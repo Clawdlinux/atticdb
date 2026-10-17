@@ -551,6 +551,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "zerodb-core"
+version = "0.0.1"
+dependencies = [
+ "blake3",
+ "proptest",
+ "zerodb-tape",
+]
+
+[[package]]
 name = "zerodb-tape"
 version = "0.0.1"
 dependencies = [
