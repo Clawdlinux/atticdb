@@ -79,3 +79,21 @@ fn missing_manifest_cannot_reinitialize_existing_segments() {
     io.remove(Path::new("db/MANIFEST")).unwrap();
     assert!(matches!(DataDir::open(io, "db", None, 1024), Err(Error::CorruptionDetected { .. })));
 }
+
+#[test]
+fn retry_persists_orphan_removal_after_directory_sync_failure() {
+    for seed in 0..32 {
+        let io = Arc::new(SimDisk::new(seed));
+        let mut dir = DataDir::open(io.clone(), "db", None, 1024).unwrap();
+        dir.prepare_next_segment(1024).unwrap();
+        let id = dir.prepare_next_segment(1024).unwrap();
+        let orphan = dir.segment_path(id);
+        dir.install_manifest(&[1]).unwrap();
+        drop(dir);
+        io.fail_next_sync().unwrap();
+        assert!(matches!(DataDir::open(io.clone(), "db", None, 1024), Err(Error::SyncFailed(_))));
+        assert!(!io.exists(&orphan).unwrap());
+        let _retry = DataDir::open(io.clone(), "db", None, 1024).unwrap();
+        assert!(!io.crash().unwrap().exists(&orphan).unwrap(), "seed={seed}");
+    }
+}

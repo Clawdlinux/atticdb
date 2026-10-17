@@ -149,6 +149,7 @@ Recovery permits roll padding no longer than 4 MiB plus a footer below the durab
 Recovery resumes at the first cut segment and offset.
 Later segments leave the manifest atomically before their files are unlinked.
 Open removes segment files beyond the manifest's last identifier and syncs the directory before recovery.
+The sync also runs without visible orphans, so retrying a failed cleanup persists earlier unlinks.
 Recovery reports discarded LSNs and removed capacity, including preallocated tails.
 An unreadable frame can hide its LSN. The reported range includes every decodable discarded record.
 

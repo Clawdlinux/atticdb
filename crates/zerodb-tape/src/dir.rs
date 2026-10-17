@@ -139,7 +139,6 @@ impl DataDir {
                 return Err(corruption(0, 0, 0, "unordered manifest"));
             }
             let last = dir.segments.last().copied().unwrap_or(0);
-            let mut removed = false;
             for path in dir.io.list(&dir.path)? {
                 let id = path
                     .file_name()
@@ -149,12 +148,10 @@ impl DataDir {
                     .and_then(|id| id.parse::<u64>().ok());
                 if id.is_some_and(|id| id > last) {
                     dir.io.remove(&path)?;
-                    removed = true;
                 }
             }
-            if removed {
-                dir.io.sync_dir(&dir.path).map_err(|e| Error::SyncFailed(e.to_string()))?;
-            }
+            // A previous open may have unlinked files but failed its directory sync.
+            dir.io.sync_dir(&dir.path).map_err(|e| Error::SyncFailed(e.to_string()))?;
             if !dir.io.exists(&dir.path.join("SUPERBLOCK"))? {
                 return Err(corruption(0, 0, 0, "missing superblock"));
             }
