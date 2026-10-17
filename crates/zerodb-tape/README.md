@@ -1,7 +1,7 @@
 # Tape primitives
 
 This crate provides CRC32C, file I/O, clocks, deterministic disk faults, and frame codecs.
-It does not implement the tape writer or recovery.
+It also provides a group-commit writer and footer-atomic crash recovery.
 
 ## I/O and simulation
 
@@ -30,7 +30,8 @@ Cross-directory rename syncs persist both connected directories.
 This is stronger than real filesystems that require both directories to be synced separately.
 
 `fail_next_sync` fails the next file or directory sync.
-Failed file syncs doom their pending writes. Cached bytes remain readable, but crashes drop those writes.
+Failed file syncs settle pending writes once through the seeded tearing model.
+Cached bytes remain readable. Later crashes retain only their settled durable state.
 Retrying sync returns success without healing doomed writes.
 Later writes can sync independently without persisting earlier cached bytes.
 `enospc_after_bytes` sets a remaining write budget. Exhaustion returns `ErrorKind::StorageFull`, possibly after writing a prefix.
@@ -58,7 +59,17 @@ Unknown versions return `UnknownVersion` only after CRC validation.
 `canon` contains exactly 30 bytes. Storage flags and payload length never enter the tenant chain.
 Content digests retain the salt commitment after a payload becomes a husk.
 Batch digests hash ordered content digests, not raw payloads.
-The caller generates salts. This crate does not provide random salt generation.
+`Tape::append` generates salts from `/dev/urandom` on caller threads.
+Simulations use `PreparedBatch::with_salts` for deterministic salts.
+
+## Writer and recovery
+
+`Tape` drives `WriterCore` on a dedicated thread. Its last handle joins the thread when dropped.
+Durable acknowledgements follow segment sync. Fast mode accepts only Cache records and returns no LSN.
+`Tape::read` exposes complete, durable transactions.
+Recovery verifies frame CRCs, transaction footers, content digests, and per-tenant chains.
+Damage at or below the superblock returns `CorruptionDetected`. Invalid tails above it are truncated and synced.
+Open removes segment files beyond the manifest before scanning. Directory sync makes cleanup durable, including retries.
 
 ## Validation
 
@@ -66,10 +77,45 @@ Run from the workspace root:
 
 ```sh
 cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
+cargo test --workspace --release
 cargo tree
 ```
 
-Crash tests exercise 1,000 seeds per seeded scenario.
+`tests/sim.rs` runs 500 seeds during normal tests. Each seed covers 2 or 3 crash generations.
+The driver uses `WriterCore::enqueue` and `step` without a writer thread.
+It mixes 1 to 8 tenants, 1 to 64 records per batch, and Durable or Cache-only Fast writes.
+Records span 0 to 8 KiB, with occasional 1 MiB requests.
+The 64 KiB segment limit rejects oversized batches without poisoning the writer.
+Supplemental scenarios use 2 MiB segments to verify accepted 1 MiB records and rolls.
+Faults include sync failures, partial ENOSPC writes, queued crashes, and cuts between mutating I/O operations.
+Replies after a captured crash point remain uncertain.
+The oracle checks complete transactions, exact content, LSN order, and tenant chains through `Tape::read`.
+Recovered survivors become durable oracle entries across later generations.
+Every 11th seed damages a frame below the superblock and requires `CorruptionDetected`.
+Failures print the seed and a replay command.
+
+```sh
+ZERODB_SIM_SEED=42 cargo test --features sim --test sim -- --nocapture
+ZERODB_SIM_SEEDS=10000 cargo test --release --features sim --test sim
+```
+
+`ZERODB_SIM_SEED` selects the first seed. Alone, it runs 1 seed.
+`ZERODB_SIM_SEEDS` selects the count. Without overrides, seeds start at 0.
+The `sim` feature exports the test helper without affecting the production driver.
+The 16-thread filesystem stress test verifies 20,000 Durable acknowledgements after reopen.
+Debug builds ignore stress. The release command above runs it in CI.
+Its scratch directory lives under `target/` and is removed after success.
+
+```sh
+cargo bench -p zerodb-tape --bench append -- --noplot
+```
+
+The benchmark compares bare framed writes against Durable append with 1 and 16 concurrent writers.
+Record sizes are 256 B and 4 KiB. Each path preallocates 64 MiB segments.
+Manual timing prints per-operation p50 and p99. Criterion records throughput and mean timings separately.
+Hardware, commands, and measured results live in [bench/RESULTS.md](../../bench/RESULTS.md).
+The macOS run isn't G1. G1 needs Linux NVMe measurements.
+
 `proptest` runs without fork or timeout features. Tests need no external directory.
