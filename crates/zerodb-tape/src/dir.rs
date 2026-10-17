@@ -138,6 +138,23 @@ impl DataDir {
             if dir.segments.windows(2).any(|ids| ids[0] >= ids[1]) {
                 return Err(corruption(0, 0, 0, "unordered manifest"));
             }
+            let last = dir.segments.last().copied().unwrap_or(0);
+            let mut removed = false;
+            for path in dir.io.list(&dir.path)? {
+                let id = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(|name| name.strip_prefix("seg-"))
+                    .and_then(|name| name.strip_suffix(".zdb"))
+                    .and_then(|id| id.parse::<u64>().ok());
+                if id.is_some_and(|id| id > last) {
+                    dir.io.remove(&path)?;
+                    removed = true;
+                }
+            }
+            if removed {
+                dir.io.sync_dir(&dir.path).map_err(|e| Error::SyncFailed(e.to_string()))?;
+            }
             if !dir.io.exists(&dir.path.join("SUPERBLOCK"))? {
                 return Err(corruption(0, 0, 0, "missing superblock"));
             }

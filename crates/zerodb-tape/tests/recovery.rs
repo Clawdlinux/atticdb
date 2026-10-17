@@ -294,6 +294,7 @@ fn manifest_is_durable_before_tail_files_are_removed() {
         for _ in 0..3 {
             dir.prepare_next_segment(1024).unwrap();
         }
+
         let (first, _) = transaction(10, 1, [0; 32]);
         write(&io.disk, &dir, 1, 0, &first);
         dir.install_superblock(10).unwrap();
@@ -326,4 +327,43 @@ fn manifest_is_durable_before_tail_files_are_removed() {
         drop(dir);
         assert!(io.handles.lock().unwrap().is_empty());
     }
+}
+
+#[test]
+fn reopen_removes_orphans_after_manifest_trim_before_unlink() {
+    use std::sync::atomic::Ordering;
+    use zerodb_tape::io::SimClock;
+    use zerodb_tape::{Options, Tape};
+
+    let io = Arc::new(support::ObservedIo::new(1));
+    let mut dir = DataDir::open(io.clone(), "db", None, 1024).unwrap();
+    for _ in 0..3 {
+        dir.prepare_next_segment(1024).unwrap();
+    }
+    let (first, _) = transaction(1, 1, [0; 32]);
+    write(&io.disk, &dir, 1, 0, &first);
+    dir.install_superblock(1).unwrap();
+    write(&io.disk, &dir, 2, 0, &[1; 8]);
+    io.events.lock().unwrap().clear();
+    io.capture.store(true, Ordering::SeqCst);
+    recover(&mut dir, 1024).unwrap();
+    let installed = io.events.lock().unwrap().iter().position(|e| e == "dir-sync db").unwrap();
+    let image = io.images.lock().unwrap()[installed].clone();
+    let orphan = dir.segment_path(3);
+    assert!(image.exists(&orphan).unwrap());
+    let image = Arc::new(image);
+    let reopened = DataDir::open(image.clone(), "db", None, 1024).unwrap();
+    assert!(!image.exists(&orphan).unwrap(), "orphan must disappear before recovery");
+    drop(reopened);
+    let crash = Arc::new(image.crash().unwrap());
+    assert!(!crash.exists(&orphan).unwrap(), "orphan cleanup must be durable");
+    let (tape, report) = Tape::open(
+        crash,
+        Arc::new(SimClock::default()),
+        "db",
+        Options { segment_size: 1024, ..Options::default() },
+    )
+    .unwrap();
+    assert_eq!(report.durable_lsn, 1);
+    assert_eq!(&tape.read(1).unwrap().unwrap().payload[16..], b"hello");
 }

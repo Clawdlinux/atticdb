@@ -148,6 +148,7 @@ Metadata failures poison future writes without changing earlier acknowledgements
 Recovery permits roll padding no longer than 4 MiB plus a footer below the durable boundary.
 Recovery resumes at the first cut segment and offset.
 Later segments leave the manifest atomically before their files are unlinked.
+Open removes segment files beyond the manifest's last identifier and syncs the directory before recovery.
 Recovery reports discarded LSNs and removed capacity, including preallocated tails.
 An unreadable frame can hide its LSN. The reported range includes every decodable discarded record.
 
