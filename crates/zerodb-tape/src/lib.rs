@@ -4,6 +4,7 @@
 
 pub mod crc32c;
 mod error;
+pub mod frame;
 pub mod io;
 pub mod simdisk;
 
