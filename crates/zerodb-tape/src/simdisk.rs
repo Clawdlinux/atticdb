@@ -95,6 +95,7 @@ impl DirOp {
 struct State {
     rng: SplitMix64,
     files: BTreeMap<FileId, SimFile>,
+    handles: BTreeMap<FileId, FileId>,
     entries: BTreeMap<PathBuf, FileId>,
     durable_entries: BTreeMap<PathBuf, FileId>,
     pending_entries: Vec<DirOp>,
@@ -110,7 +111,32 @@ fn io_error(kind: ErrorKind, message: &str) -> Error {
 
 impl State {
     fn file(&mut self, id: FileId) -> Result<&mut SimFile> {
-        self.files.get_mut(&id).ok_or_else(|| io_error(ErrorKind::NotFound, "unknown file handle"))
+        let inode = self
+            .handles
+            .get(&id)
+            .ok_or_else(|| io_error(ErrorKind::NotFound, "unknown file handle"))?;
+        self.files.get_mut(inode).ok_or_else(|| io_error(ErrorKind::NotFound, "file not found"))
+    }
+
+    fn handle(&mut self, inode: FileId) -> FileId {
+        let handle = FileId(self.next);
+        self.next += 1;
+        self.handles.insert(handle, inode);
+        handle
+    }
+
+    fn collect(&mut self) {
+        let mut retained = BTreeSet::new();
+        retained.extend(self.entries.values());
+        retained.extend(self.durable_entries.values());
+        retained.extend(self.handles.values());
+        retained.extend(&self.locked);
+        for op in &self.pending_entries {
+            if let DirOp::Create(_, id) | DirOp::Rename(_, _, id) = op {
+                retained.insert(id);
+            }
+        }
+        self.files.retain(|id, _| retained.contains(id));
     }
 
     fn sync_check(&mut self) -> Result<()> {
@@ -150,6 +176,7 @@ impl SimDisk {
             state: Arc::new(Mutex::new(State {
                 rng: SplitMix64(seed),
                 files: BTreeMap::new(),
+                handles: BTreeMap::new(),
                 entries: BTreeMap::new(),
                 durable_entries: BTreeMap::new(),
                 pending_entries: Vec::new(),
@@ -198,8 +225,18 @@ impl SimDisk {
     pub fn crash(&self) -> Result<Self> {
         let state = lock(&self.state)?;
         let mut rng = state.rng.clone();
+        let mut entries = state.durable_entries.clone();
+        for op in &state.pending_entries {
+            if rng.below(2) != 0 {
+                op.apply(&mut entries);
+            }
+        }
+        let linked: BTreeSet<_> = entries.values().copied().collect();
         let mut files = BTreeMap::new();
         for (id, file) in &state.files {
+            if !linked.contains(id) {
+                continue;
+            }
             let mut durable = file.durable.clone();
             let mut writes = file.pending.clone();
             for i in (1..writes.len()).rev() {
@@ -221,16 +258,17 @@ impl SimDisk {
             }
             files.insert(*id, SimFile { visible: durable.clone(), durable, pending: Vec::new() });
         }
-        let mut entries = state.durable_entries.clone();
-        for op in &state.pending_entries {
-            if rng.below(2) != 0 {
-                op.apply(&mut entries);
-            }
-        }
+        let handles = state
+            .handles
+            .iter()
+            .filter(|(_, id)| linked.contains(id))
+            .map(|(handle, inode)| (*handle, *inode))
+            .collect();
         Ok(Self {
             state: Arc::new(Mutex::new(State {
                 rng,
                 files,
+                handles,
                 durable_entries: entries.clone(),
                 entries,
                 pending_entries: Vec::new(),
@@ -249,15 +287,29 @@ fn position(offset: u64) -> Result<usize> {
 
 impl Io for SimDisk {
     fn create(&self, path: &Path) -> Result<FileId> {
-        lock(&self.state)?.create(path)
+        let mut state = lock(&self.state)?;
+        let inode = state.create(path)?;
+        Ok(state.handle(inode))
     }
 
     fn open(&self, path: &Path) -> Result<FileId> {
-        lock(&self.state)?
+        let mut state = lock(&self.state)?;
+        let inode = state
             .entries
             .get(path)
             .copied()
-            .ok_or_else(|| io_error(ErrorKind::NotFound, "file not found"))
+            .ok_or_else(|| io_error(ErrorKind::NotFound, "file not found"))?;
+        Ok(state.handle(inode))
+    }
+
+    fn close(&self, file: FileId) -> Result<()> {
+        let mut state = lock(&self.state)?;
+        state
+            .handles
+            .remove(&file)
+            .ok_or_else(|| io_error(ErrorKind::NotFound, "unknown file handle"))?;
+        state.collect();
+        Ok(())
     }
 
     fn write_at(&self, file: FileId, off: u64, data: &[u8]) -> Result<()> {
@@ -340,6 +392,7 @@ impl Io for SimDisk {
             }
         }
         state.pending_entries = pending;
+        state.collect();
         Ok(())
     }
 
@@ -354,6 +407,7 @@ impl Io for SimDisk {
             let op = DirOp::Rename(from.to_owned(), to.to_owned(), id);
             op.apply(&mut state.entries);
             state.pending_entries.push(op);
+            state.collect();
         }
         Ok(())
     }
@@ -364,6 +418,7 @@ impl Io for SimDisk {
             return Err(io_error(ErrorKind::NotFound, "remove target not found"));
         }
         state.pending_entries.push(DirOp::Remove(path.to_owned()));
+        state.collect();
         Ok(())
     }
 
@@ -387,14 +442,55 @@ impl Io for SimDisk {
             None => state.create(path)?,
         };
         if !state.locked.insert(id) {
-            let holder = String::from_utf8_lossy(&state.file(id)?.visible).into_owned();
+            let file = state
+                .files
+                .get(&id)
+                .ok_or_else(|| io_error(ErrorKind::NotFound, "lock file not found"))?;
+            let holder = String::from_utf8_lossy(&file.visible).into_owned();
             return Err(Error::DataDirLocked { holder });
         }
         let state = self.state.clone();
         Ok(LockGuard::new(move || {
             if let Ok(mut state) = state.lock() {
                 state.locked.remove(&id);
+                state.collect();
             }
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    #[test]
+    fn closed_unlinked_files_are_collected_after_directory_sync() {
+        let disk = SimDisk::new(0);
+        let path = Path::new("db/data");
+        let file = disk.create(path).unwrap();
+        disk.write_at(file, 0, &[7; 1024]).unwrap();
+        disk.sync_data(file).unwrap();
+        disk.sync_dir(Path::new("db")).unwrap();
+        disk.remove(path).unwrap();
+        disk.close(file).unwrap();
+        disk.sync_dir(Path::new("db")).unwrap();
+        assert!(lock(&disk.state).unwrap().files.is_empty());
+        assert!(lock(&disk.crash().unwrap().state).unwrap().files.is_empty());
+    }
+
+    #[test]
+    fn crash_discards_unlinked_files_even_when_still_open() {
+        let disk = SimDisk::new(0);
+        let path = Path::new("db/data");
+        let file = disk.create(path).unwrap();
+        disk.write_at(file, 0, &[7; 1024]).unwrap();
+        disk.sync_data(file).unwrap();
+        disk.sync_dir(Path::new("db")).unwrap();
+        disk.remove(path).unwrap();
+        disk.sync_dir(Path::new("db")).unwrap();
+        assert_eq!(disk.len(file).unwrap(), 1024);
+        assert!(lock(&disk.crash().unwrap().state).unwrap().files.is_empty());
     }
 }

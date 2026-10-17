@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use zerodb_tape::io::{Clock, Io, SimClock, StdIo, SystemClock};
+use zerodb_tape::simdisk::SimDisk;
 use zerodb_tape::Error;
 
 struct TestDir(PathBuf);
@@ -84,4 +85,27 @@ fn clocks_are_shared_and_monotonic() {
     let before = system.now_ns();
     assert!(before > 0);
     assert!(system.now_ns() >= before);
+}
+
+#[test]
+fn closed_handles_fail_without_invalidating_other_opens() {
+    let dir = TestDir::new();
+    for io in [Box::new(StdIo::new()) as Box<dyn Io>, Box::new(SimDisk::new(0))] {
+        let path = dir.0.join("closed");
+        let file = io.create(&path).unwrap();
+        io.write_at(file, 0, b"data").unwrap();
+        let other = io.open(&path).unwrap();
+        assert_ne!(file, other);
+        io.close(file).unwrap();
+        assert!(io.read_at(file, 0, &mut [0; 4]).is_err());
+        assert!(io.write_at(file, 0, b"bad").is_err());
+        assert!(io.len(file).is_err());
+        assert!(io.set_len(file, 0).is_err());
+        assert!(io.sync_data(file).is_err());
+        assert!(io.close(file).is_err());
+        assert_eq!(io.len(other).unwrap(), 4);
+        io.remove(&path).unwrap();
+        assert_eq!(io.len(other).unwrap(), 4);
+        io.close(other).unwrap();
+    }
 }

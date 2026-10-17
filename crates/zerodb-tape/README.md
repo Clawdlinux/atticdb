@@ -10,7 +10,9 @@ It does not implement the tape writer or recovery.
 `SimDisk` uses logical paths with implicit parent directories.
 Both return sorted full paths from `list`.
 Handles remain valid across rename and removal. Exclusive locks follow file identity.
-Handles are retained until their backend is dropped.
+Call `close` to release a handle. Closed handles return errors.
+Open handles retain removed files until closed.
+Simulated files remain available while durable directory entries or pending directory operations still reference them.
 
 `SimClock` advances manually and can be shared through `Arc`.
 `SystemClock` returns wall-clock nanoseconds and can move backward after clock adjustments.

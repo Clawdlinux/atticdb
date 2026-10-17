@@ -42,12 +42,14 @@ impl Drop for LockGuard {
 ///
 /// Paths identify files. Directories must already exist on real storage.
 /// Writes complete fully or return an error, possibly after a partial write.
-/// Handles remain valid across rename and remove until the backend is dropped.
+/// Handles remain valid across rename and remove until explicitly closed.
 pub trait Io: Send + Sync {
     /// Creates a new empty file, failing if its name already exists.
     fn create(&self, path: &Path) -> Result<FileId>;
     /// Opens an existing file for reading and writing.
     fn open(&self, path: &Path) -> Result<FileId>;
+    /// Releases a handle. Further operations on it fail.
+    fn close(&self, file: FileId) -> Result<()>;
     /// Writes all bytes at an absolute offset.
     fn write_at(&self, file: FileId, off: u64, data: &[u8]) -> Result<()>;
     /// Reads up to the buffer length at an absolute offset.
@@ -110,6 +112,13 @@ impl Io for StdIo {
 
     fn open(&self, path: &Path) -> Result<FileId> {
         self.register(OpenOptions::new().read(true).write(true).open(path)?)
+    }
+
+    fn close(&self, file: FileId) -> Result<()> {
+        lock(&self.files)?
+            .remove(&file)
+            .ok_or_else(|| Error::Io(std::io::ErrorKind::NotFound, "unknown file handle".into()))?;
+        Ok(())
     }
 
     fn write_at(&self, file: FileId, off: u64, data: &[u8]) -> Result<()> {
@@ -226,5 +235,33 @@ impl SimClock {
 impl Clock for SimClock {
     fn now_ns(&self) -> u64 {
         self.0.load(Ordering::SeqCst)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    #[test]
+    fn ten_thousand_atomic_installs_release_open_handles() {
+        let dir = std::env::current_dir()
+            .unwrap()
+            .join("target")
+            .join(format!("install-handles-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let io = StdIo::new();
+        let temporary = dir.join("MANIFEST.tmp");
+        let target = dir.join("MANIFEST");
+        for _ in 0..10_000 {
+            let file = io.create(&temporary).unwrap();
+            io.write_at(file, 0, b"manifest").unwrap();
+            io.rename(&temporary, &target).unwrap();
+            io.close(file).unwrap();
+            assert!(lock(&io.files).unwrap().is_empty());
+        }
+        io.remove(&target).unwrap();
+        std::fs::remove_dir(&dir).unwrap();
     }
 }
