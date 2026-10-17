@@ -2,13 +2,14 @@
 
 use crate::dir::{read_exact, DataDir, Handle};
 use crate::frame::{
-    self, Digest, Footer, Frame, Header, Kind, HEADER_LEN, MAX_FRAME_SIZE, VERSION,
+    self, Digest, Footer, Frame, Header, Kind, FLAG_HUSK, HEADER_LEN, MAX_FRAME_SIZE, VERSION,
 };
 use crate::io::{lock, Clock, Io};
 use crate::recovery::{recover, RecoveryReport};
 use crate::segment::{SegmentWriter, DEFAULT_SEGMENT_SIZE};
-use crate::{Error, Result};
+use crate::{CommittedRecord, Error, NoopStateMachine, Prepare, Result, StateMachine};
 use std::collections::{BTreeMap, VecDeque};
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -92,19 +93,20 @@ pub struct TapeOptions {
     pub segment_size: u64,
     /// Optional diagnostic address written to the directory's lock file.
     pub server_address: Option<String>,
+    /// Replay records strictly above this checkpoint watermark. Zero replays the entire tape.
+    pub replay_from_lsn: u64,
 }
 
 impl Default for TapeOptions {
     fn default() -> Self {
-        Self { segment_size: DEFAULT_SEGMENT_SIZE, server_address: None }
+        Self { segment_size: DEFAULT_SEGMENT_SIZE, server_address: None, replay_from_lsn: 0 }
     }
 }
 
 #[derive(Debug)]
 struct PreparedRecord {
-    kind: Kind,
-    tenant_id: u32,
-    payload: Vec<u8>,
+    input: RecordInput,
+    salt: [u8; 16],
     digest: Digest,
 }
 
@@ -115,9 +117,64 @@ pub struct PreparedBatch {
     digest: Digest,
     mode: Durability,
     size: usize,
+    changed: bool,
 }
 
 impl PreparedBatch {
+    /// Inspects records in transaction order, without their generated salts.
+    pub fn records(&self) -> impl ExactSizeIterator<Item = &RecordInput> {
+        self.records.iter().map(|record| &record.input)
+    }
+
+    /// Rewrites records before framing. The writer validates changes and refreshes their digests.
+    ///
+    /// Rewritten records must still satisfy the batch size and durability constraints.
+    /// Invalid rewrites poison the writer because preparation may have reserved application state.
+    pub fn records_mut(&mut self) -> impl ExactSizeIterator<Item = &mut RecordInput> {
+        self.changed = true;
+        self.records.iter_mut().map(|record| &mut record.input)
+    }
+
+    fn validate<'a>(
+        records: impl ExactSizeIterator<Item = &'a RecordInput>,
+        mode: Durability,
+    ) -> std::result::Result<usize, WriteError> {
+        if records.len() > 1024 {
+            return Err(rejected(Error::BatchTooLarge));
+        }
+        if records.len() == 0 {
+            return Err(rejected(Error::InvalidFrame("empty batch".into())));
+        }
+        let mut size = HEADER_LEN + 44;
+        for record in records {
+            if record.kind == Kind::Footer
+                || (mode == Durability::Fast && record.kind != Kind::Cache)
+            {
+                return Err(rejected(Error::InvalidFrame("disallowed record kind".into())));
+            }
+            size = size
+                .checked_add(HEADER_LEN + 16)
+                .and_then(|size| size.checked_add(record.content.len()))
+                .filter(|&size| size <= MAX_FRAME_SIZE)
+                .ok_or_else(|| rejected(Error::BatchTooLarge))?;
+        }
+        Ok(size)
+    }
+
+    fn refresh(&mut self) -> Result<()> {
+        if self.changed {
+            self.size = Self::validate(self.records(), self.mode).map_err(|error| error.kind)?;
+            let mut digests = Vec::with_capacity(self.records.len());
+            for record in &mut self.records {
+                record.digest = frame::content_digest(&record.salt, &record.input.content);
+                digests.push(record.digest);
+            }
+            self.digest = frame::batch_digest(&digests);
+            self.changed = false;
+        }
+        Ok(())
+    }
+
     fn with_entropy<R: std::io::Read>(
         batch: Vec<RecordInput>,
         mode: Durability,
@@ -142,38 +199,16 @@ impl PreparedBatch {
         mode: Durability,
         mut salt: impl FnMut() -> Result<[u8; 16]>,
     ) -> std::result::Result<Self, WriteError> {
-        let size = batch.iter().try_fold(HEADER_LEN + 44, |total, record| {
-            total.checked_add(HEADER_LEN + 16)?.checked_add(record.content.len())
-        });
-        let size = size.ok_or_else(|| rejected(Error::BatchTooLarge))?;
-        if batch.len() > 1024 || size > MAX_FRAME_SIZE {
-            return Err(rejected(Error::BatchTooLarge));
-        }
-        if batch.is_empty()
-            || batch.iter().any(|r| {
-                r.kind == Kind::Footer || (mode == Durability::Fast && r.kind != Kind::Cache)
-            })
-        {
-            return Err(rejected(Error::InvalidFrame(
-                "empty batch or disallowed record kind".into(),
-            )));
-        }
+        let size = Self::validate(batch.iter(), mode)?;
         let mut records = Vec::with_capacity(batch.len());
         let mut digests = Vec::with_capacity(batch.len());
         for record in batch {
             let salt = salt().map_err(rejected)?;
             let digest = frame::content_digest(&salt, &record.content);
-            let mut payload = salt.to_vec();
-            payload.extend_from_slice(&record.content);
             digests.push(digest);
-            records.push(PreparedRecord {
-                kind: record.kind,
-                tenant_id: record.tenant_id,
-                payload,
-                digest,
-            });
+            records.push(PreparedRecord { input: record, salt, digest });
         }
-        Ok(Self { records, digest: frame::batch_digest(&digests), mode, size })
+        Ok(Self { records, digest: frame::batch_digest(&digests), mode, size, changed: false })
     }
 }
 
@@ -201,6 +236,41 @@ struct ReadState {
 }
 
 impl ReadState {
+    fn scan(&self, from_lsn: u64) -> impl Iterator<Item = Result<CommittedRecord>> + '_ {
+        let end = self.durable_lsn.load(Ordering::Acquire);
+        let mut next = Some(from_lsn);
+        std::iter::from_fn(move || loop {
+            let start = next.filter(|&start| start <= end)?;
+            let lsn = match lock(&self.index) {
+                Ok(index) => index.range(start..=end).next().map(|(&lsn, _)| lsn),
+                Err(error) => {
+                    next = None;
+                    return Some(Err(error));
+                }
+            }?;
+            next = lsn.checked_add(1);
+            match self.read(lsn) {
+                Ok(Some(frame)) if frame.header.flags & FLAG_HUSK == 0 => {
+                    let h = frame.header;
+                    return Some(Ok(CommittedRecord {
+                        lsn: h.lsn,
+                        txn: h.txn,
+                        kind: h.kind,
+                        tenant_id: h.tenant_id,
+                        commit_time_ns: h.commit_time_ns,
+                        payload: Arc::from(&frame.payload[16..]),
+                    }));
+                }
+                Ok(Some(_)) => continue,
+                Ok(None) => return None,
+                Err(error) => {
+                    next = None;
+                    return Some(Err(error));
+                }
+            }
+        })
+    }
+
     fn read(&self, lsn: u64) -> Result<Option<Frame>> {
         if lsn > self.durable_lsn.load(Ordering::Acquire) {
             return Ok(None);
@@ -231,27 +301,43 @@ impl ReadState {
 }
 
 /// Enqueue requests, then step once to drain and commit the current group.
-pub struct WriterCore {
+pub struct WriterCore<S: StateMachine = NoopStateMachine> {
     segments: SegmentWriter,
     clock: Arc<dyn Clock>,
     reads: Arc<ReadState>,
     queue: VecDeque<WriteRequest>,
     chains: BTreeMap<u32, Digest>,
     pending: BTreeMap<u64, (u64, u64)>,
+    unpublished: Vec<CommittedRecord>,
+    state_machine: S,
     lsn: u64,
     txn: u64,
     superblock_time: u64,
 }
 
-impl std::fmt::Debug for WriterCore {
+impl<S: StateMachine> std::fmt::Debug for WriterCore<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WriterCore").field("lsn", &self.lsn).field("txn", &self.txn).finish()
     }
 }
 
-impl WriterCore {
+#[cfg(any(test, feature = "sim"))]
+impl WriterCore<NoopStateMachine> {
     /// Locks the directory, recovers complete transactions, and prepares the active segment.
     pub fn open(
+        io: Arc<dyn Io>,
+        clock: Arc<dyn Clock>,
+        path: impl AsRef<Path>,
+        opts: TapeOptions,
+    ) -> Result<(Self, RecoveryReport)> {
+        Self::open_with(NoopStateMachine, io, clock, path, opts)
+    }
+}
+
+impl<S: StateMachine> WriterCore<S> {
+    /// Recovers and replays durable records before accepting requests.
+    pub fn open_with(
+        mut state_machine: S,
         io: Arc<dyn Io>,
         clock: Arc<dyn Clock>,
         path: impl AsRef<Path>,
@@ -275,6 +361,11 @@ impl WriterCore {
             durable_lsn: AtomicU64::new(recovered.report.durable_lsn),
             poisoned: AtomicBool::new(false),
         });
+        if let Some(from) = opts.replay_from_lsn.checked_add(1) {
+            for record in reads.scan(from) {
+                state_machine.replay(&record?)?;
+            }
+        }
         let segments = SegmentWriter::new(dir, opts.segment_size, recovered.offset)?;
         let core = Self {
             segments,
@@ -284,6 +375,8 @@ impl WriterCore {
             queue: VecDeque::new(),
             chains: recovered.chains,
             pending: BTreeMap::new(),
+            unpublished: Vec::new(),
+            state_machine,
             lsn: recovered.report.durable_lsn,
             txn: recovered.txn,
         };
@@ -311,7 +404,14 @@ impl WriterCore {
         self.reads.read(lsn)
     }
 
-    fn write(&mut self, batch: PreparedBatch) -> Result<Committed> {
+    /// Scans a snapshot of the durable boundary through the deterministic driver.
+    #[cfg(any(test, feature = "sim"))]
+    pub fn scan(&self, from_lsn: u64) -> impl Iterator<Item = Result<CommittedRecord>> + '_ {
+        self.reads.scan(from_lsn)
+    }
+
+    fn write(&mut self, mut batch: PreparedBatch) -> Result<Committed> {
+        batch.refresh()?;
         let txn =
             self.txn.checked_add(1).ok_or_else(|| Error::InvalidFrame("txn exhausted".into()))?;
         let first_lsn =
@@ -324,29 +424,41 @@ impl WriterCore {
         let count = batch.records.len();
         let mut bytes = Vec::with_capacity(batch.size);
         let mut offsets = Vec::with_capacity(count);
+        let mut committed = Vec::with_capacity(count);
         for (i, record) in batch.records.into_iter().enumerate() {
-            let prev = if record.kind == Kind::Cache {
+            let input = record.input;
+            let prev = if input.kind == Kind::Cache {
                 [0; 32]
             } else {
-                self.chains.get(&record.tenant_id).copied().unwrap_or([0; 32])
+                self.chains.get(&input.tenant_id).copied().unwrap_or([0; 32])
             };
             let header = Header {
-                kind: record.kind,
+                kind: input.kind,
                 version: VERSION,
                 flags: 0,
                 txn,
                 lsn: first_lsn + i as u64,
                 commit_time_ns: time,
-                tenant_id: record.tenant_id,
+                tenant_id: input.tenant_id,
                 tenant_prev_chain: prev,
                 content_digest: record.digest,
             };
-            if record.kind != Kind::Cache {
+            if input.kind != Kind::Cache {
                 self.chains
-                    .insert(record.tenant_id, frame::chain_next(&prev, &header, &record.digest));
+                    .insert(input.tenant_id, frame::chain_next(&prev, &header, &record.digest));
             }
+            committed.push(CommittedRecord {
+                lsn: header.lsn,
+                txn,
+                kind: input.kind,
+                tenant_id: input.tenant_id,
+                commit_time_ns: time,
+                payload: Arc::from(input.content.as_slice()),
+            });
             offsets.push((header.lsn, bytes.len() as u64));
-            bytes.extend(frame::encode(&Frame { header, payload: record.payload })?);
+            let mut payload = record.salt.to_vec();
+            payload.extend_from_slice(&input.content);
+            bytes.extend(frame::encode(&Frame { header, payload })?);
         }
         let footer = Footer { txn, record_count: count as u32, batch_digest: batch.digest };
         bytes.extend(frame::encode(&Frame {
@@ -367,6 +479,7 @@ impl WriterCore {
         for (lsn, off) in offsets {
             self.pending.insert(lsn, (segment, offset + off));
         }
+        self.unpublished.extend(committed);
         self.lsn = last_lsn;
         self.txn = txn;
         Ok(Committed::Durable { txn, first_lsn, last_lsn })
@@ -375,13 +488,17 @@ impl WriterCore {
     fn publish(&mut self) -> Result<()> {
         lock(&self.reads.index)?.append(&mut self.pending);
         self.reads.durable_lsn.store(self.lsn, Ordering::Release);
+        if !self.unpublished.is_empty() {
+            self.state_machine.publish(&self.unpublished);
+            self.unpublished.clear();
+        }
         Ok(())
     }
 
     /// Writes all queued transactions, then syncs all touched files before durable replies.
     pub fn step(&mut self) {
         let mut replies = Vec::new();
-        while let Some(request) = self.queue.pop_front() {
+        while let Some(mut request) = self.queue.pop_front() {
             if self.is_poisoned() {
                 let _ = request.reply.send(Err(rejected(Error::Poisoned)));
                 continue;
@@ -389,6 +506,17 @@ impl WriterCore {
             if request.batch.size as u64 > self.segments.capacity() {
                 let _ = request.reply.send(Err(rejected(Error::BatchTooLarge)));
                 continue;
+            }
+            match self.state_machine.prepare(&mut request.batch) {
+                Prepare::Write => {}
+                Prepare::Reject(error) => {
+                    let _ = request.reply.send(Err(error));
+                    continue;
+                }
+                Prepare::Reply(committed) => {
+                    let _ = request.reply.send(Ok(committed));
+                    continue;
+                }
             }
             let mode = request.batch.mode;
             match self.write(request.batch) {
@@ -477,19 +605,20 @@ impl WriterCore {
 }
 
 /// Threaded production driver. Dropping the last handle joins the writer and releases its lock.
-pub struct Tape {
+pub struct Tape<S: StateMachine = NoopStateMachine> {
     sender: Option<mpsc::Sender<WriteRequest>>,
     thread: Option<JoinHandle<()>>,
     reads: Arc<ReadState>,
+    state_machine: PhantomData<fn() -> S>,
 }
 
-impl std::fmt::Debug for Tape {
+impl<S: StateMachine> std::fmt::Debug for Tape<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Tape").field("durable_lsn", &self.durable_lsn()).finish()
     }
 }
 
-impl Tape {
+impl Tape<NoopStateMachine> {
     /// Locks and recovers a directory, then starts its writer thread.
     pub fn open(
         io: Arc<dyn Io>,
@@ -497,7 +626,25 @@ impl Tape {
         path: impl AsRef<Path>,
         opts: TapeOptions,
     ) -> Result<(Self, RecoveryReport)> {
-        let (mut core, report) = WriterCore::open(io, clock, path, opts)?;
+        Self::open_with(NoopStateMachine, io, clock, path, opts)
+    }
+}
+
+impl<S: StateMachine> Tape<S> {
+    /// Recovers and replays state before starting the writer thread.
+    ///
+    /// `opts.replay_from_lsn` excludes records already represented by your loaded checkpoint.
+    pub fn open_with(
+        state_machine: S,
+        io: Arc<dyn Io>,
+        clock: Arc<dyn Clock>,
+        path: impl AsRef<Path>,
+        opts: TapeOptions,
+    ) -> Result<(Self, RecoveryReport)>
+    where
+        S: 'static,
+    {
+        let (mut core, report) = WriterCore::open_with(state_machine, io, clock, path, opts)?;
         let reads = core.reads.clone();
         let (sender, receiver) = mpsc::channel();
         let thread = std::thread::Builder::new().name("zerodb-writer".into()).spawn(move || {
@@ -511,7 +658,10 @@ impl Tape {
             }
             let _ = core.shutdown();
         })?;
-        Ok((Self { sender: Some(sender), thread: Some(thread), reads }, report))
+        Ok((
+            Self { sender: Some(sender), thread: Some(thread), reads, state_machine: PhantomData },
+            report,
+        ))
     }
 
     /// Atomically appends a nonempty batch using the requested acknowledgement mode.
@@ -540,9 +690,18 @@ impl Tape {
     pub fn read(&self, lsn: u64) -> Result<Option<Frame>> {
         self.reads.read(lsn)
     }
+
+    /// Scans durable application records at or above `from_lsn`, in LSN order.
+    ///
+    /// The durable boundary is captured when you create the iterator.
+    /// It reads one indexed frame at a time across segments, skipping footers and redacted husks.
+    /// Payloads exclude generated salts. An I/O or decoding error ends iteration.
+    pub fn scan(&self, from_lsn: u64) -> impl Iterator<Item = Result<CommittedRecord>> + '_ {
+        self.reads.scan(from_lsn)
+    }
 }
 
-impl Drop for Tape {
+impl<S: StateMachine> Drop for Tape<S> {
     fn drop(&mut self) {
         self.sender.take();
         if let Some(thread) = self.thread.take() {
@@ -583,7 +742,7 @@ mod tests {
         .unwrap();
         assert_eq!(opens.get(), 1);
         for (i, record) in batch.records.iter().enumerate() {
-            assert_eq!(&record.payload[..16], &salts[i * 16..(i + 1) * 16]);
+            assert_eq!(&record.salt, &salts[i * 16..(i + 1) * 16]);
         }
     }
 

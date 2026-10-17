@@ -97,7 +97,10 @@ payload
 
 ### Writer thread
 
-The writer thread does only: assign LSN and seq, frame, CRC, chain, write, sync, publish. Content digests are computed on caller threads before enqueue. Index updates run on worker threads.
+The writer assigns LSNs and sequences, then frames, chains, writes, syncs, and publishes.
+Callers compute initial content digests before enqueue.
+State-machine preparation may rewrite content. The writer refreshes changed digests before framing.
+BM25 and vector updates run on workers.
 
 Group commit is leader-follower. The writer drains the queue, writes every pending batch, syncs every file written since the last sync (a group can span a segment roll), then publishes and acks. No timer. Under low load a batch commits alone.
 

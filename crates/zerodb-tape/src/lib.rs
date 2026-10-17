@@ -24,6 +24,7 @@ pub(crate) mod segment;
 #[cfg(any(test, feature = "sim"))]
 pub mod sim;
 pub(crate) mod simdisk;
+mod state_machine;
 pub(crate) mod writer;
 
 pub use error::{Error, Result};
@@ -31,6 +32,8 @@ pub use frame::{Digest, Frame, Header, Kind};
 pub use io::{Clock, FileId, Io, LockGuard, StdIo, SystemClock};
 pub use recovery::RecoveryReport;
 pub use simdisk::SimDisk;
+pub use state_machine::{CommittedRecord, NoopStateMachine, Prepare, StateMachine};
 pub use writer::{
-    Committed, Durability, Outcome, RecordInput, Tape, TapeOptions, WriteError, WriteResult,
+    Committed, Durability, Outcome, PreparedBatch, RecordInput, Tape, TapeOptions, WriteError,
+    WriteResult,
 };

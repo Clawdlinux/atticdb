@@ -9,8 +9,9 @@ pub use crate::recovery::{recover, Recovered};
 pub use crate::segment::{SegmentWriter, DEFAULT_SEGMENT_SIZE};
 pub use crate::writer::{PreparedBatch, WriteRequest, WriterCore};
 use crate::{
-    Committed, Digest, Durability, Error, FileId, Io, Kind, LockGuard, Outcome, RecordInput,
-    Result, SimDisk, Tape, TapeOptions as Options, WriteResult,
+    Clock, Committed, CommittedRecord, Digest, Durability, Error, FileId, Io, Kind, LockGuard,
+    Outcome, Prepare, RecordInput, RecoveryReport, Result, SimDisk, StateMachine, Tape,
+    TapeOptions as Options, WriteResult,
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -156,6 +157,75 @@ struct Oracle {
     durable: BTreeMap<u64, Digest>,
 }
 
+#[derive(Debug, Default)]
+struct Publications(Mutex<Vec<u64>>);
+
+impl Publications {
+    fn record(&self, record: &CommittedRecord) {
+        let mut lsns = self.0.lock().unwrap();
+        assert_eq!(record.lsn, lsns.last().copied().unwrap_or(0) + 1);
+        lsns.push(record.lsn);
+    }
+
+    fn verify(&self, durable_lsn: u64) {
+        let lsns = self.0.lock().unwrap();
+        assert_eq!(lsns.len() as u64, durable_lsn, "durable records publish exactly once");
+    }
+
+    fn reply(&self, reply: &WriteResult) {
+        if let Ok(Committed::Durable { first_lsn, last_lsn, .. }) = reply {
+            let lsns = self.0.lock().unwrap();
+            for lsn in *first_lsn..=*last_lsn {
+                assert_eq!(lsns.get(lsn as usize - 1), Some(&lsn), "ack precedes publish");
+            }
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct RecordingStateMachine(Arc<Publications>);
+
+impl StateMachine for RecordingStateMachine {
+    fn prepare(&mut self, _batch: &mut PreparedBatch) -> Prepare {
+        Prepare::Write
+    }
+
+    fn publish(&mut self, records: &[CommittedRecord]) {
+        for record in records {
+            self.0.record(record);
+        }
+    }
+
+    fn replay(&mut self, record: &CommittedRecord) -> Result<()> {
+        self.0.record(record);
+        Ok(())
+    }
+}
+
+fn recording_core(
+    io: Arc<dyn Io>,
+    clock: Arc<dyn Clock>,
+    opts: Options,
+) -> (WriterCore<RecordingStateMachine>, Arc<Publications>) {
+    let machine = RecordingStateMachine::default();
+    let published = machine.0.clone();
+    let (core, _) = WriterCore::open_with(machine, io, clock, "db", opts).unwrap();
+    published.verify(core.durable_lsn());
+    (core, published)
+}
+
+fn recording_tape(
+    io: Arc<dyn Io>,
+    clock: Arc<dyn Clock>,
+    opts: Options,
+) -> (Tape<RecordingStateMachine>, RecoveryReport) {
+    let machine = RecordingStateMachine::default();
+    let published = machine.0.clone();
+    let (tape, report) = Tape::open_with(machine, io, clock, "db", opts).unwrap();
+    published.verify(tape.durable_lsn());
+    (tape, report)
+}
+
 impl Oracle {
     fn reply(&mut self, batch: Batch, reply: Option<WriteResult>) {
         match reply {
@@ -171,7 +241,7 @@ impl Oracle {
         self.batches.push(batch);
     }
 
-    fn verify(&mut self, tape: &Tape) {
+    fn verify<S: StateMachine>(&mut self, tape: &Tape<S>) {
         let candidates: BTreeMap<_, _> = self
             .batches
             .iter()
@@ -226,8 +296,8 @@ impl Oracle {
     }
 }
 
-fn enqueue(
-    core: &mut WriterCore,
+fn enqueue<S: StateMachine>(
+    core: &mut WriterCore<S>,
     records: Vec<RecordInput>,
     mode: Durability,
     rng: &mut Rng,
@@ -246,7 +316,7 @@ fn enqueue(
     (Batch { records, digests }, receiver)
 }
 
-fn probe(core: &mut WriterCore, oracle: &mut Oracle, rng: &mut Rng) {
+fn probe<S: StateMachine>(core: &mut WriterCore<S>, oracle: &mut Oracle, rng: &mut Rng) {
     let records = vec![RecordInput { tenant_id: 1, kind: Kind::Turn, content: rng.bytes(32) }];
     let (batch, receiver) = enqueue(core, records, Durability::Durable, rng);
     let before = core.durable_lsn();
@@ -332,28 +402,32 @@ pub fn run_seed(seed: u64) {
     let mut oracle = Oracle::default();
     for generation in 0..generations {
         let io = Arc::new(CrashIo::new(disk));
-        let (mut core, _) =
-            WriterCore::open(io.clone(), clock.clone(), "db", opts.clone()).unwrap();
+        let (mut core, mut published) = recording_core(io.clone(), clock.clone(), opts.clone());
         probe(&mut core, &mut oracle, &mut rng);
+        published.verify(core.durable_lsn());
         clock.advance(1_000_000_000);
         core.update_superblock().unwrap();
         if rng.below(3) == 0 {
             let records =
                 vec![RecordInput { tenant_id: 1, kind: Kind::Fact, content: rng.bytes(128) }];
             let (batch, reply) = enqueue(&mut core, records, Durability::Durable, &mut rng);
+            let before = core.durable_lsn();
             io.disk.fail_next_sync().unwrap();
             core.step();
+            assert_eq!(core.durable_lsn(), before);
+            published.verify(before);
             let error = reply.recv().unwrap().unwrap_err();
             assert!(matches!(error.kind, Error::SyncFailed(_)));
             oracle.reply(batch, Some(Err(error)));
             assert!(core.is_poisoned());
             drop(core);
             // Process restart preserves failed page-cache bytes. No crash image is taken here.
-            let (tape, _) = Tape::open(io.clone(), clock.clone(), "db", opts.clone()).unwrap();
+            let (tape, _) = recording_tape(io.clone(), clock.clone(), opts.clone());
             oracle.verify(&tape);
             drop(tape);
-            (core, _) = WriterCore::open(io.clone(), clock.clone(), "db", opts.clone()).unwrap();
+            (core, published) = recording_core(io.clone(), clock.clone(), opts.clone());
             probe(&mut core, &mut oracle, &mut rng);
+            published.verify(core.durable_lsn());
             if rng.below(2) == 0 {
                 clock.advance(1_000_000_000);
                 core.update_superblock().unwrap();
@@ -379,9 +453,13 @@ pub fn run_seed(seed: u64) {
             if !skip_step {
                 core.step();
             }
+            published.verify(core.durable_lsn());
             let cut = io.cut_happened() || skip_step;
             for (batch, receiver) in pending {
                 let reply = if cut { None } else { Some(receiver.recv().unwrap()) };
+                if let Some(reply) = &reply {
+                    published.reply(reply);
+                }
                 oracle.reply(batch, reply);
             }
             if cut {
@@ -409,25 +487,23 @@ pub fn run_seed(seed: u64) {
         if rng.below(4) == 0 {
             let recovery_io = Arc::new(CrashIo::new(disk.clone()));
             recovery_io.cut.store(1 + rng.below(25), Ordering::SeqCst);
-            let (tape, _) =
-                Tape::open(recovery_io.clone(), clock.clone(), "db", opts.clone()).unwrap();
+            let (tape, _) = recording_tape(recovery_io.clone(), clock.clone(), opts.clone());
             drop(tape);
             let image = recovery_io.image.lock().unwrap().take();
             if let Some(image) = image {
                 disk = image;
             }
         }
-        let (tape, report) =
-            Tape::open(Arc::new(disk.clone()), clock.clone(), "db", opts.clone()).unwrap();
+        let (tape, report) = recording_tape(Arc::new(disk.clone()), clock.clone(), opts.clone());
         oracle.verify(&tape);
         assert_eq!(report.records as u64, tape.durable_lsn());
         drop(tape);
     }
-    let (mut core, _) =
-        WriterCore::open(Arc::new(disk.clone()), clock.clone(), "db", opts.clone()).unwrap();
+    let (mut core, published) = recording_core(Arc::new(disk.clone()), clock.clone(), opts.clone());
     probe(&mut core, &mut oracle, &mut rng);
+    published.verify(core.durable_lsn());
     drop(core);
-    let (tape, _) = Tape::open(Arc::new(disk), clock, "db", opts).unwrap();
+    let (tape, _) = recording_tape(Arc::new(disk), clock, opts);
     oracle.verify(&tape);
 }
 

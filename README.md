@@ -26,6 +26,26 @@ One append-only, checksummed, per-tenant hash-chained log (the tape) is the writ
 - A seeded simulation that crashes the writer at random points across 2 to 3 generations per seed and checks that no acked write is lost. 10,000 seeds pass.
 - Benchmarks against a bare append-plus-sync baseline: [bench/RESULTS.md](bench/RESULTS.md).
 
+### Tape hooks (M2 Group D)
+
+`Tape::open_with(state_machine, io, clock, path, options)` attaches application state to the tape.
+`Tape::open(...)` keeps the tape-only behavior through `NoopStateMachine`.
+
+Implement `StateMachine` to assign sequences during `prepare`, then install synced records during `publish`.
+Preparation runs once per batch, in queue order, on the writer thread.
+`PreparedBatch::records_mut()` allows content and metadata rewrites. Changed content gets fresh digests before framing.
+`Prepare::Reject` and `Prepare::Reply` write nothing.
+Keep preparation reservations private. Storage failures poison the writer, so later writes cannot observe those reservations.
+
+Publication runs before durable replies. Fast batches publish only after a later successful sync, including clean shutdown.
+During open, recovery finishes and syncs before ordered `replay` callbacks start.
+Set `TapeOptions::replay_from_lsn` to your loaded checkpoint's watermark. Only records strictly above it replay.
+A replay error aborts open.
+
+`Tape::scan(from_lsn)` yields durable `CommittedRecord` values in LSN order, starting inclusively.
+The iterator captures its durable boundary and reads one indexed frame at a time across segments.
+Footers and redacted husks are skipped. Application payloads exclude salts.
+
 ## Roadmap
 
 | Milestone | Scope |
