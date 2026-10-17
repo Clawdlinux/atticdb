@@ -442,7 +442,7 @@ impl<S: StateMachine> WriterCore<S> {
         let mut committed = Vec::with_capacity(count);
         for (i, record) in batch.records.into_iter().enumerate() {
             let input = record.input;
-            let prev = if input.kind == Kind::Cache {
+            let prev = if !input.kind.is_chained() {
                 [0; 32]
             } else {
                 self.chains.get(&input.tenant_id).copied().unwrap_or([0; 32])
@@ -458,7 +458,7 @@ impl<S: StateMachine> WriterCore<S> {
                 tenant_prev_chain: prev,
                 content_digest: record.digest,
             };
-            if input.kind != Kind::Cache {
+            if input.kind.is_chained() {
                 self.chains
                     .insert(input.tenant_id, frame::chain_next(&prev, &header, &record.digest));
             }

@@ -274,7 +274,7 @@ impl Oracle {
                 assert_eq!(h.txn, last_txn);
             }
             seen[b].push((lsn, h.txn, r));
-            if h.kind != Kind::Cache {
+            if h.kind.is_chained() {
                 let prev = heads.entry(h.tenant_id).or_insert([0; 32]);
                 assert_eq!(h.tenant_prev_chain, *prev);
                 *prev = frame::chain_next(prev, h, &h.content_digest);

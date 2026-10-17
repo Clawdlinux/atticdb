@@ -35,6 +35,8 @@ pub enum Error {
     BatchTooLarge,
     /// Caller-supplied frame metadata or payload violates format rules.
     InvalidFrame(String),
+    /// An application state machine rejected a batch without changing the tape.
+    Rejected(&'static str),
 }
 
 impl From<std::io::Error> for Error {
@@ -57,6 +59,7 @@ impl fmt::Display for Error {
             Self::DiskFull => f.write_str("disk full"),
             Self::BatchTooLarge => f.write_str("batch too large"),
             Self::InvalidFrame(reason) => write!(f, "invalid frame: {reason}"),
+            Self::Rejected(reason) => write!(f, "application rejected batch: {reason}"),
         }
     }
 }

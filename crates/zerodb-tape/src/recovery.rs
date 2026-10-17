@@ -59,7 +59,7 @@ fn verify(records: &[(Frame, u64)], footer: &Frame, state: &Recovered) -> Result
                 return Err(Error::InvalidFrame("content digest mismatch".into()));
             }
         }
-        if h.kind != Kind::Cache {
+        if h.kind.is_chained() {
             let prev = heads
                 .get(&h.tenant_id)
                 .or_else(|| state.chains.get(&h.tenant_id))
@@ -207,7 +207,7 @@ pub fn recover(dir: &mut DataDir, size: u64) -> Result<Recovered> {
                     for (record, off) in pending.drain(..) {
                         let h = &record.header;
                         state.index.insert(h.lsn, (segment, off));
-                        if h.kind != Kind::Cache {
+                        if h.kind.is_chained() {
                             state.chains.insert(
                                 h.tenant_id,
                                 frame::chain_next(&h.tenant_prev_chain, h, &h.content_digest),

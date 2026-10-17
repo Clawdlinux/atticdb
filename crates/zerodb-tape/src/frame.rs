@@ -28,6 +28,15 @@ pub enum Kind {
     Redaction = 4,
     /// An unchained transaction footer.
     Footer = 5,
+    /// An unchained tenant registry entry.
+    TenantCreate = 6,
+}
+
+impl Kind {
+    /// Reports whether this kind advances a tenant's provenance chain.
+    pub fn is_chained(self) -> bool {
+        matches!(self, Self::Turn | Self::Fact | Self::Redaction)
+    }
 }
 
 impl TryFrom<u8> for Kind {
@@ -40,6 +49,7 @@ impl TryFrom<u8> for Kind {
             3 => Ok(Self::Cache),
             4 => Ok(Self::Redaction),
             5 => Ok(Self::Footer),
+            6 => Ok(Self::TenantCreate),
             _ => Err(DecodeError::BadLength),
         }
     }
@@ -62,7 +72,7 @@ pub struct Header {
     pub commit_time_ns: u64,
     /// The tenant identifier.
     pub tenant_id: u32,
-    /// The previous tenant chain head. Cache and Footer require zeros.
+    /// The previous tenant chain head. Unchained kinds require zeros.
     pub tenant_prev_chain: Digest,
     /// The salted content digest, retained by husks.
     pub content_digest: Digest,
@@ -153,8 +163,7 @@ fn validate(header: &Header, payload: &[u8]) -> Result<(), DecodeError> {
         return Err(DecodeError::UnknownVersion);
     }
     if header.flags & !FLAG_HUSK != 0
-        || (matches!(header.kind, Kind::Cache | Kind::Footer)
-            && header.tenant_prev_chain != [0; 32])
+        || (!header.kind.is_chained() && header.tenant_prev_chain != [0; 32])
     {
         return Err(DecodeError::BadLength);
     }
