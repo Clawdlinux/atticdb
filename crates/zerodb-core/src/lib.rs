@@ -4,6 +4,7 @@
 #![deny(missing_docs)]
 
 mod error;
+mod session;
 mod tenant;
 pub mod turn;
 
