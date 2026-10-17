@@ -83,7 +83,7 @@ fn zero_tail(dir: &DataDir, file: &Handle, from: u64, size: u64) -> Result<()> {
         dir.io.write_at(file.id, offset, &zeros[..count])?;
         offset += count as u64;
     }
-    dir.io.sync_data(file.id)
+    Ok(())
 }
 
 fn last_decodable_lsn(mut bytes: &[u8]) -> u64 {
@@ -154,6 +154,7 @@ pub fn recover(dir: &mut DataDir, size: u64) -> Result<Recovered> {
         let mut bytes = vec![0; len as usize];
         read_exact(dir.io.as_ref(), file.id, 0, &mut bytes)?;
         let mut offset = 0;
+        let mut rewrite_from = (state.report.durable_lsn >= dir.superblock()).then_some(0);
         let mut pending = Vec::<(Frame, u64)>::new();
         loop {
             let tail = &bytes[offset..];
@@ -191,6 +192,13 @@ pub fn recover(dir: &mut DataDir, size: u64) -> Result<Recovered> {
             let result = decoded.and_then(|(record, used)| {
                 if record.header.kind == Kind::Footer {
                     verify(&pending, &record, &state).map_err(|e| e.to_string())?;
+                    if rewrite_from.is_none() && record.header.lsn >= dir.superblock() {
+                        rewrite_from = Some(if record.header.lsn == dir.superblock() {
+                            offset + used
+                        } else {
+                            pending[0].1 as usize
+                        });
+                    }
                     for (record, off) in pending.drain(..) {
                         let h = &record.header;
                         state.index.insert(h.lsn, (segment, off));
@@ -234,9 +242,12 @@ pub fn recover(dir: &mut DataDir, size: u64) -> Result<Recovered> {
         }
         if !trimming {
             state.offset = offset as u64;
-            // Surviving complete transactions become durable before readers can observe them.
-            dir.io.sync_data(file.id)?;
         }
+        if let Some(from) = rewrite_from.filter(|&from| from < state.offset as usize) {
+            // A failed writeback can leave clean, readable cache bytes that another sync won't persist.
+            dir.io.write_at(file.id, from as u64, &bytes[from..state.offset as usize])?;
+        }
+        dir.io.sync_data(file.id)?;
     }
     if state.report.durable_lsn < dir.superblock() {
         return Err(corruption(state.report.durable_lsn + 1, 0, 0, "durable boundary not reached"));
@@ -249,8 +260,8 @@ pub fn recover(dir: &mut DataDir, size: u64) -> Result<Recovered> {
                 dir.io.remove(&path)?;
             }
         }
-        dir.io.sync_dir(&dir.path)?;
     }
+    dir.io.sync_dir(&dir.path)?;
     if trimming {
         state.report.truncated = Some((first_lost..=last_lost.max(first_lost), cleared));
     }

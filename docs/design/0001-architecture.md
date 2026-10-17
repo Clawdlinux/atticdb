@@ -147,6 +147,11 @@ Superblock maintenance runs after replies and at most once per second.
 Metadata failures poison future writes without changing earlier acknowledgements.
 Recovery permits roll padding no longer than 4 MiB plus a footer below the durable boundary.
 Recovery resumes at the first cut segment and offset.
+Recovery rewrites retained bytes above the superblock boundary at their original offsets before syncing each file and directory.
+A process restart can retain failed-writeback bytes in clean page cache. Another sync alone doesn't guarantee persistence.
+Rewriting re-dirties those pages before recovery publishes them or accepts new writes.
+The rewrite covers roughly 1 second of writes since superblock maintenance, plus whatever remained unsynced.
+Long pauses or failures can extend that window. The superblock isn't a strict byte-count limit.
 Later segments leave the manifest atomically before their files are unlinked.
 Open removes segment files beyond the manifest's last identifier and syncs the directory before recovery.
 The sync also runs without visible orphans, so retrying a failed cleanup persists earlier unlinks.

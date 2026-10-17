@@ -292,6 +292,28 @@ pub fn run_seed(seed: u64) {
         probe(&mut core, &mut oracle, &mut rng);
         clock.advance(1_000_000_000);
         core.update_superblock().unwrap();
+        if rng.below(3) == 0 {
+            let records =
+                vec![RecordInput { tenant_id: 1, kind: Kind::Fact, content: rng.bytes(128) }];
+            let (batch, reply) = enqueue(&mut core, records, Durability::Durable, &mut rng);
+            io.disk.fail_next_sync().unwrap();
+            core.step();
+            let error = reply.recv().unwrap().unwrap_err();
+            assert!(matches!(error.kind, Error::SyncFailed(_)));
+            oracle.reply(batch, Some(Err(error)));
+            assert!(core.is_poisoned());
+            drop(core);
+            // Process restart preserves failed page-cache bytes. No crash image is taken here.
+            let (tape, _) = Tape::open(io.clone(), clock.clone(), "db", opts.clone()).unwrap();
+            oracle.verify(&tape);
+            drop(tape);
+            (core, _) = WriterCore::open(io.clone(), clock.clone(), "db", opts.clone()).unwrap();
+            probe(&mut core, &mut oracle, &mut rng);
+            if rng.below(2) == 0 {
+                clock.advance(1_000_000_000);
+                core.update_superblock().unwrap();
+            }
+        }
         let steps = 4 + rng.below(9);
         let cut_step = rng.below(steps);
         for step in 0..steps {

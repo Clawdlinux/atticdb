@@ -28,6 +28,114 @@ fn prepared(mode: Durability) -> PreparedBatch {
 }
 
 #[test]
+fn live_restart_after_failed_sync_redirties_survivors_before_acknowledging() {
+    for seed in 0..200 {
+        for advance_superblock in [false, true] {
+            let disk = Arc::new(SimDisk::new(seed));
+            let clock = Arc::new(SimClock::default());
+            let opts = Options { segment_size: 1024, ..Options::default() };
+            let (mut core, _) =
+                WriterCore::open(disk.clone(), clock.clone(), "db", opts.clone()).unwrap();
+            disk.fail_next_sync().unwrap();
+            let (request, reply) = WriteRequest::new(
+                PreparedBatch::with_salts(
+                    vec![RecordInput { content: b"A".to_vec(), ..record(Kind::Turn) }],
+                    Durability::Durable,
+                    || Ok([1; 16]),
+                )
+                .unwrap(),
+            );
+            core.enqueue(request);
+            core.step();
+            let error = reply.recv().unwrap().unwrap_err();
+            assert!(matches!(error.kind, Error::SyncFailed(_)));
+            assert_eq!(error.outcome, Outcome::Unknown);
+            assert!(core.is_poisoned());
+            drop(core);
+
+            // Process restart only. Failed bytes remain readable through the live page cache.
+            let (mut core, report) =
+                WriterCore::open(disk.clone(), clock.clone(), "db", opts.clone()).unwrap();
+            assert_eq!(report.durable_lsn, 1);
+            let (request, reply) = WriteRequest::new(
+                PreparedBatch::with_salts(
+                    vec![RecordInput { content: b"B".to_vec(), ..record(Kind::Turn) }],
+                    Durability::Durable,
+                    || Ok([2; 16]),
+                )
+                .unwrap(),
+            );
+            core.enqueue(request);
+            core.step();
+            assert!(matches!(
+                reply.recv().unwrap().unwrap(),
+                Committed::Durable { first_lsn: 2, last_lsn: 2, .. }
+            ));
+            if advance_superblock {
+                clock.advance(1_000_000_000);
+                core.update_superblock().unwrap();
+            }
+            drop(core);
+            let (tape, report) =
+                Tape::open(Arc::new(disk.crash().unwrap()), clock, "db", opts).unwrap();
+            assert_eq!(report.durable_lsn, 2, "seed={seed}, superblock={advance_superblock}");
+            assert_eq!(&tape.read(1).unwrap().unwrap().payload[16..], b"A");
+            assert_eq!(&tape.read(2).unwrap().unwrap().payload[16..], b"B");
+        }
+    }
+}
+
+#[test]
+fn live_restart_rewrites_across_rolls_and_before_a_trimmed_tail() {
+    use zerodb_tape::io::Io;
+    let io = Arc::new(ObservedIo::new(0));
+    let clock = Arc::new(SimClock::default());
+    let opts = Options { segment_size: 1024, ..Options::default() };
+    let (mut core, _) = WriterCore::open(io.clone(), clock.clone(), "db", opts.clone()).unwrap();
+    let (request, reply) = WriteRequest::new(prepared(Durability::Durable));
+    core.enqueue(request);
+    core.step();
+    reply.recv().unwrap().unwrap();
+    clock.advance(1_000_000_000);
+    core.update_superblock().unwrap();
+    let mut replies = Vec::new();
+    for _ in 0..3 {
+        let (request, reply) = WriteRequest::new(prepared(Durability::Durable));
+        core.enqueue(request);
+        replies.push(reply);
+    }
+    // The roll performs 4 preparation syncs before the first dirty-segment sync.
+    io.fail_at.store(io.syncs.load(Ordering::SeqCst) + 3, Ordering::SeqCst);
+    core.step();
+    for reply in replies {
+        assert_eq!(reply.recv().unwrap().unwrap_err().outcome, Outcome::Unknown);
+    }
+    drop(core);
+    let file = io.open(std::path::Path::new("db/seg-0000000000000002.zdb")).unwrap();
+    io.write_at(file, 273, &[1; 8]).unwrap();
+    io.close(file).unwrap();
+    io.events.lock().unwrap().clear();
+    let (mut core, report) =
+        WriterCore::open(io.clone(), clock.clone(), "db", opts.clone()).unwrap();
+    assert_eq!(report.durable_lsn, 4);
+    assert!(report.truncated.is_some());
+    let events = io.events.lock().unwrap().clone();
+    assert!(events.iter().any(|e| e == "write db/seg-0000000000000001.zdb 273"));
+    assert!(events.iter().any(|e| e == "write db/seg-0000000000000002.zdb 0"));
+    assert!(!events.iter().any(|e| e == "write db/seg-0000000000000001.zdb 0"));
+    let (request, reply) = WriteRequest::new(prepared(Durability::Durable));
+    core.enqueue(request);
+    core.step();
+    reply.recv().unwrap().unwrap();
+    drop(core);
+    let (tape, report) = Tape::open(Arc::new(io.disk.crash().unwrap()), clock, "db", opts).unwrap();
+    assert_eq!(report.durable_lsn, 5);
+    for lsn in 1..=5 {
+        assert_eq!(&tape.read(lsn).unwrap().unwrap().payload[16..], b"hello");
+    }
+}
+
+#[test]
 fn concurrent_callers_get_dense_lsn_and_immediate_visibility() {
     let disk = Arc::new(SimDisk::new(0));
     let (tape, _) = Tape::open(disk, Arc::new(SimClock::new(0)), "db", Options::default()).unwrap();
