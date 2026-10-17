@@ -172,12 +172,13 @@ fn validate(header: &Header, payload: &[u8]) -> Result<(), DecodeError> {
 
 /// Encodes a frame with a CRC over the length, header, and payload.
 ///
-/// # Panics
-///
-/// Panics if the frame exceeds 4 MiB or its header and payload violate format rules.
-pub fn encode(frame: &Frame) -> Vec<u8> {
-    assert!(frame.payload.len() <= MAX_FRAME_SIZE - HEADER_LEN, "frame exceeds 4 MiB");
-    assert!(validate(&frame.header, &frame.payload).is_ok(), "invalid frame structure");
+/// Returns `BatchTooLarge` above 4 MiB, or `InvalidFrame` for invalid metadata or payload structure.
+pub fn encode(frame: &Frame) -> crate::Result<Vec<u8>> {
+    if frame.payload.len() > MAX_FRAME_SIZE - HEADER_LEN {
+        return Err(crate::Error::BatchTooLarge);
+    }
+    validate(&frame.header, &frame.payload)
+        .map_err(|error| crate::Error::InvalidFrame(error.to_string()))?;
     let total = HEADER_LEN + frame.payload.len();
     let header = &frame.header;
     let mut bytes = Vec::with_capacity(total);
@@ -195,7 +196,7 @@ pub fn encode(frame: &Frame) -> Vec<u8> {
     bytes.extend_from_slice(&frame.payload);
     let crc = crc32c(&bytes[4..]);
     bytes[..4].copy_from_slice(&crc.to_le_bytes());
-    bytes
+    Ok(bytes)
 }
 
 /// Decodes one frame and returns its consumed byte count.

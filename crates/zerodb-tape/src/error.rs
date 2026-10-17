@@ -29,6 +29,8 @@ pub enum Error {
     DiskFull,
     /// The batch exceeds its record or byte limit.
     BatchTooLarge,
+    /// Caller-supplied frame metadata or payload violates format rules.
+    InvalidFrame(String),
 }
 
 impl From<std::io::Error> for Error {
@@ -48,6 +50,7 @@ impl fmt::Display for Error {
             Self::Poisoned => f.write_str("tape poisoned by a failed sync"),
             Self::DiskFull => f.write_str("disk full"),
             Self::BatchTooLarge => f.write_str("batch too large"),
+            Self::InvalidFrame(reason) => write!(f, "invalid frame: {reason}"),
         }
     }
 }

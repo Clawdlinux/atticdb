@@ -6,6 +6,7 @@ use zerodb_tape::frame::{
     batch_digest, canon, chain_next, content_digest, decode, encode, DecodeError, Footer, Frame,
     Header, Kind, FLAG_HUSK, HEADER_LEN, MAX_FRAME_SIZE, VERSION,
 };
+use zerodb_tape::Error;
 
 fn frame(kind: Kind, content: &[u8]) -> Frame {
     let salt = [7; 16];
@@ -71,7 +72,7 @@ proptest! {
             original.header.flags = FLAG_HUSK;
             original.payload.clear();
         }
-        let encoded = encode(&original);
+        let encoded = encode(&original).unwrap();
         let (decoded, consumed) = decode(&encoded).unwrap();
         prop_assert_eq!(decoded, original);
         prop_assert_eq!(consumed, encoded.len());
@@ -86,7 +87,7 @@ proptest! {
 #[test]
 fn fixed_header_layout_and_canon_are_little_endian() {
     let original = frame(Kind::Turn, b"content");
-    let bytes = encode(&original);
+    let bytes = encode(&original).unwrap();
     assert_eq!(HEADER_LEN, 104);
     assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize, bytes.len());
     assert_eq!(&bytes[8..12], &[1, 1, 0, 0]);
@@ -109,7 +110,7 @@ fn fixed_header_layout_and_canon_are_little_endian() {
 fn every_single_bit_flip_is_detected() {
     // Include a power-of-2 length to catch corruption into an end marker.
     for content_len in [7, 8, 136] {
-        let encoded = encode(&frame(Kind::Turn, &vec![3; content_len]));
+        let encoded = encode(&frame(Kind::Turn, &vec![3; content_len])).unwrap();
         for bit in 0..encoded.len() * 8 {
             let mut damaged = encoded.clone();
             damaged[bit / 8] ^= 1 << (bit % 8);
@@ -134,7 +135,7 @@ fn husks_preserve_chain_and_storage_fields_do_not_enter_canon() {
         chain_next(&prev, &original.header, &digest),
         chain_next(&prev, &husk.header, &digest)
     );
-    assert_eq!(decode(&encode(&husk)).unwrap().0, husk);
+    assert_eq!(decode(&encode(&husk).unwrap()).unwrap().0, husk);
 }
 
 #[test]
@@ -170,13 +171,13 @@ fn footer_layout_and_zero_chain_kinds() {
     assert_eq!(Footer::decode(&payload[..43]), Err(DecodeError::BadLength));
     let mut full = frame(Kind::Footer, b"");
     full.payload = payload.to_vec();
-    assert_eq!(decode(&encode(&full)).unwrap().0, full);
+    assert_eq!(decode(&encode(&full).unwrap()).unwrap().0, full);
     for kind in [Kind::Cache, Kind::Footer] {
         let mut full = frame(kind, b"content");
         if kind == Kind::Footer {
             full.payload = payload.to_vec();
         }
-        let mut encoded = encode(&full);
+        let mut encoded = encode(&full).unwrap();
         encoded[40] = 1;
         refresh_crc(&mut encoded);
         assert_eq!(decode(&encoded), Err(DecodeError::BadLength));
@@ -196,7 +197,7 @@ fn boundaries_versions_and_end_marker() {
         }
     }
     let original = frame(Kind::Turn, b"content");
-    let mut bytes = encode(&original);
+    let mut bytes = encode(&original).unwrap();
     bytes[9] = 2;
     refresh_crc(&mut bytes);
     assert_eq!(decode(&bytes), Err(DecodeError::UnknownVersion));
@@ -204,7 +205,7 @@ fn boundaries_versions_and_end_marker() {
     bytes[8] = 99;
     refresh_crc(&mut bytes);
     assert_eq!(decode(&bytes), Err(DecodeError::BadLength));
-    let bytes = encode(&original);
+    let bytes = encode(&original).unwrap();
     assert_eq!(decode(&bytes[..bytes.len() - 1]), Err(DecodeError::BadLength));
     let mut concatenated = bytes.clone();
     concatenated.extend_from_slice(&bytes);
@@ -215,11 +216,24 @@ fn boundaries_versions_and_end_marker() {
 fn maximum_frame_size_is_enforced() {
     let mut original = frame(Kind::Turn, b"");
     original.payload.resize(MAX_FRAME_SIZE - HEADER_LEN, 0);
-    assert_eq!(encode(&original).len(), MAX_FRAME_SIZE);
-    assert_eq!(decode(&encode(&original)).unwrap().0, original);
+    assert_eq!(encode(&original).unwrap().len(), MAX_FRAME_SIZE);
+    assert_eq!(decode(&encode(&original).unwrap()).unwrap().0, original);
     original.payload.push(0);
-    assert!(std::panic::catch_unwind(|| encode(&original)).is_err());
+    assert!(matches!(encode(&original), Err(Error::BatchTooLarge)));
     let mut oversized = vec![0; HEADER_LEN];
     oversized[4..8].copy_from_slice(&((MAX_FRAME_SIZE + 1) as u32).to_le_bytes());
     assert_eq!(decode(&oversized), Err(DecodeError::BadLength));
+}
+
+#[test]
+fn encoding_invalid_caller_input_returns_errors() {
+    let mut oversized = frame(Kind::Turn, b"");
+    oversized.payload.resize(MAX_FRAME_SIZE, 0);
+    assert!(matches!(encode(&oversized), Err(Error::BatchTooLarge)));
+    let mut invalid = frame(Kind::Turn, b"content");
+    invalid.header.flags = FLAG_HUSK;
+    assert!(matches!(encode(&invalid), Err(Error::InvalidFrame(_))));
+    invalid.header.flags = 0;
+    invalid.header.version = VERSION + 1;
+    assert!(matches!(encode(&invalid), Err(Error::InvalidFrame(_))));
 }

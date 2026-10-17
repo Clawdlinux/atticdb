@@ -38,8 +38,7 @@ Later writes can sync independently without persisting earlier cached bytes.
 
 Frames use the 104-byte header and little-endian fields from the architecture document.
 `encode` derives the CRC and total length.
-It panics on invalid structure or total sizes above 4 MiB.
-Callers must validate batch sizes before encoding.
+It returns `InvalidFrame` for invalid structure or `BatchTooLarge` for total sizes above 4 MiB.
 Normal record payloads start with a 16-byte salt.
 Footer payloads contain exactly 44 bytes. Husks have no payload.
 
