@@ -105,12 +105,16 @@ Publish runs on the writer thread before the ack and does three O(1) installs: t
 
 ### Durable boundary and recovery
 
-- `SUPERBLOCK` holds the last LSN known synced. A background task updates it after a successful sync, at most once per second, with its own write, sync and rename. It never sits on the ack path.
+- `SUPERBLOCK` holds the last LSN known synced. Periodic maintenance follows successful syncs, at most once per second.
+  It uses its own write, sync, and rename, outside the acknowledgement path.
+  Recovery and clean shutdown also install the durable boundary, without the periodic time limit.
 - An acked batch is synced, and sync persists every earlier write to the same file. So a torn frame before an acked frame is impossible unless synced data was damaged.
 - Recovery rule:
   - Frames at or below the superblock LSN must all be valid. Any bad frame, an end-of-data marker, or a MANIFEST segment missing from disk before the superblock LSN stops the open with `CorruptionDetected` and the LSN. `zerodb repair` is an explicit offline command.
   - Above the superblock LSN, recovery truncates at the first bad frame or the first transaction without a footer. It reports the truncated LSN range and byte count loudly in the open result and logs.
-  - The window where synced bit rot is indistinguishable from a torn tail is at most 1 second of writes. This is documented.
+  - Damage above the last superblock install can be indistinguishable from a torn tail.
+    Under continuous load, that window is at most about 1 second of writes.
+    A successful open and clean shutdown checkpoint the boundary even for sessions shorter than 1 second.
 - Recovery replays from the minimum watermark across all views (session index, cache, BM25, vectors, fact index, dedup table), across segments. Open time is bounded by checkpoint frequency (every 64 MiB of tape or 60 s).
 
 ### Segment roll
@@ -145,13 +149,18 @@ An oversized batch never enters the writer. A configured segment can impose a sm
 Segment preparation runs inline in M1. Moving it to a background task remains an M2 follow-up.
 Superblock maintenance runs after replies and at most once per second.
 Metadata failures poison future writes without changing earlier acknowledgements.
+After recovery rewrites and syncs touched files and the directory, open installs any newer recovered boundary before returning.
+Clean shutdown drains requests and performs its final sync before installing the boundary without the periodic time limit.
+Dropping `Tape` joins that shutdown. Poisoned writers and failed final syncs don't advance the boundary.
 Recovery permits roll padding no longer than 4 MiB plus a footer below the durable boundary.
 Recovery resumes at the first cut segment and offset.
 Recovery rewrites retained bytes above the superblock boundary at their original offsets before syncing each file and directory.
 A process restart can retain failed-writeback bytes in clean page cache. Another sync alone doesn't guarantee persistence.
 Rewriting re-dirties those pages before recovery publishes them or accepts new writes.
-The rewrite covers roughly 1 second of writes since superblock maintenance, plus whatever remained unsynced.
+The rewrite covers data written since the last superblock install, plus anything unsynced at a crash.
+Under continuous load, that's at most about 1 second of writes.
 Long pauses or failures can extend that window. The superblock isn't a strict byte-count limit.
+Untouched segments already covered by the superblock require neither rewriting nor another file sync.
 Retained zero padding is rewritten too. A failed tail-repair sync can leave cached zeros over durable garbage.
 This includes the final segment's unused preallocation, adding at most 1 segment's remaining capacity beyond retained data.
 Later segments leave the manifest atomically before their files are unlinked.

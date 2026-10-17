@@ -25,6 +25,136 @@ fn prepared(mode: Durability) -> PreparedBatch {
 }
 
 #[test]
+fn short_sessions_bound_rewrite_bytes_to_previous_session_writes() {
+    let io = Arc::new(ObservedIo::new(0));
+    let clock = Arc::new(SimClock::default());
+    let opts = Options { segment_size: 1024, ..Options::default() };
+    let mut previous_writes = 0;
+    for session in 0..16 {
+        io.segment_bytes.store(0, Ordering::SeqCst);
+        io.segment_syncs.store(0, Ordering::SeqCst);
+        let (tape, _) = Tape::open(io.clone(), clock.clone(), "db", opts.clone()).unwrap();
+        let rewritten = io.segment_bytes.swap(0, Ordering::SeqCst);
+        assert!(rewritten <= previous_writes, "session={session}, rewritten={rewritten}");
+        if session > 0 {
+            assert_eq!(io.segment_syncs.load(Ordering::SeqCst), 0);
+        }
+        // Fill a segment exactly, so preallocated-tail overhead cannot hide growing rewrites.
+        let input = RecordInput { content: vec![session as u8; 756], ..record(Kind::Turn) };
+        tape.append(vec![input], Durability::Durable).unwrap();
+        previous_writes = io.segment_bytes.load(Ordering::SeqCst);
+        assert_eq!(previous_writes, 1024);
+        drop(tape);
+        clock.advance(500_000_000);
+    }
+}
+
+#[test]
+fn short_clean_sessions_protect_previous_session_data_from_corruption() {
+    use zerodb_tape::Io;
+    let io = Arc::new(SimDisk::new(0));
+    let clock = Arc::new(SimClock::default());
+    let opts = Options { segment_size: 1024, ..Options::default() };
+    for session in 1..=8 {
+        let (tape, _) = Tape::open(io.clone(), clock.clone(), "db", opts.clone()).unwrap();
+        tape.append(vec![record(Kind::Turn)], Durability::Durable).unwrap();
+        drop(tape);
+        clock.advance(500_000_000);
+        let image = Arc::new(io.crash().unwrap());
+        let first = image.open(std::path::Path::new("db/seg-0000000000000001.zdb")).unwrap();
+        image.flip_bit(first, 0).unwrap();
+        image.close(first).unwrap();
+        assert!(
+            matches!(
+                Tape::open(image, clock.clone(), "db", opts.clone()),
+                Err(Error::CorruptionDetected { .. })
+            ),
+            "session={session}"
+        );
+        let dir = zerodb_tape::sim::DataDir::open(io.clone(), "db", None, 1024).unwrap();
+        assert_eq!(dir.superblock(), session);
+    }
+}
+
+#[test]
+fn recovered_survivors_install_superblock_before_open_returns() {
+    let io = Arc::new(ObservedIo::new(0));
+    let clock = Arc::new(SimClock::default());
+    let opts = Options { segment_size: 1024, ..Options::default() };
+    let (mut core, _) = WriterCore::open(io.clone(), clock.clone(), "db", opts.clone()).unwrap();
+    let (request, reply) = WriteRequest::new(prepared(Durability::Durable));
+    core.enqueue(request);
+    core.step();
+    reply.recv().unwrap().unwrap();
+    drop(core);
+    io.events.lock().unwrap().clear();
+    let (core, report) = WriterCore::open(io.clone(), clock, "db", opts).unwrap();
+    assert_eq!(report.durable_lsn, 1);
+    drop(core);
+    let events = io.events.lock().unwrap();
+    let rewritten = events.iter().position(|e| e == "write db/seg-0000000000000001.zdb 0").unwrap();
+    let synced = events.iter().position(|e| e == "sync db/seg-0000000000000001.zdb").unwrap();
+    let installed = events.iter().position(|e| e == "rename db/SUPERBLOCK.tmp db/SUPERBLOCK");
+    assert!(installed.is_some(), "recovery must install its durable boundary");
+    let installed = installed.unwrap();
+    let recovered_dir = events[..installed].iter().rposition(|e| e == "dir-sync db").unwrap();
+    let directory = events.iter().rposition(|e| e == "dir-sync db").unwrap();
+    assert!(rewritten < synced && synced < recovered_dir);
+    assert!(recovered_dir < installed && installed < directory);
+    let dir = zerodb_tape::sim::DataDir::open(Arc::new(io.disk.crash().unwrap()), "db", None, 1024)
+        .unwrap();
+    assert_eq!(dir.superblock(), 1);
+}
+
+#[test]
+fn clean_shutdown_syncs_fast_records_before_forcing_superblock() {
+    let io = Arc::new(ObservedIo::new(0));
+    let clock = Arc::new(SimClock::default());
+    let opts = Options { segment_size: 1024, ..Options::default() };
+    let (tape, _) = Tape::open(io.clone(), clock.clone(), "db", opts.clone()).unwrap();
+    assert_eq!(tape.append(vec![record(Kind::Cache)], Durability::Fast).unwrap(), Committed::Fast);
+    assert_eq!(tape.durable_lsn(), 0);
+    io.events.lock().unwrap().clear();
+    drop(tape);
+    let events = io.events.lock().unwrap().clone();
+    let synced = events.iter().position(|e| e == "sync db/seg-0000000000000001.zdb").unwrap();
+    let installed =
+        events.iter().position(|e| e == "rename db/SUPERBLOCK.tmp db/SUPERBLOCK").unwrap();
+    assert!(synced < installed);
+    let image = Arc::new(io.disk.crash().unwrap());
+    let dir = zerodb_tape::sim::DataDir::open(image.clone(), "db", None, 1024).unwrap();
+    assert_eq!(dir.superblock(), 1);
+    drop(dir);
+    let (tape, _) = Tape::open(image, clock, "db", opts).unwrap();
+    assert_eq!(&tape.read(1).unwrap().unwrap().payload[16..], b"hello");
+}
+
+#[test]
+fn failed_final_sync_does_not_advance_the_shutdown_superblock() {
+    let io = Arc::new(ObservedIo::new(0));
+    let (mut core, _) = WriterCore::open(
+        io.clone(),
+        Arc::new(SimClock::default()),
+        "db",
+        Options { segment_size: 1024, ..Options::default() },
+    )
+    .unwrap();
+    let (request, reply) = WriteRequest::new(prepared(Durability::Fast));
+    core.enqueue(request);
+    core.step();
+    assert_eq!(reply.recv().unwrap().unwrap(), Committed::Fast);
+    io.disk.fail_next_sync().unwrap();
+    assert!(matches!(core.shutdown(), Err(Error::SyncFailed(_))));
+    assert_eq!(core.durable_lsn(), 0);
+    let syncs = io.syncs.load(Ordering::SeqCst);
+    assert!(matches!(core.shutdown(), Err(Error::Poisoned)));
+    assert_eq!(io.syncs.load(Ordering::SeqCst), syncs);
+    drop(core);
+    let dir = zerodb_tape::sim::DataDir::open(io, "db", None, 1024).unwrap();
+    assert_eq!(dir.superblock(), 0);
+}
+
+#[test]
 fn live_restart_after_failed_sync_redirties_survivors_before_acknowledging() {
     for seed in 0..200 {
         for advance_superblock in [false, true] {

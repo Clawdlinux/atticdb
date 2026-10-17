@@ -265,6 +265,9 @@ impl WriterCore {
         let mut dir =
             DataDir::open(io.clone(), path, opts.server_address.as_deref(), opts.segment_size)?;
         let recovered = recover(&mut dir, opts.segment_size)?;
+        if recovered.report.durable_lsn > dir.superblock() {
+            dir.install_superblock(recovered.report.durable_lsn)?;
+        }
         let reads = Arc::new(ReadState {
             io,
             path: dir.path.clone(),
@@ -440,14 +443,32 @@ impl WriterCore {
     /// Called after replies. Metadata failure poisons future writes, not earlier acknowledgements.
     pub fn update_superblock(&mut self) -> Result<()> {
         let now = self.clock.now_ns();
-        if self.is_poisoned()
-            || now.saturating_sub(self.superblock_time) < 1_000_000_000
-            || self.durable_lsn() == self.segments.dir.superblock()
-        {
+        if self.is_poisoned() || now.saturating_sub(self.superblock_time) < 1_000_000_000 {
             return Ok(());
         }
-        self.superblock_time = now;
+        self.checkpoint()
+    }
+
+    fn checkpoint(&mut self) -> Result<()> {
+        if self.durable_lsn() <= self.segments.dir.superblock() {
+            return Ok(());
+        }
+        self.superblock_time = self.clock.now_ns();
         let result = self.segments.dir.install_superblock(self.durable_lsn());
+        if result.is_err() {
+            self.reads.poisoned.store(true, Ordering::Release);
+        }
+        result
+    }
+
+    /// Drains requests, syncs pending Fast writes, and checkpoints without the periodic time limit.
+    pub fn shutdown(&mut self) -> Result<()> {
+        self.step();
+        if self.is_poisoned() {
+            return Err(Error::Poisoned);
+        }
+        let result =
+            self.segments.sync().and_then(|()| self.publish()).and_then(|()| self.checkpoint());
         if result.is_err() {
             self.reads.poisoned.store(true, Ordering::Release);
         }
@@ -488,6 +509,7 @@ impl Tape {
                 core.step();
                 let _ = core.update_superblock();
             }
+            let _ = core.shutdown();
         })?;
         Ok((Self { sender: Some(sender), thread: Some(thread), reads }, report))
     }

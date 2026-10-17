@@ -11,6 +11,8 @@ use zerodb_tape::{FileId, Io, LockGuard, SimDisk};
 pub struct ObservedIo {
     pub disk: SimDisk,
     pub syncs: AtomicUsize,
+    pub segment_bytes: AtomicU64,
+    pub segment_syncs: AtomicUsize,
     pub fail_at: AtomicUsize,
     pub slow_ms: AtomicU64,
     pub capture: AtomicBool,
@@ -24,6 +26,8 @@ impl ObservedIo {
         Self {
             disk: SimDisk::new(seed),
             syncs: AtomicUsize::new(0),
+            segment_bytes: AtomicU64::new(0),
+            segment_syncs: AtomicUsize::new(0),
             fail_at: AtomicUsize::new(0),
             slow_ms: AtomicU64::new(0),
             capture: AtomicBool::new(false),
@@ -63,6 +67,9 @@ impl Io for ObservedIo {
         Ok(())
     }
     fn write_at(&self, file: FileId, off: u64, bytes: &[u8]) -> Result<()> {
+        if self.name(file).file_name().unwrap().to_string_lossy().starts_with("seg-") {
+            self.segment_bytes.fetch_add(bytes.len() as u64, Ordering::SeqCst);
+        }
         let result = self.disk.write_at(file, off, bytes);
         self.event(format!("write {} {off}", self.name(file).display()));
         result
@@ -79,6 +86,9 @@ impl Io for ObservedIo {
         result
     }
     fn sync_data(&self, file: FileId) -> Result<()> {
+        if self.name(file).file_name().unwrap().to_string_lossy().starts_with("seg-") {
+            self.segment_syncs.fetch_add(1, Ordering::SeqCst);
+        }
         let sync = self.syncs.fetch_add(1, Ordering::SeqCst) + 1;
         if self.fail_at.load(Ordering::SeqCst) == sync {
             self.disk.fail_next_sync()?;

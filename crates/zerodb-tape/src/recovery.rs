@@ -158,6 +158,7 @@ pub fn recover(dir: &mut DataDir, size: u64) -> Result<Recovered> {
         let mut bytes = vec![0; len as usize];
         read_exact(dir.io.as_ref(), file.id, 0, &mut bytes)?;
         let mut offset = 0;
+        let mut touched = false;
         let mut rewrite_from = (state.report.durable_lsn >= dir.superblock()).then_some(0);
         let mut pending = Vec::<(Frame, u64)>::new();
         loop {
@@ -238,6 +239,7 @@ pub fn recover(dir: &mut DataDir, size: u64) -> Result<Recovered> {
                     pending.first().map_or(next, |(record, _)| record.header.lsn.max(next));
                 last_lost = last_decodable_lsn(&bytes[start as usize..]).max(first_lost);
                 zero_tail(dir, &file, start, size)?;
+                touched = true;
                 cleared += size - start;
                 state.offset = start;
                 trimming = true;
@@ -251,8 +253,11 @@ pub fn recover(dir: &mut DataDir, size: u64) -> Result<Recovered> {
         if let Some(from) = rewrite_from.filter(|&from| from < rewrite_end) {
             // A failed writeback can leave clean, readable cache bytes that another sync won't persist.
             dir.io.write_at(file.id, from as u64, &bytes[from..rewrite_end])?;
+            touched = true;
         }
-        dir.io.sync_data(file.id)?;
+        if touched {
+            dir.io.sync_data(file.id)?;
+        }
     }
     if state.report.durable_lsn < dir.superblock() {
         return Err(corruption(
