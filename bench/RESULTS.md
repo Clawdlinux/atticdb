@@ -72,14 +72,22 @@ The 1,024-sample p99 estimates remain sensitive to scheduler and storage noise.
 
 ## Validation
 
+The benchmark numbers above were recorded at `822cf91`, before the final M1 review.
+The review changes recovery and API visibility, not the measured append path.
+The benchmark target is rebuilt after review. The timing loops aren't rerun.
+The following review validation completed on 2026-10-18.
+
 | Command | Result |
 |---|---|
 | `cargo fmt --all --check` | Passed |
 | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | Passed |
+| `cargo check --lib --no-default-features` | Passed. Production builds without simulation access. |
 | `cargo test --workspace` | Passed. 500 seeds. Stress ignored in debug. |
 | `cargo test --workspace --release` | Passed. 500 seeds and 20,000 appends across 16 threads. |
 | `ZERODB_SIM_SEEDS=10000 cargo test --release --features sim --test sim -- --nocapture` | Passed. Seeds 0 through 9,999. |
-| `cargo bench -p zerodb-tape --bench append -- --noplot` | Passed. All 6 cases recorded above. |
+| `cargo test --doc` | Passed. Private implementation import paths fail to compile as expected. |
+| `cargo bench --bench append --no-run` | Passed. Benchmark compiles against the narrowed API. |
+| `cargo bench -p zerodb-tape --bench append -- --noplot` | Passed before review at `822cf91`. All 6 cases recorded above. |
 
 The final validation chain exited with status 0.
 Every randomized seed runs 2 or 3 crash generations.
@@ -100,11 +108,12 @@ cargo test --release --test stress
 
 ## Size budget
 
-Production source measures 2,353 lines, including blank lines and comments.
+Production source measures 2,444 lines, including blank lines and comments.
 The count excludes `src/sim.rs` and trailing `#[cfg(test)]` modules.
 It includes the always-exported SimDisk implementation.
-The stricter raw count includes every `src/*.rs` line: 2,971.
-Both counts remain below the M1 budget of 3,000.
+The raw count includes every `src/*.rs` line: 3,171.
+That includes 536 simulation-only helper lines and 191 embedded unit-test lines.
+Production remains below the M1 budget of 3,000.
 
 ```sh
 wc -l crates/zerodb-tape/src/*.rs
@@ -128,7 +137,51 @@ Open now syncs the directory even when no orphan remains visible.
 Both regressions failed before their fixes. Each fix has its own signed-off commit.
 The carry-over fix is `643ec6d`. The retry regression fix is `f92ca69`.
 
-The randomized harness found no additional Group A or B defects.
+### Final review fixes
+
+The initial harness missed process restart without power loss after failed sync.
+The reviewer's sequence reproduced lost durable acknowledgements at seed 0 before the fix.
+Recovery now rewrites the retained suffix above the superblock, then syncs its files and directory.
+This re-dirties readable cache bytes left clean after failed writeback.
+The regression passes 200 seeds in both stale and advanced superblock cases.
+A separate regression covers suffix rewriting across rolls and before a trimmed tail.
+
+The rewrite includes zero padding and the last segment's unused preallocation.
+A further regression reproduced failed tail-repair retry losing a later rolled acknowledgement at seed 1.
+It passes 32 seeds with both stale and advanced superblocks after rewriting padding.
+The logical rewrite window is roughly 1 second of writes plus unsynced data.
+Delayed superblock maintenance extends that window.
+The physical rewrite also includes roll padding and at most 1 final segment's unused capacity.
+
+All recovery error LSN increments now saturate.
+A CRC-valid transaction at `u64::MAX`, followed by an oversized segment, reproduced the overflow before the fix.
+Its regression checks both zero and maximum superblock values.
+
+Simulation now includes live reopen after poison, followed by more acknowledgements and a power-loss crash.
+Some generations also capture a crash during recovery's rewrites, zero-tail repair, or manifest cleanup.
+Corruption samples random byte offsets across all segments through the superblock transaction's footer.
+The selected bit spans 0 through 7.
+A coverage test checks both segments, offsets beyond the first header, and every bit.
+The SimDisk regression confirms live reopen preserves failed cached bytes.
+Another sync doesn't heal them. Rewriting identical bytes does.
+
+Production exports storage types from the crate root, including `TapeOptions`.
+Directory, recovery, segment, writer, and codec modules are crate-private.
+The `sim` feature gates external access to `WriterCore`, `DataDir`, and other deterministic helpers.
+Development self-dependency enables that feature for tests and benches.
+Default library builds don't expose it.
+`deny(missing_docs)` enforces public API documentation.
+The root API test and compile-fail documentation tests verify the supported and rejected import paths.
+
+| Commit | Change |
+|---|---|
+| `4728f9a` | Redirty recovered suffixes. Add live-restart regressions and generations. |
+| `e8ec017` | Saturate corruption LSN reporting at `u64::MAX`. |
+| `c4a6f08` | Spread corruption across durable prefix bytes and all bits. |
+| `c8f1008` | Narrow and document the public API. Gate deterministic access. |
+| `5c552db` | Persist cached zero padding. Cover failed repair retry and recovery cuts. |
+
+Each review fix is signed off and carries the Copilot co-author trailer.
 The simulator models I/O boundaries and torn writes. It doesn't replace real-filesystem crash testing.
 The stress test covers real queue contention, not power loss.
 Linux NVMe measurements and LazyFS testing remain future work.
