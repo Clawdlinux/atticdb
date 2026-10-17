@@ -85,16 +85,22 @@ fn failed_sync_keeps_pending_data() {
 
 #[test]
 fn later_writes_do_not_resurrect_failed_sync_bytes() {
-    let disk = SimDisk::new(11);
-    let file = durable_file(&disk, "db/data", b"oldold");
-    disk.write_at(file, 0, b"bad").unwrap();
-    disk.fail_next_sync().unwrap();
-    assert!(disk.sync_data(file).is_err());
-    disk.sync_data(file).unwrap();
-    disk.write_at(file, 3, b"new").unwrap();
-    disk.sync_data(file).unwrap();
-    assert_eq!(bytes(&disk, file), b"badnew");
-    assert_eq!(bytes(&disk.crash().unwrap(), file), b"oldnew");
+    let mut lost = false;
+    for seed in 0..100 {
+        let disk = SimDisk::new(seed);
+        let file = durable_file(&disk, "db/data", b"oldold");
+        disk.write_at(file, 0, b"bad").unwrap();
+        disk.fail_next_sync().unwrap();
+        assert!(disk.sync_data(file).is_err());
+        disk.sync_data(file).unwrap();
+        disk.write_at(file, 3, b"new").unwrap();
+        disk.sync_data(file).unwrap();
+        assert_eq!(bytes(&disk, file), b"badnew");
+        let crash = bytes(&disk.crash().unwrap(), file);
+        assert_eq!(&crash[3..], b"new");
+        lost |= &crash[..3] != b"bad";
+    }
+    assert!(lost);
 }
 
 #[test]

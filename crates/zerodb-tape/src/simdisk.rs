@@ -49,6 +49,7 @@ struct SimFile {
     durable: Vec<u8>,
     visible: Vec<u8>,
     pending: Vec<Write>,
+    doomed: Vec<Write>,
 }
 
 impl SimFile {
@@ -97,6 +98,7 @@ struct State {
     files: BTreeMap<FileId, SimFile>,
     handles: BTreeMap<FileId, FileId>,
     entries: BTreeMap<PathBuf, FileId>,
+    directories: BTreeSet<PathBuf>,
     durable_entries: BTreeMap<PathBuf, FileId>,
     pending_entries: Vec<DirOp>,
     locked: BTreeSet<FileId>,
@@ -155,6 +157,9 @@ impl State {
         self.next += 1;
         self.files.insert(id, SimFile::default());
         self.entries.insert(path.to_owned(), id);
+        for parent in path.ancestors().skip(1) {
+            self.directories.insert(parent.to_owned());
+        }
         self.pending_entries.push(DirOp::Create(path.to_owned(), id));
         Ok(id)
     }
@@ -179,6 +184,7 @@ impl SimDisk {
                 files: BTreeMap::new(),
                 handles: BTreeMap::new(),
                 entries: BTreeMap::new(),
+                directories: BTreeSet::from([PathBuf::from(".")]),
                 durable_entries: BTreeMap::new(),
                 pending_entries: Vec::new(),
                 locked: BTreeSet::new(),
@@ -192,7 +198,7 @@ impl SimDisk {
 
     /// Fails the next file or directory sync.
     ///
-    /// Failed file syncs doom pending writes. Their cached bytes remain visible, but crash recovery drops them.
+    /// Failed file syncs doom pending writes. Retries cannot persist them, but crashes may retain torn sectors.
     pub fn fail_next_sync(&self) -> Result<()> {
         lock(&self.state)?.fail_sync = true;
         Ok(())
@@ -226,7 +232,7 @@ impl SimDisk {
             .ok_or_else(|| io_error(ErrorKind::InvalidInput, "bit flip beyond durable data"))?;
         *byte ^= 1;
         file.visible.clone_from(&file.durable);
-        for write in &file.pending {
+        for write in file.doomed.iter().chain(&file.pending) {
             write.apply(&mut file.visible);
         }
         Ok(())
@@ -253,7 +259,8 @@ impl SimDisk {
                 continue;
             }
             let mut durable = file.durable.clone();
-            let mut writes = file.pending.clone();
+            let mut writes = file.doomed.clone();
+            writes.extend(file.pending.clone());
             for i in (1..writes.len()).rev() {
                 let j = rng.below(i + 1);
                 writes.swap(i, j);
@@ -282,7 +289,7 @@ impl SimDisk {
                     Write::Resize(len) => durable.resize(len, 0),
                 }
             }
-            files.insert(*id, SimFile { visible: durable.clone(), durable, pending: Vec::new() });
+            files.insert(*id, SimFile { visible: durable.clone(), durable, ..SimFile::default() });
         }
         let handles = state
             .handles
@@ -297,6 +304,7 @@ impl SimDisk {
                 handles,
                 durable_entries: entries.clone(),
                 entries,
+                directories: state.directories.clone(),
                 pending_entries: Vec::new(),
                 locked: BTreeSet::new(),
                 next: state.next,
@@ -391,8 +399,8 @@ impl Io for SimDisk {
         let mut state = lock(&self.state)?;
         state.file(file)?;
         if let Err(error) = state.sync_check() {
-            // Writeback errors can discard dirty writes without evicting their cached bytes.
-            state.file(file)?.pending.clear();
+            let file = state.file(file)?;
+            file.doomed.append(&mut file.pending);
             return Err(error);
         }
         let file = state.file(file)?;
@@ -475,14 +483,16 @@ impl Io for SimDisk {
             .filter_map(|relative| relative.components().next())
             .map(|component| dir.join(component.as_os_str()))
             .collect();
-        if children.is_empty() {
+        if children.is_empty() && !state.directories.contains(dir) {
             return Err(io_error(ErrorKind::NotFound, "directory not found"));
         }
         Ok(children.into_iter().collect())
     }
 
     fn exists(&self, path: &Path) -> Result<bool> {
-        Ok(lock(&self.state)?.entries.keys().any(|entry| relative_to(entry, path).is_some()))
+        let state = lock(&self.state)?;
+        Ok(state.directories.contains(path)
+            || state.entries.keys().any(|entry| relative_to(entry, path).is_some()))
     }
 
     fn try_lock_exclusive(&self, path: &Path) -> Result<LockGuard> {
@@ -514,6 +524,46 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+
+    #[test]
+    fn implicit_directory_stays_listable_when_empty() {
+        let disk = SimDisk::new(0);
+        assert!(disk.list(Path::new(".")).unwrap().is_empty());
+        let file = disk.create(Path::new("db/file")).unwrap();
+        disk.close(file).unwrap();
+        disk.remove(Path::new("db/file")).unwrap();
+        assert!(disk.list(Path::new("db")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn failed_writes_can_tear_on_crash_but_never_sync() {
+        let mut survived = false;
+        let mut lost = false;
+        let mut torn = false;
+        for seed in 0..200 {
+            let disk = SimDisk::new(seed);
+            let file = disk.create(Path::new("db/file")).unwrap();
+            disk.write_at(file, 0, &[0; 1024]).unwrap();
+            disk.sync_data(file).unwrap();
+            disk.sync_dir(Path::new("db")).unwrap();
+            disk.write_at(file, 0, &[9; 1024]).unwrap();
+            disk.fail_next_sync().unwrap();
+            assert!(disk.sync_data(file).is_err());
+            disk.sync_data(file).unwrap();
+            disk.flip_bit(file, 1023).unwrap();
+            let mut live = [0; 1024];
+            disk.read_at(file, 0, &mut live).unwrap();
+            assert_eq!(live, [9; 1024]);
+            assert_eq!(lock(&disk.state).unwrap().file(file).unwrap().durable[0], 0);
+            let crash = disk.crash().unwrap();
+            let mut bytes = [0; 1024];
+            crash.read_at(file, 0, &mut bytes).unwrap();
+            survived |= bytes.contains(&9);
+            lost |= !bytes.contains(&9);
+            torn |= bytes.contains(&9) && bytes.contains(&0);
+        }
+        assert!(survived && lost && torn);
+    }
 
     #[test]
     fn closed_unlinked_files_are_collected_after_directory_sync() {
