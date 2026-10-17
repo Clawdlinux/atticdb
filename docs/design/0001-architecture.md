@@ -122,6 +122,26 @@ Publish runs on the writer thread before the ack and does three O(1) installs: t
 
 A failed sync poisons the engine. Writes fail with `unknown` for in-flight batches and `not_committed` after. Reads keep working at the last durable LSN. Health reports `degraded`. Recovery needs a restart.
 
+### M1 implementation notes
+
+`WriterCore::enqueue` and `WriterCore::step` drive the same state machine in production and simulation.
+`Tape` owns its production thread. Dropping it joins the thread and releases the directory lock.
+Simulations prepare requests with `PreparedBatch::with_salts`, then pass them through `WriteRequest::new`.
+Production salts come from `/dev/urandom` on caller threads. This entropy source requires Unix.
+Storage operations still use `Io`. Simulations supply deterministic salts without accessing OS entropy.
+
+Record LSNs increase strictly. Footer frames copy their transaction's final record LSN.
+Footers have no separate read address. Fast acknowledgements expose no transaction identifier or LSN.
+The 4 MiB batch limit includes frame headers, salts, and the footer.
+An oversized batch never enters the writer. A configured segment can impose a smaller batch limit.
+
+Segment preparation runs inline in M1. Moving it to a background task remains an M2 follow-up.
+Superblock maintenance runs after replies and at most once per second.
+Metadata failures poison future writes without changing earlier acknowledgements.
+Recovery permits zero padding between complete transactions when a segment rolls.
+Recovery reports discarded LSNs and zero-filled bytes, including preallocated tail capacity.
+An unreadable frame can hide its LSN. The reported range includes every decodable discarded record.
+
 ### Disk space
 
 A reserve (default 1 GiB or 5% of the volume, whichever is smaller) is kept free. Writes fail with `DiskFull` (`not_committed`) before the reserve is touched. Compaction may use the reserve. Forget and compaction never run on the writer thread.

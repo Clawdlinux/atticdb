@@ -3,10 +3,12 @@
 use std::fmt;
 
 /// A tape operation failed.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Error {
     /// An I/O operation failed with its original error kind.
     Io(std::io::ErrorKind, String),
+    /// A file or directory sync failed.
+    SyncFailed(String),
     /// Durable tape bytes failed validation.
     CorruptionDetected {
         /// First affected log sequence number.
@@ -43,6 +45,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io(kind, message) => write!(f, "{kind:?}: {message}"),
+            Self::SyncFailed(message) => write!(f, "sync failed: {message}"),
             Self::CorruptionDetected { lsn, segment, offset, reason } => {
                 write!(f, "corruption at LSN {lsn}, segment {segment}, offset {offset}: {reason}")
             }

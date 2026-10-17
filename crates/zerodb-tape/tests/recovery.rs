@@ -121,9 +121,41 @@ fn bad_chain_or_footer_is_not_replayed() {
             end.payload[12] ^= 1;
             bytes = [frame::encode(&record).unwrap(), frame::encode(&end).unwrap()].concat();
         }
+
         write(&io, &dir, 1, 0, &bytes);
         let result = recover(&mut dir, 1024).unwrap();
         assert_eq!(result.report.records, 0);
         assert!(result.report.truncated.is_some());
     }
+}
+
+#[test]
+fn nonincreasing_lsn_is_truncated_above_and_corruption_below_boundary() {
+    for boundary in [0, 2] {
+        let (io, mut dir) = setup();
+        let (first, head) = transaction(1, 1, [0; 32]);
+        let (second, _) = transaction(1, 2, head);
+        write(&io, &dir, 1, 0, &[first, second].concat());
+        dir.install_superblock(boundary).unwrap();
+        let result = recover(&mut dir, 1024);
+        if boundary == 0 {
+            assert_eq!(result.unwrap().report.records, 1);
+        } else {
+            assert!(matches!(result, Err(Error::CorruptionDetected { .. })));
+        }
+    }
+}
+
+#[test]
+fn truncation_report_includes_discarded_later_segments() {
+    let (io, mut dir) = setup();
+    let (first, head) = transaction(1, 1, [0; 32]);
+    let (second, head) = transaction(2, 2, head);
+    let (third, _) = transaction(3, 3, head);
+    dir.prepare_next_segment(1024).unwrap();
+    write(&io, &dir, 1, 0, &first);
+    write(&io, &dir, 1, first.len() as u64, &second[..second.len() - 10]);
+    write(&io, &dir, 2, 0, &third);
+    let state = recover(&mut dir, 1024).unwrap();
+    assert_eq!(state.report.truncated.unwrap().0, 2..=3);
 }

@@ -7,6 +7,8 @@ use zerodb_tape::io::{Io, StdIo};
 use zerodb_tape::simdisk::SimDisk;
 use zerodb_tape::Error;
 
+mod support;
+
 #[test]
 fn metadata_roundtrip_and_crc() {
     let io = Arc::new(SimDisk::new(1));
@@ -27,25 +29,13 @@ fn metadata_roundtrip_and_crc() {
 #[test]
 fn atomic_install_is_old_or_new_at_every_crash_point() {
     for seed in 0..100 {
-        for point in 0..5 {
-            let io = Arc::new(SimDisk::new(seed));
-            let _dir = DataDir::open(io.clone(), "db", None).unwrap();
-            atomic_install(io.clone(), Path::new("db"), "TEST", b"old").unwrap();
-            let file = io.create(Path::new("db/TEST.tmp")).unwrap();
-            if point >= 1 {
-                io.write_at(file, 0, b"new-content").unwrap();
-            }
-            if point >= 2 {
-                io.sync_data(file).unwrap();
-            }
-            if point >= 3 {
-                io.rename(Path::new("db/TEST.tmp"), Path::new("db/TEST")).unwrap();
-            }
-            if point >= 4 {
-                io.sync_dir(Path::new("db")).unwrap();
-            }
-            io.close(file).unwrap();
-            let crash = io.crash().unwrap();
+        let io = Arc::new(support::ObservedIo::new(seed));
+        let _dir = DataDir::open(io.clone(), "db", None).unwrap();
+        atomic_install(io.clone(), Path::new("db"), "TEST", b"old").unwrap();
+        io.capture.store(true, std::sync::atomic::Ordering::SeqCst);
+        atomic_install(io.clone(), Path::new("db"), "TEST", b"new-content").unwrap();
+        assert!(io.handles.lock().unwrap().is_empty());
+        for crash in io.images.lock().unwrap().iter() {
             let file = crash.open(Path::new("db/TEST")).unwrap();
             let mut bytes = vec![0; crash.len(file).unwrap() as usize];
             crash.read_at(file, 0, &mut bytes).unwrap();
@@ -68,8 +58,19 @@ fn lock_is_first_and_reports_the_holder() {
             assert!(holder.contains(&std::process::id().to_string()));
             assert!(holder.contains("localhost:77"));
         }
+
         other => panic!("{other:?}"),
     }
     drop(dir);
     std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn missing_manifest_cannot_reinitialize_existing_segments() {
+    let io = Arc::new(SimDisk::new(1));
+    let mut dir = DataDir::open(io.clone(), "db", None).unwrap();
+    dir.prepare_next_segment(1024).unwrap();
+    drop(dir);
+    io.remove(Path::new("db/MANIFEST")).unwrap();
+    assert!(matches!(DataDir::open(io, "db", None), Err(Error::CorruptionDetected { .. })));
 }

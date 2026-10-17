@@ -86,6 +86,21 @@ fn zero_tail(dir: &DataDir, file: &Handle, from: u64, size: u64) -> Result<()> {
     dir.io.sync_data(file.id)
 }
 
+fn last_decodable_lsn(mut bytes: &[u8]) -> u64 {
+    let mut last = 0;
+    while bytes.len() >= 8 {
+        let len = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
+        if !(frame::HEADER_LEN..=frame::MAX_FRAME_SIZE).contains(&len) || len > bytes.len() {
+            break;
+        }
+        if let Ok((record, _)) = frame::decode(&bytes[..len]) {
+            last = last.max(record.header.lsn);
+        }
+        bytes = &bytes[len..];
+    }
+    last
+}
+
 /// Scans prepared segments, verifies chains, and syncs repaired tails before returning.
 pub fn recover(dir: &mut DataDir, size: u64) -> Result<Recovered> {
     let mut state = Recovered::default();
@@ -124,14 +139,15 @@ pub fn recover(dir: &mut DataDir, size: u64) -> Result<Recovered> {
                 "invalid segment length",
             ));
         }
+        let mut bytes = vec![0; len as usize];
+        read_exact(dir.io.as_ref(), file.id, 0, &mut bytes)?;
         if trimming {
+            last_lost = last_lost.max(last_decodable_lsn(&bytes));
             zero_tail(dir, &file, 0, size)?;
             cleared += size;
             state.offset = 0;
             continue;
         }
-        let mut bytes = vec![0; len as usize];
-        read_exact(dir.io.as_ref(), file.id, 0, &mut bytes)?;
         let mut offset = 0;
         let mut pending = Vec::<(Frame, u64)>::new();
         loop {
@@ -173,6 +189,12 @@ pub fn recover(dir: &mut DataDir, size: u64) -> Result<Recovered> {
                     }
                     state.txn = record.header.txn;
                 } else {
+                    let start = pending.first().map_or(offset, |(_, off)| *off as usize);
+                    if pending.len() == 1024
+                        || offset + used - start + frame::HEADER_LEN + 44 > frame::MAX_FRAME_SIZE
+                    {
+                        return Err("transaction exceeds batch limits".into());
+                    }
                     pending.push((record, offset as u64));
                 }
                 offset += used;
@@ -184,8 +206,9 @@ pub fn recover(dir: &mut DataDir, size: u64) -> Result<Recovered> {
                 if state.report.durable_lsn < dir.superblock() {
                     return Err(corruption(next, segment, start, reason));
                 }
-                first_lost = pending.first().map_or(next, |(record, _)| record.header.lsn);
-                last_lost = pending.last().map_or(first_lost, |(record, _)| record.header.lsn);
+                first_lost =
+                    pending.first().map_or(next, |(record, _)| record.header.lsn.max(next));
+                last_lost = last_decodable_lsn(&bytes[start as usize..]).max(first_lost);
                 zero_tail(dir, &file, start, size)?;
                 cleared += size - start;
                 state.offset = start;

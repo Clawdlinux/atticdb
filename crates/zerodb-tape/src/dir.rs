@@ -37,9 +37,9 @@ pub fn atomic_install(io: Arc<dyn Io>, dir: &Path, name: &str, bytes: &[u8]) -> 
     }
     let file = Handle::create(io.clone(), &tmp)?;
     io.write_at(file.id, 0, bytes)?;
-    io.sync_data(file.id)?;
+    io.sync_data(file.id).map_err(|e| Error::SyncFailed(e.to_string()))?;
     io.rename(&tmp, &dir.join(name))?;
-    io.sync_dir(dir)
+    io.sync_dir(dir).map_err(|e| Error::SyncFailed(e.to_string()))
 }
 
 pub(crate) fn corruption(lsn: u64, segment: u64, offset: u64, reason: impl ToString) -> Error {
@@ -133,6 +133,13 @@ impl DataDir {
             }
             dir.superblock = values[0];
         } else {
+            if dir.io.list(&dir.path)?.iter().any(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("seg-"))
+            }) {
+                return Err(corruption(0, 0, 0, "missing manifest for existing segments"));
+            }
             if dir.io.exists(&dir.path.join("SUPERBLOCK"))? {
                 let values = read(dir.io.clone(), &dir.path.join("SUPERBLOCK"), b"ZDBSUPER")?;
                 if values != [0] {
@@ -193,8 +200,8 @@ impl DataDir {
         }
         let file = Handle::create(self.io.clone(), &self.segment_path(id))?;
         self.io.set_len(file.id, size)?;
-        self.io.sync_data(file.id)?;
-        self.io.sync_dir(&self.path)?;
+        self.io.sync_data(file.id).map_err(|e| Error::SyncFailed(e.to_string()))?;
+        self.io.sync_dir(&self.path).map_err(|e| Error::SyncFailed(e.to_string()))?;
         let mut segments = self.segments.clone();
         segments.push(id);
         self.install_manifest(&segments)?;

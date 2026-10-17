@@ -28,6 +28,10 @@ impl std::fmt::Debug for SegmentWriter {
 }
 
 impl SegmentWriter {
+    pub(crate) fn capacity(&self) -> u64 {
+        self.size
+    }
+
     /// Opens the last prepared segment at its recovered transaction boundary.
     pub fn new(mut dir: DataDir, size: u64, offset: u64) -> Result<Self> {
         if size == 0 || offset > size {
@@ -75,10 +79,16 @@ impl SegmentWriter {
     pub fn sync(&mut self) -> Result<()> {
         for id in &self.dirty {
             let file = self.files.get(id).ok_or(Error::Poisoned)?;
-            self.dir.io.sync_data(file.id)?;
+            self.dir.io.sync_data(file.id).map_err(|e| Error::SyncFailed(e.to_string()))?;
         }
         self.dirty.clear();
         self.files.retain(|id, _| *id == self.active);
         Ok(())
+    }
+
+    pub(crate) fn discard_partial(&mut self) -> Result<()> {
+        let file = self.files.get(&self.active).ok_or(Error::Poisoned)?;
+        self.dir.io.set_len(file.id, self.offset)?;
+        self.dir.io.set_len(file.id, self.size)
     }
 }
