@@ -312,6 +312,14 @@ fn position(offset: u64) -> Result<usize> {
     usize::try_from(offset).map_err(|_| io_error(ErrorKind::InvalidInput, "offset too large"))
 }
 
+fn relative_to<'a>(path: &'a Path, dir: &Path) -> Option<&'a Path> {
+    if dir == Path::new(".") && path.is_relative() {
+        Some(path)
+    } else {
+        path.strip_prefix(dir).ok()
+    }
+}
+
 impl Io for SimDisk {
     fn create(&self, path: &Path) -> Result<FileId> {
         let mut state = lock(&self.state)?;
@@ -456,16 +464,25 @@ impl Io for SimDisk {
     }
 
     fn list(&self, dir: &Path) -> Result<Vec<PathBuf>> {
-        Ok(lock(&self.state)?
+        let state = lock(&self.state)?;
+        if state.entries.contains_key(dir) {
+            return Err(io_error(ErrorKind::NotADirectory, "list target is a file"));
+        }
+        let children: BTreeSet<_> = state
             .entries
             .keys()
-            .filter(|path| path.parent() == Some(dir))
-            .cloned()
-            .collect())
+            .filter_map(|path| relative_to(path, dir))
+            .filter_map(|relative| relative.components().next())
+            .map(|component| dir.join(component.as_os_str()))
+            .collect();
+        if children.is_empty() {
+            return Err(io_error(ErrorKind::NotFound, "directory not found"));
+        }
+        Ok(children.into_iter().collect())
     }
 
     fn exists(&self, path: &Path) -> Result<bool> {
-        Ok(lock(&self.state)?.entries.contains_key(path))
+        Ok(lock(&self.state)?.entries.keys().any(|entry| relative_to(entry, path).is_some()))
     }
 
     fn try_lock_exclusive(&self, path: &Path) -> Result<LockGuard> {

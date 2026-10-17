@@ -9,6 +9,8 @@ It does not implement the tape writer or recovery.
 `StdIo` uses real files. Its parent directories must already exist.
 `SimDisk` uses logical paths with implicit parent directories.
 Both return sorted full paths from `list`.
+Simulated directories exist when any file is below them. Directory listings include immediate subdirectories.
+Listing a file or a missing directory returns an error.
 Handles remain valid across rename and removal. Exclusive locks follow file identity.
 Call `close` to release a handle. Closed handles return errors.
 Open handles retain removed files until closed.

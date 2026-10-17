@@ -109,3 +109,31 @@ fn closed_handles_fail_without_invalidating_other_opens() {
         io.close(other).unwrap();
     }
 }
+
+#[test]
+fn directory_exists_and_list_match_across_backends() {
+    let dir = TestDir::new();
+    let branch = dir.0.join("branch");
+    let deeper = branch.join("deeper");
+    std::fs::create_dir_all(&deeper).unwrap();
+    for io in [Box::new(StdIo::new()) as Box<dyn Io>, Box::new(SimDisk::new(0))] {
+        let direct = dir.0.join("direct");
+        let leaf = deeper.join("leaf");
+        for path in [&direct, &leaf] {
+            let file = io.create(path).unwrap();
+            io.close(file).unwrap();
+        }
+        assert!(io.exists(&dir.0).unwrap());
+        assert!(io.exists(&branch).unwrap());
+        assert!(io.exists(&deeper).unwrap());
+        assert!(io.exists(&leaf).unwrap());
+        assert!(!io.exists(&branch.join("missing")).unwrap());
+        assert_eq!(io.list(&dir.0).unwrap(), vec![branch.clone(), direct.clone()]);
+        assert_eq!(io.list(&branch).unwrap(), vec![deeper.clone()]);
+        assert_eq!(io.list(&deeper).unwrap(), vec![leaf.clone()]);
+        assert!(io.list(&leaf).is_err());
+        assert!(io.list(&branch.join("missing")).is_err());
+        io.remove(&direct).unwrap();
+        io.remove(&leaf).unwrap();
+    }
+}
