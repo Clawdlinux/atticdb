@@ -20,7 +20,9 @@ Simulated files remain available while durable directory entries or pending dire
 `SimDisk::crash` returns an independent disk without changing the original.
 The same seed and operations produce the same image.
 Synced file bytes and synced directory entries survive.
-Pending writes can disappear, reorder, or persist only a prefix.
+Pending writes can disappear or reorder. Each sector can disappear, persist fully, or retain only a prefix.
+Sectors persist independently, so later sectors can survive when earlier sectors are missing.
+Sector boundaries default to 512 bytes. `set_sector_size` accepts positive sizes for smaller tests.
 Pending directory operations can disappear. Each rename is atomic.
 Cross-directory rename syncs persist both connected directories.
 This is stronger than real filesystems that require both directories to be synced separately.

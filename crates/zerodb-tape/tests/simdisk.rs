@@ -127,6 +127,34 @@ fn unsynced_overwrites_can_reorder() {
 }
 
 #[test]
+fn a_later_sector_can_survive_without_the_first_sector() {
+    let mut non_prefix = false;
+    for seed in 0..1000 {
+        let disk = SimDisk::new(seed);
+        let file = durable_file(&disk, "db/data", &[0; 1536]);
+        disk.write_at(file, 0, &[7; 1536]).unwrap();
+        let image = bytes(&disk.crash().unwrap(), file);
+        non_prefix |= image[..512].iter().all(|byte| *byte == 0) && image[512..].contains(&7);
+    }
+    assert!(non_prefix, "sector loss must allow holes before persisted sectors");
+}
+
+#[test]
+fn sector_size_is_configurable_and_cannot_be_zero() {
+    let mut non_prefix = false;
+    for seed in 0..1000 {
+        let disk = SimDisk::new(seed);
+        assert!(disk.set_sector_size(0).is_err());
+        disk.set_sector_size(4).unwrap();
+        let file = durable_file(&disk, "db/data", &[0; 12]);
+        disk.write_at(file, 2, &[7; 10]).unwrap();
+        let image = bytes(&disk.crash().unwrap(), file);
+        non_prefix |= image[..4] == [0; 4] && image[4..].contains(&7);
+    }
+    assert!(non_prefix);
+}
+
+#[test]
 fn file_and_directory_sync_are_independent() {
     let mut lost = false;
     let mut retained = false;

@@ -103,6 +103,7 @@ struct State {
     next: u64,
     fail_sync: bool,
     space: Option<usize>,
+    sector_size: usize,
 }
 
 fn io_error(kind: ErrorKind, message: &str) -> Error {
@@ -184,6 +185,7 @@ impl SimDisk {
                 next: 0,
                 fail_sync: false,
                 space: None,
+                sector_size: 512,
             })),
         }
     }
@@ -199,6 +201,17 @@ impl SimDisk {
     /// Allows this many more written bytes, then returns `StorageFull`.
     pub fn enospc_after_bytes(&self, bytes: usize) -> Result<()> {
         lock(&self.state)?.space = Some(bytes);
+        Ok(())
+    }
+
+    /// Sets the sector size used for crash tearing. The default is 512 bytes.
+    ///
+    /// Returns an error for zero bytes.
+    pub fn set_sector_size(&self, bytes: usize) -> Result<()> {
+        if bytes == 0 {
+            return Err(io_error(ErrorKind::InvalidInput, "sector size must be positive"));
+        }
+        lock(&self.state)?.sector_size = bytes;
         Ok(())
     }
 
@@ -221,7 +234,7 @@ impl SimDisk {
 
     /// Builds a crashed image from durable state and seeded pending operations.
     ///
-    /// Pending writes can disappear, reorder, or persist only a prefix.
+    /// Pending writes can disappear or reorder. Their sectors persist independently and can tear.
     /// Directory operations can disappear. Each rename is atomic.
     /// Repeating this call without mutations produces the same image.
     pub fn crash(&self) -> Result<Self> {
@@ -250,10 +263,21 @@ impl SimDisk {
                     continue;
                 }
                 match write {
-                    Write::Bytes(offset, mut data) => {
-                        let len = rng.below(data.len() + 1);
-                        data.truncate(len);
-                        Write::Bytes(offset, data).apply(&mut durable);
+                    Write::Bytes(offset, data) => {
+                        let mut start = 0;
+                        while start < data.len() {
+                            let sector_remaining =
+                                state.sector_size - (offset + start) % state.sector_size;
+                            let count = sector_remaining.min(data.len() - start);
+                            let kept = match rng.below(3) {
+                                0 => 0,
+                                1 => count,
+                                _ => rng.below(count + 1),
+                            };
+                            Write::Bytes(offset + start, data[start..start + kept].to_vec())
+                                .apply(&mut durable);
+                            start += count;
+                        }
                     }
                     Write::Resize(len) => durable.resize(len, 0),
                 }
@@ -278,6 +302,7 @@ impl SimDisk {
                 next: state.next,
                 fail_sync: false,
                 space: None,
+                sector_size: state.sector_size,
             })),
         })
     }
