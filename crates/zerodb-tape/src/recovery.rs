@@ -117,7 +117,7 @@ pub fn recover(dir: &mut DataDir, size: u64) -> Result<Recovered> {
             Err(Error::Io(std::io::ErrorKind::NotFound, _)) => {
                 if state.report.durable_lsn < dir.superblock() {
                     return Err(corruption(
-                        state.report.durable_lsn + 1,
+                        state.report.durable_lsn.saturating_add(1),
                         segment,
                         0,
                         "missing segment",
@@ -145,7 +145,7 @@ pub fn recover(dir: &mut DataDir, size: u64) -> Result<Recovered> {
         retained.push(segment);
         if len > size || usize::try_from(len).is_err() {
             return Err(corruption(
-                state.report.durable_lsn + 1,
+                state.report.durable_lsn.saturating_add(1),
                 segment,
                 0,
                 "invalid segment length",
@@ -165,7 +165,7 @@ pub fn recover(dir: &mut DataDir, size: u64) -> Result<Recovered> {
                     && state.report.durable_lsn < dir.superblock()
                 {
                     return Err(corruption(
-                        state.report.durable_lsn + 1,
+                        state.report.durable_lsn.saturating_add(1),
                         segment,
                         offset as u64,
                         "early end of data",
@@ -175,7 +175,7 @@ pub fn recover(dir: &mut DataDir, size: u64) -> Result<Recovered> {
                     && tail.len() > frame::MAX_FRAME_SIZE + frame::HEADER_LEN + 44
                 {
                     return Err(corruption(
-                        state.report.durable_lsn + 1,
+                        state.report.durable_lsn.saturating_add(1),
                         segment,
                         offset as u64,
                         "oversized zero padding",
@@ -250,7 +250,12 @@ pub fn recover(dir: &mut DataDir, size: u64) -> Result<Recovered> {
         dir.io.sync_data(file.id)?;
     }
     if state.report.durable_lsn < dir.superblock() {
-        return Err(corruption(state.report.durable_lsn + 1, 0, 0, "durable boundary not reached"));
+        return Err(corruption(
+            state.report.durable_lsn.saturating_add(1),
+            0,
+            0,
+            "durable boundary not reached",
+        ));
     }
     if retained != segments {
         dir.install_manifest(&retained)?;

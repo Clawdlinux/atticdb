@@ -75,6 +75,25 @@ fn clean_reopen_and_chain_heads_allow_lsn_gaps() {
 }
 
 #[test]
+fn corruption_after_maximum_lsn_reports_saturated_lsn() {
+    for superblock in [0, u64::MAX] {
+        let (io, mut dir) = setup();
+        let second = dir.prepare_next_segment(1024).unwrap();
+        let (valid, _) = transaction(u64::MAX, 1, [0; 32]);
+        write(&io, &dir, 1, 0, &valid);
+        dir.install_superblock(superblock).unwrap();
+        let file = io.open(&dir.segment_path(second)).unwrap();
+        io.set_len(file, 1025).unwrap();
+        io.sync_data(file).unwrap();
+        io.close(file).unwrap();
+        assert!(matches!(
+            recover(&mut dir, 1024),
+            Err(Error::CorruptionDetected { lsn: u64::MAX, segment: 2, .. })
+        ));
+    }
+}
+
+#[test]
 fn missing_footer_drops_whole_transaction_and_zeroes_tail() {
     let (io, mut dir) = setup();
     let (first, head) = transaction(1, 1, [0; 32]);
