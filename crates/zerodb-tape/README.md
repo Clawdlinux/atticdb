@@ -25,7 +25,10 @@ Pending directory operations can disappear. Each rename is atomic.
 Cross-directory rename syncs persist both connected directories.
 This is stronger than real filesystems that require both directories to be synced separately.
 
-`fail_next_sync` fails the next file or directory sync without persisting changes.
+`fail_next_sync` fails the next file or directory sync.
+Failed file syncs doom their pending writes. Cached bytes remain readable, but crashes drop those writes.
+Retrying sync returns success without healing doomed writes.
+Later writes can sync independently without persisting earlier cached bytes.
 `enospc_after_bytes` sets a remaining write budget. Exhaustion returns `ErrorKind::StorageFull`, possibly after writing a prefix.
 `flip_bit` damages a durable byte. New crash images reset fault knobs and release locks.
 

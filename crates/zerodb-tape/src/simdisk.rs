@@ -188,7 +188,9 @@ impl SimDisk {
         }
     }
 
-    /// Fails the next file or directory sync without persisting its changes.
+    /// Fails the next file or directory sync.
+    ///
+    /// Failed file syncs doom pending writes. Their cached bytes remain visible, but crash recovery drops them.
     pub fn fail_next_sync(&self) -> Result<()> {
         lock(&self.state)?.fail_sync = true;
         Ok(())
@@ -354,10 +356,16 @@ impl Io for SimDisk {
 
     fn sync_data(&self, file: FileId) -> Result<()> {
         let mut state = lock(&self.state)?;
-        state.sync_check()?;
+        state.file(file)?;
+        if let Err(error) = state.sync_check() {
+            // Writeback errors can discard dirty writes without evicting their cached bytes.
+            state.file(file)?.pending.clear();
+            return Err(error);
+        }
         let file = state.file(file)?;
-        file.durable.clone_from(&file.visible);
-        file.pending.clear();
+        for write in std::mem::take(&mut file.pending) {
+            write.apply(&mut file.durable);
+        }
         Ok(())
     }
 

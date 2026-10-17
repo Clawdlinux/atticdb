@@ -69,14 +69,32 @@ fn rename_crashes_are_atomic_for_1000_seeds() {
 
 #[test]
 fn failed_sync_keeps_pending_data() {
+    let mut lost = false;
+    for seed in 0..1000 {
+        let disk = SimDisk::new(seed);
+        let file = durable_file(&disk, "db/data", b"old");
+        disk.write_at(file, 0, b"new").unwrap();
+        disk.fail_next_sync().unwrap();
+        assert!(disk.sync_data(file).is_err());
+        assert_eq!(bytes(&disk, file), b"new");
+        disk.sync_data(file).unwrap();
+        lost |= bytes(&disk.crash().unwrap(), file) != b"new";
+    }
+    assert!(lost, "retrying a failed sync must not heal its writes");
+}
+
+#[test]
+fn later_writes_do_not_resurrect_failed_sync_bytes() {
     let disk = SimDisk::new(11);
-    let file = durable_file(&disk, "db/data", b"old");
-    disk.write_at(file, 0, b"new").unwrap();
+    let file = durable_file(&disk, "db/data", b"oldold");
+    disk.write_at(file, 0, b"bad").unwrap();
     disk.fail_next_sync().unwrap();
     assert!(disk.sync_data(file).is_err());
-    assert_eq!(bytes(&disk, file), b"new");
     disk.sync_data(file).unwrap();
-    assert_eq!(bytes(&disk.crash().unwrap(), file), b"new");
+    disk.write_at(file, 3, b"new").unwrap();
+    disk.sync_data(file).unwrap();
+    assert_eq!(bytes(&disk, file), b"badnew");
+    assert_eq!(bytes(&disk.crash().unwrap(), file), b"oldnew");
 }
 
 #[test]
