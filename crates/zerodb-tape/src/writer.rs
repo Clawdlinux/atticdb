@@ -95,11 +95,22 @@ pub struct TapeOptions {
     pub server_address: Option<String>,
     /// Replay records strictly above this checkpoint watermark. Zero replays the entire tape.
     pub replay_from_lsn: u64,
+    /// Encoded-byte threshold for automatic sync at step boundaries, including Fast-only traffic.
+    ///
+    /// `None` uses the segment size. Zero syncs whenever records await publication.
+    /// Accounting includes headers and footers. A group can exceed this threshold before its step ends.
+    /// Segment rolls also force sync, regardless of this threshold.
+    pub max_unpublished_bytes: Option<u64>,
 }
 
 impl Default for TapeOptions {
     fn default() -> Self {
-        Self { segment_size: DEFAULT_SEGMENT_SIZE, server_address: None, replay_from_lsn: 0 }
+        Self {
+            segment_size: DEFAULT_SEGMENT_SIZE,
+            server_address: None,
+            replay_from_lsn: 0,
+            max_unpublished_bytes: None,
+        }
     }
 }
 
@@ -309,6 +320,8 @@ pub struct WriterCore<S: StateMachine = NoopStateMachine> {
     chains: BTreeMap<u32, Digest>,
     pending: BTreeMap<u64, (u64, u64)>,
     unpublished: Vec<CommittedRecord>,
+    unpublished_bytes: u64,
+    max_unpublished_bytes: u64,
     state_machine: S,
     lsn: u64,
     txn: u64,
@@ -376,6 +389,8 @@ impl<S: StateMachine> WriterCore<S> {
             chains: recovered.chains,
             pending: BTreeMap::new(),
             unpublished: Vec::new(),
+            unpublished_bytes: 0,
+            max_unpublished_bytes: opts.max_unpublished_bytes.unwrap_or(opts.segment_size),
             state_machine,
             lsn: recovered.report.durable_lsn,
             txn: recovered.txn,
@@ -480,6 +495,7 @@ impl<S: StateMachine> WriterCore<S> {
             self.pending.insert(lsn, (segment, offset + off));
         }
         self.unpublished.extend(committed);
+        self.unpublished_bytes = self.unpublished_bytes.saturating_add(bytes.len() as u64);
         self.lsn = last_lsn;
         self.txn = txn;
         Ok(Committed::Durable { txn, first_lsn, last_lsn })
@@ -492,10 +508,13 @@ impl<S: StateMachine> WriterCore<S> {
             self.state_machine.publish(&self.unpublished);
             self.unpublished.clear();
         }
+        self.unpublished_bytes = 0;
         Ok(())
     }
 
-    /// Writes all queued transactions, then syncs all touched files before durable replies.
+    /// Writes queued transactions and syncs before durable replies.
+    ///
+    /// Fast-only groups also sync after a roll or when unpublished bytes exceed their configured threshold.
     pub fn step(&mut self) {
         let mut replies = Vec::new();
         while let Some(mut request) = self.queue.pop_front() {
@@ -507,6 +526,7 @@ impl<S: StateMachine> WriterCore<S> {
                 let _ = request.reply.send(Err(rejected(Error::BatchTooLarge)));
                 continue;
             }
+            let mode = request.batch.mode;
             match self.state_machine.prepare(&mut request.batch) {
                 Prepare::Write => {}
                 Prepare::Reject(error) => {
@@ -514,11 +534,14 @@ impl<S: StateMachine> WriterCore<S> {
                     continue;
                 }
                 Prepare::Reply(committed) => {
-                    let _ = request.reply.send(Ok(committed));
+                    if mode == Durability::Fast || committed == Committed::Fast {
+                        let _ = request.reply.send(Ok(Committed::Fast));
+                    } else {
+                        replies.push((request.reply, committed));
+                    }
                     continue;
                 }
             }
-            let mode = request.batch.mode;
             match self.write(request.batch) {
                 Ok(committed) if mode == Durability::Durable => {
                     replies.push((request.reply, committed))
@@ -553,7 +576,11 @@ impl<S: StateMachine> WriterCore<S> {
                 }
             }
         }
-        if replies.is_empty() {
+        if self.is_poisoned()
+            || (replies.is_empty()
+                && self.unpublished_bytes <= self.max_unpublished_bytes
+                && !self.segments.has_rolled())
+        {
             return;
         }
         let result = self.segments.sync().and_then(|()| self.publish());

@@ -169,7 +169,7 @@ fn fast_records_wait_for_later_sync_and_scan_has_a_fixed_durable_boundary() {
         Arc::new(SimDisk::new(3)),
         Arc::new(SimClock::default()),
         "db",
-        options(),
+        TapeOptions { segment_size: 2048, ..options() },
     )
     .unwrap();
     for _ in 0..3 {

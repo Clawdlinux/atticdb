@@ -36,8 +36,14 @@ Preparation runs once per batch, in queue order, on the writer thread.
 `PreparedBatch::records_mut()` allows content and metadata rewrites. Changed content gets fresh digests before framing.
 `Prepare::Reject` and `Prepare::Reply` write nothing.
 Keep preparation reservations private. Storage failures poison the writer, so later writes cannot observe those reservations.
+Preparation may cache dedup entries for writes still pending in the current group.
+Cached durable replies wait for sync and publication. Failed syncs return `Unknown` for originals and retries.
+Fast requests never receive LSNs, including cached replies.
 
-Publication runs before durable replies. Fast batches publish only after a later successful sync, including clean shutdown.
+Publication runs before durable replies. Fast batches publish only after a successful sync, including clean shutdown.
+Fast-only traffic forces sync after a segment roll or when buffered encoded bytes exceed a threshold.
+`TapeOptions::max_unpublished_bytes` configures that threshold. `None` uses the segment size.
+The threshold is checked at the end of each writer step. Successful syncs release rolled segment handles.
 During open, recovery finishes and syncs before ordered `replay` callbacks start.
 Set `TapeOptions::replay_from_lsn` to your loaded checkpoint's watermark. Only records strictly above it replay.
 A replay error aborts open.

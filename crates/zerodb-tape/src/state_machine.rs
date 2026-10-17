@@ -28,6 +28,9 @@ pub enum Prepare {
     /// Return an application error without writing anything.
     Reject(WriteError),
     /// Return a cached acknowledgement without writing anything.
+    ///
+    /// Durable replies wait for the group's sync and publication, including retries of pending writes.
+    /// Fast requests always receive `Committed::Fast`, without identifiers.
     Reply(Committed),
 }
 
@@ -40,13 +43,16 @@ pub enum Prepare {
 /// Preparation can reserve sequences before storage fails. Such failures poison the writer.
 /// No later preparation can observe those reservations. Reopening reconstructs state through replay.
 /// A rejected or cached batch must leave no new reservations behind.
+///
+/// Preparation may cache dedup entries for writes still pending in the current group.
+/// Return their durable acknowledgement through `Prepare::Reply`; it shares the original write's sync outcome.
 pub trait StateMachine: Send {
     /// Rewrites application content or short-circuits a batch before framing, once in queue order.
     fn prepare(&mut self, batch: &mut PreparedBatch) -> Prepare;
 
     /// Installs synced records in LSN order before durable replies. Must take O(records) work.
     ///
-    /// Fast records wait here until a later successful sync, including clean shutdown.
+    /// Fast records wait for a successful sync, including automatic Fast-only flushes and clean shutdown.
     /// A failed sync never publishes its pending records.
     fn publish(&mut self, committed: &[CommittedRecord]);
 
