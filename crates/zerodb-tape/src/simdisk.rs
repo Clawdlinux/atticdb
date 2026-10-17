@@ -231,9 +231,14 @@ impl SimDisk {
             .get_mut(offset)
             .ok_or_else(|| io_error(ErrorKind::InvalidInput, "bit flip beyond durable data"))?;
         *byte ^= 1;
-        file.visible.clone_from(&file.durable);
-        for write in file.doomed.iter().chain(&file.pending) {
-            write.apply(&mut file.visible);
+        let shadowed = file.doomed.iter().chain(&file.pending).any(|write| match write {
+            Write::Bytes(start, data) => (*start..start + data.len()).contains(&offset),
+            Write::Resize(len) => *len <= offset,
+        });
+        if !shadowed {
+            if let Some(byte) = file.visible.get_mut(offset) {
+                *byte ^= 1;
+            }
         }
         Ok(())
     }
@@ -533,6 +538,24 @@ mod tests {
         disk.close(file).unwrap();
         disk.remove(Path::new("db/file")).unwrap();
         assert!(disk.list(Path::new("db")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn bit_flip_does_not_replay_old_doomed_bytes_over_newer_visible_writes() {
+        let disk = SimDisk::new(1);
+        let file = disk.create(Path::new("db/file")).unwrap();
+        disk.write_at(file, 0, b"oldold").unwrap();
+        disk.sync_data(file).unwrap();
+        disk.write_at(file, 0, b"bad").unwrap();
+        disk.fail_next_sync().unwrap();
+        assert!(disk.sync_data(file).is_err());
+        disk.write_at(file, 0, b"NEW").unwrap();
+        disk.sync_data(file).unwrap();
+        disk.flip_bit(file, 5).unwrap();
+        let mut bytes = [0; 6];
+        disk.read_at(file, 0, &mut bytes).unwrap();
+        assert_eq!(&bytes[..3], b"NEW");
+        assert_eq!(bytes[5], b'd' ^ 1);
     }
 
     #[test]
