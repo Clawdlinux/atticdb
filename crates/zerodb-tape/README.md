@@ -95,7 +95,7 @@ Under continuous load, that's at most about 1 second of writes. Delayed maintena
 Retained zero padding is also rewritten, including the final segment's unused capacity.
 Otherwise failed tail-repair writeback could expose old garbage after a later roll and power loss.
 Recovery syncs touched segments and the directory, then installs the recovered durable LSN before open returns.
-Segments already protected by the superblock aren't rewritten or synced unless tail repair changes them.
+Fully checkpointed segments aren't rewritten or synced unless recovery changes them.
 Clean shutdown drains requests, syncs pending Fast writes, and installs the superblock without the 1-second limit.
 Dropping `Tape` joins that shutdown before releasing the directory lock.
 This protects short sessions from repeated historical rewrites and treating old durable damage as a torn tail.

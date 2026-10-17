@@ -73,7 +73,7 @@ The 1,024-sample p99 estimates remain sensitive to scheduler and storage noise.
 ## Validation
 
 The benchmark numbers above were recorded at `822cf91`, before the final M1 review.
-The review changes recovery and API visibility, not the measured append path.
+The reviews change recovery, clean shutdown, and API visibility, not the measured append path.
 The benchmark target is rebuilt after review. The timing loops aren't rerun.
 The following review validation completed on 2026-10-18.
 
@@ -90,6 +90,10 @@ The following review validation completed on 2026-10-18.
 | `cargo bench -p zerodb-tape --bench append -- --noplot` | Passed before review at `822cf91`. All 6 cases recorded above. |
 
 The final validation chain exited with status 0.
+The required commands were rerun after the short-session fix at `c9d1909`.
+Both workspace suites passed their default 500 seeds.
+The 10,000-seed release run passed in 75.15 seconds.
+Release stress passed 20,000 appends across 16 threads in 10.55 seconds.
 Every randomized seed runs 2 or 3 crash generations.
 The 10,000-seed run includes 910 deliberate below-superblock corruption cases.
 Each required `CorruptionDetected`. All other recovery opens succeeded.
@@ -108,10 +112,10 @@ cargo test --release --test stress
 
 ## Size budget
 
-Production source measures 2,444 lines, including blank lines and comments.
+Production source measures 2,471 lines, including blank lines and comments.
 The count excludes `src/sim.rs` and trailing `#[cfg(test)]` modules.
 It includes the always-exported SimDisk implementation.
-The raw count includes every `src/*.rs` line: 3,171.
+The raw count includes every `src/*.rs` line: 3,198.
 That includes 536 simulation-only helper lines and 191 embedded unit-test lines.
 Production remains below the M1 budget of 3,000.
 
@@ -149,7 +153,8 @@ A separate regression covers suffix rewriting across rolls and before a trimmed 
 The rewrite includes zero padding and the last segment's unused preallocation.
 A further regression reproduced failed tail-repair retry losing a later rolled acknowledgement at seed 1.
 It passes 32 seeds with both stale and advanced superblocks after rewriting padding.
-The logical rewrite window is roughly 1 second of writes plus unsynced data.
+The rewrite covers data written since the last superblock install, plus anything unsynced at a crash.
+Under continuous load, that's at most about 1 second of writes.
 Delayed superblock maintenance extends that window.
 The physical rewrite also includes roll padding and at most 1 final segment's unused capacity.
 
@@ -180,6 +185,32 @@ The root API test and compile-fail documentation tests verify the supported and 
 | `c4a6f08` | Spread corruption across durable prefix bytes and all bits. |
 | `c8f1008` | Narrow and document the public API. Gate deterministic access. |
 | `5c552db` | Persist cached zero padding. Cover failed repair retry and recovery cuts. |
+| `c9d1909` | Checkpoint recovery and clean shutdown. Bound short-session rewrites and skip untouched segment syncs. |
+
+### Short-session re-review
+
+The re-review found short sessions could leave the superblock at 0 indefinitely.
+The original regressions failed before the fix.
+After 2 sessions, the next open rewrote 2,048 bytes despite only 1,024 bytes written in the previous session.
+Corrupting the first short session's acknowledged data also returned success instead of `CorruptionDetected`.
+Recovery didn't install its newer durable LSN before returning.
+
+Open now installs any recovered boundary after suffix rewrites, touched-file syncs, and directory sync.
+Clean shutdown drains requests, syncs pending Fast records, and forces a checkpoint without the 1-second limit.
+Dropping `Tape` joins that shutdown.
+Final sync failures and poisoned writers don't advance the boundary.
+Unchanged segments fully covered by the superblock aren't synced again.
+
+The counting I/O regression runs 16 short sessions, advancing SimClock by 0.5 seconds between sessions.
+Each append fills its 1,024-byte segment, excluding unused-preallocation overhead from the measured bound.
+Each open stays within the previous session's write count.
+After the first session, no segment data is rewritten or synced during those opens.
+A separate 8-session test checks the installed boundary and detects damage to older session data.
+Other tests verify recovery sync ordering, final Fast sync before checkpoint, and failed shutdown preserving the old boundary.
+
+The physical rewrite still includes retained padding and at most 1 final segment's unused capacity.
+The superblock fix prevents those costs from growing across historical segments.
+Drop can't return shutdown errors. The next successful open recovers and checkpoints before accepting writes.
 
 Each review fix is signed off and carries the Copilot co-author trailer.
 The simulator models I/O boundaries and torn writes. It doesn't replace real-filesystem crash testing.
