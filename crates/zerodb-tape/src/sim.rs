@@ -406,6 +406,17 @@ pub fn run_seed(seed: u64) {
             ));
             return;
         }
+        if rng.below(4) == 0 {
+            let recovery_io = Arc::new(CrashIo::new(disk.clone()));
+            recovery_io.cut.store(1 + rng.below(25), Ordering::SeqCst);
+            let (tape, _) =
+                Tape::open(recovery_io.clone(), clock.clone(), "db", opts.clone()).unwrap();
+            drop(tape);
+            let image = recovery_io.image.lock().unwrap().take();
+            if let Some(image) = image {
+                disk = image;
+            }
+        }
         let (tape, report) =
             Tape::open(Arc::new(disk.clone()), clock.clone(), "db", opts.clone()).unwrap();
         oracle.verify(&tape);

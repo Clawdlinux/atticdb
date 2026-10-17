@@ -152,6 +152,8 @@ A process restart can retain failed-writeback bytes in clean page cache. Another
 Rewriting re-dirties those pages before recovery publishes them or accepts new writes.
 The rewrite covers roughly 1 second of writes since superblock maintenance, plus whatever remained unsynced.
 Long pauses or failures can extend that window. The superblock isn't a strict byte-count limit.
+Retained zero padding is rewritten too. A failed tail-repair sync can leave cached zeros over durable garbage.
+This includes the final segment's unused preallocation, adding at most 1 segment's remaining capacity beyond retained data.
 Later segments leave the manifest atomically before their files are unlinked.
 Open removes segment files beyond the manifest's last identifier and syncs the directory before recovery.
 The sync also runs without visible orphans, so retrying a failed cleanup persists earlier unlinks.

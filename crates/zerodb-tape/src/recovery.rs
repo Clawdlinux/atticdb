@@ -247,9 +247,10 @@ pub fn recover(dir: &mut DataDir, size: u64) -> Result<Recovered> {
         if !trimming {
             state.offset = offset as u64;
         }
-        if let Some(from) = rewrite_from.filter(|&from| from < state.offset as usize) {
+        let rewrite_end = if trimming { state.offset as usize } else { bytes.len() };
+        if let Some(from) = rewrite_from.filter(|&from| from < rewrite_end) {
             // A failed writeback can leave clean, readable cache bytes that another sync won't persist.
-            dir.io.write_at(file.id, from as u64, &bytes[from..state.offset as usize])?;
+            dir.io.write_at(file.id, from as u64, &bytes[from..rewrite_end])?;
         }
         dir.io.sync_data(file.id)?;
     }

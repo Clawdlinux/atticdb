@@ -91,6 +91,8 @@ It then syncs each touched file and the directory.
 A process restart can leave failed-writeback bytes readable in clean page cache. Sync alone may not persist them.
 Rewriting re-dirties those bytes before new appends can depend on them.
 The rewrite spans roughly 1 second of writes plus unsynced data. Delayed superblock maintenance can extend that window.
+Retained zero padding is also rewritten, including the final segment's unused capacity.
+Otherwise failed tail-repair writeback could expose old garbage after a later roll and power loss.
 
 ## Validation
 
@@ -118,6 +120,7 @@ The oracle checks complete transactions, exact content, LSN order, and tenant ch
 Recovered survivors become durable oracle entries across later generations.
 Every 11th seed flips a random bit below the superblock and requires `CorruptionDetected`.
 Offsets span all prefix segments through the boundary transaction's footer, including payloads and roll padding.
+Some generations also cut recovery during open, covering tail repair, suffix rewriting, and manifest cleanup.
 Failures print the seed and a replay command.
 
 ```sh

@@ -133,6 +133,55 @@ fn live_restart_rewrites_across_rolls_and_before_a_trimmed_tail() {
 }
 
 #[test]
+fn live_retry_of_failed_tail_repair_persists_roll_padding() {
+    use zerodb_tape::Io;
+    for seed in 0..32 {
+        for advance_superblock in [false, true] {
+            let io = Arc::new(ObservedIo::new(seed));
+            let clock = Arc::new(SimClock::default());
+            let opts = Options { segment_size: 1024, ..Options::default() };
+            let (mut core, _) =
+                WriterCore::open(io.clone(), clock.clone(), "db", opts.clone()).unwrap();
+            let (request, reply) = WriteRequest::new(prepared(Durability::Durable));
+            core.enqueue(request);
+            core.step();
+            reply.recv().unwrap().unwrap();
+            clock.advance(1_000_000_000);
+            core.update_superblock().unwrap();
+            drop(core);
+            let file = io.open(std::path::Path::new("db/seg-0000000000000001.zdb")).unwrap();
+            io.disk.write_at(file, 900, &[1; 100]).unwrap();
+            io.disk.sync_data(file).unwrap();
+            io.close(file).unwrap();
+            io.fail_at.store(io.syncs.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
+            assert!(WriterCore::open(io.clone(), clock.clone(), "db", opts.clone()).is_err());
+
+            // Failed zero-tail writeback leaves clean cached zeros over durable garbage.
+            let (mut core, report) =
+                WriterCore::open(io.clone(), clock.clone(), "db", opts.clone()).unwrap();
+            assert_eq!(report.durable_lsn, 1);
+            for _ in 0..3 {
+                let (request, reply) = WriteRequest::new(prepared(Durability::Durable));
+                core.enqueue(request);
+                core.step();
+                reply.recv().unwrap().unwrap();
+            }
+            if advance_superblock {
+                clock.advance(1_000_000_000);
+                core.update_superblock().unwrap();
+            }
+            drop(core);
+            let (tape, report) =
+                Tape::open(Arc::new(io.disk.crash().unwrap()), clock, "db", opts).unwrap();
+            assert_eq!(report.durable_lsn, 4, "seed={seed}, superblock={advance_superblock}");
+            for lsn in 1..=4 {
+                assert!(tape.read(lsn).unwrap().is_some());
+            }
+        }
+    }
+}
+
+#[test]
 fn concurrent_callers_get_dense_lsn_and_immediate_visibility() {
     let disk = Arc::new(SimDisk::new(0));
     let (tape, _) = Tape::open(disk, Arc::new(SimClock::new(0)), "db", Options::default()).unwrap();
