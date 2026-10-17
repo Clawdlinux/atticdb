@@ -91,6 +91,24 @@ pub struct PreparedBatch {
 }
 
 impl PreparedBatch {
+    fn with_entropy<R: std::io::Read>(
+        batch: Vec<RecordInput>,
+        mode: Durability,
+        mut open: impl FnMut() -> Result<R>,
+    ) -> std::result::Result<Self, WriteError> {
+        let mut source = None;
+        Self::with_salts(batch, mode, || {
+            let mut reader = match source.take() {
+                Some(reader) => reader,
+                None => open()?,
+            };
+            let mut salt = [0; 16];
+            reader.read_exact(&mut salt)?;
+            source = Some(reader);
+            Ok(salt)
+        })
+    }
+
     /// Supplies deterministic salts for simulations, without changing the writer.
     pub fn with_salts(
         batch: Vec<RecordInput>,
@@ -442,7 +460,7 @@ impl Tape {
         if self.reads.poisoned.load(Ordering::Acquire) {
             return Err(rejected(Error::Poisoned));
         }
-        let batch = PreparedBatch::with_salts(batch, mode, os_salt)?;
+        let batch = PreparedBatch::with_entropy(batch, mode, os_entropy)?;
         let (request, receiver) = WriteRequest::new(batch);
         self.sender
             .as_ref()
@@ -473,14 +491,58 @@ impl Drop for Tape {
 }
 
 #[cfg(unix)]
-fn os_salt() -> Result<[u8; 16]> {
-    use std::io::Read;
-    let mut salt = [0; 16];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut salt)?;
-    Ok(salt)
+fn os_entropy() -> Result<std::fs::File> {
+    Ok(std::fs::File::open("/dev/urandom")?)
 }
 
 #[cfg(not(unix))]
-fn os_salt() -> Result<[u8; 16]> {
+fn os_entropy() -> Result<std::fs::File> {
     Err(Error::Io(std::io::ErrorKind::Unsupported, "OS salt source requires Unix".into()))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use std::cell::Cell;
+    use std::io::Cursor;
+
+    fn records(count: usize) -> Vec<RecordInput> {
+        vec![RecordInput { kind: Kind::Turn, tenant_id: 1, content: b"hello".to_vec() }; count]
+    }
+
+    #[test]
+    fn one_entropy_open_supplies_every_salt_in_a_batch() {
+        let opens = Cell::new(0);
+        let salts: Vec<_> = (0..32 * 16).map(|i| i as u8).collect();
+        let batch = PreparedBatch::with_entropy(records(32), Durability::Durable, || {
+            opens.set(opens.get() + 1);
+            Ok(Cursor::new(salts.clone()))
+        })
+        .unwrap();
+        assert_eq!(opens.get(), 1);
+        for (i, record) in batch.records.iter().enumerate() {
+            assert_eq!(&record.payload[..16], &salts[i * 16..(i + 1) * 16]);
+        }
+    }
+
+    #[test]
+    fn invalid_batches_do_not_open_entropy_and_short_reads_are_rejected() {
+        let opens = Cell::new(0);
+        let error = PreparedBatch::with_entropy(records(1025), Durability::Durable, || {
+            opens.set(opens.get() + 1);
+            Ok(Cursor::new(vec![0; 16]))
+        })
+        .unwrap_err();
+        assert!(matches!(error.kind, Error::BatchTooLarge));
+        assert_eq!(opens.get(), 0);
+        let error = PreparedBatch::with_entropy(records(2), Durability::Durable, || {
+            opens.set(opens.get() + 1);
+            Ok(Cursor::new(vec![0; 16]))
+        })
+        .unwrap_err();
+        assert!(matches!(error.kind, Error::Io(std::io::ErrorKind::UnexpectedEof, _)));
+        assert_eq!(error.outcome, Outcome::NotCommitted);
+        assert_eq!(opens.get(), 1);
+    }
 }

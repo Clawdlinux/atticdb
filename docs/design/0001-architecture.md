@@ -128,6 +128,7 @@ A failed sync poisons the engine. Writes fail with `unknown` for in-flight batch
 `Tape` owns its production thread. Dropping it joins the thread and releases the directory lock.
 Simulations prepare requests with `PreparedBatch::with_salts`, then pass them through `WriteRequest::new`.
 Production salts come from `/dev/urandom` on caller threads. This entropy source requires Unix.
+Each batch opens the entropy source once and closes it before enqueueing.
 Storage operations still use `Io`. Simulations supply deterministic salts without accessing OS entropy.
 
 MANIFEST version 2 stores the segment size before its segment identifiers.
