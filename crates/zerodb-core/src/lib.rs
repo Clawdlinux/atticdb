@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+mod dedup;
 mod error;
 mod session;
 mod tenant;
