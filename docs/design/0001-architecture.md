@@ -130,6 +130,10 @@ Simulations prepare requests with `PreparedBatch::with_salts`, then pass them th
 Production salts come from `/dev/urandom` on caller threads. This entropy source requires Unix.
 Storage operations still use `Io`. Simulations supply deterministic salts without accessing OS entropy.
 
+MANIFEST version 2 stores the segment size before its segment identifiers.
+Opening rejects a different configured size before recovery writes or syncs anything.
+Unshipped version 1 manifests aren't accepted.
+
 Record LSNs increase strictly. Footer frames copy their transaction's final record LSN.
 Footers have no separate read address. Fast acknowledgements expose no transaction identifier or LSN.
 The 4 MiB batch limit includes frame headers, salts, and the footer.

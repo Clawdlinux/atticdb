@@ -49,7 +49,7 @@ fn transaction(lsn: u64, txn: u64, prev: [u8; 32]) -> (Vec<u8>, [u8; 32]) {
 
 fn setup() -> (Arc<SimDisk>, DataDir) {
     let io = Arc::new(SimDisk::new(1));
-    let mut dir = DataDir::open(io.clone(), "db", None).unwrap();
+    let mut dir = DataDir::open(io.clone(), "db", None, 1024).unwrap();
     dir.prepare_next_segment(1024).unwrap();
     (io, dir)
 }
@@ -238,7 +238,7 @@ fn truncation_resumes_at_the_cut_and_reopens_twice_after_new_ack() {
                         b"after repair"
                     );
                 }
-                let dir = DataDir::open(io.clone(), "db", None).unwrap();
+                let dir = DataDir::open(io.clone(), "db", None, 1024).unwrap();
                 assert_eq!(dir.segments(), &[1, 2]);
                 for id in 3..=count {
                     assert!(!io.exists(&dir.segment_path(id)).unwrap());
@@ -252,7 +252,7 @@ fn truncation_resumes_at_the_cut_and_reopens_twice_after_new_ack() {
 fn oversized_zero_padding_before_durable_boundary_is_corruption() {
     let io = Arc::new(SimDisk::new(0));
     let size = (frame::MAX_FRAME_SIZE + frame::HEADER_LEN + 44 + 1024) as u64;
-    let mut dir = DataDir::open(io.clone(), "db", None).unwrap();
+    let mut dir = DataDir::open(io.clone(), "db", None, size).unwrap();
     dir.prepare_next_segment(size).unwrap();
     dir.prepare_next_segment(size).unwrap();
     let (first, head) = transaction(1, 1, [0; 32]);
@@ -267,7 +267,7 @@ fn oversized_zero_padding_before_durable_boundary_is_corruption() {
 fn oversized_padding_above_boundary_is_not_promoted_into_durable_tape() {
     let io = Arc::new(SimDisk::new(0));
     let size = (frame::MAX_FRAME_SIZE + frame::HEADER_LEN + 44 + 1024) as u64;
-    let mut dir = DataDir::open(io.clone(), "db", None).unwrap();
+    let mut dir = DataDir::open(io.clone(), "db", None, size).unwrap();
     dir.prepare_next_segment(size).unwrap();
     dir.prepare_next_segment(size).unwrap();
     let (first, head) = transaction(1, 1, [0; 32]);
@@ -280,7 +280,7 @@ fn oversized_padding_above_boundary_is_not_promoted_into_durable_tape() {
     dir.install_superblock(1).unwrap();
     drop(dir);
     for _ in 0..2 {
-        let mut dir = DataDir::open(io.clone(), "db", None).unwrap();
+        let mut dir = DataDir::open(io.clone(), "db", None, size).unwrap();
         assert_eq!(recover(&mut dir, size).unwrap().report.records, 1);
     }
 }
@@ -290,7 +290,7 @@ fn manifest_is_durable_before_tail_files_are_removed() {
     use std::sync::atomic::Ordering;
     for fail_manifest in [false, true] {
         let io = Arc::new(support::ObservedIo::new(1));
-        let mut dir = DataDir::open(io.clone(), "db", None).unwrap();
+        let mut dir = DataDir::open(io.clone(), "db", None, 1024).unwrap();
         for _ in 0..3 {
             dir.prepare_next_segment(1024).unwrap();
         }
@@ -318,7 +318,7 @@ fn manifest_is_durable_before_tail_files_are_removed() {
             assert!(installed < removed);
             for image in io.images.lock().unwrap().iter() {
                 for _ in 0..2 {
-                    let mut dir = DataDir::open(Arc::new(image.clone()), "db", None).unwrap();
+                    let mut dir = DataDir::open(Arc::new(image.clone()), "db", None, 1024).unwrap();
                     assert_eq!(recover(&mut dir, 1024).unwrap().report.durable_lsn, 10);
                 }
             }

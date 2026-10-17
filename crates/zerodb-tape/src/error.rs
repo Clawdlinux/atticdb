@@ -9,6 +9,8 @@ pub enum Error {
     Io(std::io::ErrorKind, String),
     /// A file or directory sync failed.
     SyncFailed(String),
+    /// Options conflict with the persisted data directory configuration.
+    Configuration(String),
     /// Durable tape bytes failed validation.
     CorruptionDetected {
         /// First affected log sequence number.
@@ -46,6 +48,7 @@ impl fmt::Display for Error {
         match self {
             Self::Io(kind, message) => write!(f, "{kind:?}: {message}"),
             Self::SyncFailed(message) => write!(f, "sync failed: {message}"),
+            Self::Configuration(message) => write!(f, "configuration error: {message}"),
             Self::CorruptionDetected { lsn, segment, offset, reason } => {
                 write!(f, "corruption at LSN {lsn}, segment {segment}, offset {offset}: {reason}")
             }

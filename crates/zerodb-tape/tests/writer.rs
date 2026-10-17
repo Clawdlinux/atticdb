@@ -255,7 +255,7 @@ fn periodic_superblock_is_off_reply_path_and_rate_limited() {
     }
     assert_eq!(io.syncs.load(Ordering::SeqCst), 4);
     drop(core);
-    let dir = zerodb_tape::dir::DataDir::open(io.clone(), "db", None).unwrap();
+    let dir = zerodb_tape::dir::DataDir::open(io.clone(), "db", None, 65536).unwrap();
     assert_eq!(dir.superblock(), 2);
     drop(dir);
     assert!(io.handles.lock().unwrap().is_empty());
@@ -424,4 +424,49 @@ fn real_files_reopen_with_multiple_tenants_and_rebuilt_chain_heads() {
     assert_eq!(report.records, 5);
     drop(tape);
     std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn segment_size_mismatch_is_rejected_without_mutation() {
+    use std::path::Path;
+    use zerodb_tape::io::Io;
+    for wrong_size in [512, 2048] {
+        let io = Arc::new(ObservedIo::new(0));
+        let clock = Arc::new(SimClock::new(0));
+        let opts = Options { segment_size: 1024, ..Options::default() };
+        let (mut core, _) =
+            WriterCore::open(io.clone(), clock.clone(), "db", opts.clone()).unwrap();
+        let (request, reply) = WriteRequest::new(prepared(Durability::Durable));
+        core.enqueue(request);
+        core.step();
+        reply.recv().unwrap().unwrap();
+        drop(core);
+        let snapshot = || {
+            io.list(Path::new("db"))
+                .unwrap()
+                .into_iter()
+                .map(|path| {
+                    let file = io.open(&path).unwrap();
+                    let mut bytes = vec![0; io.len(file).unwrap() as usize];
+                    io.read_at(file, 0, &mut bytes).unwrap();
+                    io.close(file).unwrap();
+                    (path, bytes)
+                })
+                .collect::<Vec<_>>()
+        };
+        let before = snapshot();
+        io.events.lock().unwrap().clear();
+        let result = WriterCore::open(
+            io.clone(),
+            clock.clone(),
+            "db",
+            Options { segment_size: wrong_size, ..opts.clone() },
+        );
+        assert!(matches!(result, Err(Error::Configuration(_))), "size={wrong_size}");
+        assert!(io.events.lock().unwrap().is_empty(), "mismatch must not write or sync");
+        assert_eq!(snapshot(), before);
+        assert!(io.handles.lock().unwrap().is_empty());
+        let (_, report) = WriterCore::open(io, clock, "db", opts).unwrap();
+        assert_eq!(report.records, 1);
+    }
 }

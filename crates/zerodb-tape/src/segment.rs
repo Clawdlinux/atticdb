@@ -34,6 +34,7 @@ impl SegmentWriter {
 
     /// Opens the last prepared segment at its recovered transaction boundary.
     pub fn new(mut dir: DataDir, size: u64, offset: u64) -> Result<Self> {
+        dir.check_segment_size(size)?;
         if size == 0 || offset > size {
             return Err(Error::InvalidFrame("invalid segment size or offset".into()));
         }

@@ -12,25 +12,30 @@ mod support;
 #[test]
 fn metadata_roundtrip_and_crc() {
     let io = Arc::new(SimDisk::new(1));
-    let mut dir = DataDir::open(io.clone(), "db", Some("localhost:77")).unwrap();
+    let mut dir = DataDir::open(io.clone(), "db", Some("localhost:77"), 1024).unwrap();
     dir.install_manifest(&[1, 2]).unwrap();
     dir.install_superblock(99).unwrap();
     drop(dir);
-    let dir = DataDir::open(io.clone(), "db", None).unwrap();
+    let dir = DataDir::open(io.clone(), "db", None, 1024).unwrap();
     assert_eq!(dir.segments(), &[1, 2]);
     assert_eq!(dir.superblock(), 99);
+    assert_eq!(dir.segment_size(), 1024);
     drop(dir);
     let file = io.open(Path::new("db/MANIFEST")).unwrap();
+    let mut prefix = [0; 20];
+    io.read_at(file, 0, &mut prefix).unwrap();
+    assert_eq!(prefix[8..12], 2u32.to_le_bytes());
+    assert_eq!(prefix[12..20], 1024u64.to_le_bytes());
     io.flip_bit(file, 12).unwrap();
     io.close(file).unwrap();
-    assert!(matches!(DataDir::open(io, "db", None), Err(Error::CorruptionDetected { .. })));
+    assert!(matches!(DataDir::open(io, "db", None, 1024), Err(Error::CorruptionDetected { .. })));
 }
 
 #[test]
 fn atomic_install_is_old_or_new_at_every_crash_point() {
     for seed in 0..100 {
         let io = Arc::new(support::ObservedIo::new(seed));
-        let _dir = DataDir::open(io.clone(), "db", None).unwrap();
+        let _dir = DataDir::open(io.clone(), "db", None, 1024).unwrap();
         atomic_install(io.clone(), Path::new("db"), "TEST", b"old").unwrap();
         io.capture.store(true, std::sync::atomic::Ordering::SeqCst);
         atomic_install(io.clone(), Path::new("db"), "TEST", b"new-content").unwrap();
@@ -51,9 +56,9 @@ fn lock_is_first_and_reports_the_holder() {
         std::env::current_dir().unwrap().join(format!("target/dir-test-{}", std::process::id()));
     std::fs::create_dir_all(&path).unwrap();
     let io = Arc::new(StdIo::new());
-    let dir = DataDir::open(io.clone(), &path, Some("localhost:77")).unwrap();
+    let dir = DataDir::open(io.clone(), &path, Some("localhost:77"), 1024).unwrap();
     std::fs::write(path.join("MANIFEST"), b"invalid").unwrap();
-    match DataDir::open(io, &path, None) {
+    match DataDir::open(io, &path, None, 1024) {
         Err(Error::DataDirLocked { holder }) => {
             assert!(holder.contains(&std::process::id().to_string()));
             assert!(holder.contains("localhost:77"));
@@ -68,9 +73,9 @@ fn lock_is_first_and_reports_the_holder() {
 #[test]
 fn missing_manifest_cannot_reinitialize_existing_segments() {
     let io = Arc::new(SimDisk::new(1));
-    let mut dir = DataDir::open(io.clone(), "db", None).unwrap();
+    let mut dir = DataDir::open(io.clone(), "db", None, 1024).unwrap();
     dir.prepare_next_segment(1024).unwrap();
     drop(dir);
     io.remove(Path::new("db/MANIFEST")).unwrap();
-    assert!(matches!(DataDir::open(io, "db", None), Err(Error::CorruptionDetected { .. })));
+    assert!(matches!(DataDir::open(io, "db", None, 1024), Err(Error::CorruptionDetected { .. })));
 }

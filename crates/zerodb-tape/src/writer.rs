@@ -212,9 +212,10 @@ impl WriterCore {
         if opts.segment_size < (HEADER_LEN * 2 + 60) as u64
             || usize::try_from(opts.segment_size).is_err()
         {
-            return Err(Error::InvalidFrame("segment cannot hold a transaction".into()));
+            return Err(Error::Configuration("segment cannot hold a transaction".into()));
         }
-        let mut dir = DataDir::open(io.clone(), path, opts.server_address.as_deref())?;
+        let mut dir =
+            DataDir::open(io.clone(), path, opts.server_address.as_deref(), opts.segment_size)?;
         let recovered = recover(&mut dir, opts.segment_size)?;
         let reads = Arc::new(ReadState {
             io,

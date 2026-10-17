@@ -103,6 +103,7 @@ fn last_decodable_lsn(mut bytes: &[u8]) -> u64 {
 
 /// Scans prepared segments, verifies chains, and syncs repaired tails before returning.
 pub fn recover(dir: &mut DataDir, size: u64) -> Result<Recovered> {
+    dir.check_segment_size(size)?;
     let mut state = Recovered::default();
     let segments = dir.segments().to_vec();
     let mut retained = Vec::new();

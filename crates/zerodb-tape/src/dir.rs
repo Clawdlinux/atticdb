@@ -46,9 +46,9 @@ pub(crate) fn corruption(lsn: u64, segment: u64, offset: u64, reason: impl ToStr
     Error::CorruptionDetected { lsn, segment, offset, reason: reason.to_string() }
 }
 
-fn encode(magic: &[u8; 8], values: &[u64]) -> Vec<u8> {
+fn encode(magic: &[u8; 8], version: u32, values: &[u64]) -> Vec<u8> {
     let mut bytes = magic.to_vec();
-    bytes.extend_from_slice(&1u32.to_le_bytes());
+    bytes.extend_from_slice(&version.to_le_bytes());
     for value in values {
         bytes.extend_from_slice(&value.to_le_bytes());
     }
@@ -56,7 +56,7 @@ fn encode(magic: &[u8; 8], values: &[u64]) -> Vec<u8> {
     bytes
 }
 
-fn read(io: Arc<dyn Io>, path: &Path, magic: &[u8; 8]) -> Result<Vec<u64>> {
+fn read(io: Arc<dyn Io>, path: &Path, magic: &[u8; 8], version: u32) -> Result<Vec<u64>> {
     let file = Handle::open(io.clone(), path)?;
     let len = io.len(file.id)?;
     if !(16..=16 * 1024 * 1024).contains(&len) || (len - 16) % 8 != 0 {
@@ -66,7 +66,7 @@ fn read(io: Arc<dyn Io>, path: &Path, magic: &[u8; 8]) -> Result<Vec<u64>> {
     read_exact(io.as_ref(), file.id, 0, &mut bytes)?;
     let end = bytes.len() - 4;
     if &bytes[..8] != magic
-        || bytes[8..12] != 1u32.to_le_bytes()
+        || bytes[8..12] != version.to_le_bytes()
         || bytes[end..] != crc32c(&bytes[..end]).to_le_bytes()
     {
         return Err(corruption(0, 0, 0, "invalid metadata magic, version, or CRC"));
@@ -96,6 +96,7 @@ pub struct DataDir {
     pub(crate) io: Arc<dyn Io>,
     pub(crate) path: PathBuf,
     segments: Vec<u64>,
+    segment_size: u64,
     superblock: u64,
     _lock: LockGuard,
 }
@@ -111,23 +112,36 @@ impl std::fmt::Debug for DataDir {
 
 impl DataDir {
     /// Takes the lock before reading or initializing metadata. Real directories must already exist.
-    pub fn open(io: Arc<dyn Io>, path: impl AsRef<Path>, address: Option<&str>) -> Result<Self> {
+    pub fn open(
+        io: Arc<dyn Io>,
+        path: impl AsRef<Path>,
+        address: Option<&str>,
+        segment_size: u64,
+    ) -> Result<Self> {
         let path = path.as_ref().to_owned();
         let guard = io.try_lock_exclusive(&path.join("LOCK"))?;
-        let file = Handle::open(io.clone(), &path.join("LOCK"))?;
-        let holder = format!("pid={} {}\n", std::process::id(), address.unwrap_or(""));
-        io.set_len(file.id, 0)?;
-        io.write_at(file.id, 0, holder.as_bytes())?;
-        let mut dir = Self { io, path, segments: Vec::new(), superblock: 0, _lock: guard };
+        if segment_size == 0 || usize::try_from(segment_size).is_err() {
+            return Err(Error::Configuration("invalid segment size".into()));
+        }
+        let mut dir =
+            Self { io, path, segments: Vec::new(), segment_size, superblock: 0, _lock: guard };
         if dir.io.exists(&dir.path.join("MANIFEST"))? {
-            dir.segments = read(dir.io.clone(), &dir.path.join("MANIFEST"), b"ZDBMANIF")?;
+            let values = read(dir.io.clone(), &dir.path.join("MANIFEST"), b"ZDBMANIF", 2)?;
+            let (stored, segments) =
+                values.split_first().ok_or_else(|| corruption(0, 0, 0, "missing segment size"))?;
+            if *stored == 0 || usize::try_from(*stored).is_err() {
+                return Err(corruption(0, 0, 0, "invalid stored segment size"));
+            }
+            dir.segment_size = *stored;
+            dir.check_segment_size(segment_size)?;
+            dir.segments = segments.to_vec();
             if dir.segments.windows(2).any(|ids| ids[0] >= ids[1]) {
                 return Err(corruption(0, 0, 0, "unordered manifest"));
             }
             if !dir.io.exists(&dir.path.join("SUPERBLOCK"))? {
                 return Err(corruption(0, 0, 0, "missing superblock"));
             }
-            let values = read(dir.io.clone(), &dir.path.join("SUPERBLOCK"), b"ZDBSUPER")?;
+            let values = read(dir.io.clone(), &dir.path.join("SUPERBLOCK"), b"ZDBSUPER", 1)?;
             if values.len() != 1 {
                 return Err(corruption(0, 0, 0, "invalid superblock length"));
             }
@@ -141,7 +155,7 @@ impl DataDir {
                 return Err(corruption(0, 0, 0, "missing manifest for existing segments"));
             }
             if dir.io.exists(&dir.path.join("SUPERBLOCK"))? {
-                let values = read(dir.io.clone(), &dir.path.join("SUPERBLOCK"), b"ZDBSUPER")?;
+                let values = read(dir.io.clone(), &dir.path.join("SUPERBLOCK"), b"ZDBSUPER", 1)?;
                 if values != [0] {
                     return Err(corruption(0, 0, 0, "missing manifest"));
                 }
@@ -149,7 +163,26 @@ impl DataDir {
             dir.install_superblock(0)?;
             dir.install_manifest(&[])?;
         }
+        let file = Handle::open(dir.io.clone(), &dir.path.join("LOCK"))?;
+        let holder = format!("pid={} {}\n", std::process::id(), address.unwrap_or(""));
+        dir.io.set_len(file.id, 0)?;
+        dir.io.write_at(file.id, 0, holder.as_bytes())?;
         Ok(dir)
+    }
+
+    /// Returns the segment size stored in manifest version 2.
+    pub fn segment_size(&self) -> u64 {
+        self.segment_size
+    }
+
+    pub(crate) fn check_segment_size(&self, configured: u64) -> Result<()> {
+        if configured != self.segment_size {
+            return Err(Error::Configuration(format!(
+                "segment size {configured} differs from stored {}",
+                self.segment_size
+            )));
+        }
+        Ok(())
     }
 
     /// Lists prepared segments in scan order.
@@ -167,7 +200,9 @@ impl DataDir {
         if segments.windows(2).any(|ids| ids[0] >= ids[1]) {
             return Err(Error::InvalidFrame("unordered manifest".into()));
         }
-        atomic_install(self.io.clone(), &self.path, "MANIFEST", &encode(b"ZDBMANIF", segments))?;
+        let mut values = vec![self.segment_size];
+        values.extend_from_slice(segments);
+        atomic_install(self.io.clone(), &self.path, "MANIFEST", &encode(b"ZDBMANIF", 2, &values))?;
         self.segments = segments.to_vec();
         Ok(())
     }
@@ -178,7 +213,7 @@ impl DataDir {
             self.io.clone(),
             &self.path,
             "SUPERBLOCK",
-            &encode(b"ZDBSUPER", &[durable_lsn]),
+            &encode(b"ZDBSUPER", 1, &[durable_lsn]),
         )?;
         self.superblock = durable_lsn;
         Ok(())
@@ -191,6 +226,7 @@ impl DataDir {
 
     /// Preallocates a segment and persists its name before installing the manifest.
     pub fn prepare_next_segment(&mut self, size: u64) -> Result<u64> {
+        self.check_segment_size(size)?;
         let mut id = self.segments.last().copied().unwrap_or(0);
         loop {
             id = id.checked_add(1).ok_or_else(|| Error::InvalidFrame("segment overflow".into()))?;
