@@ -49,13 +49,56 @@ struct SimFile {
     durable: Vec<u8>,
     visible: Vec<u8>,
     pending: Vec<Write>,
-    doomed: Vec<Write>,
+    failed_cache: Vec<std::ops::Range<usize>>,
 }
 
 impl SimFile {
     fn write(&mut self, write: Write) {
+        let overwritten = match &write {
+            Write::Bytes(offset, data) => *offset..offset + data.len(),
+            Write::Resize(len) => *len..usize::MAX,
+        };
+        let mut cached = Vec::new();
+        for range in std::mem::take(&mut self.failed_cache) {
+            if range.start < overwritten.start {
+                cached.push(range.start..range.end.min(overwritten.start));
+            }
+            if range.end > overwritten.end {
+                cached.push(range.start.max(overwritten.end)..range.end);
+            }
+        }
+        self.failed_cache = cached;
         write.apply(&mut self.visible);
         self.pending.push(write);
+    }
+}
+
+fn settle(mut writes: Vec<Write>, bytes: &mut Vec<u8>, rng: &mut SplitMix64, sector_size: usize) {
+    for i in (1..writes.len()).rev() {
+        let j = rng.below(i + 1);
+        writes.swap(i, j);
+    }
+    for write in writes {
+        if rng.below(2) == 0 {
+            continue;
+        }
+        match write {
+            Write::Bytes(offset, data) => {
+                let mut start = 0;
+                while start < data.len() {
+                    let count =
+                        (sector_size - (offset + start) % sector_size).min(data.len() - start);
+                    let kept = match rng.below(3) {
+                        0 => 0,
+                        1 => count,
+                        _ => rng.below(count + 1),
+                    };
+                    Write::Bytes(offset + start, data[start..start + kept].to_vec()).apply(bytes);
+                    start += count;
+                }
+            }
+            Write::Resize(len) => bytes.resize(len, 0),
+        }
     }
 }
 
@@ -198,7 +241,7 @@ impl SimDisk {
 
     /// Fails the next file or directory sync.
     ///
-    /// Failed file syncs doom pending writes. Retries cannot persist them, but crashes may retain torn sectors.
+    /// Failed file syncs settle pending writes once. Cached bytes remain visible without later writeback.
     pub fn fail_next_sync(&self) -> Result<()> {
         lock(&self.state)?.fail_sync = true;
         Ok(())
@@ -231,10 +274,11 @@ impl SimDisk {
             .get_mut(offset)
             .ok_or_else(|| io_error(ErrorKind::InvalidInput, "bit flip beyond durable data"))?;
         *byte ^= 1;
-        let shadowed = file.doomed.iter().chain(&file.pending).any(|write| match write {
-            Write::Bytes(start, data) => (*start..start + data.len()).contains(&offset),
-            Write::Resize(len) => *len <= offset,
-        });
+        let shadowed = file.failed_cache.iter().any(|range| range.contains(&offset))
+            || file.pending.iter().any(|write| match write {
+                Write::Bytes(start, data) => (*start..start + data.len()).contains(&offset),
+                Write::Resize(len) => *len <= offset,
+            });
         if !shadowed {
             if let Some(byte) = file.visible.get_mut(offset) {
                 *byte ^= 1;
@@ -264,36 +308,7 @@ impl SimDisk {
                 continue;
             }
             let mut durable = file.durable.clone();
-            let mut writes = file.doomed.clone();
-            writes.extend(file.pending.clone());
-            for i in (1..writes.len()).rev() {
-                let j = rng.below(i + 1);
-                writes.swap(i, j);
-            }
-            for write in writes {
-                if rng.below(2) == 0 {
-                    continue;
-                }
-                match write {
-                    Write::Bytes(offset, data) => {
-                        let mut start = 0;
-                        while start < data.len() {
-                            let sector_remaining =
-                                state.sector_size - (offset + start) % state.sector_size;
-                            let count = sector_remaining.min(data.len() - start);
-                            let kept = match rng.below(3) {
-                                0 => 0,
-                                1 => count,
-                                _ => rng.below(count + 1),
-                            };
-                            Write::Bytes(offset + start, data[start..start + kept].to_vec())
-                                .apply(&mut durable);
-                            start += count;
-                        }
-                    }
-                    Write::Resize(len) => durable.resize(len, 0),
-                }
-            }
+            settle(file.pending.clone(), &mut durable, &mut rng, state.sector_size);
             files.insert(*id, SimFile { visible: durable.clone(), durable, ..SimFile::default() });
         }
         let handles = state
@@ -404,8 +419,17 @@ impl Io for SimDisk {
         let mut state = lock(&self.state)?;
         state.file(file)?;
         if let Err(error) = state.sync_check() {
+            let mut rng = state.rng.clone();
+            let sector_size = state.sector_size;
             let file = state.file(file)?;
-            file.doomed.append(&mut file.pending);
+            for write in &file.pending {
+                file.failed_cache.push(match write {
+                    Write::Bytes(offset, data) => *offset..offset + data.len(),
+                    Write::Resize(_) => 0..file.visible.len().max(file.durable.len()),
+                });
+            }
+            settle(std::mem::take(&mut file.pending), &mut file.durable, &mut rng, sector_size);
+            state.rng = rng;
             return Err(error);
         }
         let file = state.file(file)?;
@@ -541,7 +565,7 @@ mod tests {
     }
 
     #[test]
-    fn bit_flip_does_not_replay_old_doomed_bytes_over_newer_visible_writes() {
+    fn bit_flip_preserves_newer_cached_writes_after_failed_sync() {
         let disk = SimDisk::new(1);
         let file = disk.create(Path::new("db/file")).unwrap();
         disk.write_at(file, 0, b"oldold").unwrap();
@@ -559,7 +583,29 @@ mod tests {
     }
 
     #[test]
-    fn failed_writes_can_tear_on_crash_but_never_sync() {
+    fn failed_write_fates_cannot_overwrite_later_synced_data() {
+        for seed in 0..1000 {
+            let disk = SimDisk::new(seed);
+            let file = disk.create(Path::new("db/file")).unwrap();
+            disk.write_at(file, 0, &[0; 1024]).unwrap();
+            disk.sync_data(file).unwrap();
+            disk.sync_dir(Path::new("db")).unwrap();
+            disk.set_len(file, 16).unwrap();
+            disk.write_at(file, 0, &[9; 1024]).unwrap();
+            disk.fail_next_sync().unwrap();
+            assert!(disk.sync_data(file).is_err());
+            disk.set_len(file, 1024).unwrap();
+            disk.write_at(file, 0, &[7; 1024]).unwrap();
+            disk.sync_data(file).unwrap();
+            let crash = disk.crash().unwrap();
+            let mut bytes = [0; 1024];
+            assert_eq!(crash.read_at(file, 0, &mut bytes).unwrap(), 1024, "seed={seed}");
+            assert_eq!(bytes, [7; 1024], "seed={seed}");
+        }
+    }
+
+    #[test]
+    fn failed_sync_settles_torn_bytes_without_retry_healing() {
         let mut survived = false;
         let mut lost = false;
         let mut torn = false;
@@ -572,15 +618,18 @@ mod tests {
             disk.write_at(file, 0, &[9; 1024]).unwrap();
             disk.fail_next_sync().unwrap();
             assert!(disk.sync_data(file).is_err());
+            let settled = lock(&disk.state).unwrap().file(file).unwrap().durable.clone();
+            assert!(lock(&disk.state).unwrap().file(file).unwrap().pending.is_empty());
             disk.sync_data(file).unwrap();
+            assert_eq!(lock(&disk.state).unwrap().file(file).unwrap().durable, settled);
             disk.flip_bit(file, 1023).unwrap();
             let mut live = [0; 1024];
             disk.read_at(file, 0, &mut live).unwrap();
             assert_eq!(live, [9; 1024]);
-            assert_eq!(lock(&disk.state).unwrap().file(file).unwrap().durable[0], 0);
             let crash = disk.crash().unwrap();
             let mut bytes = [0; 1024];
             crash.read_at(file, 0, &mut bytes).unwrap();
+            assert_eq!(bytes.as_slice(), lock(&disk.state).unwrap().file(file).unwrap().durable);
             survived |= bytes.contains(&9);
             lost |= !bytes.contains(&9);
             torn |= bytes.contains(&9) && bytes.contains(&0);

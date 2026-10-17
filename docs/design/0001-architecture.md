@@ -133,6 +133,8 @@ Storage operations still use `Io`. Simulations supply deterministic salts withou
 MANIFEST version 2 stores the segment size before its segment identifiers.
 Opening rejects a different configured size before recovery writes or syncs anything.
 Unshipped version 1 manifests aren't accepted.
+SimDisk settles failed writeback once when sync fails, using the seeded sector-tearing model.
+Later crashes don't replay those writes over newer durable data.
 
 Record LSNs increase strictly. Footer frames copy their transaction's final record LSN.
 Footers have no separate read address. Fast acknowledgements expose no transaction identifier or LSN.

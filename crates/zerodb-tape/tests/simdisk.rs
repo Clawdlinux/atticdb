@@ -68,7 +68,7 @@ fn rename_crashes_are_atomic_for_1000_seeds() {
 }
 
 #[test]
-fn failed_sync_keeps_pending_data() {
+fn failed_sync_keeps_cached_data_without_retry_healing() {
     let mut lost = false;
     for seed in 0..1000 {
         let disk = SimDisk::new(seed);
