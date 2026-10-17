@@ -14,36 +14,59 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
 
+/// A batch's acknowledgement and persistence requirements.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Durability {
+    /// Acknowledge only after all earlier segment writes have synced.
     Durable,
+    /// Acknowledge Cache-only batches before sync, without assigning a public LSN.
     Fast,
 }
 
+/// A tenant record supplied to an append transaction.
 #[derive(Clone, Debug)]
 pub struct RecordInput {
+    /// Record category. Footer records are reserved for the writer.
     pub kind: Kind,
+    /// Tenant identifier used for chain isolation.
     pub tenant_id: u32,
+    /// Record content, without its generated salt.
     pub content: Vec<u8>,
 }
 
 /// Fast acknowledgements expose neither transaction identifiers nor LSNs.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Committed {
-    Durable { txn: u64, first_lsn: u64, last_lsn: u64 },
+    /// A synced transaction and its inclusive record range.
+    Durable {
+        /// Transaction identifier.
+        txn: u64,
+        /// First record's log sequence number.
+        first_lsn: u64,
+        /// Last record's log sequence number.
+        last_lsn: u64,
+    },
+    /// An accepted Cache batch whose persistence remains uncertain.
     Fast,
 }
 
+/// What an append error proves about the transaction's persistence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Outcome {
+    /// The transaction is durably committed.
     Committed,
+    /// The transaction wasn't committed.
     NotCommitted,
+    /// Recovery may retain or discard the transaction.
     Unknown,
 }
 
+/// An append failure with its transaction outcome.
 #[derive(Clone, Debug)]
 pub struct WriteError {
+    /// The underlying validation, storage, or health failure.
     pub kind: Error,
+    /// Whether the failed append could have committed.
     pub outcome: Outcome,
 }
 
@@ -55,19 +78,23 @@ impl std::fmt::Display for WriteError {
 
 impl std::error::Error for WriteError {}
 
+/// An append acknowledgement or a failure with persistence information.
 pub type WriteResult = std::result::Result<Committed, WriteError>;
 
 fn rejected(kind: Error) -> WriteError {
     WriteError { kind, outcome: Outcome::NotCommitted }
 }
 
+/// Tape configuration checked against the persisted manifest when opening.
 #[derive(Clone, Debug)]
-pub struct Options {
+pub struct TapeOptions {
+    /// Preallocated segment length. A whole transaction must fit within a segment.
     pub segment_size: u64,
+    /// Optional diagnostic address written to the directory's lock file.
     pub server_address: Option<String>,
 }
 
-impl Default for Options {
+impl Default for TapeOptions {
     fn default() -> Self {
         Self { segment_size: DEFAULT_SEGMENT_SIZE, server_address: None }
     }
@@ -151,12 +178,14 @@ impl PreparedBatch {
 }
 
 #[derive(Debug)]
+/// A prepared transaction and its acknowledgement channel.
 pub struct WriteRequest {
     batch: PreparedBatch,
     reply: mpsc::Sender<WriteResult>,
 }
 
 impl WriteRequest {
+    /// Creates an enqueueable request and its reply receiver.
     pub fn new(batch: PreparedBatch) -> (Self, mpsc::Receiver<WriteResult>) {
         let (reply, receiver) = mpsc::channel();
         (Self { batch, reply }, receiver)
@@ -221,11 +250,12 @@ impl std::fmt::Debug for WriterCore {
 }
 
 impl WriterCore {
+    /// Locks the directory, recovers complete transactions, and prepares the active segment.
     pub fn open(
         io: Arc<dyn Io>,
         clock: Arc<dyn Clock>,
         path: impl AsRef<Path>,
-        opts: Options,
+        opts: TapeOptions,
     ) -> Result<(Self, RecoveryReport)> {
         if opts.segment_size < (HEADER_LEN * 2 + 60) as u64
             || usize::try_from(opts.segment_size).is_err()
@@ -257,18 +287,23 @@ impl WriterCore {
         Ok((core, recovered.report))
     }
 
+    /// Adds a request to the next group without performing I/O.
     pub fn enqueue(&mut self, request: WriteRequest) {
         self.queue.push_back(request);
     }
 
+    /// Returns the last record visible to durable readers.
     pub fn durable_lsn(&self) -> u64 {
         self.reads.durable_lsn.load(Ordering::Acquire)
     }
 
+    /// Reports whether a storage failure requires reopening.
     pub fn is_poisoned(&self) -> bool {
         self.reads.poisoned.load(Ordering::Acquire)
     }
 
+    /// Reads a published record through the deterministic driver.
+    #[cfg(any(test, feature = "sim"))]
     pub fn read(&self, lsn: u64) -> Result<Option<Frame>> {
         self.reads.read(lsn)
     }
@@ -434,11 +469,12 @@ impl std::fmt::Debug for Tape {
 }
 
 impl Tape {
+    /// Locks and recovers a directory, then starts its writer thread.
     pub fn open(
         io: Arc<dyn Io>,
         clock: Arc<dyn Clock>,
         path: impl AsRef<Path>,
-        opts: Options,
+        opts: TapeOptions,
     ) -> Result<(Self, RecoveryReport)> {
         let (mut core, report) = WriterCore::open(io, clock, path, opts)?;
         let reads = core.reads.clone();
@@ -456,6 +492,7 @@ impl Tape {
         Ok((Self { sender: Some(sender), thread: Some(thread), reads }, report))
     }
 
+    /// Atomically appends a nonempty batch using the requested acknowledgement mode.
     pub fn append(&self, batch: Vec<RecordInput>, mode: Durability) -> WriteResult {
         if self.reads.poisoned.load(Ordering::Acquire) {
             return Err(rejected(Error::Poisoned));
@@ -472,10 +509,12 @@ impl Tape {
             .map_err(|_| WriteError { kind: Error::Poisoned, outcome: Outcome::Unknown })?
     }
 
+    /// Returns the highest record LSN available to durable readers.
     pub fn durable_lsn(&self) -> u64 {
         self.reads.durable_lsn.load(Ordering::Acquire)
     }
 
+    /// Reads a complete durable record, or returns `None` for an unpublished LSN.
     pub fn read(&self, lsn: u64) -> Result<Option<Frame>> {
         self.reads.read(lsn)
     }

@@ -4,9 +4,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
-use zerodb_tape::io::{FileId, Io, LockGuard};
-use zerodb_tape::simdisk::SimDisk;
 use zerodb_tape::Result;
+use zerodb_tape::{FileId, Io, LockGuard, SimDisk};
 
 #[derive(Debug)]
 pub struct ObservedIo {

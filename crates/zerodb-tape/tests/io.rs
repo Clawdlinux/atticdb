@@ -3,9 +3,9 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use zerodb_tape::io::{Clock, Io, SimClock, StdIo, SystemClock};
-use zerodb_tape::simdisk::SimDisk;
+use zerodb_tape::sim::SimClock;
 use zerodb_tape::Error;
+use zerodb_tape::{Clock, Io, SimDisk, StdIo, SystemClock};
 
 struct TestDir(PathBuf);
 

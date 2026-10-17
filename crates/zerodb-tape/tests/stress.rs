@@ -2,9 +2,9 @@
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Barrier};
-use zerodb_tape::frame::Kind;
-use zerodb_tape::io::{StdIo, SystemClock};
-use zerodb_tape::{Committed, Durability, Options, RecordInput, Tape};
+use zerodb_tape::{
+    Committed, Durability, Kind, RecordInput, StdIo, SystemClock, Tape, TapeOptions as Options,
+};
 
 /// Run with `cargo test --workspace --release`. Debug builds skip the filesystem stress workload.
 #[test]

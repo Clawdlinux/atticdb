@@ -21,9 +21,8 @@ fn selected_bit_flip_changes_only_that_durable_bit() {
 use std::io::ErrorKind;
 use std::path::Path;
 use std::sync::Arc;
-use zerodb_tape::io::{FileId, Io};
-use zerodb_tape::simdisk::SimDisk;
 use zerodb_tape::Error;
+use zerodb_tape::{FileId, Io, SimDisk};
 
 fn bytes(io: &dyn Io, file: FileId) -> Vec<u8> {
     let mut data = vec![0; io.len(file).unwrap() as usize];
@@ -99,6 +98,28 @@ fn failed_sync_keeps_cached_data_without_retry_healing() {
         lost |= bytes(&disk.crash().unwrap(), file) != b"new";
     }
     assert!(lost, "retrying a failed sync must not heal its writes");
+}
+
+#[test]
+fn live_reopen_keeps_failed_cache_but_same_byte_rewrite_persists_it() {
+    let mut unhealed = 0;
+    for seed in 0..200 {
+        let disk = SimDisk::new(seed);
+        let file = durable_file(&disk, "db/data", b"old");
+        disk.write_at(file, 0, b"new").unwrap();
+        disk.fail_next_sync().unwrap();
+        assert!(disk.sync_data(file).is_err());
+        disk.close(file).unwrap();
+        let reopened = disk.open(Path::new("db/data")).unwrap();
+        assert_eq!(bytes(&disk, reopened), b"new");
+        disk.sync_data(reopened).unwrap();
+        unhealed += usize::from(bytes(&disk.crash().unwrap(), reopened) != b"new");
+        let cached = bytes(&disk, reopened);
+        disk.write_at(reopened, 0, &cached).unwrap();
+        disk.sync_data(reopened).unwrap();
+        assert_eq!(bytes(&disk.crash().unwrap(), reopened), b"new");
+    }
+    assert!(unhealed > 0, "a live reopen and sync alone must not heal failed bytes");
 }
 
 #[test]

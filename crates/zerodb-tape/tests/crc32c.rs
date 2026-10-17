@@ -1,5 +1,5 @@
 use proptest::prelude::*;
-use zerodb_tape::crc32c::{crc32c, Crc32c};
+use zerodb_tape::sim::{crc32c, Crc32c};
 
 #[test]
 fn known_vectors() {

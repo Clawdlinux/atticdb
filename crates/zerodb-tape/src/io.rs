@@ -11,7 +11,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// A file handle belonging to one I/O backend.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct FileId(pub u64);
+pub struct FileId(
+    /// Backend-assigned handle value.
+    pub u64,
+);
 
 /// An exclusive file lock released when dropped.
 pub struct LockGuard {
@@ -25,7 +28,8 @@ impl std::fmt::Debug for LockGuard {
 }
 
 impl LockGuard {
-    pub(crate) fn new(release: impl FnOnce() + Send + Sync + 'static) -> Self {
+    /// Owns a backend lock and releases it exactly once when dropped.
+    pub fn new(release: impl FnOnce() + Send + Sync + 'static) -> Self {
         Self { release: Some(Box::new(release)) }
     }
 }
@@ -206,9 +210,11 @@ impl Clock for SystemClock {
 }
 
 /// A manually advanced clock, suitable for sharing through an `Arc`.
+#[cfg(any(test, feature = "sim"))]
 #[derive(Debug, Default)]
 pub struct SimClock(AtomicU64);
 
+#[cfg(any(test, feature = "sim"))]
 impl SimClock {
     /// Creates a clock at a chosen timestamp.
     pub const fn new(now_ns: u64) -> Self {
@@ -232,6 +238,7 @@ impl SimClock {
     }
 }
 
+#[cfg(any(test, feature = "sim"))]
 impl Clock for SimClock {
     fn now_ns(&self) -> u64 {
         self.0.load(Ordering::SeqCst)

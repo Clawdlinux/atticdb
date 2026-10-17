@@ -3,6 +3,22 @@
 This crate provides CRC32C, file I/O, clocks, deterministic disk faults, and frame codecs.
 It also provides a group-commit writer and footer-atomic crash recovery.
 
+## Public API
+
+Import `Tape`, `TapeOptions`, `Durability`, `RecordInput`, and `Committed` from the crate root.
+Append failures return `WriteError` with an `Outcome`.
+The root also exports `Error`, `Result`, `WriteResult`, and `RecoveryReport`.
+Record types are `Frame`, `Header`, `Kind`, and `Digest`.
+Storage backends use root exports `Io`, `StdIo`, `FileId`, and `LockGuard`.
+Clocks use `Clock` and `SystemClock`. `SimDisk` remains public for fault injection.
+
+Implementation modules, including directory, recovery, segment, and writer modules, are crate-private.
+The `sim` module exposes deterministic driver helpers only with `cfg(test)` or the `sim` feature.
+Use `sim::{WriterCore, PreparedBatch, WriteRequest, DataDir, SimClock}` for low-level tests.
+Production `Tape` still compiles the writer core internally. The gate restricts external access, not production behavior.
+Development self-dependency enables `sim` for integration tests and benchmarks, including plain `cargo test --workspace`.
+Production builds don't enable that development feature. Missing public documentation is a compiler error.
+
 ## I/O and simulation
 
 `Io` is object-safe and works through `Arc<dyn Io>`.
@@ -70,6 +86,11 @@ Durable acknowledgements follow segment sync. Fast mode accepts only Cache recor
 Recovery verifies frame CRCs, transaction footers, content digests, and per-tenant chains.
 Damage at or below the superblock returns `CorruptionDetected`. Invalid tails above it are truncated and synced.
 Open removes segment files beyond the manifest before scanning. Directory sync makes cleanup durable, including retries.
+Before publishing recovery, the tape rewrites retained bytes after the superblock boundary at the same offsets.
+It then syncs each touched file and the directory.
+A process restart can leave failed-writeback bytes readable in clean page cache. Sync alone may not persist them.
+Rewriting re-dirties those bytes before new appends can depend on them.
+The rewrite spans roughly 1 second of writes plus unsynced data. Delayed superblock maintenance can extend that window.
 
 ## Validation
 
@@ -90,10 +111,13 @@ Records span 0 to 8 KiB, with occasional 1 MiB requests.
 The 64 KiB segment limit rejects oversized batches without poisoning the writer.
 Supplemental scenarios use 2 MiB segments to verify accepted 1 MiB records and rolls.
 Faults include sync failures, partial ENOSPC writes, queued crashes, and cuts between mutating I/O operations.
+Some generations inject a sync failure, drop the poisoned writer, and reopen the live disk without power loss.
+They verify survivors, continue appending, and then crash. Both stale and advanced superblocks are exercised.
 Replies after a captured crash point remain uncertain.
 The oracle checks complete transactions, exact content, LSN order, and tenant chains through `Tape::read`.
 Recovered survivors become durable oracle entries across later generations.
-Every 11th seed damages a frame below the superblock and requires `CorruptionDetected`.
+Every 11th seed flips a random bit below the superblock and requires `CorruptionDetected`.
+Offsets span all prefix segments through the boundary transaction's footer, including payloads and roll padding.
 Failures print the seed and a replay command.
 
 ```sh

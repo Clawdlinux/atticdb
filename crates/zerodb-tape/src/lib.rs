@@ -1,22 +1,36 @@
 //! Tape storage primitives for zerodb.
+//!
+//! Import storage types from the crate root. Implementation modules aren't public.
+//! Deterministic driver access requires the `sim` feature.
+//!
+//! ```compile_fail
+//! use zerodb_tape::writer::WriterCore;
+//! ```
+//!
+//! ```compile_fail
+//! use zerodb_tape::dir::DataDir;
+//! ```
 
 #![forbid(unsafe_code)]
+#![deny(missing_docs)]
 
-#[cfg(any(test, feature = "sim"))]
-extern crate self as zerodb_tape;
-
-pub mod crc32c;
-pub mod dir;
+pub(crate) mod crc32c;
+pub(crate) mod dir;
 mod error;
-pub mod frame;
-pub mod io;
-pub mod recovery;
-pub mod segment;
+pub(crate) mod frame;
+pub(crate) mod io;
+pub(crate) mod recovery;
+pub(crate) mod segment;
 #[cfg(any(test, feature = "sim"))]
 pub mod sim;
-pub mod simdisk;
-pub mod writer;
+pub(crate) mod simdisk;
+pub(crate) mod writer;
 
 pub use error::{Error, Result};
+pub use frame::{Digest, Frame, Header, Kind};
+pub use io::{Clock, FileId, Io, LockGuard, StdIo, SystemClock};
 pub use recovery::RecoveryReport;
-pub use writer::{Committed, Durability, Options, Outcome, RecordInput, Tape, WriteError};
+pub use simdisk::SimDisk;
+pub use writer::{
+    Committed, Durability, Outcome, RecordInput, Tape, TapeOptions, WriteError, WriteResult,
+};

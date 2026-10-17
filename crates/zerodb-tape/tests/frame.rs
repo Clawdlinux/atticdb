@@ -1,8 +1,8 @@
 #![allow(clippy::unwrap_used)]
 
 use proptest::prelude::*;
-use zerodb_tape::crc32c::crc32c;
-use zerodb_tape::frame::{
+use zerodb_tape::sim::crc32c;
+use zerodb_tape::sim::frame::{
     batch_digest, canon, chain_next, content_digest, decode, encode, DecodeError, Footer, Frame,
     Header, Kind, FLAG_HUSK, HEADER_LEN, MAX_FRAME_SIZE, VERSION,
 };

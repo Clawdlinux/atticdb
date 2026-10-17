@@ -1,14 +1,11 @@
 #![allow(clippy::unwrap_used)]
 
 use std::sync::{Arc, Barrier};
-use zerodb_tape::frame::Kind;
-use zerodb_tape::io::SimClock;
-use zerodb_tape::simdisk::SimDisk;
-use zerodb_tape::writer::{
-    Committed, Durability, Options, Outcome, PreparedBatch, RecordInput, Tape, WriteRequest,
-    WriterCore,
-};
+use zerodb_tape::sim::{PreparedBatch, SimClock, WriteRequest, WriterCore};
 use zerodb_tape::Error;
+use zerodb_tape::{
+    Committed, Durability, Kind, Outcome, RecordInput, SimDisk, Tape, TapeOptions as Options,
+};
 
 mod support;
 use std::sync::atomic::Ordering;
@@ -87,7 +84,7 @@ fn live_restart_after_failed_sync_redirties_survivors_before_acknowledging() {
 
 #[test]
 fn live_restart_rewrites_across_rolls_and_before_a_trimmed_tail() {
-    use zerodb_tape::io::Io;
+    use zerodb_tape::Io;
     let io = Arc::new(ObservedIo::new(0));
     let clock = Arc::new(SimClock::default());
     let opts = Options { segment_size: 1024, ..Options::default() };
@@ -246,10 +243,7 @@ fn batch_larger_than_configured_segment_does_not_poison() {
     core.step();
     assert!(matches!(
         reply.recv().unwrap().unwrap_err(),
-        zerodb_tape::writer::WriteError {
-            kind: Error::BatchTooLarge,
-            outcome: Outcome::NotCommitted
-        }
+        zerodb_tape::WriteError { kind: Error::BatchTooLarge, outcome: Outcome::NotCommitted }
     ));
     assert!(!core.is_poisoned());
     let (request, reply) = WriteRequest::new(prepared(Durability::Durable));
@@ -363,7 +357,7 @@ fn periodic_superblock_is_off_reply_path_and_rate_limited() {
     }
     assert_eq!(io.syncs.load(Ordering::SeqCst), 4);
     drop(core);
-    let dir = zerodb_tape::dir::DataDir::open(io.clone(), "db", None, 65536).unwrap();
+    let dir = zerodb_tape::sim::DataDir::open(io.clone(), "db", None, 65536).unwrap();
     assert_eq!(dir.superblock(), 2);
     drop(dir);
     assert!(io.handles.lock().unwrap().is_empty());
@@ -499,7 +493,7 @@ fn real_files_reopen_with_multiple_tenants_and_rebuilt_chain_heads() {
     let path =
         std::env::current_dir().unwrap().join(format!("target/tape-test-{}", std::process::id()));
     std::fs::create_dir_all(&path).unwrap();
-    let io = Arc::new(zerodb_tape::io::StdIo::new());
+    let io = Arc::new(zerodb_tape::StdIo::new());
     let clock = Arc::new(SimClock::new(0));
     let opts = Options { segment_size: 65536, ..Options::default() };
     {
@@ -537,7 +531,7 @@ fn real_files_reopen_with_multiple_tenants_and_rebuilt_chain_heads() {
 #[test]
 fn segment_size_mismatch_is_rejected_without_mutation() {
     use std::path::Path;
-    use zerodb_tape::io::Io;
+    use zerodb_tape::Io;
     for wrong_size in [512, 2048] {
         let io = Arc::new(ObservedIo::new(0));
         let clock = Arc::new(SimClock::new(0));

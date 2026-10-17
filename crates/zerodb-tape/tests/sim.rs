@@ -1,10 +1,5 @@
 #![allow(clippy::unwrap_used)]
 
-// Integration tests compile the helper locally when the library's feature is disabled.
-#[cfg(not(feature = "sim"))]
-#[path = "../src/sim.rs"]
-mod sim;
-#[cfg(feature = "sim")]
 use zerodb_tape::sim;
 
 #[test]

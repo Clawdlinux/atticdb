@@ -7,10 +7,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
-use zerodb_tape::frame::{self, Footer, Frame, Header, Kind, VERSION};
-use zerodb_tape::io::{StdIo, SystemClock};
-use zerodb_tape::segment::DEFAULT_SEGMENT_SIZE;
-use zerodb_tape::{Durability, Options, RecordInput, Tape};
+use zerodb_tape::sim::frame::{self, Footer, Frame, Header, Kind, VERSION};
+use zerodb_tape::sim::DEFAULT_SEGMENT_SIZE;
+use zerodb_tape::{Durability, RecordInput, StdIo, SystemClock, Tape, TapeOptions as Options};
 
 #[derive(Debug)]
 struct BenchDir(PathBuf);

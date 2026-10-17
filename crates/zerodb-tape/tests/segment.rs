@@ -2,11 +2,9 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use zerodb_tape::dir::DataDir;
-use zerodb_tape::io::Io;
-use zerodb_tape::segment::SegmentWriter;
-use zerodb_tape::simdisk::SimDisk;
+use zerodb_tape::sim::{DataDir, SegmentWriter};
 use zerodb_tape::Error;
+use zerodb_tape::{Io, SimDisk};
 
 #[test]
 fn roll_prepares_names_and_syncs_every_dirty_file() {

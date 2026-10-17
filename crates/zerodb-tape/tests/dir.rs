@@ -2,10 +2,9 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use zerodb_tape::dir::{atomic_install, DataDir};
-use zerodb_tape::io::{Io, StdIo};
-use zerodb_tape::simdisk::SimDisk;
+use zerodb_tape::sim::{atomic_install, DataDir};
 use zerodb_tape::Error;
+use zerodb_tape::{Io, SimDisk, StdIo};
 
 mod support;
 

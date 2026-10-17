@@ -1,12 +1,10 @@
 #![allow(clippy::unwrap_used)]
 
 use std::sync::Arc;
-use zerodb_tape::dir::DataDir;
-use zerodb_tape::frame::{self, Footer, Frame, Header, Kind, VERSION};
-use zerodb_tape::io::Io;
-use zerodb_tape::recovery::recover;
-use zerodb_tape::simdisk::SimDisk;
+use zerodb_tape::sim::frame::{self, Footer, Frame, Header, Kind, VERSION};
+use zerodb_tape::sim::{recover, DataDir};
 use zerodb_tape::Error;
+use zerodb_tape::{Io, SimDisk};
 
 mod support;
 
@@ -183,10 +181,8 @@ fn truncation_report_includes_discarded_later_segments() {
 
 #[test]
 fn truncation_resumes_at_the_cut_and_reopens_twice_after_new_ack() {
-    use zerodb_tape::io::SimClock;
-    use zerodb_tape::writer::{
-        Committed, Durability, Options, PreparedBatch, RecordInput, WriteRequest, WriterCore,
-    };
+    use zerodb_tape::sim::{PreparedBatch, SimClock, WriteRequest, WriterCore};
+    use zerodb_tape::{Committed, Durability, RecordInput, TapeOptions as Options};
     for count in [3, 5] {
         for empty in [false, true] {
             for offset_zero in [false, true] {
@@ -351,8 +347,8 @@ fn manifest_is_durable_before_tail_files_are_removed() {
 #[test]
 fn reopen_removes_orphans_after_manifest_trim_before_unlink() {
     use std::sync::atomic::Ordering;
-    use zerodb_tape::io::SimClock;
-    use zerodb_tape::{Options, Tape};
+    use zerodb_tape::sim::SimClock;
+    use zerodb_tape::{Tape, TapeOptions as Options};
 
     let io = Arc::new(support::ObservedIo::new(1));
     let mut dir = DataDir::open(io.clone(), "db", None, 1024).unwrap();

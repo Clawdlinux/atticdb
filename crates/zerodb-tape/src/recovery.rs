@@ -9,16 +9,20 @@ use std::ops::RangeInclusive;
 /// Results of opening and repairing an unsynced tail.
 #[derive(Clone, Debug, Default)]
 pub struct RecoveryReport {
+    /// Highest complete record LSN after recovery and sync.
     pub durable_lsn: u64,
     /// Discarded LSN range and removed capacity, including preallocated tails.
     pub truncated: Option<(RangeInclusive<u64>, u64)>,
+    /// Number of retained manifest segments.
     pub segments: usize,
+    /// Number of replayed records, excluding footers.
     pub records: usize,
 }
 
 /// Rebuilt writer state. Only complete transactions contribute records or chain heads.
 #[derive(Debug, Default)]
 pub struct Recovered {
+    /// Recovery results exposed by the deterministic driver.
     pub report: RecoveryReport,
     pub(crate) index: BTreeMap<u64, (u64, u64)>,
     pub(crate) chains: BTreeMap<u32, Digest>,

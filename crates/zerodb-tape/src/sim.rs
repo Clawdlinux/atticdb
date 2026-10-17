@@ -2,27 +2,36 @@
 
 #![allow(clippy::unwrap_used)]
 
+pub use crate::crc32c::{crc32c, Crc32c};
+pub use crate::dir::{atomic_install, DataDir};
+pub use crate::io::SimClock;
+pub use crate::recovery::{recover, Recovered};
+pub use crate::segment::{SegmentWriter, DEFAULT_SEGMENT_SIZE};
+pub use crate::writer::{PreparedBatch, WriteRequest, WriterCore};
+use crate::{
+    Committed, Digest, Durability, Error, FileId, Io, Kind, LockGuard, Outcome, RecordInput,
+    Result, SimDisk, Tape, TapeOptions as Options, WriteResult,
+};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
-use zerodb_tape::dir::DataDir;
-use zerodb_tape::frame::{self, Digest, Kind};
-use zerodb_tape::io::{FileId, Io, LockGuard, SimClock};
-use zerodb_tape::simdisk::SimDisk;
-use zerodb_tape::writer::{PreparedBatch, WriteRequest, WriteResult, WriterCore};
-use zerodb_tape::{Committed, Durability, Error, Options, Outcome, RecordInput, Result, Tape};
+
+/// Frame codecs and format constants for simulation and storage-format tests.
+pub mod frame {
+    pub use crate::frame::*;
+}
 
 /// SplitMix64 keeps workload generation independent from disk crash randomness.
 #[derive(Debug)]
-pub struct Rng(u64);
+struct Rng(u64);
 
 impl Rng {
-    pub fn new(seed: u64) -> Self {
+    fn new(seed: u64) -> Self {
         Self(seed)
     }
 
-    pub fn next_u64(&mut self) -> u64 {
+    fn next_u64(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut value = self.0;
         value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -30,7 +39,7 @@ impl Rng {
         value ^ (value >> 31)
     }
 
-    pub fn below(&mut self, n: usize) -> usize {
+    fn below(&mut self, n: usize) -> usize {
         (self.next_u64() % n as u64) as usize
     }
 

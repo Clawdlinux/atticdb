@@ -557,6 +557,7 @@ dependencies = [
  "blake3",
  "criterion",
  "proptest",
+ "zerodb-tape",
 ]
 
 [[package]]

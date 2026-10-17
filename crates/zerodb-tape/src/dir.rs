@@ -185,6 +185,7 @@ impl DataDir {
     }
 
     /// Returns the segment size stored in manifest version 2.
+    #[cfg(any(test, feature = "sim"))]
     pub fn segment_size(&self) -> u64 {
         self.segment_size
     }
