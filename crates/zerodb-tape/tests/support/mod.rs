@@ -100,7 +100,9 @@ impl Io for ObservedIo {
         result
     }
     fn remove(&self, path: &Path) -> Result<()> {
-        self.disk.remove(path)
+        let result = self.disk.remove(path);
+        self.event(format!("remove {}", path.display()));
+        result
     }
     fn list(&self, dir: &Path) -> Result<Vec<PathBuf>> {
         self.disk.list(dir)

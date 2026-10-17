@@ -138,8 +138,10 @@ An oversized batch never enters the writer. A configured segment can impose a sm
 Segment preparation runs inline in M1. Moving it to a background task remains an M2 follow-up.
 Superblock maintenance runs after replies and at most once per second.
 Metadata failures poison future writes without changing earlier acknowledgements.
-Recovery permits zero padding between complete transactions when a segment rolls.
-Recovery reports discarded LSNs and zero-filled bytes, including preallocated tail capacity.
+Recovery permits roll padding no longer than 4 MiB plus a footer below the durable boundary.
+Recovery resumes at the first cut segment and offset.
+Later segments leave the manifest atomically before their files are unlinked.
+Recovery reports discarded LSNs and removed capacity, including preallocated tails.
 An unreadable frame can hide its LSN. The reported range includes every decodable discarded record.
 
 ### Disk space

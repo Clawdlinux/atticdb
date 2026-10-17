@@ -10,7 +10,7 @@ use std::ops::RangeInclusive;
 #[derive(Clone, Debug, Default)]
 pub struct RecoveryReport {
     pub durable_lsn: u64,
-    /// Discarded LSN range and bytes zero-filled, including preallocated tail capacity.
+    /// Discarded LSN range and removed capacity, including preallocated tails.
     pub truncated: Option<(RangeInclusive<u64>, u64)>,
     pub segments: usize,
     pub records: usize,
@@ -122,15 +122,26 @@ pub fn recover(dir: &mut DataDir, size: u64) -> Result<Recovered> {
                         "missing segment",
                     ));
                 }
+                if !trimming {
+                    first_lost = state.report.durable_lsn.saturating_add(1);
+                }
                 trimming = true;
-                first_lost = first_lost.max(state.report.durable_lsn.saturating_add(1));
                 last_lost = last_lost.max(first_lost);
                 continue;
             }
             Err(error) => return Err(error),
         };
-        retained.push(segment);
         let len = dir.io.len(file.id)?;
+        if trimming {
+            if len <= size {
+                let mut bytes = vec![0; len as usize];
+                read_exact(dir.io.as_ref(), file.id, 0, &mut bytes)?;
+                last_lost = last_lost.max(last_decodable_lsn(&bytes));
+            }
+            cleared += len;
+            continue;
+        }
+        retained.push(segment);
         if len > size || usize::try_from(len).is_err() {
             return Err(corruption(
                 state.report.durable_lsn + 1,
@@ -141,13 +152,6 @@ pub fn recover(dir: &mut DataDir, size: u64) -> Result<Recovered> {
         }
         let mut bytes = vec![0; len as usize];
         read_exact(dir.io.as_ref(), file.id, 0, &mut bytes)?;
-        if trimming {
-            last_lost = last_lost.max(last_decodable_lsn(&bytes));
-            zero_tail(dir, &file, 0, size)?;
-            cleared += size;
-            state.offset = 0;
-            continue;
-        }
         let mut offset = 0;
         let mut pending = Vec::<(Frame, u64)>::new();
         loop {
@@ -165,10 +169,21 @@ pub fn recover(dir: &mut DataDir, size: u64) -> Result<Recovered> {
                         "early end of data",
                     ));
                 }
-                if len == size {
+                if state.report.durable_lsn < dir.superblock()
+                    && tail.len() > frame::MAX_FRAME_SIZE + frame::HEADER_LEN + 44
+                {
+                    return Err(corruption(
+                        state.report.durable_lsn + 1,
+                        segment,
+                        offset as u64,
+                        "oversized zero padding",
+                    ));
+                }
+                let oversized = tail.len() > frame::MAX_FRAME_SIZE + frame::HEADER_LEN + 44;
+                if len == size && !((offset == 0 || oversized) && position + 1 < segments.len()) {
                     break;
                 }
-                Err("short segment".to_owned())
+                Err("end of tape or short segment".to_owned())
             } else {
                 frame::decode(tail).map_err(|e| e.to_string())
             };
@@ -227,6 +242,13 @@ pub fn recover(dir: &mut DataDir, size: u64) -> Result<Recovered> {
     }
     if retained != segments {
         dir.install_manifest(&retained)?;
+        for &segment in &segments[retained.len()..] {
+            let path = dir.segment_path(segment);
+            if dir.io.exists(&path)? {
+                dir.io.remove(&path)?;
+            }
+        }
+        dir.io.sync_dir(&dir.path)?;
     }
     if trimming {
         state.report.truncated = Some((first_lost..=last_lost.max(first_lost), cleared));
