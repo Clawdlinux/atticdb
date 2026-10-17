@@ -114,7 +114,7 @@ impl Footer {
 /// A frame cannot be decoded.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DecodeError {
-    /// A zero-length, zero-CRC end marker was reached.
+    /// An empty tail or zero-length, zero-CRC end marker was reached.
     EndOfData,
     /// The fixed header is incomplete.
     Truncated,
@@ -203,7 +203,11 @@ pub fn encode(frame: &Frame) -> crate::Result<Vec<u8>> {
 ///
 /// A partial fixed header is `Truncated`. A length beyond the supplied bytes is `BadLength`.
 /// End markers require zero CRC bytes, so a damaged length cannot hide a frame.
+/// An empty slice is `EndOfData`, including a segment filled to its final byte.
 pub fn decode(bytes: &[u8]) -> Result<(Frame, usize), DecodeError> {
+    if bytes.is_empty() {
+        return Err(DecodeError::EndOfData);
+    }
     let crc = u32::from_le_bytes(field(bytes, 0)?);
     let total = u32::from_le_bytes(field(bytes, 4)?) as usize;
     if total == 0 {

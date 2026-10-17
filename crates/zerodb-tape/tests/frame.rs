@@ -187,7 +187,7 @@ fn footer_layout_and_zero_chain_kinds() {
 #[test]
 fn boundaries_versions_and_end_marker() {
     assert_eq!(decode(&[0; 8]), Err(DecodeError::EndOfData));
-    for length in 0..HEADER_LEN {
+    for length in 1..HEADER_LEN {
         if length != 8 {
             let mut bytes = vec![0; length];
             if length >= 8 {
@@ -210,6 +210,11 @@ fn boundaries_versions_and_end_marker() {
     let mut concatenated = bytes.clone();
     concatenated.extend_from_slice(&bytes);
     assert_eq!(decode(&concatenated).unwrap(), (original, bytes.len()));
+}
+
+#[test]
+fn an_empty_segment_tail_is_end_of_data() {
+    assert_eq!(decode(&[]), Err(DecodeError::EndOfData));
 }
 
 #[test]

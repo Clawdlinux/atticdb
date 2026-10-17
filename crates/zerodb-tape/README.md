@@ -43,6 +43,7 @@ Normal record payloads start with a 16-byte salt.
 Footer payloads contain exactly 44 bytes. Husks have no payload.
 
 `decode` returns the first frame and its consumed byte count.
+An empty slice returns `EndOfData`, including a segment filled to its final byte.
 Trailing bytes belong to subsequent frames or preallocated space.
 An incomplete fixed header returns `Truncated`.
 A declared length beyond the supplied bytes returns `BadLength`.
