@@ -266,6 +266,15 @@ impl SimDisk {
 
     /// Flips the low bit of one durable byte.
     pub fn flip_bit(&self, file: FileId, offset: u64) -> Result<()> {
+        self.flip_bit_at(file, offset, 0)
+    }
+
+    /// Flips bit 0 through 7 of a durable byte. Rejects larger bit indices.
+    pub fn flip_bit_at(&self, file: FileId, offset: u64, bit: u8) -> Result<()> {
+        if bit >= 8 {
+            return Err(io_error(ErrorKind::InvalidInput, "bit index must be below 8"));
+        }
+        let mask = 1 << bit;
         let mut state = lock(&self.state)?;
         let file = state.file(file)?;
         let offset = position(offset)?;
@@ -273,7 +282,7 @@ impl SimDisk {
             .durable
             .get_mut(offset)
             .ok_or_else(|| io_error(ErrorKind::InvalidInput, "bit flip beyond durable data"))?;
-        *byte ^= 1;
+        *byte ^= mask;
         let shadowed = file.failed_cache.iter().any(|range| range.contains(&offset))
             || file.pending.iter().any(|write| match write {
                 Write::Bytes(start, data) => (*start..start + data.len()).contains(&offset),
@@ -281,7 +290,7 @@ impl SimDisk {
             });
         if !shadowed {
             if let Some(byte) = file.visible.get_mut(offset) {
-                *byte ^= 1;
+                *byte ^= mask;
             }
         }
         Ok(())

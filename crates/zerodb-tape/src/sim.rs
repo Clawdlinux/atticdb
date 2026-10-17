@@ -273,6 +273,42 @@ fn workload(rng: &mut Rng, tenants: usize) -> (Vec<RecordInput>, Durability) {
     (records, mode)
 }
 
+fn damage_durable(disk: &SimDisk, dir: &DataDir, rng: &mut Rng) -> (u64, u64, u8) {
+    let mut regions = Vec::new();
+    let mut boundary = false;
+    for &segment in dir.segments() {
+        let file = disk.open(&dir.segment_path(segment)).unwrap();
+        let mut bytes = vec![0; disk.len(file).unwrap() as usize];
+        disk.read_at(file, 0, &mut bytes).unwrap();
+        disk.close(file).unwrap();
+        let mut offset = 0;
+        while let Ok((record, used)) = frame::decode(&bytes[offset..]) {
+            offset += used;
+            if record.header.kind == Kind::Footer && record.header.lsn == dir.superblock() {
+                boundary = true;
+                break;
+            }
+        }
+        regions.push((segment, if boundary { offset as u64 } else { bytes.len() as u64 }));
+        if boundary {
+            break;
+        }
+    }
+    assert!(boundary && dir.superblock() > 0, "superblock position must be reachable");
+    let mut offset = rng.next_u64() % regions.iter().map(|(_, len)| len).sum::<u64>();
+    let bit = rng.below(8) as u8;
+    for (segment, len) in regions {
+        if offset < len {
+            let file = disk.open(&dir.segment_path(segment)).unwrap();
+            disk.flip_bit_at(file, offset, bit).unwrap();
+            disk.close(file).unwrap();
+            return (segment, offset, bit);
+        }
+        offset -= len;
+    }
+    unreachable!("selected offset belongs to a durable region")
+}
+
 /// Runs 2 or 3 crash generations, retaining acknowledged and uncertain transactions in an oracle.
 pub fn run_seed(seed: u64) {
     if seed % 97 == 1 {
@@ -353,10 +389,7 @@ pub fn run_seed(seed: u64) {
         if seed.is_multiple_of(11) && generation + 1 == generations {
             let dir = DataDir::open(Arc::new(disk.clone()), "db", None, opts.segment_size).unwrap();
             assert!(dir.superblock() > 0);
-            let first = dir.segment_path(dir.segments()[0]);
-            let file = disk.open(&first).unwrap();
-            disk.flip_bit(file, rng.below(104) as u64).unwrap();
-            disk.close(file).unwrap();
+            damage_durable(&disk, &dir, &mut rng);
             drop(dir);
             assert!(matches!(
                 Tape::open(Arc::new(disk), clock, "db", opts),
@@ -412,6 +445,40 @@ fn large_record(seed: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn durable_damage_spans_segments_payloads_and_every_bit() {
+        let disk = Arc::new(SimDisk::new(0));
+        let clock = Arc::new(SimClock::default());
+        let opts = Options { segment_size: 1024, ..Options::default() };
+        let (mut core, _) =
+            WriterCore::open(disk.clone(), clock.clone(), "db", opts.clone()).unwrap();
+        for _ in 0..4 {
+            probe(&mut core, &mut Oracle::default(), &mut Rng::new(1));
+        }
+        clock.advance(1_000_000_000);
+        core.update_superblock().unwrap();
+        drop(core);
+        let mut segments = 0u64;
+        let mut bits = 0u8;
+        let mut beyond_header = false;
+        for seed in 0..256 {
+            let image = Arc::new(disk.crash().unwrap());
+            let dir = DataDir::open(image.clone(), "db", None, opts.segment_size).unwrap();
+            let (segment, offset, bit) = damage_durable(&image, &dir, &mut Rng::new(seed));
+            segments |= 1 << segment;
+            bits |= 1 << bit;
+            beyond_header |= offset >= frame::HEADER_LEN as u64;
+            drop(dir);
+            assert!(matches!(
+                Tape::open(image, clock.clone(), "db", opts.clone()),
+                Err(Error::CorruptionDetected { .. })
+            ));
+        }
+        assert_eq!(segments, (1 << 1) | (1 << 2));
+        assert_eq!(bits, u8::MAX);
+        assert!(beyond_header);
+    }
 
     fn check_mutated_oracle(mutate: impl FnOnce(&mut Oracle)) {
         let disk = Arc::new(SimDisk::new(1));

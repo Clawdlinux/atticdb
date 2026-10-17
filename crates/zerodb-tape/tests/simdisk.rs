@@ -1,5 +1,23 @@
 #![allow(clippy::unwrap_used)]
 
+#[test]
+fn selected_bit_flip_changes_only_that_durable_bit() {
+    for bit in 0..8 {
+        let disk = SimDisk::new(0);
+        let file = disk.create(std::path::Path::new("bits")).unwrap();
+        disk.write_at(file, 0, &[0]).unwrap();
+        disk.sync_data(file).unwrap();
+        disk.sync_dir(std::path::Path::new(".")).unwrap();
+        disk.flip_bit_at(file, 0, bit).unwrap();
+        let mut byte = [0];
+        disk.read_at(file, 0, &mut byte).unwrap();
+        assert_eq!(byte[0], 1 << bit);
+        assert!(disk.flip_bit_at(file, 0, 8).is_err());
+        disk.crash().unwrap().read_at(file, 0, &mut byte).unwrap();
+        assert_eq!(byte[0], 1 << bit);
+    }
+}
+
 use std::io::ErrorKind;
 use std::path::Path;
 use std::sync::Arc;
