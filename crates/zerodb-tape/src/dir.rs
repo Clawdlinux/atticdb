@@ -181,4 +181,23 @@ impl DataDir {
     pub fn segment_path(&self, id: u64) -> PathBuf {
         self.path.join(format!("seg-{id:016}.zdb"))
     }
+
+    /// Preallocates a segment and persists its name before installing the manifest.
+    pub fn prepare_next_segment(&mut self, size: u64) -> Result<u64> {
+        let mut id = self.segments.last().copied().unwrap_or(0);
+        loop {
+            id = id.checked_add(1).ok_or_else(|| Error::InvalidFrame("segment overflow".into()))?;
+            if !self.io.exists(&self.segment_path(id))? {
+                break;
+            }
+        }
+        let file = Handle::create(self.io.clone(), &self.segment_path(id))?;
+        self.io.set_len(file.id, size)?;
+        self.io.sync_data(file.id)?;
+        self.io.sync_dir(&self.path)?;
+        let mut segments = self.segments.clone();
+        segments.push(id);
+        self.install_manifest(&segments)?;
+        Ok(id)
+    }
 }

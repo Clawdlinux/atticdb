@@ -1,0 +1,84 @@
+//! Inline segment preparation and whole-transaction placement.
+
+use crate::dir::{DataDir, Handle};
+use crate::{Error, Result};
+use std::collections::{BTreeMap, BTreeSet};
+
+/// Default preallocated segment length.
+pub const DEFAULT_SEGMENT_SIZE: u64 = 64 * 1024 * 1024;
+
+/// Owns segment handles and tracks every file requiring sync.
+pub struct SegmentWriter {
+    pub(crate) dir: DataDir,
+    files: BTreeMap<u64, Handle>,
+    dirty: BTreeSet<u64>,
+    active: u64,
+    offset: u64,
+    size: u64,
+}
+
+impl std::fmt::Debug for SegmentWriter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SegmentWriter")
+            .field("active", &self.active)
+            .field("offset", &self.offset)
+            .field("dirty", &self.dirty)
+            .finish()
+    }
+}
+
+impl SegmentWriter {
+    /// Opens the last prepared segment at its recovered transaction boundary.
+    pub fn new(mut dir: DataDir, size: u64, offset: u64) -> Result<Self> {
+        if size == 0 || offset > size {
+            return Err(Error::InvalidFrame("invalid segment size or offset".into()));
+        }
+        let active = match dir.segments().last().copied() {
+            Some(id) => id,
+            None => dir.prepare_next_segment(size)?,
+        };
+        let file = Handle::open(dir.io.clone(), &dir.segment_path(active))?;
+        if dir.io.len(file.id)? != size {
+            return Err(Error::InvalidFrame("segment size differs from options".into()));
+        }
+        Ok(Self {
+            dir,
+            files: BTreeMap::from([(active, file)]),
+            dirty: BTreeSet::new(),
+            active,
+            offset,
+            size,
+        })
+    }
+
+    /// Rolls before writing if needed. Returns the segment and starting offset.
+    pub fn write_batch(&mut self, bytes: &[u8]) -> Result<(u64, u64)> {
+        if bytes.len() as u64 > self.size {
+            return Err(Error::BatchTooLarge);
+        }
+        if bytes.len() as u64 > self.size - self.offset {
+            let id = self.dir.prepare_next_segment(self.size)?;
+            let file = Handle::open(self.dir.io.clone(), &self.dir.segment_path(id))?;
+            self.files.insert(id, file);
+            self.active = id;
+            self.offset = 0;
+        }
+        let file = self.files.get(&self.active).ok_or(Error::Poisoned)?;
+        let start = (self.active, self.offset);
+        self.dirty.insert(self.active);
+        self.dir.io.write_at(file.id, self.offset, bytes)?;
+        self.offset += bytes.len() as u64;
+        Ok(start)
+    }
+
+    /// Syncs all dirty segments, including segments preceding a roll.
+    pub fn sync(&mut self) -> Result<()> {
+        for id in &self.dirty {
+            let file = self.files.get(id).ok_or(Error::Poisoned)?;
+            self.dir.io.sync_data(file.id)?;
+        }
+        self.dirty.clear();
+        self.files.retain(|id, _| *id == self.active);
+        Ok(())
+    }
+}

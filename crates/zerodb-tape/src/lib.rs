@@ -7,6 +7,7 @@ pub mod dir;
 mod error;
 pub mod frame;
 pub mod io;
+pub mod segment;
 pub mod simdisk;
 
 pub use error::{Error, Result};
