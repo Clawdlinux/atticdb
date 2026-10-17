@@ -5,5 +5,6 @@
 pub mod crc32c;
 mod error;
 pub mod io;
+pub mod simdisk;
 
 pub use error::{Error, Result};
