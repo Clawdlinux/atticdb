@@ -840,6 +840,42 @@ fn legacy_checkpoint_magic_falls_back_to_full_replay() {
 }
 
 #[test]
+fn missing_checkpoint_filename_after_crash_replays_the_tape() {
+    let opts = EngineOptions {
+        tape: TapeOptions { segment_size: 64 * 1024, inline_sim: true, ..TapeOptions::default() },
+        ..EngineOptions::default()
+    };
+    let scope = Scope { tenant: "t".into(), agent: "a".into(), session: "s".into() };
+    let turn =
+        NewTurn { role: Role::User, trust: Trust::Untrusted, content: vec![9], meta: vec![] };
+    let mut observed = false;
+    for seed in 0..128 {
+        let io = Arc::new(FaultIo::new(SimDisk::new(seed)));
+        let clock = Arc::new(SimClock::default());
+        let engine = open(io.clone(), clock.clone(), &opts);
+        let receipt = engine.append(&scope, vec![turn.clone(); 2], None).unwrap();
+        // Capture after manifest rename, before the sole checkpoint directory sync.
+        io.cut.store(7, Ordering::SeqCst);
+        engine.checkpoint().unwrap();
+        let image = io.image.lock().unwrap().take().unwrap();
+        drop(engine);
+        if image.exists(Path::new("db/CHECKPOINT")).unwrap()
+            && !image
+                .exists(&Path::new("db").join(format!("ckpt-{}.zdb", receipt.last_lsn)))
+                .unwrap()
+        {
+            let engine = Engine::open_with(Arc::new(image), clock, "db", opts.clone()).unwrap();
+            assert_eq!(engine.metrics().unwrap().checkpoint_warnings, 1);
+            assert_eq!(engine.metrics().unwrap().replayed_records, 3);
+            assert_eq!(engine.window(&scope, WindowQuery::Last(10)).unwrap().len(), 2);
+            observed = true;
+            break;
+        }
+    }
+    assert!(observed, "no missing-reference crash image was exercised");
+}
+
+#[test]
 fn seeded_engine_recovery() {
     let first = std::env::var("ZERODB_SIM_SEED").map_or(0, |v| v.parse::<u64>().unwrap());
     let count = std::env::var("ZERODB_SIM_SEEDS").map_or_else(
