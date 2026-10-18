@@ -968,7 +968,7 @@ mod tests {
             let mut state = shared.lock().unwrap();
             let mut lsn = 1;
             for session in 0..128 {
-                let key = Key(1, "a".into(), session.to_string());
+                let key = Key(1, "a".into(), format!("{session:0128}"));
                 state.index.reserve(&key, 5000).unwrap();
                 for seq in 1..=5000 {
                     lsn += 1;
@@ -978,6 +978,18 @@ mod tests {
             state.published_lsn = lsn;
             state.txn = 1;
             state.chain = (0..8).map(|i| format!("old-{i}")).collect();
+            for age in 2..10_002 {
+                state.dedup.insert(Entry {
+                    key: DedupKey(1, format!("{:0128}", (age - 2) / 5000), format!("{age:0128}")),
+                    digest: [1; 32],
+                    committed: Committed::Durable {
+                        txn: 1,
+                        first_lsn: age,
+                        last_lsn: age,
+                        reply: (((age - 2) % 5000) + 1).to_le_bytes().to_vec(),
+                    },
+                });
+            }
         }
         let io = FaultIo {
             disk: SimDisk::new(30),
@@ -988,14 +1000,29 @@ mod tests {
         };
         save(&io, Path::new("db"), &shared).unwrap();
         let writes = io.writes.lock().unwrap();
-        assert!(writes.iter().map(|(_, len)| len).sum::<usize>() > 4 * 1024 * 1024);
+        assert!(writes.iter().map(|(_, len)| len).sum::<usize>() > 8 * 1024 * 1024);
         assert!(writes.iter().all(|(_, len)| *len <= 4 * 1024 * 1024), "{writes:?}");
         assert!(shared.lock().unwrap().checkpoint_buffer_peak <= BUFFER_LIMIT);
         assert!(shared.lock().unwrap().checkpoint_buffer_peak > BUFFER_LIMIT - 131072);
         assert_eq!(writes[1].0, writes[0].1 as u64);
+        let (backing, expected) = {
+            let state = shared.lock().unwrap();
+            let page = state.index.sessions[&Key(1, "a".into(), format!("{:0128}", 127))]
+                .pages
+                .last()
+                .unwrap();
+            (page.backing.clone().unwrap(), page.slots.clone().unwrap())
+        };
+        assert!(backing.offset > BUFFER_LIMIT as u64);
+        assert_eq!(&read_page(&io, Path::new("db"), &backing).unwrap(), expected.as_ref());
+        eprintln!(
+            "full checkpoint peak_buffer_bytes={} writes={writes:?}",
+            shared.lock().unwrap().checkpoint_buffer_peak
+        );
         let loaded = load_inner(&io.disk, Path::new("db"), &EngineOptions::default()).unwrap();
         assert_eq!(loaded.index.sessions.len(), 128);
         assert!(loaded.index.sessions.values().all(|entry| entry.len == 5000));
+        assert_eq!(loaded.dedup.entries.len(), 10_000);
     }
 
     #[test]
