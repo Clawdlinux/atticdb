@@ -86,3 +86,19 @@ Arbiter disposition: APPROVED once D58 to D61 landed, with carry items listed in
 ## Rejected
 
 - Dependency invalidation of derived facts (expire facts when sources change): deferred to after v0.1. Facts already flag `source_redacted`. Full invalidation needs a dependency graph, which is not needed for G1 or G2.
+
+## Slim v0.1 (0003)
+
+| Id | Decision | Why |
+|---|---|---|
+| D62 | Remove hash chains, salted digests, husks and signing | No user evidence asked for tamper evidence. They complicated compaction and forget |
+| D63 | Remove Fast durability, Cache kind, pub-sub, trust labels from v0.1 | No evidence. Fast mode broke "acked means durable" |
+| D64 | Frame v2: 40-byte header, location-seeded CRC32C | Same integrity class as SQLite and Postgres, without cryptography |
+| D65 | Footer binds `first_lsn`, `record_count`, `records_crc`, `synced_lsn` | Atomicity without batch digests. `synced_lsn` proves corruption above the superblock without a counter |
+| D66 | Dense record LSNs and txns; footers consume no LSN | Simple recovery checks and paged LSN arrays |
+| D67 | Every write carries an `idem_key` | Safe retries over HTTP and MCP, including forget and fact delete |
+| D68 | Facts scoped per tenant, prefixes for agent-local keys | Avoids split-brain facts between agents |
+| D69 | Forget is "hide, not erase" with an LSN cutoff | Evidence asks to stop recall, not forensic erase. Honest naming |
+| D70 | Markdown import deferred | Direct fixes cover the evidence |
+| D71 | `rustix` allowed for preallocation and free space | Replaces D34. Needed for disk-full safety |
+| D72 | Build in steps S1 to S6, each with two independent reviews and real use | Avoid designing ahead of evidence |
