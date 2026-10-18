@@ -263,17 +263,15 @@ impl StateMachine for Machine {
                     && state.index.dirty_bytes > self.opts.hot_page_bytes.saturating_sub(64 * 1024)
             };
             if spill {
-                std::thread::scope(|scope| {
-                    std::thread::Builder::new()
-                        .name("zerodb-checkpoint-recovery".into())
-                        .spawn_scoped(scope, || {
-                            crate::checkpoint::save(self.io.as_ref(), &self.dir, &shared)
-                        })
-                        .map_err(Error::from)?
-                        .join()
-                        .map_err(|_| Error::Poisoned)?
-                        .map_err(tape_error)
-                })?;
+                #[cfg(feature = "sim")]
+                if self.opts.tape.inline_sim {
+                    crate::checkpoint::save(self.io.as_ref(), &self.dir, &shared)
+                        .map_err(tape_error)?;
+                } else {
+                    recovery_checkpoint(self.io.as_ref(), &self.dir, &shared)?;
+                }
+                #[cfg(not(feature = "sim"))]
+                recovery_checkpoint(self.io.as_ref(), &self.dir, &shared)?;
             }
             let mut state = lock(&shared).map_err(tape_error)?;
             self.install(&mut state, record, true).map_err(tape_error)
@@ -285,6 +283,23 @@ impl StateMachine for Machine {
         }
         result
     }
+}
+
+fn recovery_checkpoint(
+    io: &dyn Io,
+    dir: &std::path::Path,
+    shared: &Arc<Mutex<State>>,
+) -> zerodb_tape::Result<()> {
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("zerodb-checkpoint-recovery".into())
+            .spawn_scoped(scope, || crate::checkpoint::save(io, dir, shared))
+            .map_err(Error::from)?
+            .join()
+            .map_err(|_| Error::Poisoned)?
+            .map_err(tape_error)
+    })
+    .map(|_| ())
 }
 
 #[cfg(test)]

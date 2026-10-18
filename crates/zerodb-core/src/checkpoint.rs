@@ -451,8 +451,16 @@ pub(crate) enum Command {
     Stop,
 }
 pub(crate) struct Worker {
-    pub(crate) sender: mpsc::SyncSender<Command>,
+    pub(crate) sender: Option<mpsc::SyncSender<Command>>,
     thread: Option<JoinHandle<()>>,
+    #[cfg(feature = "sim")]
+    inline: Option<Inline>,
+}
+#[cfg(feature = "sim")]
+struct Inline {
+    io: Arc<dyn Io>,
+    dir: PathBuf,
+    state: Arc<Mutex<State>>,
 }
 impl std::fmt::Debug for Worker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -466,6 +474,14 @@ impl Worker {
         state: Arc<Mutex<State>>,
         opts: &EngineOptions,
     ) -> Result<Self> {
+        #[cfg(feature = "sim")]
+        if opts.tape.inline_sim {
+            return Ok(Self {
+                sender: None,
+                thread: None,
+                inline: Some(Inline { io, dir, state }),
+            });
+        }
         let (sender, receiver) = mpsc::sync_channel(16);
         let interval = opts.checkpoint_interval;
         let thread = std::thread::Builder::new()
@@ -489,11 +505,22 @@ impl Worker {
                 }
             })
             .map_err(zerodb_tape::Error::from)?;
-        Ok(Self { sender, thread: Some(thread) })
+        Ok(Self {
+            sender: Some(sender),
+            thread: Some(thread),
+            #[cfg(feature = "sim")]
+            inline: None,
+        })
     }
     pub(crate) fn flush(&self) -> Result<u64> {
+        #[cfg(feature = "sim")]
+        if let Some(inline) = &self.inline {
+            return save(inline.io.as_ref(), &inline.dir, &inline.state);
+        }
         let (sender, receiver) = mpsc::sync_channel(1);
         self.sender
+            .as_ref()
+            .ok_or_else(|| EngineError::from(zerodb_tape::Error::Poisoned))?
             .send(Command::Flush(sender))
             .map_err(|_| EngineError::from(zerodb_tape::Error::Poisoned))?;
         receiver.recv().map_err(|_| EngineError::from(zerodb_tape::Error::Poisoned))?
@@ -501,7 +528,9 @@ impl Worker {
 }
 impl Drop for Worker {
     fn drop(&mut self) {
-        let _ = self.sender.send(Command::Stop);
+        if let Some(sender) = &self.sender {
+            let _ = sender.send(Command::Stop);
+        }
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }

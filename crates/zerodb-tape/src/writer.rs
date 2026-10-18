@@ -101,6 +101,9 @@ pub struct TapeOptions {
     /// Accounting includes headers and footers. A group can exceed this threshold before its step ends.
     /// Segment rolls also force sync, regardless of this threshold.
     pub max_unpublished_bytes: Option<u64>,
+    /// Runs the writer inline with fixed salts. Only for deterministic simulations.
+    #[cfg(feature = "sim")]
+    pub inline_sim: bool,
 }
 
 impl Default for TapeOptions {
@@ -110,6 +113,8 @@ impl Default for TapeOptions {
             server_address: None,
             replay_from_lsn: 0,
             max_unpublished_bytes: None,
+            #[cfg(feature = "sim")]
+            inline_sim: false,
         }
     }
 }
@@ -637,6 +642,8 @@ pub struct Tape<S: StateMachine = NoopStateMachine> {
     thread: Option<JoinHandle<()>>,
     reads: Arc<ReadState>,
     state_machine: PhantomData<fn() -> S>,
+    #[cfg(feature = "sim")]
+    inline: Option<Mutex<WriterCore<S>>>,
 }
 
 impl<S: StateMachine> std::fmt::Debug for Tape<S> {
@@ -671,8 +678,23 @@ impl<S: StateMachine> Tape<S> {
     where
         S: 'static,
     {
+        #[cfg(feature = "sim")]
+        let inline = opts.inline_sim;
         let (mut core, report) = WriterCore::open_with(state_machine, io, clock, path, opts)?;
         let reads = core.reads.clone();
+        #[cfg(feature = "sim")]
+        if inline {
+            return Ok((
+                Self {
+                    sender: None,
+                    thread: None,
+                    reads,
+                    state_machine: PhantomData,
+                    inline: Some(Mutex::new(core)),
+                },
+                report,
+            ));
+        }
         let (sender, receiver) = mpsc::channel();
         let thread = std::thread::Builder::new().name("zerodb-writer".into()).spawn(move || {
             while let Ok(request) = receiver.recv() {
@@ -686,7 +708,14 @@ impl<S: StateMachine> Tape<S> {
             let _ = core.shutdown();
         })?;
         Ok((
-            Self { sender: Some(sender), thread: Some(thread), reads, state_machine: PhantomData },
+            Self {
+                sender: Some(sender),
+                thread: Some(thread),
+                reads,
+                state_machine: PhantomData,
+                #[cfg(feature = "sim")]
+                inline: None,
+            },
             report,
         ))
     }
@@ -695,6 +724,18 @@ impl<S: StateMachine> Tape<S> {
     pub fn append(&self, batch: Vec<RecordInput>, mode: Durability) -> WriteResult {
         if self.reads.poisoned.load(Ordering::Acquire) {
             return Err(rejected(Error::Poisoned));
+        }
+        #[cfg(feature = "sim")]
+        if let Some(core) = &self.inline {
+            let mut core = core.lock().map_err(|_| rejected(Error::Poisoned))?;
+            let batch = PreparedBatch::with_salts(batch, mode, || Ok([0x51; 16]))?;
+            let (request, receiver) = WriteRequest::new(batch);
+            core.enqueue(request);
+            core.step();
+            let _ = core.update_superblock();
+            return receiver
+                .recv()
+                .map_err(|_| WriteError { kind: Error::Poisoned, outcome: Outcome::Unknown })?;
         }
         let batch = PreparedBatch::with_entropy(batch, mode, os_entropy)?;
         let (request, receiver) = WriteRequest::new(batch);
@@ -730,6 +771,12 @@ impl<S: StateMachine> Tape<S> {
 
 impl<S: StateMachine> Drop for Tape<S> {
     fn drop(&mut self) {
+        #[cfg(feature = "sim")]
+        if let Some(core) = &mut self.inline {
+            if let Ok(core) = core.get_mut() {
+                let _ = core.shutdown();
+            }
+        }
         self.sender.take();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();

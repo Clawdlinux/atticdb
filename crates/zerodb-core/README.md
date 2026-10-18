@@ -142,3 +142,27 @@ The replay counter excludes checkpointed records. It does not measure tape verif
 `Engine::open_with` accepts the tape's `Io` and `Clock` traits for SimDisk tests.
 Real filesystem callers must create the directory before using that method.
 `Engine::open` creates it automatically.
+
+## Deterministic engine simulation
+
+The `sim` feature enables the engine fault harness:
+
+```sh
+cargo test -p zerodb-core --release --features sim --test engine_sim
+ZERODB_SIM_SEEDS=10000 cargo test -p zerodb-core --release --features sim --test engine_sim
+ZERODB_SIM_SEED=19 cargo test -p zerodb-core --release --features sim --test engine_sim -- --nocapture
+```
+
+The default is 500 seeds. `ZERODB_SIM_SEED` selects 1 seed unless `ZERODB_SIM_SEEDS` also sets a count.
+Failures print the seed and reproduction command.
+Each seed runs 3 crash generations across 48 scopes and 4 tenants.
+The oracle checks bytes, dense sequences, retry receipts, and window read counts.
+It also checks transaction atomicity, tenant IDs, and corrupt-checkpoint fallback.
+Sync failures cover errors before persistence and errors after persistence.
+Live reopen preserves failed page-cache writes. Crash reopen uses a captured SimDisk image.
+
+`TapeOptions::inline_sim` disables both worker threads and uses fixed salts.
+It is feature-gated and defaults to false. Never enable it for real storage.
+Explicit seeded checkpoints replace the wall-clock timer.
+Memory-pressure checkpoints and recovery spills also run inline.
+Production defaults retain worker threads and OS entropy.
