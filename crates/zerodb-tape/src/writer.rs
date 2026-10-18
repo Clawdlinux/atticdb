@@ -274,6 +274,8 @@ struct ReadState {
     index: Mutex<BTreeMap<u64, (u64, u64)>>,
     durable_lsn: AtomicU64,
     poisoned: AtomicBool,
+    groups: AtomicU64,
+    grouped_requests: AtomicU64,
 }
 
 impl ReadState {
@@ -406,6 +408,8 @@ impl<S: StateMachine> WriterCore<S> {
             index: Mutex::new(recovered.index),
             durable_lsn: AtomicU64::new(recovered.report.durable_lsn),
             poisoned: AtomicBool::new(false),
+            groups: AtomicU64::new(0),
+            grouped_requests: AtomicU64::new(0),
         });
         if let Some(from) = opts.replay_from_lsn.checked_add(1) {
             for record in reads.scan(from) {
@@ -549,6 +553,10 @@ impl<S: StateMachine> WriterCore<S> {
     ///
     /// Fast-only groups also sync after a roll or when unpublished bytes exceed their configured threshold.
     pub fn step(&mut self) {
+        if !self.queue.is_empty() {
+            self.reads.groups.fetch_add(1, Ordering::Relaxed);
+            self.reads.grouped_requests.fetch_add(self.queue.len() as u64, Ordering::Relaxed);
+        }
         let mut replies = Vec::new();
         while let Some(mut request) = self.queue.pop_front() {
             if self.is_poisoned() {
@@ -893,6 +901,46 @@ impl<S: StateMachine> Tape<S> {
         receiver
             .recv()
             .map_err(|_| WriteError { kind: Error::Poisoned, outcome: Outcome::Unknown })?
+    }
+
+    /// Queues one deterministic request without stepping. Requires inline simulation mode.
+    #[cfg(feature = "sim")]
+    pub fn enqueue_sim(
+        &self,
+        records: Vec<RecordInput>,
+        digest: Option<Digest>,
+    ) -> Result<mpsc::Receiver<WriteResult>> {
+        let mut batch = PreparedBatch::with_salts(records, Durability::Durable, || Ok([0x51; 16]))
+            .map_err(|e| e.kind)?;
+        batch.application_digest = digest;
+        let (request, receiver) = WriteRequest::new(batch);
+        let core = self
+            .inline
+            .as_ref()
+            .ok_or_else(|| Error::Configuration("inline simulation required".into()))?;
+        lock(core)?.enqueue(request);
+        Ok(receiver)
+    }
+
+    /// Commits the queued deterministic group through the production writer state machine.
+    #[cfg(feature = "sim")]
+    pub fn step_sim(&self) -> Result<()> {
+        let core = self
+            .inline
+            .as_ref()
+            .ok_or_else(|| Error::Configuration("inline simulation required".into()))?;
+        let mut core = lock(core)?;
+        core.step();
+        let _ = core.update_superblock();
+        Ok(())
+    }
+
+    /// Returns writer group and request counts, including cached replies and rejections.
+    pub fn group_stats(&self) -> (u64, u64) {
+        (
+            self.reads.groups.load(Ordering::Relaxed),
+            self.reads.grouped_requests.load(Ordering::Relaxed),
+        )
     }
 
     /// Returns the highest record LSN available to durable readers.

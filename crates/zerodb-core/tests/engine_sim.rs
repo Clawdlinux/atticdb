@@ -30,13 +30,15 @@ impl Rng {
 }
 
 // Capture before the caller observes its reply. Later writes cannot alter the crash image.
-#[derive(Debug)]
 struct FaultIo {
     disk: SimDisk,
     cut: AtomicUsize,
     image: Mutex<Option<SimDisk>>,
     fail_before: AtomicBool,
     fail_after: AtomicBool,
+    checkpoint_at: AtomicUsize,
+    checkpoint: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    syncs: AtomicUsize,
 }
 impl FaultIo {
     fn new(disk: SimDisk) -> Self {
@@ -46,15 +48,27 @@ impl FaultIo {
             image: Mutex::new(None),
             fail_before: AtomicBool::new(false),
             fail_after: AtomicBool::new(false),
+            checkpoint_at: AtomicUsize::new(0),
+            checkpoint: Mutex::new(None),
+            syncs: AtomicUsize::new(0),
         }
     }
     fn after<T>(&self, result: Result<T>) -> Result<T> {
         if self.cut.load(Ordering::SeqCst) > 0 && self.cut.fetch_sub(1, Ordering::SeqCst) == 1 {
             *self.image.lock().unwrap() = Some(self.disk.crash().unwrap());
         }
+        if self.checkpoint_at.load(Ordering::SeqCst) > 0
+            && self.checkpoint_at.fetch_sub(1, Ordering::SeqCst) == 1
+        {
+            let callback = self.checkpoint.lock().unwrap().take();
+            if let Some(callback) = callback {
+                callback();
+            }
+        }
         result
     }
     fn sync(&self, sync: impl FnOnce() -> Result<()>) -> Result<()> {
+        self.syncs.fetch_add(1, Ordering::SeqCst);
         if self.fail_before.swap(false, Ordering::SeqCst) {
             self.disk.fail_next_sync()?;
         }
@@ -116,10 +130,11 @@ impl Io for FaultIo {
 struct Batch {
     scope: usize,
     turns: Vec<NewTurn>,
-    key: String,
+    key: Option<String>,
     receipt: Option<Appended>,
     time: u64,
 }
+#[derive(Clone)]
 struct Oracle {
     scopes: Vec<Scope>,
     history: Vec<Vec<Turn>>,
@@ -189,7 +204,7 @@ impl Oracle {
         disk: &SimDisk,
         clock: Arc<SimClock>,
         opts: &EngineOptions,
-        pending: Option<usize>,
+        pending: &[usize],
     ) -> u64 {
         let (tape, _) = Tape::open(Arc::new(disk.clone()), clock, "db", opts.tape.clone()).unwrap();
         let mut actual = vec![Vec::new(); self.scopes.len()];
@@ -220,10 +235,10 @@ impl Oracle {
                         && s.session == decoded.session_id
                 })
                 .unwrap();
-            let key = decoded.idem_key.as_ref().unwrap();
-            let batch =
-                self.batches.iter().position(|b| b.scope == scope && &b.key == key).unwrap();
-            assert!(self.batches[batch].receipt.is_some() || pending == Some(batch));
+            let batch = u64::from_le_bytes(decoded.turn.meta[..8].try_into().unwrap()) as usize;
+            assert_eq!(self.batches[batch].scope, scope);
+            assert_eq!(self.batches[batch].key, decoded.idem_key);
+            assert!(self.batches[batch].receipt.is_some() || pending.contains(&batch));
             let turns = transactions.entry(record.txn).or_default();
             let input = &self.batches[batch].turns[turns.len()];
             assert_eq!(*input, decoded.turn);
@@ -256,7 +271,7 @@ impl Oracle {
             if let Some(expected) = &batch.receipt {
                 assert_eq!(*expected, receipt);
             } else {
-                assert_eq!(pending, Some(index));
+                assert!(pending.contains(&index));
                 self.apply(index, receipt);
             }
         }
@@ -272,14 +287,67 @@ fn open(io: Arc<FaultIo>, clock: Arc<SimClock>, opts: &EngineOptions) -> Engine 
 fn retry(engine: &Engine, oracle: &mut Oracle, index: usize) {
     let batch = &oracle.batches[index];
     let before = engine.metrics().unwrap().durable_lsn;
-    let receipt =
-        engine.append(&oracle.scopes[batch.scope], batch.turns.clone(), Some(&batch.key)).unwrap();
+    let receipt = engine
+        .append(&oracle.scopes[batch.scope], batch.turns.clone(), batch.key.as_deref())
+        .unwrap();
     if let Some(expected) = &batch.receipt {
         assert_eq!(*expected, receipt);
         assert_eq!(engine.metrics().unwrap().durable_lsn, before);
     } else {
         oracle.apply(index, receipt);
     }
+}
+
+fn random_batch(rng: &mut Rng, index: usize, scope: usize, time: u64) -> Batch {
+    let turns = (0..1 + rng.below(4))
+        .map(|_| {
+            let size = [0, 1, 31, 256, 1024, 8192][rng.below(6)];
+            let meta = rng.below(64);
+            let mut metadata = (index as u64).to_le_bytes().to_vec();
+            metadata.extend(rng.bytes(meta));
+            NewTurn {
+                role: [Role::System, Role::User, Role::Assistant, Role::Tool][rng.below(4)],
+                trust: if rng.below(2) == 0 { Trust::Trusted } else { Trust::Untrusted },
+                content: rng.bytes(size),
+                meta: metadata,
+            }
+        })
+        .collect();
+    Batch {
+        scope,
+        turns,
+        key: if rng.below(3) == 0 { None } else { Some(format!("key-{index}")) },
+        receipt: None,
+        time,
+    }
+}
+
+fn corrupt_page_checksum(disk: &SimDisk, rng: &mut Rng) {
+    let mut pages = Vec::new();
+    for path in disk
+        .list(Path::new("db"))
+        .unwrap()
+        .into_iter()
+        .filter(|p| p.file_name().unwrap().to_str().unwrap().starts_with("ckpt-"))
+    {
+        let file = disk.open(&path).unwrap();
+        let mut offset = 0;
+        while offset < disk.len(file).unwrap() {
+            let mut header = [0; 9];
+            assert_eq!(disk.read_at(file, offset, &mut header).unwrap(), header.len());
+            let len = u32::from_le_bytes(header[4..8].try_into().unwrap());
+            if header[8] == 2 {
+                pages.push((path.clone(), offset));
+            }
+            offset += u64::from(len);
+        }
+        disk.close(file).unwrap();
+    }
+    assert!(!pages.is_empty());
+    let (path, offset) = &pages[rng.below(pages.len())];
+    let file = disk.open(path).unwrap();
+    disk.flip_bit_at(file, offset + rng.below(4) as u64, rng.below(8) as u8).unwrap();
+    disk.close(file).unwrap();
 }
 
 fn run_seed(seed: u64) -> Vec<Vec<Turn>> {
@@ -303,14 +371,14 @@ fn run_seed(seed: u64) -> Vec<Vec<Turn>> {
             }
             if !oracle.batches.is_empty() && rng.below(5) == 0 {
                 let index = rng.below(oracle.batches.len());
-                if oracle.batches[index].receipt.is_some() {
+                if oracle.batches[index].receipt.is_some() && oracle.batches[index].key.is_some() {
                     retry(&engine, &mut oracle, index);
                     let batch = &oracle.batches[index];
                     let mut changed = batch.turns.clone();
                     changed[0].content.push(0xff);
                     let before = engine.metrics().unwrap().durable_lsn;
                     let error = engine
-                        .append(&oracle.scopes[batch.scope], changed, Some(&batch.key))
+                        .append(&oracle.scopes[batch.scope], changed, batch.key.as_deref())
                         .unwrap_err();
                     assert_eq!(error.outcome, Outcome::NotCommitted);
                     assert!(matches!(error.kind, ErrorKind::IdempotencyConflict));
@@ -318,26 +386,8 @@ fn run_seed(seed: u64) -> Vec<Vec<Turn>> {
                 }
             }
             let scope = if rng.below(3) == 0 { 0 } else { rng.below(oracle.scopes.len()) };
-            let turns = (0..1 + rng.below(4))
-                .map(|_| {
-                    let size = [0, 1, 31, 256, 1024, 8192][rng.below(6)];
-                    let meta = rng.below(64);
-                    NewTurn {
-                        role: [Role::System, Role::User, Role::Assistant, Role::Tool][rng.below(4)],
-                        trust: if rng.below(2) == 0 { Trust::Trusted } else { Trust::Untrusted },
-                        content: rng.bytes(size),
-                        meta: rng.bytes(meta),
-                    }
-                })
-                .collect::<Vec<_>>();
             let index = oracle.batches.len();
-            let batch = Batch {
-                scope,
-                turns,
-                key: format!("key-{index}"),
-                receipt: None,
-                time: clock.now_ns(),
-            };
+            let batch = random_batch(&mut rng, index, scope, clock.now_ns());
             // Every seed covers failed sync before and after persistence, plus live reopen.
             let fault = step == 12 || step == 28;
             if fault {
@@ -352,16 +402,25 @@ fn run_seed(seed: u64) -> Vec<Vec<Turn>> {
                 io.cut.store(1 + rng.below(6), Ordering::SeqCst);
             }
             let result =
-                engine.append(&oracle.scopes[scope], batch.turns.clone(), Some(&batch.key));
+                engine.append(&oracle.scopes[scope], batch.turns.clone(), batch.key.as_deref());
             oracle.batches.push(batch);
             let image = io.image.lock().unwrap().take();
-            let mut pending = None;
             if image.is_some() {
-                pending = Some(index);
+                if let Ok(receipt) = &result {
+                    let mut after_ack = oracle.clone();
+                    after_ack.apply(index, receipt.clone());
+                    after_ack.recover(&io.disk.crash().unwrap(), clock.clone(), &opts, &[]);
+                }
+            }
+            let mut pending = Vec::new();
+            if image.is_some() {
+                if result.is_ok() || result.as_ref().is_err_and(|e| e.outcome == Outcome::Unknown) {
+                    pending.push(index);
+                }
             } else {
                 match result {
                     Ok(receipt) => oracle.apply(index, receipt),
-                    Err(error) if error.outcome == Outcome::Unknown => pending = Some(index),
+                    Err(error) if error.outcome == Outcome::Unknown => pending.push(index),
                     Err(error) => {
                         assert_eq!(error.outcome, Outcome::NotCommitted);
                         assert!(matches!(
@@ -384,12 +443,16 @@ fn run_seed(seed: u64) -> Vec<Vec<Turn>> {
                     }
                 });
                 drop(engine);
-                oracle.recover(&next, clock.clone(), &opts, pending);
+                oracle.recover(&next, clock.clone(), &opts, &pending);
                 io = Arc::new(FaultIo::new(next));
                 engine = open(io.clone(), clock.clone(), &opts);
                 oracle.verify(&engine, &mut rng);
                 // Unknown retries must either return the original receipt or install exactly once.
-                if let Some(index) = pending {
+                for index in pending
+                    .into_iter()
+                    .filter(|&i| oracle.batches[i].key.is_some())
+                    .collect::<Vec<_>>()
+                {
                     oracle.batches[index].time = if oracle.batches[index].receipt.is_none() {
                         clock.now_ns()
                     } else {
@@ -415,35 +478,271 @@ fn run_seed(seed: u64) -> Vec<Vec<Turn>> {
         io.cut.store(0, Ordering::SeqCst);
         let next = io.image.lock().unwrap().take().unwrap_or_else(|| io.disk.crash().unwrap());
         drop(engine);
-        oracle.recover(&next, clock.clone(), &opts, None);
+        oracle.recover(&next, clock.clone(), &opts, &[]);
         io = Arc::new(FaultIo::new(next));
         engine = open(io.clone(), clock.clone(), &opts);
         oracle.verify(&engine, &mut rng);
         engine.checkpoint().unwrap();
         drop(engine);
         // Checkpoints are derived data. Corrupt a referenced file and demand full replay.
-        let files = io.disk.list(Path::new("db")).unwrap();
-        let checkpoints = files
-            .iter()
-            .filter(|p| p.file_name().unwrap().to_str().unwrap().starts_with("ckpt-"))
-            .collect::<Vec<_>>();
-        assert!(!checkpoints.is_empty());
-        let file = io.disk.open(checkpoints[rng.below(checkpoints.len())]).unwrap();
-        io.disk.flip_bit(file, 0).unwrap();
-        io.disk.close(file).unwrap();
-        let records = oracle.recover(&io.disk, clock.clone(), &opts, None);
+        corrupt_page_checksum(&io.disk, &mut rng);
+        let records = oracle.recover(&io.disk, clock.clone(), &opts, &[]);
         engine = open(io.clone(), clock.clone(), &opts);
         let metrics = engine.metrics().unwrap();
         assert!(metrics.checkpoint_warnings > 0, "generation={generation}");
         assert_eq!(metrics.replayed_records, records);
         oracle.verify(&engine, &mut rng);
         for index in 0..oracle.batches.len() {
-            if oracle.batches[index].receipt.is_some() && rng.below(5) == 0 {
+            if oracle.batches[index].receipt.is_some()
+                && oracle.batches[index].key.is_some()
+                && rng.below(5) == 0
+            {
                 retry(&engine, &mut oracle, index);
             }
         }
     }
+    let mut history = oracle.history;
+    history.extend(grouped_seed(seed));
+    history
+}
+
+fn grouped_seed(seed: u64) -> Vec<Vec<Turn>> {
+    let mut rng = Rng(seed ^ 0x47b3_6f21_91e2_450a);
+    let opts = EngineOptions {
+        tape: TapeOptions { segment_size: 64 * 1024, inline_sim: true, ..TapeOptions::default() },
+        checkpoint_bytes: 8192,
+        ..EngineOptions::default()
+    };
+    let clock = Arc::new(SimClock::default());
+    let mut io = Arc::new(FaultIo::new(SimDisk::new(seed)));
+    let mut engine = Arc::new(open(io.clone(), clock.clone(), &opts));
+    let mut oracle = Oracle::new();
+    for scope in 0..4 {
+        let index = oracle.batches.len();
+        let mut batch = random_batch(&mut rng, index, scope, clock.now_ns());
+        batch.turns.truncate(1);
+        let receipt = engine
+            .append(&oracle.scopes[scope], batch.turns.clone(), batch.key.as_deref())
+            .unwrap();
+        oracle.batches.push(batch);
+        oracle.apply(index, receipt);
+    }
+    for generation in 0..3 {
+        for group in 0..8 {
+            clock.advance(1 + rng.below(2_000_000_000) as u64);
+            let count = 2 + rng.below(3);
+            let mut queued = Vec::new();
+            for position in 0..count {
+                let index = oracle.batches.len();
+                let scope = rng.below(oracle.scopes.len());
+                let mut batch = random_batch(&mut rng, index, scope, clock.now_ns());
+                if position == 0 {
+                    batch.key = Some(format!("key-{index}"));
+                }
+                queued.push((
+                    index,
+                    false,
+                    engine
+                        .enqueue_sim(
+                            &oracle.scopes[scope],
+                            batch.turns.clone(),
+                            batch.key.as_deref(),
+                        )
+                        .unwrap(),
+                ));
+                if position == 0 {
+                    queued.push((
+                        index,
+                        false,
+                        engine
+                            .enqueue_sim(
+                                &oracle.scopes[scope],
+                                batch.turns.clone(),
+                                batch.key.as_deref(),
+                            )
+                            .unwrap(),
+                    ));
+                    let mut conflict = batch.turns.clone();
+                    conflict[0].content.push(0xff);
+                    queued.push((
+                        index,
+                        true,
+                        engine
+                            .enqueue_sim(&oracle.scopes[scope], conflict, batch.key.as_deref())
+                            .unwrap(),
+                    ));
+                }
+                oracle.batches.push(batch);
+            }
+            let fault = group == 6;
+            let cut = group == 7;
+            let checkpoint_fired = Arc::new(AtomicBool::new(false));
+            if !fault && !cut {
+                let weak = Arc::downgrade(&engine);
+                let fired = checkpoint_fired.clone();
+                let boundary = engine.metrics().unwrap().durable_lsn;
+                *io.checkpoint.lock().unwrap() = Some(Box::new(move || {
+                    let engine = weak.upgrade().unwrap();
+                    assert_eq!(engine.metrics().unwrap().durable_lsn, boundary);
+                    assert_eq!(engine.checkpoint().unwrap(), boundary);
+                    fired.store(true, Ordering::SeqCst);
+                }));
+                io.checkpoint_at.store(1 + rng.below(count), Ordering::SeqCst);
+            } else if fault {
+                if generation % 2 == 0 {
+                    io.fail_before.store(true, Ordering::SeqCst);
+                } else {
+                    io.fail_after.store(true, Ordering::SeqCst);
+                }
+            } else {
+                io.cut.store(1 + rng.below(4), Ordering::SeqCst);
+            }
+            engine.step_sim().unwrap();
+            let results = queued
+                .into_iter()
+                .map(|(index, conflict, reply)| (index, conflict, reply.finish()))
+                .collect::<Vec<_>>();
+            if !fault && !cut {
+                assert!(checkpoint_fired.load(Ordering::SeqCst));
+            }
+            io.checkpoint_at.store(0, Ordering::SeqCst);
+            io.checkpoint.lock().unwrap().take();
+            io.cut.store(0, Ordering::SeqCst);
+            io.fail_before.store(false, Ordering::SeqCst);
+            io.fail_after.store(false, Ordering::SeqCst);
+            let image = io.image.lock().unwrap().take();
+            if image.is_some() {
+                let mut after_ack = oracle.clone();
+                let mut uncertain = Vec::new();
+                for (index, conflict, result) in &results {
+                    if *conflict {
+                        continue;
+                    }
+                    if let Ok(receipt) = result {
+                        if let Some(original) = &after_ack.batches[*index].receipt {
+                            assert_eq!(original, receipt);
+                        } else {
+                            after_ack.apply(*index, receipt.clone());
+                        }
+                    } else if result.as_ref().is_err_and(|e| e.outcome == Outcome::Unknown) {
+                        uncertain.push(*index);
+                    }
+                }
+                // Acknowledgements after the earlier cut must survive a later, post-return crash.
+                after_ack.recover(&io.disk.crash().unwrap(), clock.clone(), &opts, &uncertain);
+            }
+            let mut pending = Vec::new();
+            for (index, conflict, result) in results {
+                if conflict {
+                    let error = result.unwrap_err();
+                    assert_eq!(error.outcome, Outcome::NotCommitted);
+                    if !fault {
+                        assert!(matches!(error.kind, ErrorKind::IdempotencyConflict));
+                    }
+                    continue;
+                }
+                match result {
+                    Ok(receipt) if image.is_none() => {
+                        if let Some(original) = &oracle.batches[index].receipt {
+                            assert_eq!(*original, receipt);
+                        } else {
+                            oracle.apply(index, receipt);
+                        }
+                    }
+                    Ok(_) => pending.push(index),
+                    Err(error) if error.outcome == Outcome::Unknown => pending.push(index),
+                    Err(error) => assert_eq!(error.outcome, Outcome::NotCommitted),
+                }
+            }
+            pending.sort_unstable();
+            pending.dedup();
+            if fault || cut {
+                let next = image.unwrap_or_else(|| {
+                    if cut {
+                        io.disk.crash().unwrap()
+                    } else {
+                        io.disk.clone()
+                    }
+                });
+                drop(engine);
+                oracle.recover(&next, clock.clone(), &opts, &pending);
+                io = Arc::new(FaultIo::new(next));
+                engine = Arc::new(open(io.clone(), clock.clone(), &opts));
+                oracle.verify(&engine, &mut rng);
+                for index in pending {
+                    if oracle.batches[index].key.is_some() {
+                        retry(&engine, &mut oracle, index);
+                        retry(&engine, &mut oracle, index);
+                    }
+                }
+            } else if rng.below(2) == 0 {
+                engine.checkpoint_step_sim().unwrap();
+            }
+        }
+    }
     oracle.history
+}
+
+#[test]
+fn inline_group_publishes_once_and_replies_with_original_sequences() {
+    let io = Arc::new(FaultIo::new(SimDisk::new(19)));
+    let opts = EngineOptions {
+        tape: TapeOptions { inline_sim: true, ..TapeOptions::default() },
+        ..EngineOptions::default()
+    };
+    let engine = open(io.clone(), Arc::new(SimClock::default()), &opts);
+    let scope = Scope { tenant: "t".into(), agent: "a".into(), session: "s".into() };
+    let turn =
+        NewTurn { role: Role::User, trust: Trust::Untrusted, content: vec![1], meta: vec![] };
+    engine.append(&scope, vec![turn.clone()], None).unwrap();
+    let before = engine.metrics().unwrap();
+    let syncs = io.syncs.load(Ordering::SeqCst);
+    let first = engine.enqueue_sim(&scope, vec![turn.clone()], Some("same-group")).unwrap();
+    let duplicate = engine.enqueue_sim(&scope, vec![turn.clone()], Some("same-group")).unwrap();
+    let keyless = engine.enqueue_sim(&scope, vec![turn], None).unwrap();
+    assert_eq!(engine.metrics().unwrap().durable_lsn, before.durable_lsn);
+    engine.step_sim().unwrap();
+    let first = first.finish().unwrap();
+    assert_eq!(first.seqs, vec![2]);
+    assert_eq!(duplicate.finish().unwrap(), first);
+    assert_eq!(keyless.finish().unwrap().seqs, vec![3]);
+    assert_eq!(io.syncs.load(Ordering::SeqCst) - syncs, 1);
+    assert_eq!(engine.metrics().unwrap().writer_groups - before.writer_groups, 1);
+    assert_eq!(engine.metrics().unwrap().writer_group_requests - before.writer_group_requests, 3);
+    assert_eq!(engine.window(&scope, WindowQuery::Last(10)).unwrap().len(), 3);
+}
+
+#[test]
+fn oracle_rejects_partial_unknown_batches_and_missing_acknowledgements() {
+    for partial in [false, true] {
+        let opts = EngineOptions {
+            tape: TapeOptions { inline_sim: true, ..TapeOptions::default() },
+            ..EngineOptions::default()
+        };
+        let clock = Arc::new(SimClock::default());
+        let io = Arc::new(FaultIo::new(SimDisk::new(21)));
+        let engine = open(io.clone(), clock.clone(), &opts);
+        let before = io.disk.crash().unwrap();
+        let mut oracle = Oracle::new();
+        let mut batch = random_batch(&mut Rng(21), 0, 0, 0);
+        batch.turns.truncate(1);
+        let receipt =
+            engine.append(&oracle.scopes[0], batch.turns.clone(), batch.key.as_deref()).unwrap();
+        if partial {
+            batch.turns.push(batch.turns[0].clone());
+        }
+        oracle.batches.push(batch);
+        if !partial {
+            oracle.apply(0, receipt);
+        }
+        let image = if partial { io.disk.crash().unwrap() } else { before };
+        drop(engine);
+        let pending = if partial { vec![0] } else { vec![] };
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            oracle.recover(&image, clock, &opts, &pending);
+        }))
+        .is_err());
+    }
 }
 
 #[test]

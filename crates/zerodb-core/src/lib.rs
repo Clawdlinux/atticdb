@@ -14,6 +14,8 @@ mod state;
 mod tenant;
 pub mod turn;
 
+#[cfg(feature = "sim")]
+pub use engine::SimAppend;
 pub use engine::{Appended, Engine, Metrics, Scope, Turn, WindowQuery};
 pub use error::{EngineError, ErrorKind};
 pub use options::EngineOptions;

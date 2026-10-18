@@ -205,6 +205,11 @@ fn tape(iterations: usize, batch: usize, n: usize) -> Stats {
         },
         |_, _| {},
     );
+    let (groups, requests) = tape.group_stats();
+    println!(
+        "tape: writer_groups={groups} mean_requests_per_group={:.3}",
+        requests as f64 / groups as f64
+    );
     report("tape", elapsed, n, samples)
 }
 
@@ -226,6 +231,7 @@ fn engine(iterations: usize, batch: usize, n: usize) -> Stats {
     let scopes = (0..WRITERS)
         .map(|w| (0..SESSIONS).map(|s| scope(w, s)).collect::<Vec<_>>())
         .collect::<Vec<_>>();
+    let warmup = engine.metrics().unwrap();
     let (elapsed, samples, mut reads, queries) = writers(
         iterations,
         READERS,
@@ -245,6 +251,12 @@ fn engine(iterations: usize, batch: usize, n: usize) -> Stats {
     latency("engine/window", &mut reads);
     let p99 = report("engine", elapsed, n, samples);
     let metrics = engine.metrics().unwrap();
+    println!(
+        "engine: writer_groups={} mean_requests_per_group={:.3}",
+        metrics.writer_groups - warmup.writer_groups,
+        (metrics.writer_group_requests - warmup.writer_group_requests) as f64
+            / (metrics.writer_groups - warmup.writer_groups) as f64
+    );
     println!(
         "engine: checkpoint_watermark={} checkpoint_files={} checkpoint_saves={} snapshot_lock_max_us={:.3} state_lock_max_us={:.3}",
         metrics.checkpoint_watermark,

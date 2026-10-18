@@ -80,6 +80,10 @@ pub struct Metrics {
     pub checkpoint_files: usize,
     /// Completed checkpoint installs during this open.
     pub checkpoint_saves: u64,
+    /// Writer steps containing queued requests.
+    pub writer_groups: u64,
+    /// Requests handled by those steps, including cached replies and rejections.
+    pub writer_group_requests: u64,
     /// Application records replayed during this open.
     pub replayed_records: u64,
     /// Checkpoints rejected during this open.
@@ -251,39 +255,96 @@ impl Engine {
                 }
                 Err(error) => return Err(error),
                 Ok(Committed::Durable { txn, last_lsn, reply, .. }) => {
-                    return (|| {
-                        if let Some(error) = &lock(&self.state)?.failure {
-                            return Err(error.clone());
-                        }
-                        let seq = u64::from_le_bytes(
-                            reply
-                                .as_slice()
-                                .try_into()
-                                .map_err(|_| EngineError::rejected(ErrorKind::CorruptIndex))?,
-                        );
-                        let count = turns.len() as u64;
-                        let end = seq
-                            .checked_add(count)
-                            .ok_or_else(|| EngineError::rejected(ErrorKind::CorruptIndex))?;
-                        if seq == 0 || last_lsn < count {
-                            return Err(EngineError::rejected(ErrorKind::CorruptIndex));
-                        }
-                        Ok(Appended {
-                            txn,
-                            first_lsn: last_lsn - count + 1,
-                            last_lsn,
-                            seqs: (seq..end).collect(),
-                        })
-                    })()
-                    .map_err(|mut error: EngineError| {
-                        error.outcome = zerodb_tape::Outcome::Committed;
-                        error
-                    });
+                    return self.receipt(turns.len() as u64, txn, last_lsn, &reply);
                 }
                 Ok(Committed::Fast) => unreachable!("turns always use durable acknowledgement"),
             }
         }
         Err(EngineError::rejected(ErrorKind::ResourceExhausted("hot_pages")))
+    }
+
+    fn receipt(&self, count: u64, txn: u64, last_lsn: u64, reply: &[u8]) -> Result<Appended> {
+        (|| {
+            if let Some(error) = &lock(&self.state)?.failure {
+                return Err(error.clone());
+            }
+            let seq = u64::from_le_bytes(
+                reply.try_into().map_err(|_| EngineError::rejected(ErrorKind::CorruptIndex))?,
+            );
+            let end = seq
+                .checked_add(count)
+                .ok_or_else(|| EngineError::rejected(ErrorKind::CorruptIndex))?;
+            if seq == 0 || last_lsn < count {
+                return Err(EngineError::rejected(ErrorKind::CorruptIndex));
+            }
+            Ok(Appended {
+                txn,
+                first_lsn: last_lsn - count + 1,
+                last_lsn,
+                seqs: (seq..end).collect(),
+            })
+        })()
+        .map_err(|mut error: EngineError| {
+            error.outcome = zerodb_tape::Outcome::Committed;
+            error
+        })
+    }
+
+    /// Queues an append for a later inline step. Register its tenant with append first.
+    #[cfg(feature = "sim")]
+    pub fn enqueue_sim(
+        &self,
+        scope: &Scope,
+        turns: Vec<NewTurn>,
+        idem_key: Option<&str>,
+    ) -> Result<SimAppend<'_>> {
+        if turns.is_empty() || scope.tenant.len() > 255 {
+            return Err(EngineError::rejected(ErrorKind::InvalidInput));
+        }
+        let tenant = lock(&self.state)?
+            .tenants
+            .get(&scope.tenant)
+            .ok_or_else(|| EngineError::rejected(ErrorKind::InvalidInput))?;
+        let records = turns
+            .iter()
+            .map(|turn| {
+                Ok(RecordInput {
+                    kind: Kind::Turn,
+                    tenant_id: tenant,
+                    content: encode(&scope.agent, &scope.session, 0, turn, idem_key)?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let digest = idem_key.map(|_| {
+            let mut hash = blake3::Hasher::new();
+            for record in &records {
+                hash.update(&(record.content.len() as u32).to_le_bytes());
+                hash.update(&record.content);
+            }
+            *hash.finalize().as_bytes()
+        });
+        let key = Key(tenant, scope.agent.clone(), scope.session.clone());
+        let pin = match self.pin(key.clone()) {
+            Err(EngineError { kind: ErrorKind::ResourceExhausted("hot_pages"), .. }) => {
+                self.worker.flush()?;
+                self.pin(key)?
+            }
+            result => result?,
+        };
+        let reply = self.tape.enqueue_sim(records, digest)?;
+        Ok(SimAppend { engine: self, _pin: pin, count: turns.len() as u64, reply })
+    }
+
+    /// Runs the queued inline group. Replies become available after sync and publication.
+    #[cfg(feature = "sim")]
+    pub fn step_sim(&self) -> Result<()> {
+        self.tape.step_sim().map_err(EngineError::from)
+    }
+
+    /// Services one pending byte-threshold checkpoint through the production wake logic.
+    #[cfg(feature = "sim")]
+    pub fn checkpoint_step_sim(&self) -> Result<u64> {
+        self.worker.wake_sim()
     }
 
     fn pin(&self, key: Key) -> Result<Pin<'_>> {
@@ -427,6 +488,8 @@ impl Engine {
             checkpoint_watermark: state.watermark,
             checkpoint_files: state.chain.len(),
             checkpoint_saves: state.checkpoint_saves,
+            writer_groups: self.tape.group_stats().0,
+            writer_group_requests: self.tape.group_stats().1,
             replayed_records: state.replayed,
             checkpoint_warnings: state.warnings,
             checkpoint_snapshot_lock_ns: state.snapshot_lock_ns,
@@ -436,6 +499,42 @@ impl Engine {
         })
     }
 }
+
+/// One queued simulation append. Finish it only after stepping its engine.
+#[cfg(feature = "sim")]
+pub struct SimAppend<'a> {
+    engine: &'a Engine,
+    _pin: Pin<'a>,
+    count: u64,
+    reply: std::sync::mpsc::Receiver<zerodb_tape::WriteResult>,
+}
+#[cfg(feature = "sim")]
+impl std::fmt::Debug for SimAppend<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SimAppend").field("count", &self.count).finish_non_exhaustive()
+    }
+}
+#[cfg(feature = "sim")]
+impl SimAppend<'_> {
+    /// Receives the post-publication receipt without reading the tape.
+    pub fn finish(self) -> Result<Appended> {
+        let reply = self
+            .reply
+            .recv()
+            .map_err(|_| EngineError {
+                kind: ErrorKind::Poisoned,
+                outcome: zerodb_tape::Outcome::Unknown,
+            })?
+            .map_err(EngineError::write)?;
+        match reply {
+            Committed::Durable { txn, last_lsn, reply, .. } => {
+                self.engine.receipt(self.count, txn, last_lsn, &reply)
+            }
+            Committed::Fast => unreachable!("engine writes require durable acknowledgements"),
+        }
+    }
+}
+
 struct Pin<'a> {
     engine: &'a Engine,
     key: Key,

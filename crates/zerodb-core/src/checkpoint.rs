@@ -498,6 +498,7 @@ struct Inline {
     io: Arc<dyn Io>,
     dir: PathBuf,
     state: Arc<Mutex<State>>,
+    threshold: u64,
 }
 impl std::fmt::Debug for Worker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -516,7 +517,7 @@ impl Worker {
             return Ok(Self {
                 sender: None,
                 thread: None,
-                inline: Some(Inline { io, dir, state }),
+                inline: Some(Inline { io, dir, state, threshold: opts.checkpoint_bytes }),
             });
         }
         let (sender, receiver) = mpsc::sync_channel(16);
@@ -560,6 +561,9 @@ impl Worker {
     pub(crate) fn flush(&self) -> Result<u64> {
         #[cfg(feature = "sim")]
         if let Some(inline) = &self.inline {
+            lock(&inline.state)?
+                .checkpoint_pending
+                .store(false, std::sync::atomic::Ordering::Release);
             return save(inline.io.as_ref(), &inline.dir, &inline.state);
         }
         let (sender, receiver) = mpsc::sync_channel(1);
@@ -569,6 +573,17 @@ impl Worker {
             .send(Command::Flush(sender))
             .map_err(|_| EngineError::from(zerodb_tape::Error::Poisoned))?;
         receiver.recv().map_err(|_| EngineError::from(zerodb_tape::Error::Poisoned))?
+    }
+    #[cfg(feature = "sim")]
+    pub(crate) fn wake_sim(&self) -> Result<u64> {
+        let inline = self
+            .inline
+            .as_ref()
+            .ok_or_else(|| EngineError::rejected(crate::ErrorKind::InvalidInput))?;
+        if !lock(&inline.state)?.checkpoint_pending.load(std::sync::atomic::Ordering::Acquire) {
+            return Ok(lock(&inline.state)?.watermark);
+        }
+        wake(inline.io.as_ref(), &inline.dir, &inline.state, inline.threshold)
     }
 }
 impl Drop for Worker {
