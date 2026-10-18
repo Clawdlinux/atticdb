@@ -9,11 +9,13 @@ use crate::recovery::{recover, RecoveryReport};
 use crate::segment::{SegmentWriter, DEFAULT_SEGMENT_SIZE};
 use crate::{CommittedRecord, Error, NoopStateMachine, Prepare, Result, StateMachine};
 use std::collections::{BTreeMap, VecDeque};
+use std::io::Read;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 /// A batch's acknowledgement and persistence requirements.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -101,6 +103,8 @@ pub struct TapeOptions {
     /// Accounting includes headers and footers. A group can exceed this threshold before its step ends.
     /// Segment rolls also force sync, regardless of this threshold.
     pub max_unpublished_bytes: Option<u64>,
+    /// Maximum group-formation wait. Zero disables waiting. Cannot exceed 200 microseconds.
+    pub coalescing_window: Duration,
     /// Runs the writer inline with fixed salts. Only for deterministic simulations.
     #[cfg(feature = "sim")]
     pub inline_sim: bool,
@@ -113,6 +117,7 @@ impl Default for TapeOptions {
             server_address: None,
             replay_from_lsn: 0,
             max_unpublished_bytes: None,
+            coalescing_window: Duration::from_micros(200),
             #[cfg(feature = "sim")]
             inline_sim: false,
         }
@@ -361,6 +366,9 @@ impl<S: StateMachine> WriterCore<S> {
         path: impl AsRef<Path>,
         opts: TapeOptions,
     ) -> Result<(Self, RecoveryReport)> {
+        if opts.coalescing_window > Duration::from_micros(200) {
+            return Err(Error::Configuration("coalescing window exceeds 200 microseconds".into()));
+        }
         if opts.segment_size < (HEADER_LEN * 2 + 60) as u64
             || usize::try_from(opts.segment_size).is_err()
         {
@@ -636,12 +644,62 @@ impl<S: StateMachine> WriterCore<S> {
     }
 }
 
+/// Bounded adaptive group formation, shared with the bare benchmark driver.
+#[derive(Debug)]
+pub struct Coalescer {
+    window: Duration,
+    recent: VecDeque<usize>,
+}
+impl Coalescer {
+    /// Creates a driver with at most 200 microseconds of waiting per group.
+    pub fn new(window: Duration) -> Self {
+        Self { window: window.min(Duration::from_micros(200)), recent: VecDeque::new() }
+    }
+    /// Drains ready requests, then waits for the largest of the previous 64 groups.
+    pub fn collect<T>(&mut self, receiver: &mpsc::Receiver<T>, first: T) -> Vec<T> {
+        let mut group = vec![first];
+        group.extend(receiver.try_iter());
+        self.collect_with(group, |wait| receiver.recv_timeout(wait).ok())
+    }
+    fn collect_with<T>(
+        &mut self,
+        mut group: Vec<T>,
+        mut receive: impl FnMut(Duration) -> Option<T>,
+    ) -> Vec<T> {
+        let target = self.recent.iter().copied().max().unwrap_or(1);
+        let start = Instant::now();
+        while group.len() < target && !self.window.is_zero() {
+            let remaining = self.window.saturating_sub(start.elapsed());
+            if remaining.is_zero() {
+                break;
+            }
+            match receive(remaining) {
+                Some(request) => group.push(request),
+                None => break,
+            }
+        }
+        self.recent.push_back(group.len());
+        if self.recent.len() > 64 {
+            self.recent.pop_front();
+        }
+        group
+    }
+}
+
+struct Entropy<'a>(&'a Mutex<std::fs::File>);
+impl Read for Entropy<'_> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        self.0.lock().map_err(|_| std::io::Error::other("entropy mutex poisoned"))?.read(out)
+    }
+}
+
 /// Threaded production driver. Dropping the last handle joins the writer and releases its lock.
 pub struct Tape<S: StateMachine = NoopStateMachine> {
     sender: Option<mpsc::Sender<WriteRequest>>,
     thread: Option<JoinHandle<()>>,
     reads: Arc<ReadState>,
     state_machine: PhantomData<fn() -> S>,
+    entropy: Option<Mutex<std::fs::File>>,
     #[cfg(feature = "sim")]
     inline: Option<Mutex<WriterCore<S>>>,
 }
@@ -680,6 +738,7 @@ impl<S: StateMachine> Tape<S> {
     {
         #[cfg(feature = "sim")]
         let inline = opts.inline_sim;
+        let mut coalescer = Coalescer::new(opts.coalescing_window);
         let (mut core, report) = WriterCore::open_with(state_machine, io, clock, path, opts)?;
         let reads = core.reads.clone();
         #[cfg(feature = "sim")]
@@ -690,16 +749,17 @@ impl<S: StateMachine> Tape<S> {
                     thread: None,
                     reads,
                     state_machine: PhantomData,
+                    entropy: None,
                     inline: Some(Mutex::new(core)),
                 },
                 report,
             ));
         }
         let (sender, receiver) = mpsc::channel();
+        let entropy = Some(Mutex::new(os_entropy()?));
         let thread = std::thread::Builder::new().name("zerodb-writer".into()).spawn(move || {
             while let Ok(request) = receiver.recv() {
-                core.enqueue(request);
-                for request in receiver.try_iter() {
+                for request in coalescer.collect(&receiver, request) {
                     core.enqueue(request);
                 }
                 core.step();
@@ -713,6 +773,7 @@ impl<S: StateMachine> Tape<S> {
                 thread: Some(thread),
                 reads,
                 state_machine: PhantomData,
+                entropy,
                 #[cfg(feature = "sim")]
                 inline: None,
             },
@@ -737,7 +798,8 @@ impl<S: StateMachine> Tape<S> {
                 .recv()
                 .map_err(|_| WriteError { kind: Error::Poisoned, outcome: Outcome::Unknown })?;
         }
-        let batch = PreparedBatch::with_entropy(batch, mode, os_entropy)?;
+        let entropy = self.entropy.as_ref().ok_or_else(|| rejected(Error::Poisoned))?;
+        let batch = PreparedBatch::with_entropy(batch, mode, || Ok(Entropy(entropy)))?;
         let (request, receiver) = WriteRequest::new(batch);
         self.sender
             .as_ref()
@@ -803,6 +865,32 @@ mod tests {
 
     fn records(count: usize) -> Vec<RecordInput> {
         vec![RecordInput { kind: Kind::Turn, tenant_id: 1, content: b"hello".to_vec() }; count]
+    }
+
+    #[test]
+    fn coalescing_targets_recent_groups_and_bounds_waiting() {
+        let mut groups = Coalescer::new(std::time::Duration::from_micros(200));
+        groups.recent.push_back(3);
+        let mut next = [2, 3].into_iter();
+        assert_eq!(
+            groups.collect_with(vec![1], |wait| {
+                assert!(wait <= std::time::Duration::from_micros(200));
+                next.next()
+            }),
+            vec![1, 2, 3]
+        );
+        groups.window = std::time::Duration::ZERO;
+        assert_eq!(groups.collect_with(vec![1], |_| panic!("zero disables waiting")), vec![1]);
+        groups.window = std::time::Duration::from_micros(200);
+        let mut calls = 0;
+        assert_eq!(
+            groups.collect_with(vec![1], |_| {
+                calls += 1;
+                None
+            }),
+            vec![1]
+        );
+        assert_eq!(calls, 1);
     }
 
     #[test]
