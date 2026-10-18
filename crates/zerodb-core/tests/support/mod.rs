@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::Mutex;
 use zerodb_tape::{Error, FileId, Io, LockGuard, Result, SimDisk};
 
@@ -10,6 +11,7 @@ pub struct ProbeIo {
     pub fail_read: AtomicBool,
     files: Mutex<BTreeMap<FileId, PathBuf>>,
     pub writes: Mutex<Vec<(String, PathBuf)>>,
+    pub read_gate: Mutex<Option<(mpsc::SyncSender<()>, mpsc::Receiver<()>)>>,
 }
 impl ProbeIo {
     pub fn new(seed: u64) -> Self {
@@ -18,6 +20,7 @@ impl ProbeIo {
             fail_read: AtomicBool::new(false),
             files: Mutex::new(BTreeMap::new()),
             writes: Mutex::new(Vec::new()),
+            read_gate: Mutex::new(None),
         }
     }
     fn register(&self, path: &Path, file: Result<FileId>) -> Result<FileId> {
@@ -46,6 +49,17 @@ impl Io for ProbeIo {
         self.disk.write_at(f, o, d)
     }
     fn read_at(&self, f: FileId, o: u64, d: &mut [u8]) -> Result<usize> {
+        let checkpoint = self.files.lock().unwrap()[&f]
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("ckpt-");
+        let gate = if checkpoint { self.read_gate.lock().unwrap().take() } else { None };
+        if let Some((entered, release)) = gate {
+            entered.send(()).unwrap();
+            release.recv().unwrap();
+        }
         if self.fail_read.swap(false, Ordering::SeqCst) {
             return Err(Error::Io(
                 std::io::ErrorKind::Other,

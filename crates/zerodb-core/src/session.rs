@@ -1,11 +1,12 @@
 use crate::error::Result;
 use crate::{EngineError, ErrorKind};
 use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct Key(pub(crate) u32, pub(crate) String, pub(crate) String);
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Backing {
     pub(crate) file: String,
     pub(crate) offset: u64,
@@ -14,7 +15,7 @@ pub(crate) struct Backing {
 
 #[derive(Debug)]
 pub(crate) struct Page {
-    pub(crate) slots: Option<Vec<u64>>,
+    pub(crate) slots: Option<Arc<Vec<u64>>>,
     pub(crate) backing: Option<Backing>,
     pub(crate) revision: u64,
     pub(crate) dirty: bool,
@@ -142,7 +143,7 @@ impl Index {
         let entry = self.sessions.entry(key.clone()).or_default();
         for page in existing..needed {
             entry.pages.push(Page {
-                slots: Some(Vec::with_capacity(capacity(page))),
+                slots: Some(Arc::new(Vec::with_capacity(capacity(page)))),
                 backing: None,
                 revision: 0,
                 dirty: true,
@@ -170,9 +171,12 @@ impl Index {
             .pages
             .get_mut(page)
             .ok_or_else(|| EngineError::rejected(ErrorKind::CorruptIndex))?;
-        let slots = p.slots.as_mut().ok_or_else(|| exhausted("hot_pages"))?;
+        let slots = Arc::make_mut(p.slots.as_mut().ok_or_else(|| exhausted("hot_pages"))?);
         if slots.len() != slot {
             return Err(EngineError::rejected(ErrorKind::CorruptIndex));
+        }
+        if slots.capacity() < capacity(page) {
+            slots.reserve_exact(capacity(page) - slots.len());
         }
         self.lru.remove(&(p.touch, key.clone(), page));
         slots.push(lsn);
@@ -186,32 +190,73 @@ impl Index {
         Ok(())
     }
 
+    pub(crate) fn resident(&mut self, key: &Key, page: usize) -> Result<Option<Arc<Vec<u64>>>> {
+        let slots = self
+            .sessions
+            .get(key)
+            .and_then(|entry| entry.pages.get(page))
+            .ok_or_else(|| EngineError::rejected(ErrorKind::CorruptIndex))?
+            .slots
+            .clone();
+        if slots.is_some() {
+            self.touch(key, page);
+        }
+        Ok(slots)
+    }
+
+    pub(crate) fn backing(&self, key: &Key, page: usize) -> Result<Backing> {
+        self.sessions
+            .get(key)
+            .and_then(|entry| entry.pages.get(page))
+            .and_then(|page| page.backing.clone())
+            .ok_or_else(|| EngineError::rejected(ErrorKind::CorruptIndex))
+    }
+
+    pub(crate) fn install_loaded(
+        &mut self,
+        key: &Key,
+        page: usize,
+        backing: &Backing,
+        slots: Vec<u64>,
+    ) -> Result<bool> {
+        let p = self
+            .sessions
+            .get(key)
+            .and_then(|entry| entry.pages.get(page))
+            .ok_or_else(|| EngineError::rejected(ErrorKind::CorruptIndex))?;
+        if p.slots.is_some() {
+            return Ok(true);
+        }
+        if p.backing.as_ref() != Some(backing) {
+            return Ok(false);
+        }
+        if slots.len() != p.used || slots.last().copied() != Some(p.revision) {
+            return Err(EngineError::rejected(ErrorKind::CorruptIndex));
+        }
+        self.room(capacity(page) * 8)?;
+        let mut hot = Vec::with_capacity(capacity(page));
+        hot.extend(slots);
+        self.sessions.get_mut(key).unwrap_or_else(|| unreachable!()).pages[page].slots =
+            Some(Arc::new(hot));
+        self.hot_bytes += capacity(page) * 8;
+        self.touch(key, page);
+        Ok(true)
+    }
+
     pub(crate) fn load(
         &mut self,
         key: &Key,
         page: usize,
         read: &mut impl FnMut(&Backing) -> Result<Vec<u64>>,
     ) -> Result<()> {
-        let p = self
-            .sessions
-            .get(key)
-            .and_then(|entry| entry.pages.get(page))
-            .ok_or_else(|| EngineError::rejected(ErrorKind::CorruptIndex))?;
-        if p.slots.is_none() {
-            let backing =
-                p.backing.clone().ok_or_else(|| EngineError::rejected(ErrorKind::CorruptIndex))?;
-            self.room(capacity(page) * 8)?;
-            let slots = read(&backing)?;
-            let mut hot = Vec::with_capacity(capacity(page));
-            hot.extend(slots);
-            self.sessions.get_mut(key).unwrap_or_else(|| unreachable!()).pages[page].slots =
-                Some(hot);
-            self.hot_bytes += capacity(page) * 8;
+        if self.resident(key, page)?.is_none() {
+            let backing = self.backing(key, page)?;
+            self.install_loaded(key, page, &backing, read(&backing)?)?;
         }
-        self.touch(key, page);
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn window(
         &mut self,
         key: &Key,

@@ -99,7 +99,18 @@ The checkpoint worker wakes every 60 seconds or after 64 MiB of published tape b
 `checkpoint()` waits for an explicit worker snapshot.
 Normal checkpoints write only dirty pages, newly registered tenants, and retained retry-key additions.
 Deterministic oldest-first eviction rebuilds the retry window without tombstones.
-Snapshot copying holds the state lock. File writes and syncs run outside that lock.
+Snapshots share immutable page buffers and retry entries through reference counts.
+Appending to a shared page uses copy-on-write.
+Cold reads run outside the state lock, then recheck the current backing location before installation.
+Compaction can replace or unlink a captured location. Loading retries against the replacement.
+File writes and syncs also run outside the state lock.
+
+Full snapshots still enumerate page and retry-entry metadata under the state lock.
+That work scales with configured directory bounds, not dirty bytes.
+It can delay writer preparation and publication for large directories.
+`checkpoint_snapshot_lock_ns` reports the longest snapshot hold, excluding lock acquisition.
+The `full_snapshot_shares_pages_and_measures_its_lock_hold` test measures a 1000-page full snapshot.
+This measures hold time without asserting a hardware-dependent latency threshold.
 
 Files are named `ckpt-{lsn}.zdb`. Failed attempts may leave numbered suffixes.
 Every record contains a CRC32C, a total length, and a typed payload.

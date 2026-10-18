@@ -424,6 +424,49 @@ fn failed_sync_with_a_full_dedup_window_cannot_checkpoint_tentative_eviction() {
     }
 }
 
+#[test]
+fn cold_window_and_pin_io_do_not_hold_the_writer_state_lock() {
+    for append in [false, true] {
+        let io = Arc::new(support::ProbeIo::new(18));
+        let opts = EngineOptions { hot_page_bytes: 256, ..options() };
+        let engine =
+            Engine::open_with(io.clone(), Arc::new(SimClock::default()), "db", opts).unwrap();
+        for i in 0..3 {
+            engine.append(&scope(&i.to_string()), vec![turn(i)], None).unwrap();
+            engine.checkpoint().unwrap();
+        }
+        let (entered, blocked) = std::sync::mpsc::sync_channel(1);
+        let (release, resumed) = std::sync::mpsc::sync_channel(1);
+        *io.read_gate.lock().unwrap() = Some((entered, resumed));
+        std::thread::scope(|threads| {
+            threads.spawn(|| {
+                if append {
+                    engine.append(&scope("0"), vec![turn(10)], None).unwrap();
+                } else {
+                    engine.window(&scope("0"), WindowQuery::Last(1)).unwrap();
+                }
+            });
+            blocked.recv_timeout(Duration::from_secs(2)).unwrap();
+            let (done, completed) = std::sync::mpsc::sync_channel(1);
+            let engine = &engine;
+            threads.spawn(move || {
+                let result = engine.append(&scope("2"), vec![turn(11)], None);
+                let _ = done.send(result);
+            });
+            let result = completed.recv_timeout(Duration::from_secs(1));
+            if result.is_ok() {
+                for i in 0..6 {
+                    engine.append(&scope("2"), vec![turn(20 + i)], None).unwrap();
+                    engine.checkpoint().unwrap();
+                }
+            }
+            release.send(()).unwrap();
+            assert!(result.is_ok(), "writer stalled behind cold I/O, append={append}");
+            result.unwrap().unwrap();
+        });
+    }
+}
+
 struct TestDir(PathBuf);
 impl TestDir {
     fn new() -> Self {

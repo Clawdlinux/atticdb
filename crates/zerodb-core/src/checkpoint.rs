@@ -230,7 +230,7 @@ pub(crate) fn load(io: &dyn Io, dir: &Path, opts: &EngineOptions) -> State {
     }
 }
 
-type PageSnapshot = (Key, usize, u64, Option<Vec<u64>>, Option<Backing>);
+type PageSnapshot = (Key, usize, u64, Option<Arc<Vec<u64>>>, Option<Backing>);
 struct Snapshot {
     lsn: u64,
     txn: u64,
@@ -299,7 +299,7 @@ fn snapshot(state: &State) -> Snapshot {
 }
 pub(crate) fn save(io: &dyn Io, dir: &Path, shared: &Mutex<State>) -> Result<u64> {
     let snap = {
-        let state = lock(shared)?;
+        let mut state = lock(shared)?;
         if let Some(error) = &state.failure {
             return Err(error.clone());
         }
@@ -309,7 +309,11 @@ pub(crate) fn save(io: &dyn Io, dir: &Path, shared: &Mutex<State>) -> Result<u64
         if state.published_lsn == state.watermark {
             return Ok(state.watermark);
         }
-        snapshot(&state)
+        let start = std::time::Instant::now();
+        let snap = snapshot(&state);
+        state.snapshot_lock_ns =
+            state.snapshot_lock_ns.max(start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64);
+        snap
     };
     let mut name = format!("ckpt-{}.zdb", snap.lsn);
     let mut attempt = 0;
@@ -334,13 +338,13 @@ pub(crate) fn save(io: &dyn Io, dir: &Path, shared: &Mutex<State>) -> Result<u64
     for (key, index, revision, slots, backing) in snap.pages {
         let slots = match slots {
             Some(slots) => slots,
-            None => read_page(io, dir, &backing.ok_or_else(corrupt)?)?,
+            None => Arc::new(read_page(io, dir, &backing.ok_or_else(corrupt)?)?),
         };
         let mut data = vec![2];
         put_key(&mut data, &key);
         data.extend_from_slice(&(index as u32).to_le_bytes());
         data.extend_from_slice(&(slots.len() as u32).to_le_bytes());
-        for slot in slots {
+        for slot in slots.iter() {
             data.extend_from_slice(&slot.to_le_bytes());
         }
         let (offset, len) = write(io, file.1, &mut off, &data)?;
@@ -562,6 +566,44 @@ mod tests {
         assert_eq!(engine.metrics().unwrap().checkpoint_warnings, 1);
         assert_eq!(engine.metrics().unwrap().replayed_records, 4);
         assert_eq!(engine.window(&scope, WindowQuery::Last(10)).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn full_snapshot_shares_pages_and_measures_its_lock_hold() {
+        let disk = SimDisk::new(6);
+        let shared = state();
+        let key = Key(1, "a".into(), "0".into());
+        {
+            let mut state = shared.lock().unwrap();
+            for i in 0..1000 {
+                let key = Key(1, "a".into(), i.to_string());
+                state.index.reserve(&key, 1).unwrap();
+                state.index.publish(&key, 1, i + 2).unwrap();
+                state.dirty.insert((key, 0));
+            }
+            state.published_lsn = 1001;
+            state.txn = 1000;
+            state.chain = (0..8).map(|i| format!("old-{i}")).collect();
+        }
+        let snap = snapshot(&shared.lock().unwrap());
+        let captured = snap.pages.iter().find(|p| p.0 == key).unwrap().3.as_ref().unwrap();
+        {
+            let mut state = shared.lock().unwrap();
+            assert!(Arc::ptr_eq(
+                captured,
+                state.index.sessions[&key].pages[0].slots.as_ref().unwrap()
+            ));
+            state.index.reserve(&key, 1).unwrap();
+            state.index.publish(&key, 2, 1002).unwrap();
+            state.published_lsn = 1002;
+            state.txn = 1001;
+            assert_eq!(captured.len(), 1);
+            assert_eq!(state.index.sessions[&key].pages[0].slots.as_ref().unwrap().len(), 2);
+        }
+        save(&disk, Path::new("db"), &shared).unwrap();
+        let ns = shared.lock().unwrap().snapshot_lock_ns;
+        eprintln!("full checkpoint snapshot: 1000 pages, lock_hold_ns={ns}");
+        assert!(ns > 0);
     }
 
     fn append(state: &Mutex<State>, seq: u64) {

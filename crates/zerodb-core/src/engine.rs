@@ -82,6 +82,8 @@ pub struct Metrics {
     pub replayed_records: u64,
     /// Checkpoints rejected during this open.
     pub checkpoint_warnings: u64,
+    /// Maximum checkpoint snapshot lock hold, in nanoseconds. Excludes lock acquisition.
+    pub checkpoint_snapshot_lock_ns: u64,
     /// Tape::read calls issued by window, excluding append receipts.
     pub window_reads: u64,
     /// Registered tenants.
@@ -272,20 +274,45 @@ impl Engine {
     fn pin(&self, key: Key) -> Result<Pin<'_>> {
         let mut state = lock(&self.state)?;
         let mut active = false;
-        if let Some(entry) = state.index.sessions.get_mut(&key) {
+        let len = if let Some(entry) = state.index.sessions.get_mut(&key) {
             entry.pins += 1;
             active = true;
-            let len = entry.reserved;
-            if len > 0 {
-                if let Err(error) = state.index.load(&key, address(len).0, &mut |backing| {
-                    checkpoint::read_page(self.io.as_ref(), &self.dir, backing)
-                }) {
-                    state.index.sessions.get_mut(&key).unwrap_or_else(|| unreachable!()).pins -= 1;
-                    return Err(error);
+            entry.reserved
+        } else {
+            0
+        };
+        drop(state);
+        let pin = Pin { engine: self, key, active };
+        if len > 0 {
+            self.load_page(&pin.key, address(len).0)?;
+        }
+        Ok(pin)
+    }
+
+    fn load_page(&self, key: &Key, page: usize) -> Result<Arc<Vec<u64>>> {
+        loop {
+            let backing = {
+                let mut state = lock(&self.state)?;
+                if let Some(slots) = state.index.resident(key, page)? {
+                    return Ok(slots);
                 }
+                state.index.backing(key, page)?
+            };
+            let read = checkpoint::read_page(self.io.as_ref(), &self.dir, &backing);
+            let mut state = lock(&self.state)?;
+            if let Some(slots) = state.index.resident(key, page)? {
+                return Ok(slots);
+            }
+            if state.index.backing(key, page)? != backing {
+                continue;
+            }
+            if state.index.install_loaded(key, page, &backing, read?)? {
+                return state
+                    .index
+                    .resident(key, page)?
+                    .ok_or_else(|| EngineError::rejected(ErrorKind::CorruptIndex));
             }
         }
-        Ok(Pin { engine: self, key, active })
     }
 
     /// Reads an ordered window at a pinned durable boundary, with one tape read per returned turn.
@@ -299,7 +326,7 @@ impl Engine {
         }
     }
     fn window_snapshot(&self, scope: &Scope, query: WindowQuery) -> Result<Vec<Turn>> {
-        let mut state = lock(&self.state)?;
+        let state = lock(&self.state)?;
         let snapshot = self.tape.durable_lsn();
         let Some(tenant) = state.tenants.get(&scope.tenant) else {
             return Ok(Vec::new());
@@ -315,10 +342,23 @@ impl Engine {
                 (seq.max(1).min(end), end.min(seq.max(1).saturating_add(limit as u64)))
             }
         };
-        let slots = state.index.window(&key, start, end, |backing| {
-            checkpoint::read_page(self.io.as_ref(), &self.dir, backing)
-        })?;
         drop(state);
+        let mut slots = Vec::new();
+        let mut seq = start;
+        while seq < end {
+            let (page, offset) = address(seq);
+            let loaded = self.load_page(&key, page)?;
+            let available = loaded
+                .len()
+                .checked_sub(offset)
+                .ok_or_else(|| EngineError::rejected(ErrorKind::CorruptIndex))?;
+            let count = (end - seq).min(available as u64) as usize;
+            if count == 0 {
+                return Err(EngineError::rejected(ErrorKind::CorruptIndex));
+            }
+            slots.extend_from_slice(&loaded[offset..offset + count]);
+            seq += count as u64;
+        }
         let mut out = Vec::with_capacity(slots.len());
         for (offset, lsn) in slots.into_iter().enumerate() {
             if lsn > snapshot {
@@ -372,6 +412,7 @@ impl Engine {
             checkpoint_files: state.chain.len(),
             replayed_records: state.replayed,
             checkpoint_warnings: state.warnings,
+            checkpoint_snapshot_lock_ns: state.snapshot_lock_ns,
             window_reads: self.reads.load(Ordering::Relaxed),
             tenants: state.tenants.entries.len(),
         })
