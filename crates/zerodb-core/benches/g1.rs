@@ -46,7 +46,7 @@ fn records(scope: &Scope, iteration: usize, batch: usize) -> Vec<RecordInput> {
 fn quantile(samples: &[Duration], numerator: usize, denominator: usize) -> f64 {
     samples[(samples.len() * numerator).div_ceil(denominator) - 1].as_secs_f64() * 1e6
 }
-fn latency(label: &str, samples: &mut [Duration]) -> f64 {
+fn latency(label: &str, samples: &mut [Duration]) -> [f64; 3] {
     assert!(!samples.is_empty());
     samples.sort_unstable();
     let p99 = quantile(samples, 99, 100);
@@ -56,16 +56,24 @@ fn latency(label: &str, samples: &mut [Duration]) -> f64 {
         quantile(samples, 50, 100),
         quantile(samples, 999, 1000)
     );
-    p99
+    [quantile(samples, 50, 100), p99, quantile(samples, 999, 1000)]
 }
-fn report(label: &str, elapsed: Duration, n: usize, mut samples: Vec<Duration>) -> f64 {
+#[derive(Clone, Copy)]
+struct Stats {
+    ack: [f64; 3],
+    throughput: f64,
+}
+fn report(label: &str, elapsed: Duration, n: usize, mut samples: Vec<Duration>) -> Stats {
     println!(
         "{label}: turns={n} seconds={:.3} turns_per_sec={:.1} batches_per_sec={:.1}",
         elapsed.as_secs_f64(),
         n as f64 / elapsed.as_secs_f64(),
         samples.len() as f64 / elapsed.as_secs_f64()
     );
-    latency(&format!("{label}/durable_ack"), &mut samples)
+    Stats {
+        ack: latency(&format!("{label}/durable_ack"), &mut samples),
+        throughput: n as f64 / elapsed.as_secs_f64(),
+    }
 }
 
 fn writers(
@@ -132,7 +140,7 @@ struct Request {
     bytes: Arc<Vec<u8>>,
     reply: mpsc::SyncSender<()>,
 }
-fn bare(iterations: usize, batch: usize, n: usize) -> f64 {
+fn bare(iterations: usize, batch: usize, n: usize) -> Stats {
     let dir = BenchDir::new();
     let mut bare = Bare::new(&dir.0);
     let templates = (0..SIZES.len())
@@ -180,7 +188,7 @@ fn bare(iterations: usize, batch: usize, n: usize) -> f64 {
     report("bare", elapsed, n, samples)
 }
 
-fn tape(iterations: usize, batch: usize, n: usize) -> f64 {
+fn tape(iterations: usize, batch: usize, n: usize) -> Stats {
     let dir = BenchDir::new();
     let (tape, _) =
         Tape::open(Arc::new(StdIo::new()), Arc::new(SystemClock), &dir.0, TapeOptions::default())
@@ -199,7 +207,7 @@ fn tape(iterations: usize, batch: usize, n: usize) -> f64 {
     report("tape", elapsed, n, samples)
 }
 
-fn engine(iterations: usize, batch: usize, n: usize) -> f64 {
+fn engine(iterations: usize, batch: usize, n: usize) -> Stats {
     let dir = BenchDir::new();
     let engine = Engine::open(&dir.0, EngineOptions::default()).unwrap();
     // Register every tenant and session before timing, so timed bytes match the bare trace.
@@ -310,6 +318,16 @@ fn history_windows() {
 fn env_number(name: &str, default: usize) -> usize {
     std::env::var(name).map_or(default, |s| s.parse().unwrap())
 }
+fn spread(path: &str, metric: &str, mut values: Vec<f64>) -> f64 {
+    values.sort_by(f64::total_cmp);
+    let median = values[values.len() / 2];
+    println!(
+        "summary path={path} metric={metric} median={median:.3} min={:.3} max={:.3}",
+        values[0],
+        values[values.len() - 1]
+    );
+    median
+}
 fn main() {
     let n = env_number("G1_TURNS", 1_000_000);
     let batch = env_number("G1_BATCH", 4);
@@ -319,16 +337,36 @@ fn main() {
         "G1_TURNS must be a positive multiple of 16 * G1_BATCH"
     );
     let iterations = n / WRITERS / batch;
+    let reps = env_number("G1_REPS", 3);
+    assert!(reps >= 3, "G1_REPS must be at least 3");
     println!("G1: turns={n} batch={batch} writers={WRITERS} readers={READERS} sessions={} sizes={SIZES:?}", WRITERS * SESSIONS);
     println!("Nearest-rank caller latency, measured per durable batch. macOS sync_data uses F_FULLFSYNC.");
-    let bare_p99 = bare(iterations, batch, n);
-    let tape_p99 = tape(iterations, batch, n);
-    let engine_p99 = engine(iterations, batch, n);
-    println!(
-        "comparison: engine_p99_over_bare={:.3} tape_p99_over_bare={:.3}",
-        engine_p99 / bare_p99,
-        tape_p99 / bare_p99
+    let mut results = Vec::new();
+    for rep in 1..=reps {
+        println!("repetition={rep}/{reps}");
+        let bare = bare(iterations, batch, n);
+        let tape = tape(iterations, batch, n);
+        let engine = engine(iterations, batch, n);
+        println!(
+            "comparison repetition={rep} engine_p99_over_bare={:.3} tape_p99_over_bare={:.3}",
+            engine.ack[1] / bare.ack[1],
+            tape.ack[1] / bare.ack[1]
+        );
+        results.push([bare, tape, engine]);
+    }
+    for (i, path) in ["bare", "tape", "engine"].into_iter().enumerate() {
+        for (j, metric) in ["p50_us", "p99_us", "p99.9_us"].into_iter().enumerate() {
+            spread(path, metric, results.iter().map(|r| r[i].ack[j]).collect());
+        }
+        spread(path, "turns_per_sec", results.iter().map(|r| r[i].throughput).collect());
+    }
+    let ratio = spread(
+        "engine/bare",
+        "p99_ratio",
+        results.iter().map(|r| r[2].ack[1] / r[0].ack[1]).collect(),
     );
-    history_windows();
-    println!("G1 verdict: PENDING. Requires Linux NVMe, the full 1M-turn trace, and nightly LazyFS crash validation.");
+    if env_number("G1_HISTORY", 1) != 0 {
+        history_windows();
+    }
+    println!("macOS local 1.5x verdict: {} (median ratio={ratio:.3}). Linux NVMe and nightly LazyFS remain pending. Cache writes wait until M3.", if ratio <= 1.5 { "PASS" } else { "FAIL" });
 }
