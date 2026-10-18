@@ -118,6 +118,8 @@ Cold reads run outside the state lock, then recheck the current backing location
 Compaction can replace or unlink a captured location. Loading retries against the replacement.
 File writes and syncs also run outside the state lock.
 Each checkpoint data file is buffered into 1 write before its sync.
+Buffering uses memory proportional to the checkpoint file.
+Full compaction can exceed the resident hot-page budget.
 Backing locations install in chunks of 32 pages, releasing State between chunks.
 Old-file removal and directory sync happen after releasing State.
 
@@ -221,6 +223,7 @@ All paths use the same content-size trace and transaction batching.
 Bare and Tape share the same adaptive coalescer.
 `TapeOptions::coalescing_window` defaults to 200 us. Zero disables waiting. Larger values are rejected.
 It targets the largest of the previous 64 groups until that bounded timeout.
+After waiting, it drains ready arrivals without blocking again.
 Group boundaries still depend on scheduling. Every path reports its observed request-group size.
 Tape keeps 1 entropy handle open and reads each batch's salts together before hashing.
 Periodic superblocks run on a helper using only published, already-synced LSNs.

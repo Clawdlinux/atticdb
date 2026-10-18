@@ -792,7 +792,7 @@ impl<S: StateMachine> std::fmt::Debug for Tape<S> {
 }
 
 impl Tape<NoopStateMachine> {
-    /// Locks and recovers a directory, then starts its writer thread.
+    /// Locks and recovers a directory, then starts its writer and metadata workers.
     pub fn open(
         io: Arc<dyn Io>,
         clock: Arc<dyn Clock>,
@@ -804,7 +804,7 @@ impl Tape<NoopStateMachine> {
 }
 
 impl<S: StateMachine> Tape<S> {
-    /// Recovers and replays state before starting the writer thread.
+    /// Recovers and replays state before starting background workers.
     ///
     /// `opts.replay_from_lsn` excludes records already represented by your loaded checkpoint.
     pub fn open_with(

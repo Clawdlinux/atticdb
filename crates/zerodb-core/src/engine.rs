@@ -118,7 +118,7 @@ impl std::fmt::Debug for Engine {
 }
 
 impl Engine {
-    /// Creates the directory, recovers its tape, and starts both workers using real filesystem I/O.
+    /// Creates the directory, recovers its tape, and starts background workers using real filesystem I/O.
     pub fn open(path: impl AsRef<Path>, opts: EngineOptions) -> Result<Self> {
         std::fs::create_dir_all(path.as_ref()).map_err(zerodb_tape::Error::from)?;
         Self::open_with(Arc::new(StdIo::new()), Arc::new(SystemClock), path, opts)
