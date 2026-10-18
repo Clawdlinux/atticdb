@@ -577,14 +577,23 @@ fn grouped_seed(seed: u64) -> Vec<Vec<Turn>> {
             let fault = group == 6;
             let cut = group == 7;
             let checkpoint_fired = Arc::new(AtomicBool::new(false));
+            let metrics = engine.metrics().unwrap();
+            let boundary = metrics.durable_lsn;
+            let writer_in_checkpoint = !fault
+                && !cut
+                && rng.below(2) == 0
+                && metrics.durable_lsn > metrics.checkpoint_watermark;
             if !fault && !cut {
                 let weak = Arc::downgrade(&engine);
                 let fired = checkpoint_fired.clone();
-                let boundary = engine.metrics().unwrap().durable_lsn;
                 *io.checkpoint.lock().unwrap() = Some(Box::new(move || {
                     let engine = weak.upgrade().unwrap();
-                    assert_eq!(engine.metrics().unwrap().durable_lsn, boundary);
-                    assert_eq!(engine.checkpoint().unwrap(), boundary);
+                    if writer_in_checkpoint {
+                        engine.step_sim().unwrap();
+                    } else {
+                        assert_eq!(engine.metrics().unwrap().durable_lsn, boundary);
+                        assert_eq!(engine.checkpoint().unwrap(), boundary);
+                    }
                     fired.store(true, Ordering::SeqCst);
                 }));
                 io.checkpoint_at.store(1 + rng.below(count), Ordering::SeqCst);
@@ -597,7 +606,12 @@ fn grouped_seed(seed: u64) -> Vec<Vec<Turn>> {
             } else {
                 io.cut.store(1 + rng.below(4), Ordering::SeqCst);
             }
-            engine.step_sim().unwrap();
+            if writer_in_checkpoint {
+                assert_eq!(engine.checkpoint().unwrap(), boundary);
+                assert!(engine.metrics().unwrap().durable_lsn > boundary);
+            } else {
+                engine.step_sim().unwrap();
+            }
             let results = queued
                 .into_iter()
                 .map(|(index, conflict, reply)| (index, conflict, reply.finish()))
@@ -743,6 +757,48 @@ fn oracle_rejects_partial_unknown_batches_and_missing_acknowledgements() {
         }))
         .is_err());
     }
+}
+
+#[test]
+fn publish_during_checkpoint_keeps_the_new_page_dirty() {
+    let io = Arc::new(FaultIo::new(SimDisk::new(31)));
+    let clock = Arc::new(SimClock::default());
+    let opts = EngineOptions {
+        tape: TapeOptions { segment_size: 64 * 1024, inline_sim: true, ..TapeOptions::default() },
+        ..EngineOptions::default()
+    };
+    let engine = Arc::new(open(io.clone(), clock.clone(), &opts));
+    let scope = Scope { tenant: "t".into(), agent: "a".into(), session: "s".into() };
+    let turn = |value| NewTurn {
+        role: Role::User,
+        trust: Trust::Untrusted,
+        content: vec![value],
+        meta: vec![],
+    };
+    let before = engine.append(&scope, vec![turn(1), turn(2)], None).unwrap();
+    let queued = engine.enqueue_sim(&scope, vec![turn(3)], None).unwrap();
+    let weak = Arc::downgrade(&engine);
+    let fired = Arc::new(AtomicBool::new(false));
+    let completed = fired.clone();
+    *io.checkpoint.lock().unwrap() = Some(Box::new(move || {
+        weak.upgrade().unwrap().step_sim().unwrap();
+        completed.store(true, Ordering::SeqCst);
+    }));
+    io.checkpoint_at.store(2, Ordering::SeqCst);
+    assert_eq!(engine.checkpoint().unwrap(), before.last_lsn);
+    assert!(fired.load(Ordering::SeqCst));
+    let receipt = queued.finish().unwrap();
+    assert_eq!(receipt.seqs, vec![3]);
+    assert_eq!(engine.checkpoint().unwrap(), receipt.last_lsn);
+    drop(engine);
+    let engine = open(io, clock, &opts);
+    let window = engine.window(&scope, WindowQuery::Last(10)).unwrap();
+    assert_eq!(window.iter().map(|t| t.seq).collect::<Vec<_>>(), vec![1, 2, 3]);
+    assert_eq!(
+        window.iter().map(|t| t.content.clone()).collect::<Vec<_>>(),
+        vec![vec![1], vec![2], vec![3]]
+    );
+    assert_eq!(engine.metrics().unwrap().replayed_records, 0);
 }
 
 #[test]
