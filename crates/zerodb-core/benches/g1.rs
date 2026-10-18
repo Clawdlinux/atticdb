@@ -335,7 +335,12 @@ fn env_number(name: &str, default: usize) -> usize {
 }
 fn spread(path: &str, metric: &str, mut values: Vec<f64>) -> f64 {
     values.sort_by(f64::total_cmp);
-    let median = values[values.len() / 2];
+    let middle = values.len() / 2;
+    let median = if values.len().is_multiple_of(2) {
+        (values[middle - 1] + values[middle]) / 2.0
+    } else {
+        values[middle]
+    };
     println!(
         "summary path={path} metric={metric} median={median:.3} min={:.3} max={:.3}",
         values[0],
