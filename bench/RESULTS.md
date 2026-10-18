@@ -223,4 +223,156 @@ Drop can't return shutdown errors. The next successful open recovers and checkpo
 Each review fix is signed off and carries the Copilot co-author trailer.
 The simulator models I/O boundaries and torn writes. It doesn't replace real-filesystem crash testing.
 The stress test covers real queue contention, not power loss.
+
+# M2 engine simulation and G1
+
+Measured on 2026-10-18 at `0e9b951`, based on `60293c9`.
+The engine simulator is `50f933a`. The matched benchmark harness is `0e9b951`.
+These commits are local on `feat/m2-sim-g1`. Nothing was pushed.
+
+## Hardware and durability
+
+This run uses the same Apple M4 and internal Apple SSD as M1.
+macOS is 27.0.1, build 26A434. The workspace uses APFS, with about 61 GiB free.
+The compiler is rustc 1.99.1, commit `58cf8f9c3`.
+Cargo is 1.99.1, commit `5f94df478`.
+Release settings remain opt-level 3, thin LTO, and 1 codegen unit.
+Rust's macOS `sync_data` invokes `F_FULLFSYNC`.
+The benchmark uses real filesystem I/O. SimDisk is not used for these measurements.
+This is a shared development machine, not an isolated performance host.
+No test or simulation workloads from this task overlapped the recorded benchmark.
+
+**G1 verdict: pending. Linux NVMe and nightly LazyFS crash validation are still required.**
+macOS has no G1 pass threshold. A local ratio is not a Linux performance claim.
+
+## Matched trace
+
+```sh
+./bench/g1.sh
+```
+
+The default trace contains 1,000,000 timed turns, with 4 turns per durable batch.
+There are 16 writers, 16 tenants, and 1024 sessions.
+Content sizes cycle through 256 B, 512 B, 1 KiB, 4 KiB, and 8 KiB.
+The engine also runs 2 concurrent last-16 window readers.
+Initial tenant and session registration uses 1024 untimed turns.
+The timed trace excludes tenant creation. Retry keys are disabled for this performance trace.
+Default engine checkpoints remain enabled.
+
+All 3 paths use identical content-size ordering, turn payload lengths, and transaction batching.
+The bare baseline reuses M1's frame encoder, preallocation, append, and file sync implementation.
+Each encoded turn contains 16 metadata bytes and 63 total codec overhead bytes.
+The 5 encoded batch lengths are 6768, 10864, 13936, 14448, and 14704 bytes.
+These lengths include salt space, record headers, and transaction footers.
+The bare path precomputes fixed metadata and frame bytes outside timing, as in M1.
+Tape and Engine include caller preparation, hashing, queueing, and replies.
+Engine additionally includes session publication, checkpoints, and concurrent window load.
+
+The bare writer drains queued requests and syncs each group before returning receipts.
+Tape uses the same queue-draining group policy. Actual group boundaries depend on scheduling.
+The harness reports the bare path's observed batches per sync group.
+Segment preallocation is 64 MiB on every path.
+Later segment rolls remain inside timing. Initial segment setup and final shutdown stay outside.
+Only the engine runs window readers.
+Every session's final sequence is checked after reopen, outside timing.
+
+Caller latencies use nearest-rank p50, p99, and p99.9 across 250,000 durable batch acknowledgements.
+These are batch latencies, not amortized per-turn latencies.
+Throughput reports turns per second across the complete timed phase.
+Window latency samples every 64th completed query, while counting every query.
+
+## macOS numbers
+
+The full 1M-turn trace completed. No reduced-N substitution was needed.
+All 1024 session tails matched their expected final sequences after reopen.
+
+| Path | Timed turns | Seconds | Turns/s | Ack p50, ms | Ack p99, ms | Ack p99.9, ms |
+|---|---:|---:|---:|---:|---:|---:|
+| Bare append + sync | 1,000,000 | 78.607 | 12,721.5 | 4.054 | 10.136 | 17.088 |
+| Tape Durable | 1,000,000 | 107.602 | 9,293.5 | 6.982 | 17.304 | 32.879 |
+| Engine + 2 window readers | 1,000,000 | 174.330 | 5,736.2 | 9.094 | 34.506 | 101.289 |
+
+The bare writer synced 20,481 groups, averaging 12.206 batches per group.
+Engine p99 was 3.404x bare p99. Tape p99 was 1.707x bare p99.
+The local engine ratio exceeds 1.5x. The Linux-only G1 threshold does not apply to this macOS run.
+These numbers do not establish a G1 pass.
+
+Concurrent readers completed 812,792 windows during the engine phase.
+The 12,700 sampled windows had p50 384.000 us, p99 1138.125 us, and p99.9 6294.000 us.
+The final observed checkpoint watermark was 984,312, with 4 files in its chain.
+Maximum measured checkpoint snapshot lock hold was 1269.709 us.
+The watermark was sampled before clean shutdown. Open still verifies the complete tape.
+
+## Window work versus history
+
+Each cell measures 2000 queries after 100 warmups, returning exactly 16 turns.
+Content is fixed at 256 B for this separate history-length experiment.
+Since queries start near the middle, except at sequence 1 for the 16-turn history.
+Both query forms issue exactly 16 tape reads at every history length.
+The harness asserts that count, rather than inferring complexity from elapsed time.
+
+| History turns | Query | Returned | Tape reads/query | p50, us | p99, us | p99.9, us |
+|---:|---|---:|---:|---:|---:|---:|
+| 16 | Last 16 | 16 | 16 | 234.750 | 766.958 | 3918.042 |
+| 1024 | Last 16 | 16 | 16 | 234.209 | 393.208 | 496.209 |
+| 65,536 | Last 16 | 16 | 16 | 235.083 | 437.541 | 574.792 |
+| 16 | Since, limit 16 | 16 | 16 | 232.500 | 402.250 | 552.042 |
+| 1024 | Since, limit 16 | 16 | 16 | 233.500 | 398.667 | 568.375 |
+| 65,536 | Since, limit 16 | 16 | 16 | 232.917 | 404.541 | 500.125 |
+
+History grows 4096x. Last-window p50 stays between 234.209 us and 235.083 us.
+Since-window p50 stays between 232.500 us and 233.500 us.
+Record-read work is flat. Tail latency still reflects filesystem and scheduler noise.
+
+## Engine simulation and validation
+
+The simulator drives the real Engine API on SimDisk and SimClock.
+The `sim` feature's inline option disables writer and checkpoint threads.
+Fixed salts and seeded checkpoint points remove scheduler and entropy variance.
+Production defaults retain both worker threads and OS entropy.
+
+Each seed runs 120 randomized batches across 48 scopes, with 4 tenants and 2 agents.
+It includes 3 append crash generations and cuts during checkpoint installation.
+Sync failures occur before persistence and after persistence. Each failure triggers live reopen.
+Half the seeds use a 4 KiB hot-page budget.
+Each generation corrupts a checkpoint and checks full replay with a warning.
+The independent oracle scans recovered tape records before opening the engine.
+It verifies dense sequences, exact bytes, stable tenant IDs, and complete transactions.
+It also checks last/since windows and original idempotent sequence, transaction, and LSN receipts.
+Retries cover uncertain results, live reopen, and crash recovery.
+Conflicting retries must write nothing and report `NotCommitted`.
+A repeat-run test compares the complete final histories for the same seed.
+
+The 10,000-seed engine run passed seeds 0 through 9,999 in 621.55 seconds.
+The separate 2,000-seed engine run passed seeds 0 through 1,999 in 124.00 seconds.
+Both ran without storage correctness failures. No bug-fix commits were needed for Group F.
+CI now runs the default 500 engine seeds in release mode on Linux and macOS.
+
+| Command | Result |
+|---|---|
+| `cargo fmt --all --check` | Passed |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | Passed |
+| `cargo test --workspace` | Passed. Default 500 M1 seeds. Release-only stress ignored. |
+| `cargo test --workspace --release` | Passed. Default 500 M1 seeds and release stress. |
+| `ZERODB_SIM_SEEDS=2000 cargo test -p zerodb-tape --release --features sim --test sim` | Passed. Seeds 0 through 1,999. |
+| `ZERODB_SIM_SEEDS=2000 cargo test -p zerodb-core --release --features sim --test engine_sim` | Passed. 2 tests, including repeat-run equality. |
+| `ZERODB_SIM_SEEDS=10000 cargo test -p zerodb-core --release --features sim --test engine_sim` | Passed. 2 tests, including repeat-run equality. |
+| `cargo check -p zerodb-core --lib --no-default-features --quiet` | Passed. Normal worker path compiles without simulation. |
+| `cargo bench -p zerodb-core --bench g1 --no-run --quiet` | Passed |
+| `cargo bench -p zerodb-tape --bench append --no-run --quiet` | Passed |
+| `G1_TURNS=1024 ./bench/g1.sh` | Passed. Smoke measurement excluded from reported numbers. |
+| `./bench/g1.sh` | Passed. Full 1M turns per path, reopen checks, and fixed-return history experiments. |
+
+## Group F size
+
+Implementation commits add 1114 lines and remove 118 lines across 12 files.
+Production Rust changes add 107 lines and remove 16 lines.
+The engine simulation is 470 lines. The G1 benchmark is 334 lines.
+The shared M1 benchmark helper is 118 lines. The shell entry point is 7 lines.
+These counts exclude this results update.
+
+Core source has 2027 physical lines before trailing unit-test modules, including simulation-only blocks.
+Excluding `sim`-guarded code and its attributes leaves 1997 production lines, including comments and blanks.
+That count is 1837 after removing comments and blank lines.
+The count covers `crates/zerodb-core/src/*.rs`, not the earlier Group D tape hooks.
 Linux NVMe measurements and LazyFS testing remain future work.
