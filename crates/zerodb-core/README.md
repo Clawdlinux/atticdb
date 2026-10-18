@@ -113,6 +113,9 @@ The `full_snapshot_shares_pages_and_measures_its_lock_hold` test measures a 1000
 This measures hold time without asserting a hardware-dependent latency threshold.
 
 Files are named `ckpt-{lsn}.zdb`. Failed attempts may leave numbered suffixes.
+Failures before a rename attempt remove partial data and staging files.
+An ambiguous rename keeps the complete file until the next open checks the installed chain.
+Open removes unreferenced checkpoint files after acquiring the tape lock.
 Every record contains a CRC32C, a total length, and a typed payload.
 CRC coverage includes the length and payload.
 File headers carry the watermark and transaction.

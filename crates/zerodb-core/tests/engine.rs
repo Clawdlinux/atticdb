@@ -467,6 +467,31 @@ fn cold_window_and_pin_io_do_not_hold_the_writer_state_lock() {
     }
 }
 
+#[test]
+fn open_sweeps_orphan_checkpoints_only_after_taking_the_tape_lock() {
+    let disk = Arc::new(SimDisk::new(19));
+    let engine = open(disk.clone(), options());
+    engine.append(&scope("s"), vec![turn(1)], None).unwrap();
+    engine.checkpoint().unwrap();
+    for path in ["db/ckpt-orphan.zdb", "db/CHECKPOINT.next"] {
+        let id = disk.create(std::path::Path::new(path)).unwrap();
+        disk.write_at(id, 0, b"partial").unwrap();
+        disk.sync_data(id).unwrap();
+        disk.close(id).unwrap();
+    }
+    disk.sync_dir(std::path::Path::new("db")).unwrap();
+    assert!(
+        Engine::open_with(disk.clone(), Arc::new(SimClock::default()), "db", options()).is_err()
+    );
+    assert!(disk.exists(std::path::Path::new("db/ckpt-orphan.zdb")).unwrap());
+    drop(engine);
+    let engine = open(disk.clone(), options());
+    assert!(!disk.exists(std::path::Path::new("db/ckpt-orphan.zdb")).unwrap());
+    assert!(!disk.exists(std::path::Path::new("db/CHECKPOINT.next")).unwrap());
+    assert_eq!(engine.metrics().unwrap().checkpoint_files, 1);
+    assert_eq!(engine.window(&scope("s"), WindowQuery::Last(1)).unwrap()[0].seq, 1);
+}
+
 struct TestDir(PathBuf);
 impl TestDir {
     fn new() -> Self {

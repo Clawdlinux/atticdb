@@ -20,6 +20,30 @@ impl Drop for File<'_> {
     }
 }
 
+struct PendingFile<'a> {
+    io: &'a dyn Io,
+    path: PathBuf,
+    preserve: bool,
+}
+impl Drop for PendingFile<'_> {
+    fn drop(&mut self) {
+        if self.preserve {
+            return;
+        }
+        let dir = self.path.parent().unwrap_or_else(|| Path::new("."));
+        for path in [&self.path, &dir.join("CHECKPOINT.next")] {
+            if let Err(error) = self.io.remove(path) {
+                if !matches!(error, zerodb_tape::Error::Io(std::io::ErrorKind::NotFound, _)) {
+                    eprintln!("zerodb: checkpoint cleanup failed: {error}");
+                }
+            }
+        }
+        if let Err(error) = self.io.sync_dir(dir) {
+            eprintln!("zerodb: checkpoint cleanup sync failed: {error}");
+        }
+    }
+}
+
 fn crc(data: &[u8]) -> u32 {
     let mut crc = !0u32;
     for byte in data {
@@ -230,6 +254,24 @@ pub(crate) fn load(io: &dyn Io, dir: &Path, opts: &EngineOptions) -> State {
     }
 }
 
+pub(crate) fn sweep(io: &dyn Io, dir: &Path, chain: &[String]) -> Result<()> {
+    for path in io.list(dir)? {
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if (name.starts_with("ckpt-")
+            && name.ends_with(".zdb")
+            && !chain.iter().any(|live| live == name))
+            || name == "CHECKPOINT.next"
+            || (name == "CHECKPOINT" && chain.is_empty())
+        {
+            io.remove(&path)?;
+        }
+    }
+    io.sync_dir(dir)?;
+    Ok(())
+}
+
 type PageSnapshot = (Key, usize, u64, Option<Arc<Vec<u64>>>, Option<Backing>);
 struct Snapshot {
     lsn: u64,
@@ -321,7 +363,8 @@ pub(crate) fn save(io: &dyn Io, dir: &Path, shared: &Mutex<State>) -> Result<u64
         attempt += 1;
         name = format!("ckpt-{}-{attempt}.zdb", snap.lsn);
     }
-    let file = File(io, io.create(&dir.join(&name))?);
+    let mut pending = PendingFile { io, path: dir.join(&name), preserve: false };
+    let file = File(io, io.create(&pending.path)?);
     let mut off = 0;
     let mut header = b"ZCK1".to_vec();
     header.extend_from_slice(&snap.lsn.to_le_bytes());
@@ -381,6 +424,8 @@ pub(crate) fn save(io: &dyn Io, dir: &Path, shared: &Mutex<State>) -> Result<u64
     let meta = File(io, io.create(&next)?);
     write(io, meta.1, &mut 0, &manifest)?;
     io.sync_data(meta.1)?;
+    // A failed rename can have taken effect. Open sweeps any unreferenced complete file.
+    pending.preserve = true;
     io.rename(&next, &dir.join("CHECKPOINT"))?;
     io.sync_dir(dir)?;
     let mut state = lock(shared)?;
@@ -760,5 +805,24 @@ mod tests {
         let file = disk.open(Path::new("db/ckpt-102.zdb")).unwrap();
         assert!(disk.len(file).unwrap() < 128);
         disk.close(file).unwrap();
+    }
+
+    #[test]
+    fn failed_checkpoint_before_install_removes_partial_files() {
+        for at in [3, 4, 5, 9, 10] {
+            let disk = SimDisk::new(7);
+            let shared = state();
+            append(&shared, 1);
+            save(&disk, Path::new("db"), &shared).unwrap();
+            append(&shared, 2);
+            let io = FaultIo { disk, at, count: AtomicUsize::new(0), crashed: Mutex::new(None) };
+            assert!(save(&io, Path::new("db"), &shared).is_err());
+            assert!(!io.disk.exists(Path::new("db/ckpt-3.zdb")).unwrap(), "operation {at}");
+            assert!(!io.disk.exists(Path::new("db/CHECKPOINT.next")).unwrap(), "operation {at}");
+            assert_eq!(
+                load_inner(&io.disk, Path::new("db"), &EngineOptions::default()).unwrap().watermark,
+                2
+            );
+        }
     }
 }

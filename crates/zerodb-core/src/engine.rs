@@ -160,6 +160,8 @@ impl Engine {
         } else {
             opened?.0
         };
+        let chain = lock(&state)?.chain.clone();
+        checkpoint::sweep(io.as_ref(), &dir, &chain)?;
         let worker = Worker::start(io.clone(), dir.clone(), state.clone(), &opts)?;
         lock(&state)?.notify = Some(worker.sender.clone());
         Ok(Self {
