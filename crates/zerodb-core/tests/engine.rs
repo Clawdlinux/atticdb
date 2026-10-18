@@ -398,6 +398,32 @@ fn replay_spills_by_dirty_capacity_not_clean_resident_pages() {
     );
 }
 
+#[test]
+fn failed_sync_with_a_full_dedup_window_cannot_checkpoint_tentative_eviction() {
+    let disk = Arc::new(SimDisk::new(17));
+    let opts = EngineOptions { dedup_per_tenant: 1, dedup_global: 1, ..options() };
+    let engine = open(disk.clone(), opts.clone());
+    let receipt = engine.append(&scope("s"), vec![turn(1)], Some("original")).unwrap();
+    let watermark = engine.checkpoint().unwrap();
+    disk.fail_next_sync().unwrap();
+    assert_eq!(
+        engine.append(&scope("s"), vec![turn(2)], Some("unknown")).unwrap_err().outcome,
+        Outcome::Unknown
+    );
+    assert_eq!(engine.checkpoint().unwrap(), watermark);
+    drop(engine);
+    let engine = open(Arc::new(disk.crash().unwrap()), opts);
+    let window = engine.window(&scope("s"), WindowQuery::Last(10)).unwrap();
+    if window.len() == 1 {
+        assert_eq!(engine.append(&scope("s"), vec![turn(1)], Some("original")).unwrap(), receipt);
+    } else {
+        assert_eq!(
+            engine.append(&scope("s"), vec![turn(2)], Some("unknown")).unwrap().seqs,
+            vec![2]
+        );
+    }
+}
+
 struct TestDir(PathBuf);
 impl TestDir {
     fn new() -> Self {

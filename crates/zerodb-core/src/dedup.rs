@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
 use zerodb_tape::{Committed, Digest};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -20,9 +21,9 @@ impl Entry {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct Dedup {
-    pub(crate) entries: BTreeMap<u64, Entry>,
+    pub(crate) entries: BTreeMap<u64, Arc<Entry>>,
     lookup: HashMap<DedupKey, u64>,
     tenants: BTreeMap<u32, BTreeSet<u64>>,
     per_tenant: usize,
@@ -39,21 +40,24 @@ impl Dedup {
             global,
         }
     }
-    pub(crate) fn get(&self, key: &DedupKey) -> Option<&Entry> {
+    pub(crate) fn get(&self, key: &DedupKey) -> Option<&Arc<Entry>> {
         self.lookup.get(key).and_then(|age| self.entries.get(age))
     }
-    fn remove(&mut self, age: u64) {
-        if let Some(entry) = self.entries.remove(&age) {
-            self.lookup.remove(&entry.key);
-            if let Some(ages) = self.tenants.get_mut(&entry.key.0) {
-                ages.remove(&age);
-                if ages.is_empty() {
-                    self.tenants.remove(&entry.key.0);
-                }
+    pub(crate) fn remove(&mut self, age: u64) -> Option<Arc<Entry>> {
+        let entry = self.entries.remove(&age)?;
+        self.lookup.remove(&entry.key);
+        if let Some(ages) = self.tenants.get_mut(&entry.key.0) {
+            ages.remove(&age);
+            if ages.is_empty() {
+                self.tenants.remove(&entry.key.0);
             }
         }
+        Some(entry)
     }
     pub(crate) fn insert(&mut self, entry: Entry) {
+        self.insert_arc(Arc::new(entry));
+    }
+    pub(crate) fn insert_arc(&mut self, entry: Arc<Entry>) {
         if self.per_tenant == 0 || self.global == 0 {
             return;
         }
@@ -71,6 +75,24 @@ impl Dedup {
             }
         }
         while self.entries.len() > self.global {
+            if let Some((&age, _)) = self.entries.first_key_value() {
+                self.remove(age);
+            }
+        }
+    }
+    fn tenant_len(&self, tenant: u32) -> usize {
+        self.tenants.get(&tenant).map_or(0, BTreeSet::len)
+    }
+    pub(crate) fn can_stage(&self, tenant: u32) -> bool {
+        self.entries.len() < self.global && self.tenant_len(tenant) < self.per_tenant
+    }
+    pub(crate) fn reserve_overlay(&mut self, overlay: &Self, tenant: u32) {
+        while self.tenant_len(tenant) + overlay.tenant_len(tenant) >= self.per_tenant {
+            if let Some(&age) = self.tenants[&tenant].first() {
+                self.remove(age);
+            }
+        }
+        while self.entries.len() + overlay.entries.len() >= self.global {
             if let Some((&age, _)) = self.entries.first_key_value() {
                 self.remove(age);
             }

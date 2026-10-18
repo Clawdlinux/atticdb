@@ -34,13 +34,14 @@ impl Machine {
         opts: EngineOptions,
     ) -> Result<Self> {
         let s = lock(&state)?;
+        let dedup = Dedup::new(opts.dedup_per_tenant, opts.dedup_global);
         let machine = Self {
             state: state.clone(),
             io,
             dir,
             opts,
             tenants: s.tenants.clone(),
-            dedup: s.dedup.clone(),
+            dedup,
             lsn: s.published_lsn,
             txn: s.txn,
             digest_txn: 0,
@@ -90,12 +91,21 @@ impl Machine {
         }
         let digest = *hash.finalize().as_bytes();
         let dedup_key = first.idem_key.map(|id| DedupKey(tenant, first.session_id, id));
-        if let Some(entry) = dedup_key.as_ref().and_then(|key| self.dedup.get(key)) {
+        let mut state = lock(&self.state)?;
+        if let Some(error) = &state.failure {
+            return Err(error.clone());
+        }
+        if let Some(entry) =
+            dedup_key.as_ref().and_then(|key| self.dedup.get(key).or_else(|| state.dedup.get(key)))
+        {
             return if entry.digest == digest {
                 Ok(Prepare::Reply(entry.committed.clone()))
             } else {
                 Err(EngineError::rejected(ErrorKind::IdempotencyConflict))
             };
+        }
+        if dedup_key.is_some() && !self.dedup.can_stage(tenant) {
+            return Err(EngineError::rejected(ErrorKind::ResourceExhausted("prepared_dedup")));
         }
         let first_lsn = self
             .lsn
@@ -109,10 +119,6 @@ impl Machine {
             .txn
             .checked_add(1)
             .ok_or_else(|| EngineError::rejected(ErrorKind::ResourceExhausted("txn")))?;
-        let mut state = lock(&self.state)?;
-        if let Some(error) = &state.failure {
-            return Err(error.clone());
-        }
         let seq = state.index.reserve(&key, turns.len())?;
         if let Some(record) = create {
             let name = std::str::from_utf8(&record.content)
@@ -128,7 +134,9 @@ impl Machine {
         }
         self.lsn = last_lsn;
         self.txn = txn;
+        state.prepared_lsn = last_lsn;
         if let Some(key) = dedup_key {
+            state.dedup.reserve_overlay(&self.dedup, tenant);
             self.dedup.insert(Entry {
                 key,
                 digest,
@@ -177,7 +185,7 @@ impl Machine {
                 }
                 state.index.publish(&key, turn.seq, record.lsn)?;
                 state.dirty.insert((key, address(turn.seq).0));
-                if let Some(id) = turn.idem_key {
+                if let Some(id) = turn.idem_key.filter(|_| replay) {
                     let mut normalized = record.payload.to_vec();
                     set_seq(&mut normalized, 0)?;
                     self.hash.update(&(normalized.len() as u32).to_le_bytes());
@@ -191,10 +199,12 @@ impl Machine {
                             last_lsn: record.lsn,
                         },
                     };
-                    state.dedup.insert(entry.clone());
-                    if replay {
-                        self.dedup.insert(entry);
-                    }
+                    state.dedup.insert(entry);
+                } else if let Some(entry) = self.dedup.entries.values().next().filter(|entry| {
+                    matches!(entry.committed, Committed::Durable { last_lsn, .. } if last_lsn == record.lsn)
+                }) {
+                    let age = entry.age();
+                    if let Some(entry) = self.dedup.remove(age) { state.dedup.insert_arc(entry); }
                 }
             }
             _ => return Err(EngineError::rejected(ErrorKind::CorruptIndex)),
@@ -283,6 +293,66 @@ mod tests {
     use crate::{NewTurn, Role, Trust};
     use zerodb_tape::sim::{SimClock, WriteRequest, WriterCore};
     use zerodb_tape::{Durability, Kind, RecordInput, SimDisk};
+
+    #[test]
+    fn prepared_overlay_starts_empty_and_shares_the_global_entry_budget() {
+        let disk = Arc::new(SimDisk::new(8));
+        let opts =
+            EngineOptions { dedup_per_tenant: 2, dedup_global: 2, ..EngineOptions::default() };
+        let mut initial = State::new(&opts);
+        initial.tenants.insert("t", 1, 1, 10_000).unwrap();
+        initial.published_lsn = 3;
+        initial.txn = 1;
+        for age in 2..=3 {
+            initial.dedup.insert(Entry {
+                key: DedupKey(1, age.to_string(), "old".into()),
+                digest: [0; 32],
+                committed: Committed::Durable { txn: 1, first_lsn: age, last_lsn: age },
+            });
+        }
+        let shared = Arc::new(Mutex::new(initial));
+        let mut machine = Machine::new(shared.clone(), disk.clone(), "db".into(), opts).unwrap();
+        assert!(machine.dedup.entries.is_empty());
+        let mut records = Vec::new();
+        for (i, session) in ["new1", "new2"].into_iter().enumerate() {
+            let content = crate::turn::encode(
+                "a",
+                session,
+                0,
+                &NewTurn {
+                    role: Role::User,
+                    content: vec![1],
+                    meta: vec![],
+                    trust: Trust::Untrusted,
+                },
+                Some("key"),
+            )
+            .unwrap();
+            let mut batch = PreparedBatch::with_salts(
+                vec![RecordInput { kind: Kind::Turn, tenant_id: 1, content }],
+                Durability::Durable,
+                || Ok([1; 16]),
+            )
+            .unwrap();
+            assert!(matches!(machine.prepare(&mut batch), Prepare::Write));
+            assert!(shared.lock().unwrap().dedup.entries.len() + machine.dedup.entries.len() <= 2);
+            records.push(CommittedRecord {
+                lsn: 4 + i as u64,
+                txn: 2 + i as u64,
+                kind: Kind::Turn,
+                tenant_id: 1,
+                commit_time_ns: 0,
+                payload: Arc::from(batch.records().next().unwrap().content.as_slice()),
+            });
+        }
+        assert_eq!(
+            crate::checkpoint::save(disk.as_ref(), std::path::Path::new("db"), &shared).unwrap(),
+            0
+        );
+        machine.publish(&records);
+        assert!(machine.dedup.entries.is_empty());
+        assert_eq!(shared.lock().unwrap().dedup.entries.len(), 2);
+    }
 
     #[test]
     fn pending_retry_shares_group_sync_and_poison_hides_dedup_reservations() {

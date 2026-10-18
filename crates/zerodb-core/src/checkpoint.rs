@@ -239,7 +239,7 @@ struct Snapshot {
     chain: Vec<String>,
     tenants: Vec<(u32, String, u64)>,
     pages: Vec<PageSnapshot>,
-    dedup: Vec<Entry>,
+    dedup: Vec<Arc<Entry>>,
 }
 fn snapshot(state: &State) -> Snapshot {
     let full = state.chain.len() >= 8;
@@ -302,6 +302,9 @@ pub(crate) fn save(io: &dyn Io, dir: &Path, shared: &Mutex<State>) -> Result<u64
         let state = lock(shared)?;
         if let Some(error) = &state.failure {
             return Err(error.clone());
+        }
+        if state.prepared_lsn > state.published_lsn {
+            return Ok(state.watermark);
         }
         if state.published_lsn == state.watermark {
             return Ok(state.watermark);

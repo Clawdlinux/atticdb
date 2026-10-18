@@ -78,8 +78,11 @@ Arithmetic maps sequences to page slots. Slots store LSNs, not segment offsets.
 Defaults allow 256 MiB of hot slots and 10,000 tenants.
 Directory defaults allow 1M sessions and 8M pages, including cold pages.
 Retry tables retain at most 1M keys per tenant and 8M globally.
-The published and prepared retry tables each obey these limits.
-A checkpoint snapshot can hold another bounded copy.
+Published entries and the prepared overlay share that entry budget.
+Preparation doesn't clone the published table.
+Checkpoint snapshots share immutable retry entries rather than copying their payloads.
+Checkpoints don't advance while prepared writes remain unpublished.
+Failed sync recovery therefore restores any entries evicted during preparation.
 
 Clean checkpoint-backed pages use LRU eviction. Active append tails stay pinned until acknowledgement.
 Dirty pages need a worker checkpoint before eviction.
