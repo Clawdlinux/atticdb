@@ -802,6 +802,44 @@ fn publish_during_checkpoint_keeps_the_new_page_dirty() {
 }
 
 #[test]
+fn legacy_checkpoint_magic_falls_back_to_full_replay() {
+    let io = Arc::new(FaultIo::new(SimDisk::new(33)));
+    let clock = Arc::new(SimClock::default());
+    let opts = EngineOptions {
+        tape: TapeOptions { segment_size: 64 * 1024, inline_sim: true, ..TapeOptions::default() },
+        ..EngineOptions::default()
+    };
+    let scope = Scope { tenant: "t".into(), agent: "a".into(), session: "s".into() };
+    let turn =
+        NewTurn { role: Role::User, trust: Trust::Untrusted, content: vec![7], meta: vec![] };
+    let engine = open(io.clone(), clock.clone(), &opts);
+    engine.append(&scope, vec![turn.clone(); 2], Some("original")).unwrap();
+    engine.checkpoint().unwrap();
+    drop(engine);
+    let path = io
+        .disk
+        .list(Path::new("db"))
+        .unwrap()
+        .into_iter()
+        .find(|p| p.file_name().unwrap().to_str().unwrap().starts_with("ckpt-"))
+        .unwrap();
+    let file = io.disk.open(&path).unwrap();
+    let mut header = [0; 28];
+    assert_eq!(io.disk.read_at(file, 0, &mut header).unwrap(), header.len());
+    header[8..12].copy_from_slice(b"ZCK1");
+    let crc = zerodb_tape::sim::crc32c(&header[4..]);
+    header[..4].copy_from_slice(&crc.to_le_bytes());
+    io.disk.write_at(file, 0, &header).unwrap();
+    io.disk.sync_data(file).unwrap();
+    io.disk.close(file).unwrap();
+    let engine = open(io, clock, &opts);
+    assert_eq!(engine.metrics().unwrap().checkpoint_warnings, 1);
+    assert_eq!(engine.metrics().unwrap().replayed_records, 3);
+    assert_eq!(engine.window(&scope, WindowQuery::Last(10)).unwrap().len(), 2);
+    assert_eq!(engine.append(&scope, vec![turn; 2], Some("original")).unwrap().seqs, vec![1, 2]);
+}
+
+#[test]
 fn seeded_engine_recovery() {
     let first = std::env::var("ZERODB_SIM_SEED").map_or(0, |v| v.parse::<u64>().unwrap());
     let count = std::env::var("ZERODB_SIM_SEEDS").map_or_else(

@@ -167,7 +167,7 @@ fn load_inner(io: &dyn Io, dir: &Path, opts: &EngineOptions) -> Result<State> {
         let (header, header_len) = read(io, file.1, 0)?;
         let mut off = u64::from(header_len);
         let mut cur = Cursor(&header);
-        if cur.take(4)? != b"ZCK1" {
+        if cur.take(4)? != b"ZCK2" {
             return Err(corrupt());
         }
         let boundary = cur.u64()?;
@@ -407,7 +407,7 @@ pub(crate) fn save(io: &dyn Io, dir: &Path, shared: &Mutex<State>) -> Result<u64
     let mut pending = PendingFile { io, path: dir.join(&name), preserve: false };
     let file = File(io, io.create(&pending.path)?);
     let mut buffer = CheckpointBuffer::new(io, file.1);
-    let mut header = b"ZCK1".to_vec();
+    let mut header = b"ZCK2".to_vec();
     header.extend_from_slice(&snap.lsn.to_le_bytes());
     header.extend_from_slice(&snap.txn.to_le_bytes());
     buffer.record(&header)?;
@@ -648,7 +648,7 @@ mod tests {
         };
         disk.set_len(id, 0).unwrap();
         let mut off = 0;
-        let mut header = b"ZCK1".to_vec();
+        let mut header = b"ZCK2".to_vec();
         header.extend_from_slice(&boundary.to_le_bytes());
         header.extend_from_slice(&1u64.to_le_bytes());
         write(disk, id, &mut off, &header).unwrap();
