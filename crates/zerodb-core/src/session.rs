@@ -18,6 +18,7 @@ pub(crate) struct Page {
     pub(crate) backing: Option<Backing>,
     pub(crate) revision: u64,
     pub(crate) dirty: bool,
+    pub(crate) used: usize,
     touch: u64,
 }
 
@@ -145,6 +146,7 @@ impl Index {
                 backing: None,
                 revision: 0,
                 dirty: true,
+                used: 0,
                 touch: 0,
             });
         }
@@ -164,13 +166,17 @@ impl Index {
             return Err(EngineError::rejected(ErrorKind::CorruptIndex));
         }
         let (page, slot) = address(seq);
-        let p = &mut entry.pages[page];
+        let p = entry
+            .pages
+            .get_mut(page)
+            .ok_or_else(|| EngineError::rejected(ErrorKind::CorruptIndex))?;
         let slots = p.slots.as_mut().ok_or_else(|| exhausted("hot_pages"))?;
         if slots.len() != slot {
             return Err(EngineError::rejected(ErrorKind::CorruptIndex));
         }
         self.lru.remove(&(p.touch, key.clone(), page));
         slots.push(lsn);
+        p.used = slots.len();
         p.revision = lsn;
         if !p.dirty {
             self.dirty_bytes += capacity(page) * 8;
@@ -186,7 +192,11 @@ impl Index {
         page: usize,
         read: &mut impl FnMut(&Backing) -> Result<Vec<u64>>,
     ) -> Result<()> {
-        let p = &self.sessions[key].pages[page];
+        let p = self
+            .sessions
+            .get(key)
+            .and_then(|entry| entry.pages.get(page))
+            .ok_or_else(|| EngineError::rejected(ErrorKind::CorruptIndex))?;
         if p.slots.is_none() {
             let backing =
                 p.backing.clone().ok_or_else(|| EngineError::rejected(ErrorKind::CorruptIndex))?;
@@ -216,7 +226,11 @@ impl Index {
             self.load(key, page, &mut read)?;
             let slots =
                 self.sessions[key].pages[page].slots.as_ref().unwrap_or_else(|| unreachable!());
-            let count = (end - seq).min((slots.len() - slot) as u64) as usize;
+            let available = slots
+                .len()
+                .checked_sub(slot)
+                .ok_or_else(|| EngineError::rejected(ErrorKind::CorruptIndex))?;
+            let count = (end - seq).min(available as u64) as usize;
             if count == 0 {
                 return Err(EngineError::rejected(ErrorKind::CorruptIndex));
             }
@@ -251,10 +265,23 @@ impl Index {
             return Err(exhausted("sessions"));
         }
         let entry = self.sessions.entry(key).or_default();
-        if page > entry.pages.len() {
+        if page > entry.pages.len()
+            || (page == entry.pages.len()
+                && page > 0
+                && entry.pages[page - 1].used != capacity(page - 1))
+            || entry.pages.get(page).is_some_and(|old| count < old.used || revision < old.revision)
+            || (page + 1 < entry.pages.len() && count != capacity(page))
+        {
             return Err(EngineError::rejected(ErrorKind::CorruptIndex));
         }
-        let p = Page { slots: None, backing: Some(backing), revision, dirty: false, touch: 0 };
+        let p = Page {
+            slots: None,
+            backing: Some(backing),
+            revision,
+            dirty: false,
+            used: count,
+            touch: 0,
+        };
         if page == entry.pages.len() {
             if self.pages >= self.max_pages {
                 return Err(exhausted("page_directory"));
@@ -275,6 +302,17 @@ impl Index {
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+
+    #[test]
+    fn short_resident_page_returns_corruption_instead_of_panicking() {
+        let key = Key(1, "a".into(), "s".into());
+        let mut index = Index::new(4096, 10, 100);
+        index.reserve(&key, 17).unwrap();
+        index.publish(&key, 1, 2).unwrap();
+        index.sessions.get_mut(&key).unwrap().len = 17;
+        let error = index.window(&key, 10, 11, |_| unreachable!()).unwrap_err();
+        assert!(matches!(error.kind, ErrorKind::CorruptIndex));
+    }
 
     #[test]
     fn geometric_slots_dense_windows_and_eviction() {

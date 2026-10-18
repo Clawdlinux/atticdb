@@ -18,6 +18,7 @@ pub(crate) struct State {
     pub(crate) chain: Vec<String>,
     pub(crate) replayed: u64,
     pub(crate) warnings: u64,
+    pub(crate) replay_failed: bool,
     pub(crate) failure: Option<EngineError>,
     pub(crate) notify: Option<std::sync::mpsc::SyncSender<crate::checkpoint::Command>>,
 }
@@ -36,6 +37,7 @@ impl State {
             chain: Vec::new(),
             replayed: 0,
             warnings: 0,
+            replay_failed: false,
             failure: None,
             notify: None,
         }

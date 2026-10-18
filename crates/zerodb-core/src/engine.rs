@@ -134,24 +134,30 @@ impl Engine {
         let state = Arc::new(Mutex::new(checkpoint::load(io.as_ref(), &dir, &opts)));
         opts.tape.replay_from_lsn = lock(&state)?.watermark;
         let machine = Machine::new(state.clone(), io.clone(), dir.clone(), opts.clone())?;
-        let (mut tape, report) =
-            Tape::open_with(machine, io.clone(), clock.clone(), &dir, opts.tape.clone())?;
-        if report.durable_lsn < opts.tape.replay_from_lsn {
-            drop(tape);
+        let opened = Tape::open_with(machine, io.clone(), clock.clone(), &dir, opts.tape.clone());
+        let retry = opts.tape.replay_from_lsn > 0
+            && match &opened {
+                Ok((_, report)) => report.durable_lsn < opts.tape.replay_from_lsn,
+                Err(_) => lock(&state)?.replay_failed,
+            };
+        let tape = if retry {
+            drop(opened);
             let mut fresh = State::new(&opts);
             fresh.warnings = 1;
             *lock(&state)? = fresh;
-            eprintln!("zerodb: checkpoint exceeds recovered tape, replaying tape");
+            eprintln!("zerodb: checkpoint inconsistent with recovered tape, replaying tape");
             opts.tape.replay_from_lsn = 0;
-            tape = Tape::open_with(
+            Tape::open_with(
                 Machine::new(state.clone(), io.clone(), dir.clone(), opts.clone())?,
                 io.clone(),
                 clock,
                 &dir,
                 opts.tape.clone(),
             )?
-            .0;
-        }
+            .0
+        } else {
+            opened?.0
+        };
         let worker = Worker::start(io.clone(), dir.clone(), state.clone(), &opts)?;
         lock(&state)?.notify = Some(worker.sender.clone());
         Ok(Self {

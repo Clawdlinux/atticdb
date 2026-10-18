@@ -243,28 +243,36 @@ impl StateMachine for Machine {
         }
     }
     fn replay(&mut self, record: &CommittedRecord) -> zerodb_tape::Result<()> {
-        let shared = self.state.clone();
-        let spill = {
-            let state = lock(&shared).map_err(tape_error)?;
-            state.published_lsn > state.watermark
-                && state.txn != record.txn
-                && state.index.dirty_bytes > self.opts.hot_page_bytes.saturating_sub(64 * 1024)
-        };
-        if spill {
-            std::thread::scope(|scope| {
-                std::thread::Builder::new()
-                    .name("zerodb-checkpoint-recovery".into())
-                    .spawn_scoped(scope, || {
-                        crate::checkpoint::save(self.io.as_ref(), &self.dir, &shared)
-                    })
-                    .map_err(Error::from)?
-                    .join()
-                    .map_err(|_| Error::Poisoned)?
-                    .map_err(tape_error)
-            })?;
+        let result = (|| {
+            let shared = self.state.clone();
+            let spill = {
+                let state = lock(&shared).map_err(tape_error)?;
+                state.published_lsn > state.watermark
+                    && state.txn != record.txn
+                    && state.index.dirty_bytes > self.opts.hot_page_bytes.saturating_sub(64 * 1024)
+            };
+            if spill {
+                std::thread::scope(|scope| {
+                    std::thread::Builder::new()
+                        .name("zerodb-checkpoint-recovery".into())
+                        .spawn_scoped(scope, || {
+                            crate::checkpoint::save(self.io.as_ref(), &self.dir, &shared)
+                        })
+                        .map_err(Error::from)?
+                        .join()
+                        .map_err(|_| Error::Poisoned)?
+                        .map_err(tape_error)
+                })?;
+            }
+            let mut state = lock(&shared).map_err(tape_error)?;
+            self.install(&mut state, record, true).map_err(tape_error)
+        })();
+        if result.is_err() {
+            if let Ok(mut state) = self.state.lock() {
+                state.replay_failed = true;
+            }
         }
-        let mut state = lock(&shared).map_err(tape_error)?;
-        self.install(&mut state, record, true).map_err(tape_error)
+        result
     }
 }
 

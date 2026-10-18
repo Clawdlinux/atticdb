@@ -465,6 +465,102 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use zerodb_tape::{LockGuard, SimDisk};
 
+    fn fixture(disk: &SimDisk, shapes: &[(usize, usize)], boundary: u64) {
+        let path = Path::new("db/ckpt-3.zdb");
+        let id = if disk.exists(path).unwrap() {
+            disk.open(path).unwrap()
+        } else {
+            disk.create(path).unwrap()
+        };
+        disk.set_len(id, 0).unwrap();
+        let mut off = 0;
+        let mut header = b"ZCK1".to_vec();
+        header.extend_from_slice(&boundary.to_le_bytes());
+        header.extend_from_slice(&1u64.to_le_bytes());
+        write(disk, id, &mut off, &header).unwrap();
+        let mut tenant = vec![1];
+        tenant.extend_from_slice(&1u32.to_le_bytes());
+        tenant.extend_from_slice(&1u64.to_le_bytes());
+        bytes(&mut tenant, b"t");
+        write(disk, id, &mut off, &tenant).unwrap();
+        for &(page, count) in shapes {
+            let mut data = vec![2];
+            put_key(&mut data, &Key(1, "a".into(), "s".into()));
+            data.extend_from_slice(&(page as u32).to_le_bytes());
+            data.extend_from_slice(&(count as u32).to_le_bytes());
+            for lsn in 2..count as u64 + 2 {
+                data.extend_from_slice(&lsn.to_le_bytes());
+            }
+            write(disk, id, &mut off, &data).unwrap();
+        }
+        disk.sync_data(id).unwrap();
+        disk.close(id).unwrap();
+        let path = Path::new("db/CHECKPOINT");
+        let id = if disk.exists(path).unwrap() {
+            disk.open(path).unwrap()
+        } else {
+            disk.create(path).unwrap()
+        };
+        disk.set_len(id, 0).unwrap();
+        let mut data = b"ZCM1".to_vec();
+        data.extend_from_slice(&boundary.to_le_bytes());
+        data.extend_from_slice(&1u64.to_le_bytes());
+        data.push(1);
+        bytes(&mut data, b"ckpt-3.zdb");
+        write(disk, id, &mut 0, &data).unwrap();
+        disk.sync_data(id).unwrap();
+        disk.close(id).unwrap();
+        disk.sync_dir(Path::new("db")).unwrap();
+    }
+
+    #[test]
+    fn crc_valid_malformed_page_geometry_is_rejected() {
+        for shape in [
+            vec![(1, 1)],
+            vec![(0, 1), (1, 1)],
+            vec![(0, 16), (0, 1)],
+            vec![(0, 16), (1, 1), (0, 1)],
+        ] {
+            let disk = SimDisk::new(4);
+            fixture(&disk, &shape, 100);
+            assert!(
+                load_inner(&disk, Path::new("db"), &EngineOptions::default()).is_err(),
+                "{shape:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn replay_failure_after_a_crc_valid_checkpoint_retries_from_zero() {
+        use crate::{Engine, NewTurn, Role, Scope, Trust, WindowQuery};
+        let disk = Arc::new(SimDisk::new(5));
+        let scope = Scope { tenant: "t".into(), agent: "a".into(), session: "s".into() };
+        let turn =
+            NewTurn { role: Role::User, content: vec![1], meta: vec![], trust: Trust::Untrusted };
+        let engine = Engine::open_with(
+            disk.clone(),
+            Arc::new(zerodb_tape::sim::SimClock::default()),
+            "db",
+            EngineOptions::default(),
+        )
+        .unwrap();
+        engine.append(&scope, vec![turn.clone(); 2], None).unwrap();
+        engine.checkpoint().unwrap();
+        engine.append(&scope, vec![turn], None).unwrap();
+        drop(engine);
+        fixture(&disk, &[(0, 1)], 3);
+        let engine = Engine::open_with(
+            disk,
+            Arc::new(zerodb_tape::sim::SimClock::default()),
+            "db",
+            EngineOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(engine.metrics().unwrap().checkpoint_warnings, 1);
+        assert_eq!(engine.metrics().unwrap().replayed_records, 4);
+        assert_eq!(engine.window(&scope, WindowQuery::Last(10)).unwrap().len(), 3);
+    }
+
     fn append(state: &Mutex<State>, seq: u64) {
         let mut state = state.lock().unwrap();
         let key = Key(1, "a".into(), "s".into());
