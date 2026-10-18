@@ -50,6 +50,7 @@ pub(crate) fn capacity(page: usize) -> usize {
 pub(crate) struct Index {
     pub(crate) sessions: HashMap<Key, SessionEntry>,
     pub(crate) hot_bytes: usize,
+    pub(crate) dirty_bytes: usize,
     pub(crate) budget: usize,
     pub(crate) max_sessions: usize,
     pub(crate) max_pages: usize,
@@ -67,6 +68,7 @@ impl Index {
         Self {
             sessions: HashMap::new(),
             hot_bytes: 0,
+            dirty_bytes: 0,
             budget,
             max_sessions,
             max_pages,
@@ -149,6 +151,7 @@ impl Index {
         entry.reserved = end;
         self.pages += needed - existing;
         self.hot_bytes += bytes;
+        self.dirty_bytes += bytes;
         Ok(old + 1)
     }
 
@@ -169,6 +172,9 @@ impl Index {
         self.lru.remove(&(p.touch, key.clone(), page));
         slots.push(lsn);
         p.revision = lsn;
+        if !p.dirty {
+            self.dirty_bytes += capacity(page) * 8;
+        }
         p.dirty = true;
         entry.len = seq;
         Ok(())
@@ -223,8 +229,9 @@ impl Index {
     pub(crate) fn clean(&mut self, key: &Key, page: usize, revision: u64, backing: Backing) {
         let p = &mut self.sessions.get_mut(key).unwrap_or_else(|| unreachable!()).pages[page];
         p.backing = Some(backing);
-        if p.revision == revision {
+        if p.revision == revision && p.dirty {
             p.dirty = false;
+            self.dirty_bytes -= capacity(page) * 8;
         }
         self.touch(key, page);
     }

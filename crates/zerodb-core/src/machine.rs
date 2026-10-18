@@ -248,7 +248,7 @@ impl StateMachine for Machine {
             let state = lock(&shared).map_err(tape_error)?;
             state.published_lsn > state.watermark
                 && state.txn != record.txn
-                && state.index.hot_bytes > self.opts.hot_page_bytes.saturating_sub(32768)
+                && state.index.dirty_bytes > self.opts.hot_page_bytes.saturating_sub(64 * 1024)
         };
         if spill {
             std::thread::scope(|scope| {

@@ -370,6 +370,34 @@ fn receipt_read_failure_reports_committed_and_checkpoint_io_uses_worker() {
     assert!(checkpoint_writes.iter().all(|(thread, _)| thread == "zerodb-checkpoint"));
 }
 
+#[test]
+fn replay_spills_by_dirty_capacity_not_clean_resident_pages() {
+    let io = Arc::new(support::ProbeIo::new(16));
+    let engine =
+        Engine::open_with(io.clone(), Arc::new(SimClock::default()), "db", options()).unwrap();
+    for i in 0..1300 {
+        engine.append(&scope(&i.to_string()), vec![turn(i)], None).unwrap();
+    }
+    drop(engine);
+    io.writes.lock().unwrap().clear();
+    let opts = EngineOptions { hot_page_bytes: 128 * 1024, ..options() };
+    let engine = Engine::open_with(io.clone(), Arc::new(SimClock::default()), "db", opts).unwrap();
+    let files: std::collections::BTreeSet<_> = io
+        .writes
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, p)| p.file_name().unwrap().to_str().unwrap().starts_with("ckpt-"))
+        .map(|(_, p)| p.clone())
+        .collect();
+    assert!(!files.is_empty());
+    assert!(files.len() <= 3, "{} checkpoints for 1300 dirty pages", files.len());
+    assert_eq!(
+        engine.window(&scope("1299"), WindowQuery::Last(1)).unwrap()[0].content,
+        1299u64.to_le_bytes()
+    );
+}
+
 struct TestDir(PathBuf);
 impl TestDir {
     fn new() -> Self {
