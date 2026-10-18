@@ -24,6 +24,7 @@ pub(crate) struct Machine {
     txn: u64,
     digest_txn: u64,
     first_lsn: u64,
+    first_seq: u64,
     hash: blake3::Hasher,
 }
 impl Machine {
@@ -46,6 +47,7 @@ impl Machine {
             txn: s.txn,
             digest_txn: 0,
             first_lsn: 0,
+            first_seq: 0,
             hash: blake3::Hasher::new(),
         };
         Ok(machine)
@@ -134,11 +136,13 @@ impl Machine {
         }
         self.lsn = last_lsn;
         self.txn = txn;
+        let reply = seq.to_le_bytes().to_vec();
+        batch.set_reply(reply.clone());
         if let Some(key) = dedup_key {
             self.dedup.insert(Entry {
                 key,
                 digest,
-                committed: Committed::Durable { txn, first_lsn, last_lsn },
+                committed: Committed::Durable { txn, first_lsn, last_lsn, reply },
             });
         }
         Ok(Prepare::Write)
@@ -148,6 +152,7 @@ impl Machine {
         if self.digest_txn != record.txn {
             self.digest_txn = record.txn;
             self.first_lsn = record.lsn;
+            self.first_seq = 0;
             self.hash.reset();
         }
         match record.kind {
@@ -167,6 +172,9 @@ impl Machine {
             zerodb_tape::Kind::Turn => {
                 let turn = decode(&record.payload)
                     .map_err(|_| EngineError::rejected(ErrorKind::CorruptIndex))?;
+                if self.first_seq == 0 {
+                    self.first_seq = turn.seq;
+                }
                 let key = Key(record.tenant_id, turn.agent_id, turn.session_id.clone());
                 if record.tenant_id == 0 || record.tenant_id as usize > state.tenants.entries.len()
                 {
@@ -196,6 +204,7 @@ impl Machine {
                             txn: record.txn,
                             first_lsn: self.first_lsn,
                             last_lsn: record.lsn,
+                            reply: self.first_seq.to_le_bytes().to_vec(),
                         },
                     };
                     state.dedup.insert(entry);
@@ -394,7 +403,12 @@ mod tests {
             initial.dedup.insert(Entry {
                 key: DedupKey(1, age.to_string(), "old".into()),
                 digest: [0; 32],
-                committed: Committed::Durable { txn: 1, first_lsn: age, last_lsn: age },
+                committed: Committed::Durable {
+                    txn: 1,
+                    first_lsn: age,
+                    last_lsn: age,
+                    reply: 1u64.to_le_bytes().to_vec(),
+                },
             });
         }
         let shared = Arc::new(Mutex::new(initial));

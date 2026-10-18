@@ -35,7 +35,7 @@ struct Dedup {
 }
 
 fn original() -> Committed {
-    Committed::Durable { txn: 1, first_lsn: 1, last_lsn: 1 }
+    Committed::Durable { txn: 1, first_lsn: 1, last_lsn: 1, reply: Vec::new() }
 }
 
 impl StateMachine for Dedup {

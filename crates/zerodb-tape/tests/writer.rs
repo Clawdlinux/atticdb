@@ -325,7 +325,7 @@ fn concurrent_callers_get_dense_lsn_and_immediate_visibility() {
             gate.wait();
             let mut lsns = Vec::new();
             for _ in 0..20 {
-                let Committed::Durable { txn, first_lsn, last_lsn } =
+                let Committed::Durable { txn, first_lsn, last_lsn, .. } =
                     tape.append(vec![record(Kind::Turn)], Durability::Durable).unwrap()
                 else {
                     panic!()

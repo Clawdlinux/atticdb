@@ -23,7 +23,7 @@ struct Machine {
 }
 
 fn cached() -> Committed {
-    Committed::Durable { txn: 77, first_lsn: 88, last_lsn: 88 }
+    Committed::Durable { txn: 77, first_lsn: 88, last_lsn: 88, reply: Vec::new() }
 }
 
 impl StateMachine for Machine {
@@ -156,7 +156,7 @@ fn reject_and_cached_reply_write_nothing() {
     assert!(log.lock().unwrap().published.is_empty());
     assert!(matches!(
         tape.append(vec![input(Kind::Turn, &[0; 8])], Durability::Durable).unwrap(),
-        Committed::Durable { txn: 1, first_lsn: 1, last_lsn: 1 }
+        Committed::Durable { txn: 1, first_lsn: 1, last_lsn: 1, .. }
     ));
 }
 

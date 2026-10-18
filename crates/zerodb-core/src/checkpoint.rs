@@ -218,6 +218,7 @@ fn load_inner(io: &dyn Io, dir: &Path, opts: &EngineOptions) -> Result<State> {
                     let txn = cur.u64()?;
                     let first_lsn = cur.u64()?;
                     let last_lsn = cur.u64()?;
+                    let reply = cur.take(8)?.to_vec();
                     cur.end()?;
                     if first_lsn == 0
                         || first_lsn > last_lsn
@@ -230,7 +231,7 @@ fn load_inner(io: &dyn Io, dir: &Path, opts: &EngineOptions) -> Result<State> {
                     state.dedup.insert(Entry {
                         key: DedupKey(tenant, session, key),
                         digest,
-                        committed: Committed::Durable { txn, first_lsn, last_lsn },
+                        committed: Committed::Durable { txn, first_lsn, last_lsn, reply },
                     });
                 }
                 _ => return Err(corrupt()),
@@ -404,10 +405,11 @@ pub(crate) fn save(io: &dyn Io, dir: &Path, shared: &Mutex<State>) -> Result<u64
         bytes(&mut data, entry.key.1.as_bytes());
         bytes(&mut data, entry.key.2.as_bytes());
         data.extend_from_slice(&entry.digest);
-        if let Committed::Durable { txn, first_lsn, last_lsn } = entry.committed {
+        if let Committed::Durable { txn, first_lsn, last_lsn, ref reply } = entry.committed {
             for value in [txn, first_lsn, last_lsn] {
                 data.extend_from_slice(&value.to_le_bytes());
             }
+            data.extend_from_slice(reply);
         }
         buffer_record(&mut buffer, &data);
     }

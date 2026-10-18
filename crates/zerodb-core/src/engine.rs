@@ -240,32 +240,29 @@ impl Engine {
                     self.worker.flush()?;
                 }
                 Err(error) => return Err(error),
-                Ok(Committed::Durable { txn, last_lsn, .. }) => {
+                Ok(Committed::Durable { txn, last_lsn, reply, .. }) => {
                     return (|| {
                         if let Some(error) = &lock(&self.state)?.failure {
                             return Err(error.clone());
                         }
-                        let frame = self
-                            .tape
-                            .read(last_lsn)?
-                            .ok_or_else(|| EngineError::rejected(ErrorKind::CorruptIndex))?;
-                        let seq = decode(
-                            frame
-                                .payload
-                                .get(16..)
-                                .ok_or_else(|| EngineError::rejected(ErrorKind::CorruptIndex))?,
-                        )
-                        .map_err(|_| EngineError::rejected(ErrorKind::CorruptIndex))?
-                        .seq;
+                        let seq = u64::from_le_bytes(
+                            reply
+                                .as_slice()
+                                .try_into()
+                                .map_err(|_| EngineError::rejected(ErrorKind::CorruptIndex))?,
+                        );
                         let count = turns.len() as u64;
-                        if seq < count || last_lsn < count {
+                        let end = seq
+                            .checked_add(count)
+                            .ok_or_else(|| EngineError::rejected(ErrorKind::CorruptIndex))?;
+                        if seq == 0 || last_lsn < count {
                             return Err(EngineError::rejected(ErrorKind::CorruptIndex));
                         }
                         Ok(Appended {
                             txn,
                             first_lsn: last_lsn - count + 1,
                             last_lsn,
-                            seqs: (seq - count + 1..=seq).collect(),
+                            seqs: (seq..end).collect(),
                         })
                     })()
                     .map_err(|mut error: EngineError| {

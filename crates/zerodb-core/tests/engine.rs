@@ -348,13 +348,15 @@ fn long_session_evicts_its_own_old_pages() {
 }
 
 #[test]
-fn receipt_read_failure_reports_committed_and_checkpoint_io_uses_worker() {
+fn receipts_need_no_reads_and_checkpoint_io_uses_worker() {
     let io = Arc::new(support::ProbeIo::new(15));
     let engine =
         Engine::open_with(io.clone(), Arc::new(SimClock::default()), "db", options()).unwrap();
     io.fail_read.store(true, Ordering::SeqCst);
-    let error = engine.append(&scope("s"), vec![turn(1)], Some("key")).unwrap_err();
-    assert_eq!(error.outcome, Outcome::Committed);
+    let receipt = engine.append(&scope("s"), vec![turn(1)], Some("key")).unwrap();
+    assert_eq!(receipt.seqs, vec![1]);
+    assert_eq!(engine.append(&scope("s"), vec![turn(1)], Some("key")).unwrap(), receipt);
+    assert!(io.fail_read.swap(false, Ordering::SeqCst), "append and retry must not read");
     assert_eq!(engine.window(&scope("s"), WindowQuery::Last(1)).unwrap()[0].seq, 1);
     assert_eq!(engine.append(&scope("s"), vec![turn(1)], Some("key")).unwrap().seqs, vec![1]);
     engine.checkpoint().unwrap();

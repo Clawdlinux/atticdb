@@ -100,7 +100,12 @@ mod tests {
         Entry {
             key: DedupKey(tenant, session.into(), key.into()),
             digest: [3; 32],
-            committed: Committed::Durable { txn: age, first_lsn: age, last_lsn: age },
+            committed: Committed::Durable {
+                txn: age,
+                first_lsn: age,
+                last_lsn: age,
+                reply: 1u64.to_le_bytes().to_vec(),
+            },
         }
     }
     #[test]

@@ -48,6 +48,8 @@ pub enum Committed {
         first_lsn: u64,
         /// Last record's log sequence number.
         last_lsn: u64,
+        /// Application receipt staged during prepare and returned after publication.
+        reply: Vec<u8>,
     },
     /// An accepted Cache batch whose persistence remains uncertain.
     Fast,
@@ -139,9 +141,14 @@ pub struct PreparedBatch {
     mode: Durability,
     size: usize,
     changed: bool,
+    reply: Vec<u8>,
 }
 
 impl PreparedBatch {
+    /// Stages an application receipt. Durable replies release it only after sync and publication.
+    pub fn set_reply(&mut self, reply: Vec<u8>) {
+        self.reply = reply;
+    }
     /// Inspects records in transaction order, without their generated salts.
     pub fn records(&self) -> impl ExactSizeIterator<Item = &RecordInput> {
         self.records.iter().map(|record| &record.input)
@@ -229,7 +236,14 @@ impl PreparedBatch {
             digests.push(digest);
             records.push(PreparedRecord { input: record, salt, digest });
         }
-        Ok(Self { records, digest: frame::batch_digest(&digests), mode, size, changed: false })
+        Ok(Self {
+            records,
+            digest: frame::batch_digest(&digests),
+            mode,
+            size,
+            changed: false,
+            reply: Vec::new(),
+        })
     }
 }
 
@@ -511,7 +525,7 @@ impl<S: StateMachine> WriterCore<S> {
         self.unpublished_bytes = self.unpublished_bytes.saturating_add(bytes.len() as u64);
         self.lsn = last_lsn;
         self.txn = txn;
-        Ok(Committed::Durable { txn, first_lsn, last_lsn })
+        Ok(Committed::Durable { txn, first_lsn, last_lsn, reply: batch.reply })
     }
 
     fn publish(&mut self) -> Result<()> {
