@@ -34,6 +34,7 @@ The `window_reads` metric counts those `Tape::read` calls.
 
 Append receipts cover turn LSNs, excluding any preceding tenant record.
 The writer assigns sequences during preparation. Publication installs slots before replying.
+Sequence receipts travel with the durable acknowledgement. Returning them never reads the tape.
 A failed sync hides reservations and poisons writes. Reads keep the last durable view.
 Every error carries `Outcome`. Receipt reconstruction failures after sync report `Committed`.
 Preparation preserves `InvalidInput`, `CorruptIndex`, and `Poisoned` error kinds through the tape hook.
@@ -41,6 +42,9 @@ Preparation preserves `InvalidInput`, `CorruptIndex`, and `Poisoned` error kinds
 Retry keys use `(tenant, session, key)`, without agent.
 The digest covers the ordered encoded turns, with sequences normalized to 0.
 Each payload includes its byte length in that digest.
+Keyless appends skip the retry digest. Keyed appends compute it on the caller.
+Preparation and publication parse borrowed payload views without copying turn content.
+Tape integrity hashes still cover every salted payload, including assigned sequences.
 Changing an agent, role, trust, metadata, content, or batch boundary produces a conflict.
 Retries return the original transaction, turn LSNs, and sequences.
 Keys outside the count window are new requests.
@@ -103,6 +107,8 @@ Recovery can spill completed transactions through a checkpoint worker when resid
 ## Checkpoints
 
 The checkpoint worker wakes every 60 seconds or after 64 MiB of published tape bytes.
+An atomic pending flag coalesces byte-threshold notifications.
+The worker clears it and rechecks the threshold under State before saving.
 `checkpoint()` waits for an explicit worker snapshot.
 Normal checkpoints write only dirty pages, newly registered tenants, and retained retry-key additions.
 Deterministic oldest-first eviction rebuilds the retry window without tombstones.
@@ -111,11 +117,17 @@ Appending to a shared page uses copy-on-write.
 Cold reads run outside the state lock, then recheck the current backing location before installation.
 Compaction can replace or unlink a captured location. Loading retries against the replacement.
 File writes and syncs also run outside the state lock.
+Each checkpoint data file is buffered into 1 write before its sync.
+Backing locations install in chunks of 32 pages, releasing State between chunks.
+Old-file removal and directory sync happen after releasing State.
 
 Full snapshots still enumerate page and retry-entry metadata under the state lock.
 That work scales with configured directory bounds, not dirty bytes.
 It can delay writer preparation and publication for large directories.
 `checkpoint_snapshot_lock_ns` reports the longest snapshot hold, excluding lock acquisition.
+`checkpoint_state_lock_ns` reports the maximum snapshot, install-chunk, or final watermark hold.
+This includes installation work. It excludes waiting to acquire State.
+`checkpoint_saves` counts successful installs during the current open.
 The `full_snapshot_shares_pages_and_measures_its_lock_hold` test measures a 1000-page full snapshot.
 This measures hold time without asserting a hardware-dependent latency threshold.
 
@@ -136,6 +148,9 @@ Old chain files are removed only after installation and backing-location replace
 Open validates checkpoint CRCs, loads page locations, and replays application records above the watermark.
 Corrupt or missing checkpoint data logs a warning and triggers full replay.
 Checkpoints are derived data. They never authorize truncating tape records.
+Retry checkpoint records include the original sequence receipt.
+Older derived checkpoints without receipts fall back to full tape replay.
+The tape payload format is unchanged.
 Tape recovery still verifies the entire tape before application replay.
 The replay counter excludes checkpointed records. It does not measure tape verification work.
 
@@ -156,14 +171,24 @@ ZERODB_SIM_SEED=19 cargo test -p zerodb-core --release --features sim --test eng
 The default is 500 seeds. `ZERODB_SIM_SEED` selects 1 seed unless `ZERODB_SIM_SEEDS` also sets a count.
 Failures print the seed and reproduction command.
 Each seed runs 3 crash generations across 48 scopes and 4 tenants.
+It also runs grouped generations with 2 through 4 distinct appends per writer step.
+Those groups include same-group retries, conflicts, and multi-batch publication.
 The oracle checks bytes, dense sequences, retry receipts, and window read counts.
 It also checks transaction atomicity, tenant IDs, and corrupt-checkpoint fallback.
 Sync failures cover errors before persistence and errors after persistence.
 Live reopen preserves failed page-cache writes. Crash reopen uses a captured SimDisk image.
+A captured mid-append cut does not excuse later acknowledged loss.
+When append returns successfully, a second post-return crash image must retain its receipt.
+Keyless turns carry unique oracle metadata, so their uncertain outcomes remain independently checkable.
+Corruption flips checkpoint page-record checksum bytes, not file magic.
 
-`TapeOptions::inline_sim` disables both worker threads and uses fixed salts.
+`TapeOptions::inline_sim` disables background workers and uses fixed salts.
 It is feature-gated and defaults to false. Never enable it for real storage.
 Explicit seeded checkpoints replace the wall-clock timer.
+`enqueue_sim` queues appends. `step_sim` runs their shared production writer step.
+Register tenants before queueing grouped appends. `SimAppend::finish` receives post-publication receipts.
+Seeded I/O callbacks invoke checkpoints between preparation and publication.
+`checkpoint_step_sim` services pending byte-threshold wakes through the production wake check.
 Memory-pressure checkpoints and recovery spills also run inline.
 Production defaults retain worker threads and OS entropy.
 
@@ -173,9 +198,14 @@ Production defaults retain worker threads and OS entropy.
 ./bench/g1.sh
 G1_TURNS=65536 ./bench/g1.sh
 G1_BATCH=1 G1_TURNS=65536 ./bench/g1.sh
+G1_TURNS=192000 G1_REPS=3 G1_HISTORY=0 ./bench/g1.sh
 ```
 
 The default trace appends 1M turns using 16 writers across 1024 sessions.
+`G1_REPS` defaults to 3 and cannot be smaller.
+Each repetition runs bare, Tape, then Engine. Summaries report medians and min/max spreads.
+Ratios are paired within repetitions before computing their median.
+`G1_HISTORY=0` skips only the separate history experiment.
 Each durable batch contains 4 turns. Content sizes cycle through 256, 512, 1024, 4096, and 8192 bytes.
 `G1_BATCH` accepts 1 through 256. `G1_TURNS` must be divisible by `16 * G1_BATCH`.
 The engine runs with 2 concurrent last-16 window readers and default checkpoint settings.
@@ -188,8 +218,14 @@ The bare baseline reuses M1's framing, segment preallocation, append, and sync c
 It preframes the same turn codec, metadata, salts, transaction footer, and byte counts.
 Its fixed headers exclude hashing and caller preparation, as in M1.
 All paths use the same content-size trace and transaction batching.
-The bare driver drains a request queue and syncs each group before replying, like Tape.
-Group boundaries depend on scheduling. The bare output reports its observed group size.
+Bare and Tape share the same adaptive coalescer.
+`TapeOptions::coalescing_window` defaults to 200 us. Zero disables waiting. Larger values are rejected.
+It targets the largest of the previous 64 groups until that bounded timeout.
+Group boundaries still depend on scheduling. Every path reports its observed request-group size.
+Tape keeps 1 entropy handle open and reads each batch's salts together before hashing.
+Periodic superblocks run on a helper using only published, already-synced LSNs.
+Shutdown joins that helper before the final synchronous install. Open retains its synchronous install.
+Metadata failures poison later writes. They never invalidate earlier durable acknowledgements.
 Tape also runs separately to distinguish tape overhead from engine and reader overhead.
 Only the engine runs window readers.
 Segment rolls remain inside timing. Initial segment setup and final shutdown stay outside.
@@ -199,4 +235,6 @@ It reports last/since latency after warmup and asserts exactly 16 tape reads per
 This proves flat record-read work. Timing still depends on filesystem caching and scheduling.
 Measurements live in `bench/RESULTS.md`.
 macOS uses `sync_data`, which invokes `F_FULLFSYNC` in this Rust toolchain.
+The local macOS target is median Engine/bare durable-ack p99 at most 1.5x.
+This is an append-only M2 proxy. Cache writes aren't implemented until M3.
 G1 remains pending until Linux NVMe runs the full trace and nightly LazyFS crash checks.
