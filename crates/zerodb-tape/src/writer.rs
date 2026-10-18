@@ -636,6 +636,7 @@ impl<S: StateMachine> WriterCore<S> {
     }
 
     /// Called after replies. Metadata failure poisons future writes, not earlier acknowledgements.
+    #[cfg(any(test, feature = "sim"))]
     pub fn update_superblock(&mut self) -> Result<()> {
         if !self.superblock_due() {
             return Ok(());
