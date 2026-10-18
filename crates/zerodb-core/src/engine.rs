@@ -80,6 +80,8 @@ pub struct Metrics {
     pub checkpoint_files: usize,
     /// Completed checkpoint installs during this open.
     pub checkpoint_saves: u64,
+    /// Maximum occupied encoded checkpoint buffer, bounded at 4 MiB.
+    pub checkpoint_buffer_peak_bytes: usize,
     /// Writer steps containing queued requests.
     pub writer_groups: u64,
     /// Requests handled by those steps, including cached replies and rejections.
@@ -488,6 +490,7 @@ impl Engine {
             checkpoint_watermark: state.watermark,
             checkpoint_files: state.chain.len(),
             checkpoint_saves: state.checkpoint_saves,
+            checkpoint_buffer_peak_bytes: state.checkpoint_buffer_peak,
             writer_groups: self.tape.group_stats().0,
             writer_group_requests: self.tape.group_stats().1,
             replayed_records: state.replayed,

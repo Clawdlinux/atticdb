@@ -347,6 +347,41 @@ fn snapshot(state: &State) -> Snapshot {
             .collect(),
     }
 }
+const BUFFER_LIMIT: usize = 4 * 1024 * 1024;
+struct CheckpointBuffer<'a> {
+    io: &'a dyn Io,
+    file: FileId,
+    offset: u64,
+    bytes: Vec<u8>,
+    peak: usize,
+}
+impl<'a> CheckpointBuffer<'a> {
+    fn new(io: &'a dyn Io, file: FileId) -> Self {
+        Self { io, file, offset: 0, bytes: Vec::with_capacity(BUFFER_LIMIT), peak: 0 }
+    }
+    fn record(&mut self, payload: &[u8]) -> Result<(u64, u32)> {
+        let len = payload.len().checked_add(8).ok_or_else(corrupt)?;
+        if len > BUFFER_LIMIT {
+            return Err(corrupt());
+        }
+        if self.bytes.len() + len > BUFFER_LIMIT {
+            self.flush()?;
+        }
+        let (offset, len) = buffer_record(&mut self.bytes, payload);
+        self.peak = self.peak.max(self.bytes.len());
+        debug_assert!(self.bytes.capacity() <= BUFFER_LIMIT);
+        Ok((self.offset + offset, len))
+    }
+    fn flush(&mut self) -> Result<()> {
+        if !self.bytes.is_empty() {
+            self.io.write_at(self.file, self.offset, &self.bytes)?;
+            self.offset += self.bytes.len() as u64;
+            self.bytes.clear();
+        }
+        Ok(())
+    }
+}
+
 pub(crate) fn save(io: &dyn Io, dir: &Path, shared: &Mutex<State>) -> Result<u64> {
     let snap = {
         let mut state = lock(shared)?;
@@ -371,17 +406,17 @@ pub(crate) fn save(io: &dyn Io, dir: &Path, shared: &Mutex<State>) -> Result<u64
     }
     let mut pending = PendingFile { io, path: dir.join(&name), preserve: false };
     let file = File(io, io.create(&pending.path)?);
-    let mut buffer = Vec::new();
+    let mut buffer = CheckpointBuffer::new(io, file.1);
     let mut header = b"ZCK1".to_vec();
     header.extend_from_slice(&snap.lsn.to_le_bytes());
     header.extend_from_slice(&snap.txn.to_le_bytes());
-    buffer_record(&mut buffer, &header);
+    buffer.record(&header)?;
     for (id, name, lsn) in &snap.tenants {
         let mut data = vec![1];
         data.extend_from_slice(&id.to_le_bytes());
         data.extend_from_slice(&lsn.to_le_bytes());
         bytes(&mut data, name.as_bytes());
-        buffer_record(&mut buffer, &data);
+        buffer.record(&data)?;
     }
     let mut locations = Vec::new();
     for (key, index, revision, slots, backing) in snap.pages {
@@ -396,7 +431,7 @@ pub(crate) fn save(io: &dyn Io, dir: &Path, shared: &Mutex<State>) -> Result<u64
         for slot in slots.iter() {
             data.extend_from_slice(&slot.to_le_bytes());
         }
-        let (offset, len) = buffer_record(&mut buffer, &data);
+        let (offset, len) = buffer.record(&data)?;
         locations.push((key, index, revision, Backing { file: name.clone(), offset, len }));
     }
     for entry in snap.dedup {
@@ -411,9 +446,9 @@ pub(crate) fn save(io: &dyn Io, dir: &Path, shared: &Mutex<State>) -> Result<u64
             }
             data.extend_from_slice(reply);
         }
-        buffer_record(&mut buffer, &data);
+        buffer.record(&data)?;
     }
-    io.write_at(file.1, 0, &buffer)?;
+    buffer.flush()?;
     io.sync_data(file.1)?;
     io.sync_dir(dir)?;
     let mut chain = if snap.full { Vec::new() } else { snap.chain.clone() };
@@ -456,6 +491,7 @@ pub(crate) fn save(io: &dyn Io, dir: &Path, shared: &Mutex<State>) -> Result<u64
         state.watermark = snap.lsn;
         state.checkpoint_bytes = snap.bytes;
         state.checkpoint_saves += 1;
+        state.checkpoint_buffer_peak = state.checkpoint_buffer_peak.max(buffer.peak);
         state.chain = chain;
         state.checkpoint_lock_ns = state
             .checkpoint_lock_ns
@@ -801,6 +837,7 @@ mod tests {
         at: usize,
         count: AtomicUsize,
         crashed: Mutex<Option<SimDisk>>,
+        writes: Mutex<Vec<(u64, usize)>>,
     }
     impl FaultIo {
         fn hit<T>(&self, result: zerodb_tape::Result<T>) -> zerodb_tape::Result<T> {
@@ -826,6 +863,7 @@ mod tests {
             self.disk.close(f)
         }
         fn write_at(&self, f: FileId, o: u64, d: &[u8]) -> zerodb_tape::Result<()> {
+            self.writes.lock().unwrap().push((o, d.len()));
             self.hit(self.disk.write_at(f, o, d))
         }
         fn read_at(&self, f: FileId, o: u64, d: &mut [u8]) -> zerodb_tape::Result<usize> {
@@ -868,8 +906,13 @@ mod tests {
                 append(&shared, 1);
                 save(&disk, Path::new("db"), &shared).unwrap();
                 append(&shared, 2);
-                let io =
-                    FaultIo { disk, at, count: AtomicUsize::new(0), crashed: Mutex::new(None) };
+                let io = FaultIo {
+                    disk,
+                    at,
+                    count: AtomicUsize::new(0),
+                    crashed: Mutex::new(None),
+                    writes: Mutex::new(Vec::new()),
+                };
                 let _ = save(&io, Path::new("db"), &shared);
                 if let Some(crashed) = io.crashed.lock().unwrap().as_ref() {
                     let loaded = load(crashed, Path::new("db"), &EngineOptions::default());
@@ -911,6 +954,43 @@ mod tests {
     }
 
     #[test]
+    fn large_full_snapshot_bounds_encoded_buffer() {
+        let shared = state();
+        {
+            let mut state = shared.lock().unwrap();
+            let mut lsn = 1;
+            for session in 0..128 {
+                let key = Key(1, "a".into(), session.to_string());
+                state.index.reserve(&key, 5000).unwrap();
+                for seq in 1..=5000 {
+                    lsn += 1;
+                    state.index.publish(&key, seq, lsn).unwrap();
+                }
+            }
+            state.published_lsn = lsn;
+            state.txn = 1;
+            state.chain = (0..8).map(|i| format!("old-{i}")).collect();
+        }
+        let io = FaultIo {
+            disk: SimDisk::new(30),
+            at: usize::MAX,
+            count: AtomicUsize::new(0),
+            crashed: Mutex::new(None),
+            writes: Mutex::new(Vec::new()),
+        };
+        save(&io, Path::new("db"), &shared).unwrap();
+        let writes = io.writes.lock().unwrap();
+        assert!(writes.iter().map(|(_, len)| len).sum::<usize>() > 4 * 1024 * 1024);
+        assert!(writes.iter().all(|(_, len)| *len <= 4 * 1024 * 1024), "{writes:?}");
+        assert!(shared.lock().unwrap().checkpoint_buffer_peak <= BUFFER_LIMIT);
+        assert!(shared.lock().unwrap().checkpoint_buffer_peak > BUFFER_LIMIT - 131072);
+        assert_eq!(writes[1].0, writes[0].1 as u64);
+        let loaded = load_inner(&io.disk, Path::new("db"), &EngineOptions::default()).unwrap();
+        assert_eq!(loaded.index.sessions.len(), 128);
+        assert!(loaded.index.sessions.values().all(|entry| entry.len == 5000));
+    }
+
+    #[test]
     fn failed_checkpoint_before_install_removes_partial_files() {
         // Data write/syncs and metadata write/sync, before the ambiguous rename.
         for at in [3, 4, 5, 8, 9] {
@@ -919,7 +999,13 @@ mod tests {
             append(&shared, 1);
             save(&disk, Path::new("db"), &shared).unwrap();
             append(&shared, 2);
-            let io = FaultIo { disk, at, count: AtomicUsize::new(0), crashed: Mutex::new(None) };
+            let io = FaultIo {
+                disk,
+                at,
+                count: AtomicUsize::new(0),
+                crashed: Mutex::new(None),
+                writes: Mutex::new(Vec::new()),
+            };
             assert!(save(&io, Path::new("db"), &shared).is_err());
             assert!(!io.disk.exists(Path::new("db/ckpt-3.zdb")).unwrap(), "operation {at}");
             assert!(!io.disk.exists(Path::new("db/CHECKPOINT.next")).unwrap(), "operation {at}");
