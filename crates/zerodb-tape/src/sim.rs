@@ -396,7 +396,11 @@ pub fn run_seed(seed: u64) {
     let mut rng = Rng::new(seed);
     let tenants = 1 + rng.below(8);
     let generations = 2 + rng.below(2);
-    let opts = Options { segment_size: 64 * 1024, ..Options::default() };
+    let opts = Options {
+        segment_size: 64 * 1024,
+        superblock_interval: std::time::Duration::from_secs(1),
+        ..Options::default()
+    };
     let clock = Arc::new(SimClock::default());
     let mut disk = SimDisk::new(seed);
     let mut oracle = Oracle::default();
@@ -546,7 +550,11 @@ mod tests {
     fn durable_damage_spans_segments_payloads_and_every_bit() {
         let disk = Arc::new(SimDisk::new(0));
         let clock = Arc::new(SimClock::default());
-        let opts = Options { segment_size: 1024, ..Options::default() };
+        let opts = Options {
+            segment_size: 1024,
+            superblock_interval: std::time::Duration::from_secs(1),
+            ..Options::default()
+        };
         let (mut core, _) =
             WriterCore::open(disk.clone(), clock.clone(), "db", opts.clone()).unwrap();
         for _ in 0..4 {

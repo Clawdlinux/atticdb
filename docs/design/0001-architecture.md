@@ -108,16 +108,20 @@ Publish runs on the writer thread before the ack and does three O(1) installs: t
 
 ### Durable boundary and recovery
 
-- `SUPERBLOCK` holds the last LSN known synced. Periodic maintenance follows successful syncs, at most once per second.
-  It uses its own write, sync, and rename, outside the acknowledgement path.
+- `SUPERBLOCK` holds the last LSN known synced.
+  Installation is requested after a published segment roll, 30 seconds, or 256 MiB, whichever comes first.
+  The time and byte thresholds are configurable. The byte counter includes roll padding.
+  Installation uses its own write, sync, and rename, outside the acknowledgement path.
   Recovery and clean shutdown also install the durable boundary, without the periodic time limit.
 - An acked batch is synced, and sync persists every earlier write to the same file. So a torn frame before an acked frame is impossible unless synced data was damaged.
 - Recovery rule:
   - Frames at or below the superblock LSN must all be valid. Any bad frame, an end-of-data marker, or a MANIFEST segment missing from disk before the superblock LSN stops the open with `CorruptionDetected` and the LSN. `zerodb repair` is an explicit offline command.
   - Above the superblock LSN, recovery truncates at the first bad frame or the first transaction without a footer. It reports the truncated LSN range and byte count loudly in the open result and logs.
   - Damage above the last superblock install can be indistinguishable from a torn tail.
-    Under continuous load, that window is at most about 1 second of writes.
-    A successful open and clean shutdown checkpoint the boundary even for sessions shorter than 1 second.
+    Deferred installation enlarges the rewrite and damage-detection window above the last completed superblock.
+    Requests occur within the byte threshold plus one published group.
+    Helper scheduling and I/O can extend the completed-install lag. It is not a hard repair-size ceiling.
+    Successful open and clean shutdown still install the boundary, including short sessions.
 - Recovery replays from the minimum watermark across all views, across segments.
   Checkpoint frequency bounds application replay: every 64 MiB of tape or 60 s.
   Tape verification still scans every segment on open.
@@ -131,13 +135,13 @@ Publish runs on the writer thread before the ack and does three O(1) installs: t
 
 A failed sync poisons the engine. Writes fail with `unknown` for in-flight batches and `not_committed` after. Reads keep working at the last durable LSN. Health reports `degraded`. Recovery needs a restart.
 
-### M1 implementation notes
+### Tape implementation notes
 
 `WriterCore::enqueue` and `WriterCore::step` drive the same state machine in production and simulation.
-`Tape` owns its production thread. Dropping it joins the thread and releases the directory lock.
+`Tape` owns its writer and metadata helper. Dropping it joins both and releases the directory lock.
 Simulations prepare requests with `PreparedBatch::with_salts`, then pass them through `WriteRequest::new`.
 Production salts come from `/dev/urandom` on caller threads. This entropy source requires Unix.
-Each batch opens the entropy source once and closes it before enqueueing.
+Tape keeps one entropy handle open. Each caller reads its batch's salts together before hashing.
 Storage operations still use `Io`. Simulations supply deterministic salts without accessing OS entropy.
 
 MANIFEST version 2 stores the segment size before its segment identifiers.
@@ -151,8 +155,8 @@ Footers have no separate read address. Fast acknowledgements expose no transacti
 The 4 MiB batch limit includes frame headers, salts, and the footer.
 An oversized batch never enters the writer. A configured segment can impose a smaller batch limit.
 
-Segment preparation runs inline in M1. Moving it to a background task remains an M2 follow-up.
-Superblock maintenance runs after replies and at most once per second.
+Segment preparation runs inline. Moving it to a background task remains future work.
+Superblock requests run after replies, using the roll, time, and byte triggers above.
 Metadata failures poison future writes without changing earlier acknowledgements.
 After recovery rewrites and syncs touched files and the directory, open installs any newer recovered boundary before returning.
 Clean shutdown drains requests and performs its final sync before installing the boundary without the periodic time limit.
@@ -163,8 +167,10 @@ Recovery rewrites retained bytes above the superblock boundary at their original
 A process restart can retain failed-writeback bytes in clean page cache. Another sync alone doesn't guarantee persistence.
 Rewriting re-dirties those pages before recovery publishes them or accepts new writes.
 The rewrite covers data written since the last superblock install, plus anything unsynced at a crash.
-Under continuous load, that's at most about 1 second of writes.
-Long pauses or failures can extend that window. The superblock isn't a strict byte-count limit.
+The default request budget is 256 MiB, including padding, plus one published group and helper lag.
+With 64 MiB segments, roll notifications normally trigger sooner.
+Repair also covers at most one final segment's unused preallocation.
+Slow or blocked helper I/O can exceed the request budget. Acknowledgements do not wait for metadata.
 Untouched segments already covered by the superblock require neither rewriting nor another file sync.
 Retained zero padding is rewritten too. A failed tail-repair sync can leave cached zeros over durable garbage.
 This includes the final segment's unused preallocation, adding at most 1 segment's remaining capacity beyond retained data.

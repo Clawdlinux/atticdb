@@ -227,6 +227,12 @@ After waiting, it drains ready arrivals without blocking again.
 Group boundaries still depend on scheduling. Every path reports its observed request-group size.
 Tape keeps 1 entropy handle open and reads each batch's salts together before hashing.
 Periodic superblocks run on a helper using only published, already-synced LSNs.
+Requests follow segment rolls, 30 seconds of active writes, or 256 MiB of published bytes.
+`TapeOptions::superblock_interval` and `superblock_bytes` configure the latter thresholds. Both must be positive.
+The byte count includes roll padding. Requests can overshoot by one group.
+Deferred installation increases recovery rewrites above the last completed superblock.
+Repair also includes final unused preallocation. Helper scheduling and I/O can extend that window.
+Acknowledgements never wait for the metadata helper.
 Shutdown joins that helper before the final synchronous install. Open retains its synchronous install.
 Metadata failures poison later writes. They never invalidate earlier durable acknowledgements.
 Tape also runs separately to distinguish tape overhead from engine and reader overhead.

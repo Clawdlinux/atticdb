@@ -15,6 +15,7 @@ pub struct SegmentWriter {
     active: u64,
     offset: u64,
     size: u64,
+    written_bytes: u64,
 }
 
 impl std::fmt::Debug for SegmentWriter {
@@ -34,6 +35,9 @@ impl SegmentWriter {
 
     pub(crate) fn has_rolled(&self) -> bool {
         self.files.len() > 1
+    }
+    pub(crate) fn position(&self) -> (u64, u64) {
+        (self.active, self.written_bytes)
     }
 
     /// Opens the last prepared segment at its recovered transaction boundary.
@@ -57,6 +61,7 @@ impl SegmentWriter {
             active,
             offset,
             size,
+            written_bytes: 0,
         })
     }
 
@@ -65,7 +70,9 @@ impl SegmentWriter {
         if bytes.len() as u64 > self.size {
             return Err(Error::BatchTooLarge);
         }
+        let mut padding = 0;
         if bytes.len() as u64 > self.size - self.offset {
+            padding = self.size - self.offset;
             let id = self.dir.prepare_next_segment(self.size)?;
             let file = Handle::open(self.dir.io.clone(), &self.dir.segment_path(id))?;
             self.files.insert(id, file);
@@ -77,6 +84,8 @@ impl SegmentWriter {
         self.dirty.insert(self.active);
         self.dir.io.write_at(file.id, self.offset, bytes)?;
         self.offset += bytes.len() as u64;
+        self.written_bytes =
+            self.written_bytes.saturating_add(padding).saturating_add(bytes.len() as u64);
         Ok(start)
     }
 

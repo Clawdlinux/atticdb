@@ -397,7 +397,7 @@ fn periodic_superblock_io_does_not_run_on_the_writer() {
     let clock = Arc::new(SimClock::default());
     let engine = Engine::open_with(io.clone(), clock.clone(), "db", options()).unwrap();
     io.writes.lock().unwrap().clear();
-    clock.advance(2_000_000_000);
+    clock.advance(31_000_000_000);
     engine.append(&scope("s"), vec![turn(1)], None).unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {

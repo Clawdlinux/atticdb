@@ -107,6 +107,10 @@ pub struct TapeOptions {
     pub max_unpublished_bytes: Option<u64>,
     /// Maximum group-formation wait. Zero disables waiting. Cannot exceed 200 microseconds.
     pub coalescing_window: Duration,
+    /// Maximum active-write interval between superblock requests. Must be nonzero.
+    pub superblock_interval: Duration,
+    /// Published tape bytes between superblock requests, including roll padding. Must be nonzero.
+    pub superblock_bytes: u64,
     /// Runs the writer inline with fixed salts. Only for deterministic simulations.
     #[cfg(feature = "sim")]
     pub inline_sim: bool,
@@ -120,6 +124,8 @@ impl Default for TapeOptions {
             replay_from_lsn: 0,
             max_unpublished_bytes: None,
             coalescing_window: Duration::from_micros(200),
+            superblock_interval: Duration::from_secs(30),
+            superblock_bytes: 256 * 1024 * 1024,
             #[cfg(feature = "sim")]
             inline_sim: false,
         }
@@ -275,6 +281,7 @@ struct ReadState {
     poisoned: AtomicBool,
     groups: AtomicU64,
     grouped_requests: AtomicU64,
+    superblock_installs: AtomicU64,
 }
 
 impl ReadState {
@@ -357,6 +364,10 @@ pub struct WriterCore<S: StateMachine = NoopStateMachine> {
     lsn: u64,
     txn: u64,
     superblock_time: u64,
+    superblock_interval_ns: u64,
+    superblock_bytes: u64,
+    superblock_position: (u64, u64),
+    synced_position: (u64, u64),
 }
 
 impl<S: StateMachine> std::fmt::Debug for WriterCore<S> {
@@ -390,6 +401,11 @@ impl<S: StateMachine> WriterCore<S> {
         if opts.coalescing_window > Duration::from_micros(200) {
             return Err(Error::Configuration("coalescing window exceeds 200 microseconds".into()));
         }
+        if opts.superblock_interval.is_zero() || opts.superblock_bytes == 0 {
+            return Err(Error::Configuration(
+                "superblock interval and byte limit must be positive".into(),
+            ));
+        }
         if opts.segment_size < (HEADER_LEN * 2 + 60) as u64
             || usize::try_from(opts.segment_size).is_err()
         {
@@ -409,6 +425,7 @@ impl<S: StateMachine> WriterCore<S> {
             poisoned: AtomicBool::new(false),
             groups: AtomicU64::new(0),
             grouped_requests: AtomicU64::new(0),
+            superblock_installs: AtomicU64::new(0),
         });
         if let Some(from) = opts.replay_from_lsn.checked_add(1) {
             for record in reads.scan(from) {
@@ -416,9 +433,15 @@ impl<S: StateMachine> WriterCore<S> {
             }
         }
         let segments = SegmentWriter::new(dir, opts.segment_size, recovered.offset)?;
+        let position = segments.position();
         let core = Self {
             segments,
             superblock_time: clock.now_ns(),
+            superblock_interval_ns: opts.superblock_interval.as_nanos().min(u128::from(u64::MAX))
+                as u64,
+            superblock_bytes: opts.superblock_bytes,
+            superblock_position: position,
+            synced_position: position,
             clock,
             reads,
             queue: VecDeque::new(),
@@ -540,6 +563,7 @@ impl<S: StateMachine> WriterCore<S> {
     fn publish(&mut self) -> Result<()> {
         lock(&self.reads.index)?.append(&mut self.pending);
         self.reads.durable_lsn.store(self.lsn, Ordering::Release);
+        self.synced_position = self.segments.position();
         if !self.unpublished.is_empty() {
             self.state_machine.publish(&self.unpublished);
             self.unpublished.clear();
@@ -651,17 +675,27 @@ impl<S: StateMachine> WriterCore<S> {
     }
     fn superblock_due(&self) -> bool {
         !self.is_poisoned()
-            && self.clock.now_ns().saturating_sub(self.superblock_time) >= 1_000_000_000
+            && (self.synced_position.0 != self.superblock_position.0
+                || self.synced_position.1.saturating_sub(self.superblock_position.1)
+                    >= self.superblock_bytes
+                || self.clock.now_ns().saturating_sub(self.superblock_time)
+                    >= self.superblock_interval_ns)
+    }
+    fn note_superblock_request(&mut self) {
+        self.superblock_time = self.clock.now_ns();
+        self.superblock_position = self.synced_position;
     }
 
     fn checkpoint(&mut self) -> Result<()> {
         if self.durable_lsn() <= self.segments.dir.superblock() {
             return Ok(());
         }
-        self.superblock_time = self.clock.now_ns();
+        self.note_superblock_request();
         let result = self.segments.dir.install_superblock(self.durable_lsn());
         if result.is_err() {
             self.reads.poisoned.store(true, Ordering::Release);
+        } else {
+            self.reads.superblock_installs.fetch_add(1, Ordering::Relaxed);
         }
         result
     }
@@ -760,6 +794,7 @@ impl SuperblockWorker {
                         eprintln!("zerodb: superblock maintenance failed: {error}");
                     } else {
                         installed = boundary;
+                        reads.superblock_installs.fetch_add(1, Ordering::Relaxed);
                     }
                 }
             })?;
@@ -852,7 +887,7 @@ impl<S: StateMachine> Tape<S> {
                 }
                 core.step();
                 if core.superblock_due() {
-                    core.superblock_time = core.clock.now_ns();
+                    core.note_superblock_request();
                     maintenance.wake();
                 }
             }
@@ -956,6 +991,11 @@ impl<S: StateMachine> Tape<S> {
         )
     }
 
+    /// Successful runtime superblock installs, excluding initialization and recovery before open returns.
+    pub fn superblock_installs(&self) -> u64 {
+        self.reads.superblock_installs.load(Ordering::Relaxed)
+    }
+
     /// Returns the highest record LSN available to durable readers.
     pub fn durable_lsn(&self) -> u64 {
         self.reads.durable_lsn.load(Ordering::Acquire)
@@ -1010,6 +1050,58 @@ mod tests {
 
     fn records(count: usize) -> Vec<RecordInput> {
         vec![RecordInput { kind: Kind::Turn, tenant_id: 1, content: b"hello".to_vec() }; count]
+    }
+
+    #[test]
+    fn superblock_waits_thirty_seconds_without_a_roll() {
+        let disk = Arc::new(crate::SimDisk::new(34));
+        let clock = Arc::new(crate::sim::SimClock::default());
+        let (mut core, _) = WriterCore::open(
+            disk,
+            clock.clone(),
+            "db",
+            TapeOptions { segment_size: 4096, ..TapeOptions::default() },
+        )
+        .unwrap();
+        let (request, reply) = WriteRequest::new(
+            PreparedBatch::with_salts(records(1), Durability::Durable, || Ok([1; 16])).unwrap(),
+        );
+        core.enqueue(request);
+        core.step();
+        reply.recv().unwrap().unwrap();
+        clock.advance(29_999_999_999);
+        core.update_superblock().unwrap();
+        assert_eq!(core.segments.dir.superblock(), 0);
+        clock.advance(1);
+        core.update_superblock().unwrap();
+        assert_eq!(core.segments.dir.superblock(), 1);
+    }
+
+    #[test]
+    fn superblock_byte_budget_and_roll_trigger_without_clock_progress() {
+        for (segment_size, budget, count) in [(4096, 600, 3), (512, 256 * 1024 * 1024, 2)] {
+            let disk = Arc::new(crate::SimDisk::new(35));
+            let opts =
+                TapeOptions { segment_size, superblock_bytes: budget, ..TapeOptions::default() };
+            let (mut core, _) =
+                WriterCore::open(disk, Arc::new(crate::sim::SimClock::default()), "db", opts)
+                    .unwrap();
+            for expected in 1..=count {
+                let (request, reply) = WriteRequest::new(
+                    PreparedBatch::with_salts(records(1), Durability::Durable, || Ok([1; 16]))
+                        .unwrap(),
+                );
+                core.enqueue(request);
+                core.step();
+                reply.recv().unwrap().unwrap();
+                core.update_superblock().unwrap();
+                assert_eq!(
+                    core.segments.dir.superblock(),
+                    if expected == count { count } else { 0 }
+                );
+            }
+            assert_eq!(core.reads.superblock_installs.load(Ordering::Relaxed), 1);
+        }
     }
 
     #[test]

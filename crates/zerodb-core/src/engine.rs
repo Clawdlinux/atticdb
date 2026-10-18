@@ -86,6 +86,8 @@ pub struct Metrics {
     pub writer_groups: u64,
     /// Requests handled by those steps, including cached replies and rejections.
     pub writer_group_requests: u64,
+    /// Successful runtime superblock installs during this open.
+    pub superblock_installs: u64,
     /// Application records replayed during this open.
     pub replayed_records: u64,
     /// Checkpoints rejected during this open.
@@ -493,6 +495,7 @@ impl Engine {
             checkpoint_buffer_peak_bytes: state.checkpoint_buffer_peak,
             writer_groups: self.tape.group_stats().0,
             writer_group_requests: self.tape.group_stats().1,
+            superblock_installs: self.tape.superblock_installs(),
             replayed_records: state.replayed,
             checkpoint_warnings: state.warnings,
             checkpoint_snapshot_lock_ns: state.snapshot_lock_ns,

@@ -199,7 +199,7 @@ fn live_restart_after_failed_sync_redirties_survivors_before_acknowledging() {
                 Committed::Durable { first_lsn: 2, last_lsn: 2, .. }
             ));
             if advance_superblock {
-                clock.advance(1_000_000_000);
+                clock.advance(30_000_000_000);
                 core.update_superblock().unwrap();
             }
             drop(core);
@@ -223,7 +223,7 @@ fn live_restart_rewrites_across_rolls_and_before_a_trimmed_tail() {
     core.enqueue(request);
     core.step();
     reply.recv().unwrap().unwrap();
-    clock.advance(1_000_000_000);
+    clock.advance(30_000_000_000);
     core.update_superblock().unwrap();
     let mut replies = Vec::new();
     for _ in 0..3 {
@@ -276,7 +276,7 @@ fn live_retry_of_failed_tail_repair_persists_roll_padding() {
             core.enqueue(request);
             core.step();
             reply.recv().unwrap().unwrap();
-            clock.advance(1_000_000_000);
+            clock.advance(30_000_000_000);
             core.update_superblock().unwrap();
             drop(core);
             let file = io.open(std::path::Path::new("db/seg-0000000000000001.zdb")).unwrap();
@@ -297,7 +297,7 @@ fn live_retry_of_failed_tail_repair_persists_roll_padding() {
                 reply.recv().unwrap().unwrap();
             }
             if advance_superblock {
-                clock.advance(1_000_000_000);
+                clock.advance(30_000_000_000);
                 core.update_superblock().unwrap();
             }
             drop(core);
@@ -530,7 +530,7 @@ fn periodic_superblock_is_off_reply_path_and_rate_limited() {
         core.step();
         reply.try_recv().unwrap().unwrap();
         if i == 1 {
-            clock.advance(1_000_000_000);
+            clock.advance(30_000_000_000);
         }
         core.update_superblock().unwrap();
     }
@@ -660,7 +660,7 @@ fn metadata_sync_failure_cannot_retract_an_acknowledgement() {
     core.enqueue(request);
     core.step();
     reply.try_recv().unwrap().unwrap();
-    clock.advance(1_000_000_000);
+    clock.advance(30_000_000_000);
     io.fail_next_sync().unwrap();
     assert!(core.update_superblock().is_err());
     assert!(core.is_poisoned());
