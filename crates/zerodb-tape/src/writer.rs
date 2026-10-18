@@ -213,15 +213,14 @@ impl PreparedBatch {
         mode: Durability,
         mut open: impl FnMut() -> Result<R>,
     ) -> std::result::Result<Self, WriteError> {
-        let mut source = None;
+        Self::validate(batch.iter(), mode)?;
+        let mut salts = vec![0; batch.len() * 16];
+        open().map_err(rejected)?.read_exact(&mut salts).map_err(Error::from).map_err(rejected)?;
+        let mut offset = 0;
         Self::with_salts(batch, mode, || {
-            let mut reader = match source.take() {
-                Some(reader) => reader,
-                None => open()?,
-            };
             let mut salt = [0; 16];
-            reader.read_exact(&mut salt)?;
-            source = Some(reader);
+            salt.copy_from_slice(&salts[offset..offset + 16]);
+            offset += 16;
             Ok(salt)
         })
     }
@@ -1023,6 +1022,26 @@ mod tests {
             vec![1]
         );
         assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn caller_reads_all_batch_salts_in_one_read() {
+        struct CountRead<'a> {
+            source: Cursor<Vec<u8>>,
+            reads: &'a Cell<usize>,
+        }
+        impl Read for CountRead<'_> {
+            fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+                self.reads.set(self.reads.get() + 1);
+                self.source.read(out)
+            }
+        }
+        let reads = Cell::new(0);
+        PreparedBatch::with_entropy(records(32), Durability::Durable, || {
+            Ok(CountRead { source: Cursor::new(vec![7; 32 * 16]), reads: &reads })
+        })
+        .unwrap();
+        assert_eq!(reads.get(), 1);
     }
 
     #[test]
