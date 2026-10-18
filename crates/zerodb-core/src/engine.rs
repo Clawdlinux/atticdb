@@ -86,6 +86,9 @@ pub struct Metrics {
     pub checkpoint_warnings: u64,
     /// Maximum checkpoint snapshot lock hold, in nanoseconds. Excludes lock acquisition.
     pub checkpoint_snapshot_lock_ns: u64,
+    /// Maximum State hold across checkpoint snapshot, install chunks, and watermark publication.
+    /// Excludes lock acquisition and includes all work inside each critical section.
+    pub checkpoint_state_lock_ns: u64,
     /// Tape::read calls issued by window, excluding append receipts.
     pub window_reads: u64,
     /// Registered tenants.
@@ -420,6 +423,7 @@ impl Engine {
             replayed_records: state.replayed,
             checkpoint_warnings: state.warnings,
             checkpoint_snapshot_lock_ns: state.snapshot_lock_ns,
+            checkpoint_state_lock_ns: state.checkpoint_lock_ns,
             window_reads: self.reads.load(Ordering::Relaxed),
             tenants: state.tenants.entries.len(),
         })

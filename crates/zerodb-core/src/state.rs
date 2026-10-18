@@ -22,6 +22,7 @@ pub(crate) struct State {
     pub(crate) warnings: u64,
     pub(crate) replay_failed: bool,
     pub(crate) snapshot_lock_ns: u64,
+    pub(crate) checkpoint_lock_ns: u64,
     pub(crate) failure: Option<EngineError>,
     pub(crate) notify: Option<std::sync::mpsc::SyncSender<crate::checkpoint::Command>>,
 }
@@ -44,6 +45,7 @@ impl State {
             warnings: 0,
             replay_failed: false,
             snapshot_lock_ns: 0,
+            checkpoint_lock_ns: 0,
             failure: None,
             notify: None,
         }

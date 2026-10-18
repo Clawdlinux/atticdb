@@ -66,15 +66,22 @@ fn exact(io: &dyn Io, id: FileId, mut off: u64, mut out: &mut [u8]) -> Result<()
     Ok(())
 }
 fn write(io: &dyn Io, id: FileId, off: &mut u64, payload: &[u8]) -> Result<(u64, u32)> {
+    let mut record = Vec::new();
+    let (_, len) = buffer_record(&mut record, payload);
+    let location = (*off, len);
+    io.write_at(id, *off, &record)?;
+    *off += u64::from(len);
+    Ok(location)
+}
+fn buffer_record(out: &mut Vec<u8>, payload: &[u8]) -> (u64, u32) {
     let mut record = vec![0; 4];
     record.extend_from_slice(&((payload.len() + 8) as u32).to_le_bytes());
     record.extend_from_slice(payload);
     let sum = crc(&record[4..]);
     record[..4].copy_from_slice(&sum.to_le_bytes());
-    let location = (*off, record.len() as u32);
-    io.write_at(id, *off, &record)?;
-    *off += record.len() as u64;
-    Ok(location)
+    let location = (out.len() as u64, record.len() as u32);
+    out.extend(record);
+    location
 }
 fn read(io: &dyn Io, id: FileId, off: u64) -> Result<(Vec<u8>, u32)> {
     let mut header = [0; 8];
@@ -352,6 +359,7 @@ pub(crate) fn save(io: &dyn Io, dir: &Path, shared: &Mutex<State>) -> Result<u64
         let snap = snapshot(&state);
         state.snapshot_lock_ns =
             state.snapshot_lock_ns.max(start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64);
+        state.checkpoint_lock_ns = state.checkpoint_lock_ns.max(state.snapshot_lock_ns);
         snap
     };
     let mut name = format!("ckpt-{}.zdb", snap.lsn);
@@ -362,17 +370,17 @@ pub(crate) fn save(io: &dyn Io, dir: &Path, shared: &Mutex<State>) -> Result<u64
     }
     let mut pending = PendingFile { io, path: dir.join(&name), preserve: false };
     let file = File(io, io.create(&pending.path)?);
-    let mut off = 0;
+    let mut buffer = Vec::new();
     let mut header = b"ZCK1".to_vec();
     header.extend_from_slice(&snap.lsn.to_le_bytes());
     header.extend_from_slice(&snap.txn.to_le_bytes());
-    write(io, file.1, &mut off, &header)?;
+    buffer_record(&mut buffer, &header);
     for (id, name, lsn) in &snap.tenants {
         let mut data = vec![1];
         data.extend_from_slice(&id.to_le_bytes());
         data.extend_from_slice(&lsn.to_le_bytes());
         bytes(&mut data, name.as_bytes());
-        write(io, file.1, &mut off, &data)?;
+        buffer_record(&mut buffer, &data);
     }
     let mut locations = Vec::new();
     for (key, index, revision, slots, backing) in snap.pages {
@@ -387,7 +395,7 @@ pub(crate) fn save(io: &dyn Io, dir: &Path, shared: &Mutex<State>) -> Result<u64
         for slot in slots.iter() {
             data.extend_from_slice(&slot.to_le_bytes());
         }
-        let (offset, len) = write(io, file.1, &mut off, &data)?;
+        let (offset, len) = buffer_record(&mut buffer, &data);
         locations.push((key, index, revision, Backing { file: name.clone(), offset, len }));
     }
     for entry in snap.dedup {
@@ -401,8 +409,9 @@ pub(crate) fn save(io: &dyn Io, dir: &Path, shared: &Mutex<State>) -> Result<u64
                 data.extend_from_slice(&value.to_le_bytes());
             }
         }
-        write(io, file.1, &mut off, &data)?;
+        buffer_record(&mut buffer, &data);
     }
+    io.write_at(file.1, 0, &buffer)?;
     io.sync_data(file.1)?;
     io.sync_dir(dir)?;
     let mut chain = if snap.full { Vec::new() } else { snap.chain.clone() };
@@ -425,17 +434,31 @@ pub(crate) fn save(io: &dyn Io, dir: &Path, shared: &Mutex<State>) -> Result<u64
     pending.preserve = true;
     io.rename(&next, &dir.join("CHECKPOINT"))?;
     io.sync_dir(dir)?;
-    let mut state = lock(shared)?;
-    for (key, page, revision, backing) in locations {
-        state.index.clean(&key, page, revision, backing);
-        if state.index.sessions[&key].pages[page].revision == revision {
-            state.dirty.remove(&(key, page));
+    // New backing files are already durable. Yield the state lock between bounded installs.
+    for chunk in locations.chunks(32) {
+        let mut state = lock(shared)?;
+        let start = std::time::Instant::now();
+        for (key, page, revision, backing) in chunk {
+            state.index.clean(key, *page, *revision, backing.clone());
+            if state.index.sessions[key].pages[*page].revision == *revision {
+                state.dirty.remove(&(key.clone(), *page));
+            }
         }
+        state.checkpoint_lock_ns = state
+            .checkpoint_lock_ns
+            .max(start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64);
     }
-    state.watermark = snap.lsn;
-    state.checkpoint_bytes = snap.bytes;
-    state.checkpoint_saves += 1;
-    state.chain = chain;
+    {
+        let mut state = lock(shared)?;
+        let start = std::time::Instant::now();
+        state.watermark = snap.lsn;
+        state.checkpoint_bytes = snap.bytes;
+        state.checkpoint_saves += 1;
+        state.chain = chain;
+        state.checkpoint_lock_ns = state
+            .checkpoint_lock_ns
+            .max(start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64);
+    }
     if snap.full {
         for name in snap.chain {
             let _ = io.remove(&dir.join(name));
@@ -693,6 +716,7 @@ mod tests {
         }
         save(&disk, Path::new("db"), &shared).unwrap();
         let ns = shared.lock().unwrap().snapshot_lock_ns;
+        assert!(shared.lock().unwrap().checkpoint_lock_ns >= ns);
         eprintln!("full checkpoint snapshot: 1000 pages, lock_hold_ns={ns}");
         assert!(ns > 0);
     }
@@ -871,7 +895,8 @@ mod tests {
 
     #[test]
     fn failed_checkpoint_before_install_removes_partial_files() {
-        for at in [3, 4, 5, 9, 10] {
+        // Data write/syncs and metadata write/sync, before the ambiguous rename.
+        for at in [3, 4, 5, 8, 9] {
             let disk = SimDisk::new(7);
             let shared = state();
             append(&shared, 1);

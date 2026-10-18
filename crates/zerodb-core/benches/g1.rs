@@ -246,11 +246,12 @@ fn engine(iterations: usize, batch: usize, n: usize) -> Stats {
     let p99 = report("engine", elapsed, n, samples);
     let metrics = engine.metrics().unwrap();
     println!(
-        "engine: checkpoint_watermark={} checkpoint_files={} checkpoint_saves={} snapshot_lock_max_us={:.3}",
+        "engine: checkpoint_watermark={} checkpoint_files={} checkpoint_saves={} snapshot_lock_max_us={:.3} state_lock_max_us={:.3}",
         metrics.checkpoint_watermark,
         metrics.checkpoint_files,
         metrics.checkpoint_saves,
-        metrics.checkpoint_snapshot_lock_ns as f64 / 1e3
+        metrics.checkpoint_snapshot_lock_ns as f64 / 1e3,
+        metrics.checkpoint_state_lock_ns as f64 / 1e3
     );
     drop(engine);
     let engine = Engine::open(&dir.0, EngineOptions::default()).unwrap();

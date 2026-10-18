@@ -371,6 +371,24 @@ fn receipt_read_failure_reports_committed_and_checkpoint_io_uses_worker() {
 }
 
 #[test]
+fn checkpoint_file_is_written_in_one_buffer() {
+    let io = Arc::new(support::ProbeIo::new(42));
+    let engine =
+        Engine::open_with(io.clone(), Arc::new(SimClock::default()), "db", options()).unwrap();
+    for i in 0..20 {
+        engine.append(&scope(&format!("session-{i}")), vec![turn(i)], None).unwrap();
+    }
+    io.writes.lock().unwrap().clear();
+    engine.checkpoint().unwrap();
+    let writes = io.writes.lock().unwrap();
+    let data_writes = writes
+        .iter()
+        .filter(|(_, path)| path.file_name().unwrap().to_str().unwrap().starts_with("ckpt-"))
+        .count();
+    assert_eq!(data_writes, 1);
+}
+
+#[test]
 fn replay_spills_by_dirty_capacity_not_clean_resident_pages() {
     let io = Arc::new(support::ProbeIo::new(16));
     let engine =
