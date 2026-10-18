@@ -62,6 +62,13 @@ fn latency(label: &str, samples: &mut [Duration]) -> [f64; 3] {
 struct Stats {
     ack: [f64; 3],
     throughput: f64,
+    reopen: Option<Reopen>,
+}
+#[derive(Clone, Copy)]
+struct Reopen {
+    ms: f64,
+    records: u64,
+    tail_bytes: u64,
 }
 fn report(label: &str, elapsed: Duration, n: usize, mut samples: Vec<Duration>) -> Stats {
     println!(
@@ -73,6 +80,7 @@ fn report(label: &str, elapsed: Duration, n: usize, mut samples: Vec<Duration>) 
     Stats {
         ack: latency(&format!("{label}/durable_ack"), &mut samples),
         throughput: n as f64 / elapsed.as_secs_f64(),
+        reopen: None,
     }
 }
 
@@ -207,15 +215,17 @@ fn tape(iterations: usize, batch: usize, n: usize) -> Stats {
     );
     let (groups, requests) = tape.group_stats();
     println!(
-        "tape: writer_groups={groups} mean_requests_per_group={:.3}",
-        requests as f64 / groups as f64
+        "tape: writer_groups={groups} mean_requests_per_group={:.3} superblock_installs={}",
+        requests as f64 / groups as f64,
+        tape.superblock_installs()
     );
     report("tape", elapsed, n, samples)
 }
 
-fn engine(iterations: usize, batch: usize, n: usize) -> Stats {
+fn engine(iterations: usize, batch: usize, n: usize, checkpoint_bytes: u64) -> Stats {
     let dir = BenchDir::new();
-    let engine = Engine::open(&dir.0, EngineOptions::default()).unwrap();
+    let opts = EngineOptions { checkpoint_bytes, ..EngineOptions::default() };
+    let engine = Engine::open(&dir.0, opts.clone()).unwrap();
     // Register every tenant and session before timing, so timed bytes match the bare trace.
     std::thread::scope(|threads| {
         for writer in 0..WRITERS {
@@ -249,7 +259,7 @@ fn engine(iterations: usize, batch: usize, n: usize) -> Stats {
     );
     println!("engine/window: queries={queries} sample_stride=64");
     latency("engine/window", &mut reads);
-    let p99 = report("engine", elapsed, n, samples);
+    let mut stats = report("engine", elapsed, n, samples);
     let metrics = engine.metrics().unwrap();
     println!(
         "engine: writer_groups={} mean_requests_per_group={:.3}",
@@ -258,15 +268,28 @@ fn engine(iterations: usize, batch: usize, n: usize) -> Stats {
             / (metrics.writer_groups - warmup.writer_groups) as f64
     );
     println!(
-        "engine: checkpoint_watermark={} checkpoint_files={} checkpoint_saves={} snapshot_lock_max_us={:.3} state_lock_max_us={:.3}",
+        "engine: checkpoint_watermark={} checkpoint_files={} checkpoint_saves={} snapshot_lock_max_us={:.3} state_lock_max_us={:.3} superblock_installs={} checkpoint_buffer_peak_bytes={}",
         metrics.checkpoint_watermark,
         metrics.checkpoint_files,
         metrics.checkpoint_saves,
         metrics.checkpoint_snapshot_lock_ns as f64 / 1e3,
-        metrics.checkpoint_state_lock_ns as f64 / 1e3
+        metrics.checkpoint_state_lock_ns as f64 / 1e3,
+        metrics.superblock_installs - warmup.superblock_installs,
+        metrics.checkpoint_buffer_peak_bytes
     );
     drop(engine);
-    let engine = Engine::open(&dir.0, EngineOptions::default()).unwrap();
+    let start = Instant::now();
+    let engine = Engine::open(&dir.0, opts).unwrap();
+    let open_ms = start.elapsed().as_secs_f64() * 1e3;
+    let recovered = engine.metrics().unwrap();
+    assert_eq!(recovered.checkpoint_warnings, 0);
+    assert!(recovered.replayed_records <= metrics.durable_lsn - metrics.checkpoint_watermark);
+    println!("engine/reopen: checkpoint_mib={} total_ms={open_ms:.3} replayed_records={} tail_bytes_before_close={}", checkpoint_bytes / (1024 * 1024), recovered.replayed_records, metrics.checkpoint_pending_bytes);
+    stats.reopen = Some(Reopen {
+        ms: open_ms,
+        records: recovered.replayed_records,
+        tail_bytes: metrics.checkpoint_pending_bytes,
+    });
     for scopes in &scopes {
         for (session, scope) in scopes.iter().enumerate() {
             let batches = iterations / SESSIONS + usize::from(session < iterations % SESSIONS);
@@ -276,7 +299,7 @@ fn engine(iterations: usize, batch: usize, n: usize) -> Stats {
         }
     }
     println!("engine/reopen: verified all {} session tails outside timing", WRITERS * SESSIONS);
-    p99
+    stats
 }
 
 fn history_windows() {
@@ -348,6 +371,26 @@ fn spread(path: &str, metric: &str, mut values: Vec<f64>) -> f64 {
     );
     median
 }
+fn replay_probe(iterations: usize, batch: usize, n: usize, reps: usize) {
+    let mut results = [Vec::new(), Vec::new()];
+    for rep in 1..=reps {
+        for (i, mib) in [64, 128].into_iter().enumerate() {
+            println!("replay_probe repetition={rep}/{reps} checkpoint_mib={mib}");
+            let result = engine(iterations, batch, n, mib * 1024 * 1024);
+            results[i].push(result.reopen.unwrap());
+        }
+    }
+    for (mib, values) in [64, 128].into_iter().zip(results) {
+        let path = format!("reopen/{mib}MiB");
+        spread(&path, "total_ms", values.iter().map(|v| v.ms).collect());
+        spread(&path, "replayed_records", values.iter().map(|v| v.records as f64).collect());
+        spread(
+            &path,
+            "tail_bytes_before_close",
+            values.iter().map(|v| v.tail_bytes as f64).collect(),
+        );
+    }
+}
 fn main() {
     let n = env_number("G1_TURNS", 1_000_000);
     let batch = env_number("G1_BATCH", 4);
@@ -359,6 +402,16 @@ fn main() {
     let iterations = n / WRITERS / batch;
     let reps = env_number("G1_REPS", 3);
     assert!(reps >= 3, "G1_REPS must be at least 3");
+    if env_number("G1_REPLAY_PROBE", 0) != 0 {
+        return replay_probe(iterations, batch, n, reps);
+    }
+    let checkpoint_bytes = env_number(
+        "G1_CHECKPOINT_MIB",
+        (EngineOptions::default().checkpoint_bytes / (1024 * 1024)) as usize,
+    ) as u64
+        * 1024
+        * 1024;
+    assert!(checkpoint_bytes > 0);
     println!("G1: turns={n} batch={batch} writers={WRITERS} readers={READERS} sessions={} sizes={SIZES:?}", WRITERS * SESSIONS);
     println!("Nearest-rank caller latency, measured per durable batch. macOS sync_data uses F_FULLFSYNC.");
     let mut results = Vec::new();
@@ -366,7 +419,7 @@ fn main() {
         println!("repetition={rep}/{reps}");
         let bare = bare(iterations, batch, n);
         let tape = tape(iterations, batch, n);
-        let engine = engine(iterations, batch, n);
+        let engine = engine(iterations, batch, n, checkpoint_bytes);
         println!(
             "comparison repetition={rep} engine_p99_over_bare={:.3} tape_p99_over_bare={:.3}",
             engine.ack[1] / bare.ack[1],
@@ -384,6 +437,13 @@ fn main() {
         "engine/bare",
         "p99_ratio",
         results.iter().map(|r| r[2].ack[1] / r[0].ack[1]).collect(),
+    );
+    spread("tape/bare", "p99_ratio", results.iter().map(|r| r[1].ack[1] / r[0].ack[1]).collect());
+    spread("engine/reopen", "total_ms", results.iter().map(|r| r[2].reopen.unwrap().ms).collect());
+    spread(
+        "engine/reopen",
+        "replayed_records",
+        results.iter().map(|r| r[2].reopen.unwrap().records as f64).collect(),
     );
     if env_number("G1_HISTORY", 1) != 0 {
         history_windows();
