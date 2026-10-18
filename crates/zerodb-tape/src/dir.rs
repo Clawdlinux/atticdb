@@ -56,6 +56,10 @@ fn encode(magic: &[u8; 8], version: u32, values: &[u64]) -> Vec<u8> {
     bytes
 }
 
+pub(crate) fn write_superblock(io: Arc<dyn Io>, path: &Path, durable_lsn: u64) -> Result<()> {
+    atomic_install(io, path, "SUPERBLOCK", &encode(b"ZDBSUPER", 1, &[durable_lsn]))
+}
+
 fn read(io: Arc<dyn Io>, path: &Path, magic: &[u8; 8], version: u32) -> Result<Vec<u64>> {
     let file = Handle::open(io.clone(), path)?;
     let len = io.len(file.id)?;
@@ -224,12 +228,7 @@ impl DataDir {
 
     /// Records a previously synced LSN using atomic replacement.
     pub fn install_superblock(&mut self, durable_lsn: u64) -> Result<()> {
-        atomic_install(
-            self.io.clone(),
-            &self.path,
-            "SUPERBLOCK",
-            &encode(b"ZDBSUPER", 1, &[durable_lsn]),
-        )?;
+        write_superblock(self.io.clone(), &self.path, durable_lsn)?;
         self.superblock = durable_lsn;
         Ok(())
     }

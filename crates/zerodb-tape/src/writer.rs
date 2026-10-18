@@ -624,11 +624,14 @@ impl<S: StateMachine> WriterCore<S> {
 
     /// Called after replies. Metadata failure poisons future writes, not earlier acknowledgements.
     pub fn update_superblock(&mut self) -> Result<()> {
-        let now = self.clock.now_ns();
-        if self.is_poisoned() || now.saturating_sub(self.superblock_time) < 1_000_000_000 {
+        if !self.superblock_due() {
             return Ok(());
         }
         self.checkpoint()
+    }
+    fn superblock_due(&self) -> bool {
+        !self.is_poisoned()
+            && self.clock.now_ns().saturating_sub(self.superblock_time) >= 1_000_000_000
     }
 
     fn checkpoint(&mut self) -> Result<()> {
@@ -707,6 +710,49 @@ impl Read for Entropy<'_> {
     }
 }
 
+struct SuperblockWorker {
+    sender: Option<mpsc::SyncSender<()>>,
+    thread: Option<JoinHandle<()>>,
+}
+impl SuperblockWorker {
+    fn start<S: StateMachine>(core: &WriterCore<S>) -> Result<Self> {
+        let reads = core.reads.clone();
+        let io = reads.io.clone();
+        let path = reads.path.clone();
+        let mut installed = core.segments.dir.superblock();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let thread =
+            std::thread::Builder::new().name("zerodb-superblock".into()).spawn(move || {
+                while receiver.recv().is_ok() {
+                    let boundary = reads.durable_lsn.load(Ordering::Acquire);
+                    if reads.poisoned.load(Ordering::Acquire) || boundary <= installed {
+                        continue;
+                    }
+                    if let Err(error) = crate::dir::write_superblock(io.clone(), &path, boundary) {
+                        reads.poisoned.store(true, Ordering::Release);
+                        eprintln!("zerodb: superblock maintenance failed: {error}");
+                    } else {
+                        installed = boundary;
+                    }
+                }
+            })?;
+        Ok(Self { sender: Some(sender), thread: Some(thread) })
+    }
+    fn wake(&self) {
+        if let Some(sender) = &self.sender {
+            let _ = sender.try_send(());
+        }
+    }
+}
+impl Drop for SuperblockWorker {
+    fn drop(&mut self) {
+        self.sender.take();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 /// Threaded production driver. Dropping the last handle joins the writer and releases its lock.
 pub struct Tape<S: StateMachine = NoopStateMachine> {
     sender: Option<mpsc::Sender<WriteRequest>>,
@@ -771,14 +817,20 @@ impl<S: StateMachine> Tape<S> {
         }
         let (sender, receiver) = mpsc::channel();
         let entropy = Some(Mutex::new(os_entropy()?));
+        let maintenance = SuperblockWorker::start(&core)?;
         let thread = std::thread::Builder::new().name("zerodb-writer".into()).spawn(move || {
             while let Ok(request) = receiver.recv() {
                 for request in coalescer.collect(&receiver, request) {
                     core.enqueue(request);
                 }
                 core.step();
-                let _ = core.update_superblock();
+                if core.superblock_due() {
+                    core.superblock_time = core.clock.now_ns();
+                    maintenance.wake();
+                }
             }
+            // Join periodic installs before the final synchronous install. Never regress the boundary.
+            drop(maintenance);
             let _ = core.shutdown();
         })?;
         Ok((

@@ -380,6 +380,7 @@ fn checkpoint_file_is_written_in_one_buffer() {
     for i in 0..20 {
         engine.append(&scope(&format!("session-{i}")), vec![turn(i)], None).unwrap();
     }
+
     io.writes.lock().unwrap().clear();
     engine.checkpoint().unwrap();
     let writes = io.writes.lock().unwrap();
@@ -388,6 +389,33 @@ fn checkpoint_file_is_written_in_one_buffer() {
         .filter(|(_, path)| path.file_name().unwrap().to_str().unwrap().starts_with("ckpt-"))
         .count();
     assert_eq!(data_writes, 1);
+}
+
+#[test]
+fn periodic_superblock_io_does_not_run_on_the_writer() {
+    let io = Arc::new(support::ProbeIo::new(43));
+    let clock = Arc::new(SimClock::default());
+    let engine = Engine::open_with(io.clone(), clock.clone(), "db", options()).unwrap();
+    io.writes.lock().unwrap().clear();
+    clock.advance(2_000_000_000);
+    engine.append(&scope("s"), vec![turn(1)], None).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let names = io
+            .writes
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, p)| p.file_name().unwrap() == "SUPERBLOCK.tmp")
+            .map(|(thread, _)| thread.clone())
+            .collect::<Vec<_>>();
+        if !names.is_empty() {
+            assert!(names.iter().all(|name| name == "zerodb-superblock"), "{names:?}");
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::yield_now();
+    }
 }
 
 #[test]
