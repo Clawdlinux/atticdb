@@ -690,12 +690,17 @@ impl Coalescer {
     pub fn collect<T>(&mut self, receiver: &mpsc::Receiver<T>, first: T) -> Vec<T> {
         let mut group = vec![first];
         group.extend(receiver.try_iter());
-        self.collect_with(group, |wait| receiver.recv_timeout(wait).ok())
+        self.collect_with(
+            group,
+            |wait| receiver.recv_timeout(wait).ok(),
+            || receiver.try_iter().collect(),
+        )
     }
     fn collect_with<T>(
         &mut self,
         mut group: Vec<T>,
         mut receive: impl FnMut(Duration) -> Option<T>,
+        mut ready: impl FnMut() -> Vec<T>,
     ) -> Vec<T> {
         let target = self.recent.iter().copied().max().unwrap_or(1);
         let start = Instant::now();
@@ -709,6 +714,8 @@ impl Coalescer {
                 None => break,
             }
         }
+        // Scheduling can outlast the wait budget. Include arrivals without another blocking wait.
+        group.extend(ready());
         self.recent.push_back(group.len());
         if self.recent.len() > 64 {
             self.recent.pop_front();
@@ -1005,24 +1012,44 @@ mod tests {
         groups.recent.push_back(3);
         let mut next = [2, 3].into_iter();
         assert_eq!(
-            groups.collect_with(vec![1], |wait| {
-                assert!(wait <= std::time::Duration::from_micros(200));
-                next.next()
-            }),
+            groups.collect_with(
+                vec![1],
+                |wait| {
+                    assert!(wait <= std::time::Duration::from_micros(200));
+                    next.next()
+                },
+                Vec::new
+            ),
             vec![1, 2, 3]
         );
         groups.window = std::time::Duration::ZERO;
-        assert_eq!(groups.collect_with(vec![1], |_| panic!("zero disables waiting")), vec![1]);
+        assert_eq!(
+            groups.collect_with(vec![1], |_| panic!("zero disables waiting"), Vec::new),
+            vec![1]
+        );
         groups.window = std::time::Duration::from_micros(200);
         let mut calls = 0;
         assert_eq!(
-            groups.collect_with(vec![1], |_| {
-                calls += 1;
-                None
-            }),
+            groups.collect_with(
+                vec![1],
+                |_| {
+                    calls += 1;
+                    None
+                },
+                Vec::new
+            ),
             vec![1]
         );
         assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn coalescing_drains_ready_requests_when_waiting_expires() {
+        let mut groups = Coalescer::new(Duration::from_micros(200));
+        groups.recent.push_back(3);
+        let group = groups.collect_with(vec![1], |_| None, || vec![2, 3]);
+        assert_eq!(group, vec![1, 2, 3]);
+        assert_eq!(groups.recent.back(), Some(&3));
     }
 
     #[test]
