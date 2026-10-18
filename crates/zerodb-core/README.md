@@ -166,3 +166,37 @@ It is feature-gated and defaults to false. Never enable it for real storage.
 Explicit seeded checkpoints replace the wall-clock timer.
 Memory-pressure checkpoints and recovery spills also run inline.
 Production defaults retain worker threads and OS entropy.
+
+## G1 performance harness
+
+```sh
+./bench/g1.sh
+G1_TURNS=65536 ./bench/g1.sh
+G1_BATCH=1 G1_TURNS=65536 ./bench/g1.sh
+```
+
+The default trace appends 1M turns using 16 writers across 1024 sessions.
+Each durable batch contains 4 turns. Content sizes cycle through 256, 512, 1024, 4096, and 8192 bytes.
+`G1_BATCH` accepts 1 through 256. `G1_TURNS` must be divisible by `16 * G1_BATCH`.
+The engine runs with 2 concurrent last-16 window readers and default checkpoint settings.
+Every session starts with 1 untimed turn. Timed writes exclude tenant creation.
+Durable-ack latency includes caller preparation and queueing. Quantiles use nearest rank per batch, not per turn.
+Reader latency samples every 64th completed query. All queries contribute to the count.
+Reopen verifies every session's final sequence outside timing.
+
+The bare baseline reuses M1's framing, segment preallocation, append, and sync code.
+It preframes the same turn codec, metadata, salts, transaction footer, and byte counts.
+Its fixed headers exclude hashing and caller preparation, as in M1.
+All paths use the same content-size trace and transaction batching.
+The bare driver drains a request queue and syncs each group before replying, like Tape.
+Group boundaries depend on scheduling. The bare output reports its observed group size.
+Tape also runs separately to distinguish tape overhead from engine and reader overhead.
+Only the engine runs window readers.
+Segment rolls remain inside timing. Initial segment setup and final shutdown stay outside.
+
+The history test holds returned size at 16 for histories of 16, 1024, and 65536 turns.
+It reports last/since latency after warmup and asserts exactly 16 tape reads per query.
+This proves flat record-read work. Timing still depends on filesystem caching and scheduling.
+Measurements live in `bench/RESULTS.md`.
+macOS uses `sync_data`, which invokes `F_FULLFSYNC` in this Rust toolchain.
+G1 remains pending until Linux NVMe runs the full trace and nightly LazyFS crash checks.

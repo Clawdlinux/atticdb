@@ -1,0 +1,334 @@
+#![allow(clippy::unwrap_used)]
+
+#[path = "../../zerodb-tape/benches/support/mod.rs"]
+mod support;
+
+use std::hint::black_box;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Barrier};
+use std::time::{Duration, Instant};
+use support::{encoded_batch, Bare, BenchDir};
+use zerodb_core::{turn::encode, Engine, EngineOptions, NewTurn, Role, Scope, Trust, WindowQuery};
+use zerodb_tape::{Durability, Kind, RecordInput, StdIo, SystemClock, Tape, TapeOptions};
+
+const WRITERS: usize = 16;
+const READERS: usize = 2;
+const SESSIONS: usize = 64;
+const SIZES: [usize; 5] = [256, 512, 1024, 4096, 8192];
+
+fn scope(writer: usize, session: usize) -> Scope {
+    Scope {
+        tenant: format!("tenant-{writer:02}"),
+        agent: format!("agent-{writer:02}"),
+        session: format!("session-{session:03}"),
+    }
+}
+fn turns(iteration: usize, batch: usize) -> Vec<NewTurn> {
+    (0..batch)
+        .map(|i| NewTurn {
+            role: Role::User,
+            trust: Trust::Untrusted,
+            meta: vec![0x42; 16],
+            content: vec![0x5a; SIZES[(iteration * batch + i) % SIZES.len()]],
+        })
+        .collect()
+}
+fn records(scope: &Scope, iteration: usize, batch: usize) -> Vec<RecordInput> {
+    turns(iteration, batch)
+        .iter()
+        .map(|turn| RecordInput {
+            kind: Kind::Turn,
+            tenant_id: 1,
+            content: encode(&scope.agent, &scope.session, 1, turn, None).unwrap(),
+        })
+        .collect()
+}
+fn quantile(samples: &[Duration], numerator: usize, denominator: usize) -> f64 {
+    samples[(samples.len() * numerator).div_ceil(denominator) - 1].as_secs_f64() * 1e6
+}
+fn latency(label: &str, samples: &mut [Duration]) -> f64 {
+    assert!(!samples.is_empty());
+    samples.sort_unstable();
+    let p99 = quantile(samples, 99, 100);
+    println!(
+        "{label}: samples={} p50_us={:.3} p99_us={p99:.3} p99.9_us={:.3}",
+        samples.len(),
+        quantile(samples, 50, 100),
+        quantile(samples, 999, 1000)
+    );
+    p99
+}
+fn report(label: &str, elapsed: Duration, n: usize, mut samples: Vec<Duration>) -> f64 {
+    println!(
+        "{label}: turns={n} seconds={:.3} turns_per_sec={:.1} batches_per_sec={:.1}",
+        elapsed.as_secs_f64(),
+        n as f64 / elapsed.as_secs_f64(),
+        samples.len() as f64 / elapsed.as_secs_f64()
+    );
+    latency(&format!("{label}/durable_ack"), &mut samples)
+}
+
+fn writers(
+    iterations: usize,
+    readers: usize,
+    append: impl Fn(usize, usize) + Sync,
+    read: impl Fn(usize, usize) + Sync,
+) -> (Duration, Vec<Duration>, Vec<Duration>, u64) {
+    let barrier = Barrier::new(WRITERS + readers + 1);
+    let done = AtomicBool::new(false);
+    std::thread::scope(|threads| {
+        let writers = (0..WRITERS)
+            .map(|writer| {
+                let (barrier, append) = (&barrier, &append);
+                threads.spawn(move || {
+                    let mut samples = Vec::with_capacity(iterations);
+                    barrier.wait();
+                    for i in 0..iterations {
+                        let start = Instant::now();
+                        append(writer, i);
+                        samples.push(start.elapsed());
+                    }
+                    samples
+                })
+            })
+            .collect::<Vec<_>>();
+        let readers = (0..readers)
+            .map(|reader| {
+                let (barrier, done, read) = (&barrier, &done, &read);
+                threads.spawn(move || {
+                    let mut samples = Vec::new();
+                    let mut count = 0;
+                    barrier.wait();
+                    while !done.load(Ordering::Acquire) {
+                        let start = Instant::now();
+                        read(reader, count);
+                        // Bound sample memory during the 1M-turn trace. Count every completed query.
+                        if count.is_multiple_of(64) {
+                            samples.push(start.elapsed());
+                        }
+                        count += 1;
+                    }
+                    (count as u64, samples)
+                })
+            })
+            .collect::<Vec<_>>();
+        let start = Instant::now();
+        barrier.wait();
+        let samples = writers.into_iter().flat_map(|t| t.join().unwrap()).collect();
+        let elapsed = start.elapsed();
+        done.store(true, Ordering::Release);
+        let mut read_samples = Vec::new();
+        let mut queries = 0;
+        for reader in readers {
+            let (n, samples) = reader.join().unwrap();
+            queries += n;
+            read_samples.extend(samples);
+        }
+        (elapsed, samples, read_samples, queries)
+    })
+}
+
+struct Request {
+    bytes: Arc<Vec<u8>>,
+    reply: mpsc::SyncSender<()>,
+}
+fn bare(iterations: usize, batch: usize, n: usize) -> f64 {
+    let dir = BenchDir::new();
+    let mut bare = Bare::new(&dir.0);
+    let templates = (0..SIZES.len())
+        .map(|i| Arc::new(encoded_batch(&records(&scope(0, 0), i, batch))))
+        .collect::<Vec<_>>();
+    println!(
+        "matched encoded batch bytes: {:?}",
+        templates.iter().map(|b| b.len()).collect::<Vec<_>>()
+    );
+    let (sender, receiver) = mpsc::channel::<Request>();
+    let worker = std::thread::spawn(move || {
+        let mut syncs = 0;
+        let mut requests = 0;
+        while let Ok(first) = receiver.recv() {
+            let mut group = vec![first];
+            group.extend(receiver.try_iter());
+            for request in &group {
+                bare.write(&request.bytes);
+            }
+            bare.sync();
+            syncs += 1;
+            requests += group.len();
+            for request in group {
+                request.reply.send(()).unwrap();
+            }
+        }
+        (syncs, requests)
+    });
+    let (elapsed, samples, _, _) = writers(
+        iterations,
+        0,
+        |_, i| {
+            let (reply, receiver) = mpsc::sync_channel(1);
+            sender.send(Request { bytes: templates[i % SIZES.len()].clone(), reply }).unwrap();
+            receiver.recv().unwrap();
+        },
+        |_, _| {},
+    );
+    drop(sender);
+    let (syncs, requests) = worker.join().unwrap();
+    println!(
+        "bare: sync_groups={syncs} mean_batches_per_group={:.3}",
+        requests as f64 / syncs as f64
+    );
+    report("bare", elapsed, n, samples)
+}
+
+fn tape(iterations: usize, batch: usize, n: usize) -> f64 {
+    let dir = BenchDir::new();
+    let (tape, _) =
+        Tape::open(Arc::new(StdIo::new()), Arc::new(SystemClock), &dir.0, TapeOptions::default())
+            .unwrap();
+    let templates = (0..SIZES.len()).map(|i| records(&scope(0, 0), i, batch)).collect::<Vec<_>>();
+    let (elapsed, samples, _, _) = writers(
+        iterations,
+        0,
+        |_, i| {
+            black_box(
+                tape.append(templates[i % SIZES.len()].clone(), Durability::Durable).unwrap(),
+            );
+        },
+        |_, _| {},
+    );
+    report("tape", elapsed, n, samples)
+}
+
+fn engine(iterations: usize, batch: usize, n: usize) -> f64 {
+    let dir = BenchDir::new();
+    let engine = Engine::open(&dir.0, EngineOptions::default()).unwrap();
+    // Register every tenant and session before timing, so timed bytes match the bare trace.
+    std::thread::scope(|threads| {
+        for writer in 0..WRITERS {
+            let engine = &engine;
+            threads.spawn(move || {
+                for session in 0..SESSIONS {
+                    engine.append(&scope(writer, session), turns(0, 1), None).unwrap();
+                }
+            });
+        }
+    });
+    let templates = (0..SIZES.len()).map(|i| turns(i, batch)).collect::<Vec<_>>();
+    let scopes = (0..WRITERS)
+        .map(|w| (0..SESSIONS).map(|s| scope(w, s)).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    let (elapsed, samples, mut reads, queries) = writers(
+        iterations,
+        READERS,
+        |writer, i| {
+            black_box(
+                engine
+                    .append(&scopes[writer][i % SESSIONS], templates[i % SIZES.len()].clone(), None)
+                    .unwrap(),
+            );
+        },
+        |reader, i| {
+            let scope = &scopes[(i + reader) % WRITERS][i / WRITERS % SESSIONS];
+            black_box(engine.window(scope, WindowQuery::Last(16)).unwrap());
+        },
+    );
+    println!("engine/window: queries={queries} sample_stride=64");
+    latency("engine/window", &mut reads);
+    let p99 = report("engine", elapsed, n, samples);
+    let metrics = engine.metrics().unwrap();
+    println!(
+        "engine: checkpoint_watermark={} checkpoint_files={} snapshot_lock_max_us={:.3}",
+        metrics.checkpoint_watermark,
+        metrics.checkpoint_files,
+        metrics.checkpoint_snapshot_lock_ns as f64 / 1e3
+    );
+    drop(engine);
+    let engine = Engine::open(&dir.0, EngineOptions::default()).unwrap();
+    for scopes in &scopes {
+        for (session, scope) in scopes.iter().enumerate() {
+            let batches = iterations / SESSIONS + usize::from(session < iterations % SESSIONS);
+            let tail = engine.window(scope, WindowQuery::Last(1)).unwrap();
+            assert_eq!(tail.len(), 1);
+            assert_eq!(tail[0].seq, (1 + batches * batch) as u64);
+        }
+    }
+    println!("engine/reopen: verified all {} session tails outside timing", WRITERS * SESSIONS);
+    p99
+}
+
+fn history_windows() {
+    let dir = BenchDir::new();
+    let engine = Engine::open(&dir.0, EngineOptions::default()).unwrap();
+    let scope = scope(0, 0);
+    let mut length = 0;
+    for target in [16, 1024, 65536] {
+        while length < target {
+            let count = (target - length).min(256);
+            let turn = NewTurn {
+                role: Role::User,
+                trust: Trust::Untrusted,
+                meta: vec![],
+                content: vec![0x5a; 256],
+            };
+            engine.append(&scope, vec![turn; count], None).unwrap();
+            length += count;
+        }
+        for (name, query) in [
+            ("last", WindowQuery::Last(16)),
+            ("since", WindowQuery::Since { seq: (target / 2).max(1) as u64, limit: 16 }),
+        ] {
+            // The smallest history still returns 16 turns for the since query.
+            let query = if name == "since" && target == 16 {
+                WindowQuery::Since { seq: 1, limit: 16 }
+            } else {
+                query
+            };
+            for _ in 0..100 {
+                black_box(engine.window(&scope, query).unwrap());
+            }
+            let before = engine.metrics().unwrap().window_reads;
+            let mut samples = (0..2000)
+                .map(|_| {
+                    let start = Instant::now();
+                    let turns = engine.window(&scope, query).unwrap();
+                    assert_eq!(turns.len(), 16);
+                    black_box(turns);
+                    start.elapsed()
+                })
+                .collect::<Vec<_>>();
+            let reads = engine.metrics().unwrap().window_reads - before;
+            assert_eq!(reads, 2000 * 16);
+            println!(
+                "history={target} query={name} returned=16 tape_reads_per_query={}",
+                reads / 2000
+            );
+            latency(&format!("window/{name}/{target}"), &mut samples);
+        }
+    }
+}
+
+fn env_number(name: &str, default: usize) -> usize {
+    std::env::var(name).map_or(default, |s| s.parse().unwrap())
+}
+fn main() {
+    let n = env_number("G1_TURNS", 1_000_000);
+    let batch = env_number("G1_BATCH", 4);
+    assert!((1..=256).contains(&batch), "G1_BATCH must be in 1..=256");
+    assert!(
+        n >= WRITERS * batch && n.is_multiple_of(WRITERS * batch),
+        "G1_TURNS must be a positive multiple of 16 * G1_BATCH"
+    );
+    let iterations = n / WRITERS / batch;
+    println!("G1: turns={n} batch={batch} writers={WRITERS} readers={READERS} sessions={} sizes={SIZES:?}", WRITERS * SESSIONS);
+    println!("Nearest-rank caller latency, measured per durable batch. macOS sync_data uses F_FULLFSYNC.");
+    let bare_p99 = bare(iterations, batch, n);
+    let tape_p99 = tape(iterations, batch, n);
+    let engine_p99 = engine(iterations, batch, n);
+    println!(
+        "comparison: engine_p99_over_bare={:.3} tape_p99_over_bare={:.3}",
+        engine_p99 / bare_p99,
+        tape_p99 / bare_p99
+    );
+    history_windows();
+    println!("G1 verdict: PENDING. Requires Linux NVMe, the full 1M-turn trace, and nightly LazyFS crash validation.");
+}

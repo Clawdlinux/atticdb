@@ -18,3 +18,7 @@ zerodb-tape = { path = "../zerodb-tape", features = ["sim"] }
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "g1"
+harness = false
