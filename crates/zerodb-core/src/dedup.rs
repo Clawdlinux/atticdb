@@ -86,18 +86,6 @@ impl Dedup {
     pub(crate) fn can_stage(&self, tenant: u32) -> bool {
         self.entries.len() < self.global && self.tenant_len(tenant) < self.per_tenant
     }
-    pub(crate) fn reserve_overlay(&mut self, overlay: &Self, tenant: u32) {
-        while self.tenant_len(tenant) + overlay.tenant_len(tenant) >= self.per_tenant {
-            if let Some(&age) = self.tenants[&tenant].first() {
-                self.remove(age);
-            }
-        }
-        while self.entries.len() + overlay.entries.len() >= self.global {
-            if let Some((&age, _)) = self.entries.first_key_value() {
-                self.remove(age);
-            }
-        }
-    }
     pub(crate) fn effective_window(&self) -> usize {
         self.tenants.values().map(BTreeSet::len).min().unwrap_or(0)
     }

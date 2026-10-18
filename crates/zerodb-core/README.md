@@ -79,11 +79,17 @@ Arithmetic maps sequences to page slots. Slots store LSNs, not segment offsets.
 Defaults allow 256 MiB of hot slots and 10,000 tenants.
 Directory defaults allow 1M sessions and 8M pages, including cold pages.
 Retry tables retain at most 1M keys per tenant and 8M globally.
-Published entries and the prepared overlay share that entry budget.
-Preparation doesn't clone the published table.
+Those limits apply to the published table. Eviction happens during publication, never preparation.
+The writer keeps only its current group's unpublished entries in a separate overlay.
+The overlay independently obeys the same per-tenant and global limits.
+Temporary overshoot is at most that group's distinct staged keys, capped at 1M per tenant and 8M globally.
+Thus published plus staged entries cannot exceed 2M per tenant or 16M globally.
+Exceeding overlay capacity rejects a new keyed request with `ResourceExhausted("prepared_dedup")`.
+Publication transfers entries into the published table and empties the overlay after a successful group.
+Preparation doesn't clone or evict from the published table.
 Checkpoint snapshots share immutable retry entries rather than copying their payloads.
-Checkpoints don't advance while prepared writes remain unpublished.
-Failed sync recovery therefore restores any entries evicted during preparation.
+Checkpoints capture published data while later writes are still prepared.
+A failed sync leaves the published retry window unchanged.
 
 Clean checkpoint-backed pages use LRU eviction. Active append tails stay pinned until acknowledgement.
 Dirty pages need a worker checkpoint before eviction.

@@ -134,9 +134,7 @@ impl Machine {
         }
         self.lsn = last_lsn;
         self.txn = txn;
-        state.prepared_lsn = last_lsn;
         if let Some(key) = dedup_key {
-            state.dedup.reserve_overlay(&self.dedup, tenant);
             self.dedup.insert(Entry {
                 key,
                 digest,
@@ -349,7 +347,7 @@ mod tests {
     }
 
     #[test]
-    fn prepared_overlay_starts_empty_and_shares_the_global_entry_budget() {
+    fn prepared_overlay_preserves_published_entries_until_publish() {
         let disk = Arc::new(SimDisk::new(8));
         let opts =
             EngineOptions { dedup_per_tenant: 2, dedup_global: 2, ..EngineOptions::default() };
@@ -365,7 +363,8 @@ mod tests {
             });
         }
         let shared = Arc::new(Mutex::new(initial));
-        let mut machine = Machine::new(shared.clone(), disk.clone(), "db".into(), opts).unwrap();
+        let mut machine =
+            Machine::new(shared.clone(), disk.clone(), "db".into(), opts.clone()).unwrap();
         assert!(machine.dedup.entries.is_empty());
         let mut records = Vec::new();
         for (i, session) in ["new1", "new2"].into_iter().enumerate() {
@@ -389,7 +388,8 @@ mod tests {
             )
             .unwrap();
             assert!(matches!(machine.prepare(&mut batch), Prepare::Write));
-            assert!(shared.lock().unwrap().dedup.entries.len() + machine.dedup.entries.len() <= 2);
+            assert_eq!(shared.lock().unwrap().dedup.entries.len(), 2);
+            assert_eq!(machine.dedup.entries.len(), i + 1);
             records.push(CommittedRecord {
                 lsn: 4 + i as u64,
                 txn: 2 + i as u64,
@@ -401,11 +401,60 @@ mod tests {
         }
         assert_eq!(
             crate::checkpoint::save(disk.as_ref(), std::path::Path::new("db"), &shared).unwrap(),
-            0
+            3
         );
+        let checkpoint = crate::checkpoint::load(disk.as_ref(), std::path::Path::new("db"), &opts);
+        for age in 2..=3 {
+            assert!(checkpoint.dedup.get(&DedupKey(1, age.to_string(), "old".into())).is_some());
+        }
+        assert!(checkpoint.dedup.get(&DedupKey(1, "new1".into(), "key".into())).is_none());
         machine.publish(&records);
         assert!(machine.dedup.entries.is_empty());
         assert_eq!(shared.lock().unwrap().dedup.entries.len(), 2);
+    }
+
+    #[test]
+    fn flush_cleans_published_pages_and_hot_page_retry_works_during_preparation() {
+        let disk = Arc::new(SimDisk::new(10));
+        let opts = EngineOptions { hot_page_bytes: 256, ..EngineOptions::default() };
+        let mut initial = State::new(&opts);
+        initial.tenants.insert("t", 1, 1, 10_000).unwrap();
+        let published = Key(1, "a".into(), "published".into());
+        initial.index.reserve(&published, 1).unwrap();
+        initial.index.publish(&published, 1, 2).unwrap();
+        initial.dirty.insert((published.clone(), 0));
+        initial.published_lsn = 2;
+        initial.txn = 1;
+        let shared = Arc::new(Mutex::new(initial));
+        let mut machine =
+            Machine::new(shared.clone(), disk.clone(), "db".into(), opts.clone()).unwrap();
+        let content = crate::turn::encode(
+            "a",
+            "pending",
+            0,
+            &NewTurn { role: Role::User, content: vec![1], meta: vec![], trust: Trust::Untrusted },
+            None,
+        )
+        .unwrap();
+        let mut batch = PreparedBatch::with_salts(
+            vec![RecordInput { kind: Kind::Turn, tenant_id: 1, content }],
+            Durability::Durable,
+            || Ok([1; 16]),
+        )
+        .unwrap();
+        assert!(matches!(machine.prepare(&mut batch), Prepare::Write));
+        let retry = Key(1, "a".into(), "retry".into());
+        assert!(matches!(
+            shared.lock().unwrap().index.reserve(&retry, 1).unwrap_err().kind,
+            ErrorKind::ResourceExhausted("hot_pages")
+        ));
+        let worker =
+            crate::checkpoint::Worker::start(disk, "db".into(), shared.clone(), &opts).unwrap();
+        assert_eq!(worker.flush().unwrap(), 2);
+        let mut state = shared.lock().unwrap();
+        assert!(!state.index.sessions[&published].pages[0].dirty);
+        assert_eq!(state.index.dirty_bytes, 128);
+        assert_eq!(state.index.reserve(&retry, 1).unwrap(), 1);
     }
 
     #[test]

@@ -345,9 +345,6 @@ pub(crate) fn save(io: &dyn Io, dir: &Path, shared: &Mutex<State>) -> Result<u64
         if let Some(error) = &state.failure {
             return Err(error.clone());
         }
-        if state.prepared_lsn > state.published_lsn {
-            return Ok(state.watermark);
-        }
         if state.published_lsn == state.watermark {
             return Ok(state.watermark);
         }

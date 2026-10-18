@@ -492,6 +492,66 @@ fn open_sweeps_orphan_checkpoints_only_after_taking_the_tape_lock() {
     assert_eq!(engine.window(&scope("s"), WindowQuery::Last(1)).unwrap()[0].seq, 1);
 }
 
+#[test]
+fn checkpoints_advance_while_tiny_budget_writers_append_continuously() {
+    let engine =
+        open(Arc::new(SimDisk::new(20)), EngineOptions { hot_page_bytes: 2048, ..options() });
+    let barrier = Barrier::new(5);
+    let active = std::sync::atomic::AtomicUsize::new(4);
+    let acked = AtomicU64::new(0);
+    std::thread::scope(|threads| {
+        for thread in 0..4 {
+            let engine = &engine;
+            let barrier = &barrier;
+            let active = &active;
+            let acked = &acked;
+            threads.spawn(move || {
+                barrier.wait();
+                let result = (|| -> Result<(), zerodb_core::EngineError> {
+                    for i in 0..128 {
+                        let session = format!("{thread}-{i}");
+                        let receipt =
+                            engine.append(&scope(&session), vec![turn(i)], Some("key"))?;
+                        acked.fetch_max(receipt.last_lsn, Ordering::Release);
+                    }
+                    Ok(())
+                })();
+                active.fetch_sub(1, Ordering::Release);
+                result.unwrap();
+            });
+        }
+        threads.spawn(|| {
+            barrier.wait();
+            let mut advances = 0;
+            let mut previous = 0;
+            while active.load(Ordering::Acquire) > 0 {
+                let target = acked.load(Ordering::Acquire);
+                let watermark = engine.checkpoint().unwrap();
+                assert!(
+                    watermark >= target,
+                    "checkpoint {watermark} missed acknowledged boundary {target}"
+                );
+                if watermark > previous {
+                    advances += 1;
+                    previous = watermark;
+                }
+                std::thread::sleep(Duration::from_micros(100));
+            }
+            assert!(advances > 1, "checkpoints did not advance under load");
+        });
+    });
+    assert_eq!(engine.checkpoint().unwrap(), acked.load(Ordering::Acquire));
+    for thread in 0..4 {
+        for i in 0..128 {
+            assert_eq!(
+                engine.window(&scope(&format!("{thread}-{i}")), WindowQuery::Last(1)).unwrap()[0]
+                    .seq,
+                1
+            );
+        }
+    }
+}
+
 struct TestDir(PathBuf);
 impl TestDir {
     fn new() -> Self {
