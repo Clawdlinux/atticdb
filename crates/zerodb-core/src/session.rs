@@ -94,7 +94,17 @@ impl Index {
                 return Err(exhausted("hot_pages"));
             };
             let entry = self.sessions.get_mut(&item.1).unwrap_or_else(|| unreachable!());
-            if entry.pins > 0 || entry.reserved > entry.len {
+            let pending = entry.reserved > entry.len
+                && item.2 >= address(entry.len + 1).0
+                && item.2 <= address(entry.reserved).0;
+            let pinned_tail = entry.pins > 0
+                && entry.reserved > 0
+                && item.2 == address(entry.reserved).0
+                && entry.pages[item.2]
+                    .slots
+                    .as_ref()
+                    .is_some_and(|slots| slots.len() < capacity(item.2));
+            if pending || pinned_tail {
                 pinned.push(item);
                 continue;
             }
@@ -112,7 +122,10 @@ impl Index {
             return Err(exhausted("sessions"));
         }
         let old = entry.map_or(0, |e| e.reserved);
-        let end = old.checked_add(count as u64).ok_or_else(|| exhausted("sequences"))?;
+        let end = old
+            .checked_add(count as u64)
+            .filter(|&seq| seq < u64::MAX)
+            .ok_or_else(|| exhausted("sequences"))?;
         let needed = address(end).0 + 1;
         let existing = entry.map_or(0, |e| e.pages.len());
         if self.pages.saturating_add(needed - existing) > self.max_pages {

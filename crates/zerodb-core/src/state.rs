@@ -19,6 +19,7 @@ pub(crate) struct State {
     pub(crate) replayed: u64,
     pub(crate) warnings: u64,
     pub(crate) failure: Option<EngineError>,
+    pub(crate) notify: Option<std::sync::mpsc::SyncSender<crate::checkpoint::Command>>,
 }
 impl State {
     pub(crate) fn new(opts: &EngineOptions) -> Self {
@@ -36,6 +37,7 @@ impl State {
             replayed: 0,
             warnings: 0,
             failure: None,
+            notify: None,
         }
     }
 }

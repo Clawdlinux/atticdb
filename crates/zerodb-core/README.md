@@ -1,0 +1,120 @@
+# zerodb-core
+
+Durable session history on `zerodb-tape`. No async runtime or new third-party packages.
+
+```rust,no_run
+use zerodb_core::{Engine, EngineOptions, NewTurn, Role, Scope, Trust, WindowQuery};
+
+let engine = Engine::open("memory", EngineOptions::default())?;
+let scope = Scope {
+    tenant: "acme".into(),
+    agent: "helper".into(),
+    session: "chat".into(),
+};
+let receipt = engine.append(
+    &scope,
+    vec![NewTurn {
+        role: Role::User,
+        content: b"hello".to_vec(),
+        meta: Vec::new(),
+        trust: Trust::Untrusted,
+    }],
+    Some("request-1"),
+)?;
+let recent = engine.window(&scope, WindowQuery::Last(8))?;
+# Ok::<(), zerodb_core::EngineError>(())
+```
+
+## Semantics
+
+Sequences start at 1. `Since { seq, limit }` includes `seq`. Sequence 0 starts at 1.
+`Last(0)` returns nothing. An unknown scope also returns nothing.
+Windows include every trust label. They pin a durable LSN and read each returned turn once.
+The `window_reads` metric counts those `Tape::read` calls.
+
+Append receipts cover turn LSNs, excluding any preceding tenant record.
+The writer assigns sequences during preparation. Publication installs slots before replying.
+A failed sync hides reservations and poisons writes. Reads keep the last durable view.
+Every error carries `Outcome`. Receipt reconstruction failures after sync report `Committed`.
+
+Retry keys use `(tenant, session, key)`, without agent.
+The digest covers the ordered encoded turns, with sequences normalized to 0.
+Each payload includes its byte length in that digest.
+Changing an agent, role, trust, metadata, content, or batch boundary produces a conflict.
+Retries return the original transaction, turn LSNs, and sequences.
+Keys outside the count window are new requests.
+`dedup_window_effective` reports the smallest retained count among tenants with retained keys.
+
+Tenant creation is atomic with its first turns. `TenantCreate = 6` does not advance provenance chains.
+The first tenant transaction allows 1023 turns. Later transactions allow 1024.
+The tape's 4 MiB encoded batch limit includes headers, salts, and the footer.
+That limit can reject content below the codec's independent 4 MiB field limit.
+
+## Payload format
+
+Version 1 uses little-endian integers. Every length prefix is a u32 byte count.
+
+```text
+u8 version = 1
+agent_id: length + UTF-8, <=255 bytes
+session_id: length + UTF-8, <=255 bytes
+u64 seq
+u8 role: system=0, user=1, assistant=2, tool=3
+meta: length + bytes, <=65536 bytes
+content: length + bytes, <=4194304 bytes
+u8 trust: trusted=0, untrusted=1
+u8 key_present: 0 or 1
+if present: idem_key length + UTF-8, <=128 bytes
+```
+
+Unknown versions, invalid tags, malformed UTF-8, trailing bytes, and oversized fields are rejected.
+
+## Bounds and cold pages
+
+Page capacities are 16, 64, 256, 1024, then repeated 4096-slot pages.
+Arithmetic maps sequences to page slots. Slots store LSNs, not segment offsets.
+
+`EngineOptions` bounds resident slots, sessions, page metadata, tenants, and retry tables.
+Defaults allow 256 MiB of hot slots and 10,000 tenants.
+Directory defaults allow 1M sessions and 8M pages, including cold pages.
+Retry tables retain at most 1M keys per tenant and 8M globally.
+The published and prepared retry tables each obey these limits.
+A checkpoint snapshot can hold another bounded copy.
+
+Clean checkpoint-backed pages use LRU eviction. Active append tails stay pinned until acknowledgement.
+Dirty pages need a worker checkpoint before eviction.
+Memory pressure requests that checkpoint, then retries allocation once.
+A batch needing more resident capacity than configured returns typed `ResourceExhausted`.
+This also applies when pinned concurrent requests prevent eviction.
+
+Cold windows read page records directly from checkpoint files, without scanning session history.
+Recovery can spill completed transactions through a checkpoint worker when resident slots fill.
+
+## Checkpoints
+
+The checkpoint worker wakes every 60 seconds or after 64 MiB of published tape bytes.
+`checkpoint()` waits for an explicit worker snapshot.
+Normal checkpoints write only dirty pages, newly registered tenants, and retained retry-key additions.
+Deterministic oldest-first eviction rebuilds the retry window without tombstones.
+Snapshot copying holds the state lock. File writes and syncs run outside that lock.
+
+Files are named `ckpt-{lsn}.zdb`. Failed attempts may leave numbered suffixes.
+Every record contains a CRC32C, a total length, and a typed payload.
+CRC coverage includes the length and payload.
+File headers carry the watermark and transaction.
+`CHECKPOINT` names the ordered file chain and its final watermark.
+
+Installation syncs the new file and directory before replacing `CHECKPOINT`.
+The replacement uses a synced staging file, rename, then directory sync.
+The 9th checkpoint compacts the chain into 1 file.
+Old chain files are removed only after installation and backing-location replacement.
+
+Open validates checkpoint CRCs, loads page locations, and replays application records above the watermark.
+Corrupt or missing checkpoint data logs a warning and triggers full replay.
+Checkpoints are derived data. They never authorize truncating tape records.
+Tape recovery still verifies the entire tape before application replay.
+The replay counter excludes checkpointed records. It does not measure tape verification work.
+
+`Engine::open_with` accepts the tape's `Io` and `Clock` traits for SimDisk tests.
+Real filesystem callers must create the directory before using that method.
+`Engine::open` creates it automatically.

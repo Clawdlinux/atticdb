@@ -300,6 +300,9 @@ fn snapshot(state: &State) -> Snapshot {
 pub(crate) fn save(io: &dyn Io, dir: &Path, shared: &Mutex<State>) -> Result<u64> {
     let snap = {
         let state = lock(shared)?;
+        if let Some(error) = &state.failure {
+            return Err(error.clone());
+        }
         if state.published_lsn == state.watermark {
             return Ok(state.watermark);
         }
@@ -586,5 +589,35 @@ mod tests {
                 };
             }
         }
+    }
+    #[test]
+    fn checkpoint_delta_io_does_not_rewrite_unchanged_sessions() {
+        let disk = SimDisk::new(3);
+        let shared = state();
+        {
+            let mut state = shared.lock().unwrap();
+            for i in 0..100 {
+                let key = Key(1, "a".into(), i.to_string());
+                state.index.reserve(&key, 1).unwrap();
+                state.index.publish(&key, 1, i + 2).unwrap();
+                state.dirty.insert((key, 0));
+            }
+            state.published_lsn = 101;
+            state.txn = 100;
+        }
+        save(&disk, Path::new("db"), &shared).unwrap();
+        {
+            let mut state = shared.lock().unwrap();
+            let key = Key(1, "a".into(), "0".into());
+            state.index.reserve(&key, 1).unwrap();
+            state.index.publish(&key, 2, 102).unwrap();
+            state.dirty.insert((key, 0));
+            state.published_lsn = 102;
+            state.txn = 101;
+        }
+        save(&disk, Path::new("db"), &shared).unwrap();
+        let file = disk.open(Path::new("db/ckpt-102.zdb")).unwrap();
+        assert!(disk.len(file).unwrap() < 128);
+        disk.close(file).unwrap();
     }
 }

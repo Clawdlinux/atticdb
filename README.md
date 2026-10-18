@@ -3,6 +3,7 @@
 Agent memory database written in Rust. Fast and crash safe first.
 
 Status: early. Milestone 1 (the tape) is done. Nothing here is ready for production use.
+M2 Groups D and E add durable session history. G1 and engine simulation remain separate acceptance work.
 
 ## Why
 
@@ -51,6 +52,17 @@ A replay error aborts open.
 `Tape::scan(from_lsn)` yields durable `CommittedRecord` values in LSN order, starting inclusively.
 The iterator captures its durable boundary and reads one indexed frame at a time across segments.
 Footers and redacted husks are skipped. Application payloads exclude salts.
+
+### Session engine (M2 Group E)
+
+`crates/zerodb-core` provides `Engine::open`, `append`, and ordered `window` reads.
+The writer assigns dense session sequences and publishes the index before acknowledging durable writes.
+Retry keys detect conflicts and return original receipts within bounded per-tenant and global windows.
+Geometric session pages use a global LRU budget. Cold pages reload from incremental checkpoint files.
+Checkpoint I/O runs on a separate worker through the tape's `Io` trait.
+Corrupt checkpoints trigger full replay with a warning.
+
+See [the core API and storage notes](crates/zerodb-core/README.md) for formats, limits, and recovery behavior.
 
 ## Roadmap
 
