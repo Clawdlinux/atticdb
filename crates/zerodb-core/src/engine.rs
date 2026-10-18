@@ -161,7 +161,11 @@ impl Engine {
             drop(opened);
             let mut fresh = State::new(&opts);
             fresh.warnings = 1;
-            *lock(&state)? = fresh;
+            {
+                let mut previous = lock(&state)?;
+                fresh.checkpoint_attempt = previous.checkpoint_attempt;
+                *previous = fresh;
+            }
             eprintln!("zerodb: checkpoint inconsistent with recovered tape, replaying tape");
             opts.tape.replay_from_lsn = 0;
             Tape::open_with(

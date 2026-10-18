@@ -135,14 +135,21 @@ This includes installation work. It excludes waiting to acquire State.
 The `full_snapshot_shares_pages_and_measures_its_lock_hold` test measures a 1000-page full snapshot.
 This measures hold time without asserting a hardware-dependent latency threshold.
 
-Files are named `ckpt-{lsn}.zdb`. Failed attempts may leave numbered suffixes.
+Attempt 0 uses `ckpt-{lsn}.zdb`. Later attempts use `ckpt-{lsn}-{attempt}.zdb`.
+State reserves a monotonic attempt ID before filename checks or file creation.
+Failures and existing-name collisions consume IDs. Replay fallback preserves the counter.
+Retries cannot reuse a filename during that engine state's lifetime.
 Failures before a rename attempt remove partial data and staging files.
 An ambiguous rename keeps the complete file until the next open checks the installed chain.
 Open removes unreferenced checkpoint files after acquiring the tape lock.
 Every record contains a CRC32C, a total length, and a typed payload.
 CRC coverage includes the length and payload.
 File headers use `ZCK2` and carry the watermark and transaction.
-`CHECKPOINT` names the ordered file chain and its final watermark.
+The `ZCM2` manifest names the ordered file chain and its final watermark.
+Each entry includes the file's exact length and BLAKE3 digest over all encoded bytes.
+Load checks length and hashes the existing CRC-framed read stream.
+Either mismatch logs a warning and triggers full tape replay.
+Legacy `ZCM1` manifests also trigger full replay.
 
 Installation syncs the data file before replacing `CHECKPOINT`.
 The replacement uses a synced staging file, rename, then one directory sync.

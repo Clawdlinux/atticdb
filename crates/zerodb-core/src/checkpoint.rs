@@ -13,6 +13,13 @@ fn corrupt() -> EngineError {
     EngineError::rejected(ErrorKind::CorruptIndex)
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct CheckpointFile {
+    pub(crate) name: String,
+    pub(crate) len: u64,
+    pub(crate) digest: [u8; 32],
+}
+
 struct File<'a>(&'a dyn Io, FileId);
 impl Drop for File<'_> {
     fn drop(&mut self) {
@@ -84,6 +91,14 @@ fn buffer_record(out: &mut Vec<u8>, payload: &[u8]) -> (u64, u32) {
     location
 }
 fn read(io: &dyn Io, id: FileId, off: u64) -> Result<(Vec<u8>, u32)> {
+    read_hashed(io, id, off, None)
+}
+fn read_hashed(
+    io: &dyn Io,
+    id: FileId,
+    off: u64,
+    hash: Option<&mut blake3::Hasher>,
+) -> Result<(Vec<u8>, u32)> {
     let mut header = [0; 8];
     exact(io, id, off, &mut header)?;
     let len = u32::from_le_bytes(header[4..].try_into().map_err(|_| corrupt())?);
@@ -95,6 +110,9 @@ fn read(io: &dyn Io, id: FileId, off: u64) -> Result<(Vec<u8>, u32)> {
     exact(io, id, off + 8, &mut data[8..])?;
     if crc(&data[4..]) != u32::from_le_bytes(header[..4].try_into().map_err(|_| corrupt())?) {
         return Err(corrupt());
+    }
+    if let Some(hash) = hash {
+        hash.update(&data);
     }
     Ok((data[8..].to_vec(), len))
 }
@@ -141,7 +159,7 @@ fn load_inner(io: &dyn Io, dir: &Path, opts: &EngineOptions) -> Result<State> {
         return Err(corrupt());
     }
     let mut cur = Cursor(&data);
-    if cur.take(4)? != b"ZCM1" {
+    if cur.take(4)? != b"ZCM2" {
         return Err(corrupt());
     }
     let watermark = cur.u64()?;
@@ -158,13 +176,21 @@ fn load_inner(io: &dyn Io, dir: &Path, opts: &EngineOptions) -> Result<State> {
         {
             return Err(corrupt());
         }
-        state.chain.push(name);
+        let len = cur.u64()?;
+        let digest = cur.take(32)?.try_into().map_err(|_| corrupt())?;
+        state.chain.push(CheckpointFile { name, len, digest });
     }
     cur.end()?;
     let mut previous = 0;
-    for name in state.chain.clone() {
+    for sealed in state.chain.clone() {
+        let name = sealed.name;
         let file = File(io, io.open(&dir.join(&name))?);
-        let (header, header_len) = read(io, file.1, 0)?;
+        let file_len = io.len(file.1)?;
+        if file_len != sealed.len {
+            return Err(corrupt());
+        }
+        let mut hash = blake3::Hasher::new();
+        let (header, header_len) = read_hashed(io, file.1, 0, Some(&mut hash))?;
         let mut off = u64::from(header_len);
         let mut cur = Cursor(&header);
         if cur.take(4)? != b"ZCK2" {
@@ -177,9 +203,8 @@ fn load_inner(io: &dyn Io, dir: &Path, opts: &EngineOptions) -> Result<State> {
             return Err(corrupt());
         }
         previous = boundary;
-        let file_len = io.len(file.1)?;
         while off < file_len {
-            let (data, len) = read(io, file.1, off)?;
+            let (data, len) = read_hashed(io, file.1, off, Some(&mut hash))?;
             let mut cur = Cursor(&data);
             match cur.byte()? {
                 1 => {
@@ -238,7 +263,7 @@ fn load_inner(io: &dyn Io, dir: &Path, opts: &EngineOptions) -> Result<State> {
             }
             off = off.checked_add(u64::from(len)).ok_or_else(corrupt)?;
         }
-        if off != file_len {
+        if off != file_len || hash.finalize().as_bytes() != &sealed.digest {
             return Err(corrupt());
         }
     }
@@ -262,14 +287,14 @@ pub(crate) fn load(io: &dyn Io, dir: &Path, opts: &EngineOptions) -> State {
     }
 }
 
-pub(crate) fn sweep(io: &dyn Io, dir: &Path, chain: &[String]) -> Result<()> {
+pub(crate) fn sweep(io: &dyn Io, dir: &Path, chain: &[CheckpointFile]) -> Result<()> {
     for path in io.list(dir)? {
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
         if (name.starts_with("ckpt-")
             && name.ends_with(".zdb")
-            && !chain.iter().any(|live| live == name))
+            && !chain.iter().any(|live| live.name == name))
             || name == "CHECKPOINT.next"
             || (name == "CHECKPOINT" && chain.is_empty())
         {
@@ -286,7 +311,7 @@ struct Snapshot {
     txn: u64,
     bytes: u64,
     full: bool,
-    chain: Vec<String>,
+    chain: Vec<CheckpointFile>,
     tenants: Vec<(u32, String, u64)>,
     pages: Vec<PageSnapshot>,
     dedup: Vec<Arc<Entry>>,
@@ -354,10 +379,18 @@ struct CheckpointBuffer<'a> {
     offset: u64,
     bytes: Vec<u8>,
     peak: usize,
+    hash: blake3::Hasher,
 }
 impl<'a> CheckpointBuffer<'a> {
     fn new(io: &'a dyn Io, file: FileId) -> Self {
-        Self { io, file, offset: 0, bytes: Vec::with_capacity(BUFFER_LIMIT), peak: 0 }
+        Self {
+            io,
+            file,
+            offset: 0,
+            bytes: Vec::with_capacity(BUFFER_LIMIT),
+            peak: 0,
+            hash: blake3::Hasher::new(),
+        }
     }
     fn record(&mut self, payload: &[u8]) -> Result<(u64, u32)> {
         let len = payload.len().checked_add(8).ok_or_else(corrupt)?;
@@ -375,11 +408,21 @@ impl<'a> CheckpointBuffer<'a> {
     fn flush(&mut self) -> Result<()> {
         if !self.bytes.is_empty() {
             self.io.write_at(self.file, self.offset, &self.bytes)?;
+            self.hash.update(&self.bytes);
             self.offset += self.bytes.len() as u64;
             self.bytes.clear();
         }
         Ok(())
     }
+}
+
+fn next_name(shared: &Mutex<State>, lsn: u64) -> Result<String> {
+    let mut state = lock(shared)?;
+    let attempt = state.checkpoint_attempt;
+    state.checkpoint_attempt = attempt.checked_add(1).ok_or_else(|| {
+        EngineError::rejected(ErrorKind::ResourceExhausted("checkpoint_attempts"))
+    })?;
+    Ok(if attempt == 0 { format!("ckpt-{lsn}.zdb") } else { format!("ckpt-{lsn}-{attempt}.zdb") })
 }
 
 pub(crate) fn save(io: &dyn Io, dir: &Path, shared: &Mutex<State>) -> Result<u64> {
@@ -398,11 +441,9 @@ pub(crate) fn save(io: &dyn Io, dir: &Path, shared: &Mutex<State>) -> Result<u64
         state.checkpoint_lock_ns = state.checkpoint_lock_ns.max(state.snapshot_lock_ns);
         snap
     };
-    let mut name = format!("ckpt-{}.zdb", snap.lsn);
-    let mut attempt = 0;
+    let mut name = next_name(shared, snap.lsn)?;
     while io.exists(&dir.join(&name))? {
-        attempt += 1;
-        name = format!("ckpt-{}-{attempt}.zdb", snap.lsn);
+        name = next_name(shared, snap.lsn)?;
     }
     let mut pending = PendingFile { io, path: dir.join(&name), preserve: false };
     let file = File(io, io.create(&pending.path)?);
@@ -452,13 +493,19 @@ pub(crate) fn save(io: &dyn Io, dir: &Path, shared: &Mutex<State>) -> Result<u64
     io.sync_data(file.1)?;
     // A crash can lose this derived filename. Open falls back to tape replay if it is missing.
     let mut chain = if snap.full { Vec::new() } else { snap.chain.clone() };
-    chain.push(name);
-    let mut manifest = b"ZCM1".to_vec();
+    chain.push(CheckpointFile {
+        name,
+        len: buffer.offset,
+        digest: *buffer.hash.finalize().as_bytes(),
+    });
+    let mut manifest = b"ZCM2".to_vec();
     manifest.extend_from_slice(&snap.lsn.to_le_bytes());
     manifest.extend_from_slice(&snap.txn.to_le_bytes());
     manifest.push(chain.len() as u8);
-    for name in &chain {
-        bytes(&mut manifest, name.as_bytes());
+    for sealed in &chain {
+        bytes(&mut manifest, sealed.name.as_bytes());
+        manifest.extend_from_slice(&sealed.len.to_le_bytes());
+        manifest.extend_from_slice(&sealed.digest);
     }
     let next = dir.join("CHECKPOINT.next");
     if io.exists(&next)? {
@@ -498,8 +545,8 @@ pub(crate) fn save(io: &dyn Io, dir: &Path, shared: &Mutex<State>) -> Result<u64
             .max(start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64);
     }
     if snap.full {
-        for name in snap.chain {
-            let _ = io.remove(&dir.join(name));
+        for sealed in snap.chain {
+            let _ = io.remove(&dir.join(sealed.name));
         }
         let _ = io.sync_dir(dir);
     }
@@ -636,7 +683,7 @@ impl Drop for Worker {
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use zerodb_tape::{LockGuard, SimDisk};
 
     fn fixture(disk: &SimDisk, shapes: &[(usize, usize)], boundary: u64) {
@@ -668,6 +715,9 @@ mod tests {
             write(disk, id, &mut off, &data).unwrap();
         }
         disk.sync_data(id).unwrap();
+        let mut sealed_data = vec![0; off as usize];
+        assert_eq!(disk.read_at(id, 0, &mut sealed_data).unwrap(), sealed_data.len());
+        let digest = blake3::hash(&sealed_data);
         disk.close(id).unwrap();
         let path = Path::new("db/CHECKPOINT");
         let id = if disk.exists(path).unwrap() {
@@ -676,11 +726,13 @@ mod tests {
             disk.create(path).unwrap()
         };
         disk.set_len(id, 0).unwrap();
-        let mut data = b"ZCM1".to_vec();
+        let mut data = b"ZCM2".to_vec();
         data.extend_from_slice(&boundary.to_le_bytes());
         data.extend_from_slice(&1u64.to_le_bytes());
         data.push(1);
         bytes(&mut data, b"ckpt-3.zdb");
+        data.extend_from_slice(&off.to_le_bytes());
+        data.extend_from_slice(digest.as_bytes());
         write(disk, id, &mut 0, &data).unwrap();
         disk.sync_data(id).unwrap();
         disk.close(id).unwrap();
@@ -750,7 +802,9 @@ mod tests {
             }
             state.published_lsn = 1001;
             state.txn = 1000;
-            state.chain = (0..8).map(|i| format!("old-{i}")).collect();
+            state.chain = (0..8)
+                .map(|i| CheckpointFile { name: format!("old-{i}"), len: 0, digest: [0; 32] })
+                .collect();
         }
         let snap = snapshot(&shared.lock().unwrap());
         let captured = snap.pages.iter().find(|p| p.0 == key).unwrap().3.as_ref().unwrap();
@@ -824,7 +878,7 @@ mod tests {
             .as_ref()
             .unwrap();
         assert_eq!(read_page(&disk, dir, backing).unwrap(), (2..=11).collect::<Vec<_>>());
-        let id = disk.open(&dir.join(&state.chain[0])).unwrap();
+        let id = disk.open(&dir.join(&state.chain[0].name)).unwrap();
         disk.flip_bit(id, 12).unwrap();
         disk.close(id).unwrap();
         let loaded = load(&disk, dir, &EngineOptions::default());
@@ -838,8 +892,25 @@ mod tests {
         count: AtomicUsize,
         crashed: Mutex<Option<SimDisk>>,
         writes: Mutex<Vec<(u64, usize)>>,
+        created: Mutex<Vec<PathBuf>>,
+        tear_write: AtomicBool,
+        skip_cleanup_sync: AtomicBool,
+        capture_rename: AtomicBool,
     }
     impl FaultIo {
+        fn new(disk: SimDisk, at: usize) -> Self {
+            Self {
+                disk,
+                at,
+                count: AtomicUsize::new(0),
+                crashed: Mutex::new(None),
+                writes: Mutex::new(Vec::new()),
+                created: Mutex::new(Vec::new()),
+                tear_write: AtomicBool::new(false),
+                skip_cleanup_sync: AtomicBool::new(false),
+                capture_rename: AtomicBool::new(false),
+            }
+        }
         fn hit<T>(&self, result: zerodb_tape::Result<T>) -> zerodb_tape::Result<T> {
             let value = result?;
             if self.count.fetch_add(1, Ordering::SeqCst) + 1 == self.at {
@@ -854,6 +925,7 @@ mod tests {
     }
     impl Io for FaultIo {
         fn create(&self, p: &Path) -> zerodb_tape::Result<FileId> {
+            self.created.lock().unwrap().push(p.to_owned());
             self.hit(self.disk.create(p))
         }
         fn open(&self, p: &Path) -> zerodb_tape::Result<FileId> {
@@ -864,6 +936,18 @@ mod tests {
         }
         fn write_at(&self, f: FileId, o: u64, d: &[u8]) -> zerodb_tape::Result<()> {
             self.writes.lock().unwrap().push((o, d.len()));
+            if self.tear_write.swap(false, Ordering::SeqCst) {
+                let header = u32::from_le_bytes(d[4..8].try_into().unwrap()) as usize;
+                let tenant =
+                    u32::from_le_bytes(d[header + 4..header + 8].try_into().unwrap()) as usize;
+                self.disk.write_at(f, o, &d[..header + tenant])?;
+                self.disk.sync_data(f)?;
+                self.skip_cleanup_sync.store(true, Ordering::SeqCst);
+                return Err(zerodb_tape::Error::Io(
+                    std::io::ErrorKind::Interrupted,
+                    "torn checkpoint".into(),
+                ));
+            }
             self.hit(self.disk.write_at(f, o, d))
         }
         fn read_at(&self, f: FileId, o: u64, d: &mut [u8]) -> zerodb_tape::Result<usize> {
@@ -879,10 +963,17 @@ mod tests {
             self.hit(self.disk.sync_data(f))
         }
         fn sync_dir(&self, p: &Path) -> zerodb_tape::Result<()> {
+            if self.skip_cleanup_sync.swap(false, Ordering::SeqCst) {
+                return Err(zerodb_tape::Error::SyncFailed("unsynced cleanup removal".into()));
+            }
             self.hit(self.disk.sync_dir(p))
         }
         fn rename(&self, a: &Path, b: &Path) -> zerodb_tape::Result<()> {
-            self.hit(self.disk.rename(a, b))
+            let result = self.hit(self.disk.rename(a, b));
+            if result.is_ok() && self.capture_rename.swap(false, Ordering::SeqCst) {
+                *self.crashed.lock().unwrap() = Some(self.disk.crash()?);
+            }
+            result
         }
         fn remove(&self, p: &Path) -> zerodb_tape::Result<()> {
             self.hit(self.disk.remove(p))
@@ -906,13 +997,7 @@ mod tests {
                 append(&shared, 1);
                 save(&disk, Path::new("db"), &shared).unwrap();
                 append(&shared, 2);
-                let io = FaultIo {
-                    disk,
-                    at,
-                    count: AtomicUsize::new(0),
-                    crashed: Mutex::new(None),
-                    writes: Mutex::new(Vec::new()),
-                };
+                let io = FaultIo::new(disk, at);
                 let _ = save(&io, Path::new("db"), &shared);
                 if let Some(crashed) = io.crashed.lock().unwrap().as_ref() {
                     let loaded = load(crashed, Path::new("db"), &EngineOptions::default());
@@ -956,7 +1041,8 @@ mod tests {
             state.txn = 101;
         }
         save(&disk, Path::new("db"), &shared).unwrap();
-        let file = disk.open(Path::new("db/ckpt-102.zdb")).unwrap();
+        let name = shared.lock().unwrap().chain.last().unwrap().name.clone();
+        let file = disk.open(&Path::new("db").join(name)).unwrap();
         assert!(disk.len(file).unwrap() < 128);
         disk.close(file).unwrap();
     }
@@ -977,7 +1063,9 @@ mod tests {
             }
             state.published_lsn = lsn;
             state.txn = 1;
-            state.chain = (0..8).map(|i| format!("old-{i}")).collect();
+            state.chain = (0..8)
+                .map(|i| CheckpointFile { name: format!("old-{i}"), len: 0, digest: [0; 32] })
+                .collect();
             for age in 2..10_002 {
                 state.dedup.insert(Entry {
                     key: DedupKey(1, format!("{:0128}", (age - 2) / 5000), format!("{age:0128}")),
@@ -991,13 +1079,7 @@ mod tests {
                 });
             }
         }
-        let io = FaultIo {
-            disk: SimDisk::new(30),
-            at: usize::MAX,
-            count: AtomicUsize::new(0),
-            crashed: Mutex::new(None),
-            writes: Mutex::new(Vec::new()),
-        };
+        let io = FaultIo::new(SimDisk::new(30), usize::MAX);
         save(&io, Path::new("db"), &shared).unwrap();
         let writes = io.writes.lock().unwrap();
         assert!(writes.iter().map(|(_, len)| len).sum::<usize>() > 8 * 1024 * 1024);
@@ -1026,6 +1108,149 @@ mod tests {
     }
 
     #[test]
+    fn legacy_unsealed_manifest_requests_full_replay() {
+        let disk = SimDisk::new(40);
+        let shared = state();
+        append(&shared, 1);
+        save(&disk, Path::new("db"), &shared).unwrap();
+        let name = shared.lock().unwrap().chain[0].name.clone();
+        let mut legacy = b"ZCM1".to_vec();
+        legacy.extend_from_slice(&2u64.to_le_bytes());
+        legacy.extend_from_slice(&1u64.to_le_bytes());
+        legacy.push(1);
+        bytes(&mut legacy, name.as_bytes());
+        let file = disk.open(Path::new("db/CHECKPOINT")).unwrap();
+        disk.set_len(file, 0).unwrap();
+        write(&disk, file, &mut 0, &legacy).unwrap();
+        disk.sync_data(file).unwrap();
+        disk.close(file).unwrap();
+        let loaded = load(&disk, Path::new("db"), &EngineOptions::default());
+        assert_eq!(loaded.warnings, 1);
+        assert_eq!(loaded.watermark, 0);
+    }
+
+    #[test]
+    fn manifest_rejects_valid_record_prefixes_and_crc_valid_replacements() {
+        for changed in 0..2 {
+            for truncate in [false, true] {
+                let disk = SimDisk::new(38);
+                let shared = state();
+                append(&shared, 1);
+                save(&disk, Path::new("db"), &shared).unwrap();
+                append(&shared, 2);
+                save(&disk, Path::new("db"), &shared).unwrap();
+                let files = disk
+                    .list(Path::new("db"))
+                    .unwrap()
+                    .into_iter()
+                    .filter(|p| p.file_name().unwrap().to_str().unwrap().starts_with("ckpt-"))
+                    .collect::<Vec<_>>();
+                let file = disk.open(&files[changed]).unwrap();
+                let mut data = vec![0; disk.len(file).unwrap() as usize];
+                assert_eq!(disk.read_at(file, 0, &mut data).unwrap(), data.len());
+                let mut offset = 0;
+                while data[offset + 8] != 2 {
+                    offset += u32::from_le_bytes(data[offset + 4..offset + 8].try_into().unwrap())
+                        as usize;
+                }
+                if truncate {
+                    disk.set_len(file, offset as u64).unwrap();
+                } else {
+                    let len = u32::from_le_bytes(data[offset + 4..offset + 8].try_into().unwrap())
+                        as usize;
+                    let slot = offset + len - (changed + 1) * 8;
+                    data[slot..slot + 8].copy_from_slice(&1u64.to_le_bytes());
+                    let sum = crc(&data[offset + 4..offset + len]);
+                    data[offset..offset + 4].copy_from_slice(&sum.to_le_bytes());
+                    disk.write_at(file, 0, &data).unwrap();
+                }
+                disk.sync_data(file).unwrap();
+                disk.close(file).unwrap();
+                let loaded = load(&disk, Path::new("db"), &EngineOptions::default());
+                assert_eq!(loaded.warnings, 1, "chain file {changed}, truncated={truncate}");
+                assert_eq!(loaded.watermark, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn failed_attempts_consume_names_and_counter_never_wraps() {
+        let shared = state();
+        append(&shared, 1);
+        let io = FaultIo::new(SimDisk::new(39), usize::MAX);
+        for _ in 0..2 {
+            io.tear_write.store(true, Ordering::SeqCst);
+            assert!(save(&io, Path::new("db"), &shared).is_err());
+        }
+        save(&io, Path::new("db"), &shared).unwrap();
+        let names = io
+            .created
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| p.file_name().unwrap().to_str().unwrap().starts_with("ckpt-"))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec![
+                PathBuf::from("db/ckpt-2.zdb"),
+                PathBuf::from("db/ckpt-2-1.zdb"),
+                PathBuf::from("db/ckpt-2-2.zdb"),
+            ]
+        );
+        assert_eq!(shared.lock().unwrap().checkpoint_attempt, 3);
+        append(&shared, 2);
+        shared.lock().unwrap().checkpoint_attempt = u64::MAX;
+        let error = save(&io, Path::new("db"), &shared).unwrap_err();
+        assert!(matches!(error.kind, ErrorKind::ResourceExhausted("checkpoint_attempts")));
+        assert_eq!(shared.lock().unwrap().checkpoint_attempt, u64::MAX);
+    }
+
+    #[test]
+    fn failed_save_unsynced_cleanup_retry_crash_never_accepts_stale_prefix() {
+        let mut manifests = 0;
+        for seed in 0..256 {
+            let shared = state();
+            append(&shared, 1);
+            let io = FaultIo::new(SimDisk::new(seed), usize::MAX);
+            io.tear_write.store(true, Ordering::SeqCst);
+            assert!(save(&io, Path::new("db"), &shared).is_err());
+            assert!(!io.disk.exists(Path::new("db/ckpt-2.zdb")).unwrap());
+            io.capture_rename.store(true, Ordering::SeqCst);
+            save(&io, Path::new("db"), &shared).unwrap();
+            let created = io
+                .created
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|p| p.file_name().unwrap().to_str().unwrap().starts_with("ckpt-"))
+                .cloned()
+                .collect::<Vec<_>>();
+            assert_eq!(
+                created,
+                vec![PathBuf::from("db/ckpt-2.zdb"), PathBuf::from("db/ckpt-2-1.zdb")]
+            );
+            let image = io.crashed.lock().unwrap().take().unwrap();
+            if image.exists(Path::new("db/CHECKPOINT")).unwrap() {
+                manifests += 1;
+                let loaded = load(&image, Path::new("db"), &EngineOptions::default());
+                if loaded.watermark == 2 {
+                    assert_eq!(
+                        loaded.index.sessions.get(&Key(1, "a".into(), "s".into())).map(|e| e.len),
+                        Some(1),
+                        "stale file accepted at seed {seed}"
+                    );
+                } else {
+                    assert_eq!(loaded.watermark, 0);
+                    assert_eq!(loaded.warnings, 1);
+                }
+            }
+        }
+        assert!(manifests > 0);
+    }
+
+    #[test]
     fn failed_checkpoint_before_install_removes_partial_files() {
         // Data write/syncs and metadata write/sync, before the ambiguous rename.
         for at in [3, 4, 5, 7, 8] {
@@ -1034,15 +1259,9 @@ mod tests {
             append(&shared, 1);
             save(&disk, Path::new("db"), &shared).unwrap();
             append(&shared, 2);
-            let io = FaultIo {
-                disk,
-                at,
-                count: AtomicUsize::new(0),
-                crashed: Mutex::new(None),
-                writes: Mutex::new(Vec::new()),
-            };
+            let io = FaultIo::new(disk, at);
             assert!(save(&io, Path::new("db"), &shared).is_err());
-            assert!(!io.disk.exists(Path::new("db/ckpt-3.zdb")).unwrap(), "operation {at}");
+            assert!(!io.disk.exists(Path::new("db/ckpt-3-1.zdb")).unwrap(), "operation {at}");
             assert!(!io.disk.exists(Path::new("db/CHECKPOINT.next")).unwrap(), "operation {at}");
             assert_eq!(
                 load_inner(&io.disk, Path::new("db"), &EngineOptions::default()).unwrap().watermark,

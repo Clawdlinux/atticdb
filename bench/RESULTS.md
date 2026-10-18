@@ -4,6 +4,7 @@ Latest macOS median target: **PASS**, with Engine/bare p99 **1.399654x** [1.3173
 Tape/bare median is **1.123347x** [1.065021x, 1.159804x].
 See [merge-review measurements](#m2-merge-review) for the trace and tradeoffs.
 Linux NVMe and nightly LazyFS remain pending. The trace omits cache writes until M3.
+These performance numbers precede the final checkpoint identity fix documented below. G1 was not rerun for that fix.
 
 # M1 append baseline
 
@@ -845,3 +846,49 @@ All commits are signed off and carry the requested co-author trailer. Nothing wa
 | `0e273c8` | Remove the pre-manifest directory sync with missing-reference crash coverage. |
 | `43b9228` | Replay-budget comparison, metadata counters, and paired Tape/bare reporting. |
 | `f297302` | Full-snapshot index/dedup buffer bound and global backing-offset regression. |
+
+# Final checkpoint identity fix
+
+Review base: `67ec44b`.
+The requested regression reproduced stale checkpoint acceptance before the fix at seed 37.
+It performs a failed save, leaves cleanup removal unsynced, retries the same LSN, and captures a crash after rename.
+The stale file ends at a valid record boundary, with a valid header and tenant record but no session page.
+The previous name-only manifest accepted that incomplete view as current.
+
+State now reserves monotonic checkpoint attempt IDs before touching a candidate filename.
+Failures and filename collisions consume IDs. The counter cannot wrap.
+Same-LSN retries use `ckpt-L-1.zdb`, `ckpt-L-2.zdb`, and later unused attempt IDs.
+Engine replay fallback preserves the counter instead of resetting it.
+
+Manifest magic is `ZCM2`. Data-file magic remains `ZCK2`.
+Every chain entry stores its name, exact byte length, and complete BLAKE3 digest.
+Encoding hashes successful buffer writes, including headers and record CRCs.
+Loading hashes the existing bounded record-read stream. It does not allocate a whole-file buffer or reread the file.
+Length or digest mismatches log a warning and force full replay.
+Legacy `ZCM1` manifests are rejected rather than interpreted without seals.
+The authoritative tape and durable-ack ordering are unchanged.
+
+Regression coverage:
+
+- 256 seeds exercise failed save, unsynced unlink, same-LSN retry, and post-rename crash.
+- Every captured manifest either loads the expected session or requests full replay.
+- Failed attempts reserve distinct names, including consecutive `-1` and `-2` suffixes.
+- Counter exhaustion returns `ResourceExhausted("checkpoint_attempts")`, without wrapping.
+- Both chain positions reject valid-record-boundary truncation.
+- Both chain positions reject equal-length replacements with recomputed, valid record CRCs.
+- A CRC-valid legacy name-only manifest requests full replay.
+- Existing full-compaction, bounded-buffer, cold backing-offset, and checkpoint interleaving tests remain in place.
+
+Performance was not rerun because this request specified correctness validation.
+The earlier G1 and reopen timings describe the previous manifest format.
+
+Validation completed before committing the fix:
+
+| Command | Result |
+|---|---|
+| `cargo fmt --all --check` | Passed |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | Passed |
+| `cargo test --workspace --release` | Passed |
+| `ZERODB_SIM_SEEDS=2000 cargo test -p zerodb-tape --release --features sim --test sim` | Passed. 18.37 seconds. |
+| `ZERODB_SIM_SEEDS=2000 cargo test -p zerodb-core --release --features sim --test engine_sim` | Passed. All 7 tests, 122.45 seconds. |
+| `cargo clippy -p zerodb-core --lib --no-default-features -- -D warnings` | Passed |

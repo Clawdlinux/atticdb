@@ -124,6 +124,9 @@ Publish runs on the writer thread before the ack and does three O(1) installs: t
     Successful open and clean shutdown still install the boundary, including short sessions.
 - Recovery replays from the minimum watermark across all views, across segments.
   Checkpoint frequency bounds application replay: every 64 MiB of tape or 60 s.
+  Derived `ZCM2` manifests seal every chain file's exact length and complete BLAKE3 digest.
+  Monotonic State attempt IDs prevent failed same-LSN saves from reusing checkpoint names.
+  Missing or mismatched derived files produce a warning and full tape replay.
   Tape verification still scans every segment on open.
 
 ### Segment roll
