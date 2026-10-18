@@ -616,10 +616,16 @@ impl<S: StateMachine> WriterCore<S> {
                 }
             }
         }
-        if self.is_poisoned()
-            || (replies.is_empty()
-                && self.unpublished_bytes <= self.max_unpublished_bytes
-                && !self.segments.has_rolled())
+        if self.is_poisoned() {
+            for (reply, _) in replies {
+                let _ = reply
+                    .send(Err(WriteError { kind: Error::Poisoned, outcome: Outcome::Unknown }));
+            }
+            return;
+        }
+        if replies.is_empty()
+            && self.unpublished_bytes <= self.max_unpublished_bytes
+            && !self.segments.has_rolled()
         {
             return;
         }
@@ -1004,6 +1010,51 @@ mod tests {
 
     fn records(count: usize) -> Vec<RecordInput> {
         vec![RecordInput { kind: Kind::Turn, tenant_id: 1, content: b"hello".to_vec() }; count]
+    }
+
+    #[test]
+    fn asynchronous_poison_mid_step_returns_unknown() {
+        struct PoisonDuringPrepare(Option<Box<dyn FnMut() + Send>>);
+        impl StateMachine for PoisonDuringPrepare {
+            fn prepare(&mut self, _: &mut PreparedBatch) -> Prepare {
+                if let Some(callback) = &mut self.0 {
+                    callback();
+                }
+                Prepare::Write
+            }
+            fn publish(&mut self, _: &[CommittedRecord]) {
+                panic!("poisoned data must not publish");
+            }
+            fn replay(&mut self, _: &CommittedRecord) -> Result<()> {
+                Ok(())
+            }
+        }
+        let disk = Arc::new(crate::SimDisk::new(32));
+        let opts = TapeOptions { segment_size: 4096, ..TapeOptions::default() };
+        let (mut core, _) = WriterCore::open_with(
+            PoisonDuringPrepare(None),
+            disk,
+            Arc::new(crate::sim::SimClock::default()),
+            "db",
+            opts,
+        )
+        .unwrap();
+        let reads = core.reads.clone();
+        core.state_machine.0 =
+            Some(Box::new(move || reads.poisoned.store(true, Ordering::Release)));
+        let batch =
+            || PreparedBatch::with_salts(records(1), Durability::Durable, || Ok([3; 16])).unwrap();
+        let (first, reply) = WriteRequest::new(batch());
+        let (second, later) = WriteRequest::new(batch());
+        core.enqueue(first);
+        core.enqueue(second);
+        core.step();
+        let error = reply.recv().unwrap().unwrap_err();
+        assert_eq!(error.outcome, Outcome::Unknown);
+        assert!(matches!(error.kind, Error::Poisoned));
+        assert_eq!(later.recv().unwrap().unwrap_err().outcome, Outcome::NotCommitted);
+        assert_eq!(core.durable_lsn(), 0);
+        assert!(core.read(1).unwrap().is_none());
     }
 
     #[test]
