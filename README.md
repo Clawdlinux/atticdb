@@ -2,7 +2,7 @@
 
 Agent memory database written in Rust. Fast and crash safe first.
 
-Status: early. Milestone 1 (the tape) is done. Nothing here is ready for production use.
+Status: early. Milestones 1 (the tape) and 2 (the session log engine) are done. Nothing here is ready for production use.
 M2 Groups D and E add durable session history. G1 and engine simulation remain separate acceptance work.
 
 ## Why
@@ -20,11 +20,13 @@ zerodb puts session history, hybrid recall and a cache behind one durable commit
 
 One append-only, checksummed, per-tenant hash-chained log (the tape) is the write-ahead log, the data store and the provenance chain at once. Every other structure is a view rebuilt from the tape. Group commit keeps the durable ack close to a bare append plus sync. Full design: [docs/design/0001-architecture.md](docs/design/0001-architecture.md). Decision log: [docs/design/0002-decision-log.md](docs/design/0002-decision-log.md).
 
-## What exists today (M1)
+## What exists today (M1, M2)
 
 - `crates/zerodb-tape`: frames, CRC32C, BLAKE3 tenant chains, segment files, manifest and superblock, a group-commit writer, and recovery.
 - `SimDisk`: a deterministic fault-injecting disk. It loses, reorders and tears unsynced writes, fails syncs fsyncgate-style, flips bits, and runs out of space.
 - A seeded simulation that crashes the writer at random points across 2 to 3 generations per seed and checks that no acked write is lost. 10,000 seeds pass.
+- `crates/zerodb-core`: the session log engine. `append` and `window` with dense per-session seqs, read-your-writes, O(returned) windows, idempotent retries, tenants, and incremental checkpoints.
+- An engine-level seeded simulation with grouped commits, crashes, live reopens and corrupt checkpoints. 10,000 seeds pass.
 - Benchmarks against a bare append-plus-sync baseline: [bench/RESULTS.md](bench/RESULTS.md).
 
 ### Tape hooks (M2 Group D)
@@ -69,7 +71,7 @@ See [the core API and storage notes](crates/zerodb-core/README.md) for formats, 
 | Milestone | Scope |
 |---|---|
 | M1 | Tape, I/O, recovery, simulation. Done. |
-| M2 | Session index, append and window, idempotency, checkpoints. Kill gate G1 on Linux NVMe. |
+| M2 | Session index, append and window, idempotency, checkpoints. Done. G1 passes on macOS (1.40x median vs 1.5x gate). Linux NVMe run pending. |
 | M3 | Cache with TTL, pub-sub, temporal facts. |
 | M4 | Compaction, forget, retention, signed checkpoints, verify, export. |
 | M5 | BM25, exact vector scan, RRF. Kill gate G2. |
