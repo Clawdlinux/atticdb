@@ -36,6 +36,7 @@ Append receipts cover turn LSNs, excluding any preceding tenant record.
 The writer assigns sequences during preparation. Publication installs slots before replying.
 A failed sync hides reservations and poisons writes. Reads keep the last durable view.
 Every error carries `Outcome`. Receipt reconstruction failures after sync report `Committed`.
+Preparation preserves `InvalidInput`, `CorruptIndex`, and `Poisoned` error kinds through the tape hook.
 
 Retry keys use `(tenant, session, key)`, without agent.
 The digest covers the ordered encoded turns, with sequences normalized to 0.

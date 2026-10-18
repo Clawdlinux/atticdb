@@ -12,6 +12,8 @@ pub enum ErrorKind {
     ResourceExhausted(&'static str),
     /// Stored engine data failed validation.
     CorruptIndex,
+    /// The writer or its shared state needs reopening.
+    Poisoned,
     /// A tape or checkpoint operation failed.
     Storage(Error),
 }
@@ -32,6 +34,9 @@ impl EngineError {
     pub(crate) fn write(error: WriteError) -> Self {
         let kind = match error.kind {
             Error::Rejected("idempotency") => ErrorKind::IdempotencyConflict,
+            Error::Rejected("invalid_input") => ErrorKind::InvalidInput,
+            Error::Rejected("corrupt_index") => ErrorKind::CorruptIndex,
+            Error::Poisoned => ErrorKind::Poisoned,
             Error::Rejected(resource) => ErrorKind::ResourceExhausted(resource),
             error => ErrorKind::Storage(error),
         };
@@ -40,7 +45,7 @@ impl EngineError {
 }
 impl From<Error> for EngineError {
     fn from(error: Error) -> Self {
-        Self::rejected(ErrorKind::Storage(error))
+        Self::write(WriteError { kind: error, outcome: Outcome::NotCommitted })
     }
 }
 impl From<crate::turn::CodecError> for EngineError {

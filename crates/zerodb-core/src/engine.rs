@@ -249,7 +249,8 @@ impl Engine {
                                 .payload
                                 .get(16..)
                                 .ok_or_else(|| EngineError::rejected(ErrorKind::CorruptIndex))?,
-                        )?
+                        )
+                        .map_err(|_| EngineError::rejected(ErrorKind::CorruptIndex))?
                         .seq;
                         let count = turns.len() as u64;
                         if seq < count || last_lsn < count {
@@ -376,7 +377,8 @@ impl Engine {
                     .payload
                     .get(16..)
                     .ok_or_else(|| EngineError::rejected(ErrorKind::CorruptIndex))?,
-            )?;
+            )
+            .map_err(|_| EngineError::rejected(ErrorKind::CorruptIndex))?;
             if frame.header.kind != Kind::Turn
                 || frame.header.tenant_id != tenant
                 || decoded.agent_id != scope.agent

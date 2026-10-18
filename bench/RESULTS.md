@@ -110,6 +110,14 @@ ZERODB_SIM_SEEDS=10000 cargo test --release --features sim --test sim
 cargo test --release --test stress
 ```
 
+## Open cost limit (M2)
+
+Open remains O(tape) for CRC, digest, and chain verification.
+Recovery verifies every segment before application replay, even with a current checkpoint.
+The replay counter measures records above the checkpoint watermark, not total open work.
+A later milestone must add verified-segment markers before we claim checkpoint-bounded open time.
+The append measurements above don't measure startup latency.
+
 ## Size budget
 
 Production source measures 2,471 lines, including blank lines and comments.

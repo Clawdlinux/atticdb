@@ -120,7 +120,7 @@ pub(crate) fn read_page(io: &dyn Io, dir: &Path, backing: &Backing) -> Result<Ve
     if len != backing.len {
         return Err(corrupt());
     }
-    Ok(page(&data)?.2)
+    Ok(page(&data).map_err(|_| corrupt())?.2)
 }
 
 fn load_inner(io: &dyn Io, dir: &Path, opts: &EngineOptions) -> Result<State> {

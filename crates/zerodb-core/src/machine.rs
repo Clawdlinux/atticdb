@@ -167,7 +167,8 @@ impl Machine {
                 }
             }
             zerodb_tape::Kind::Turn => {
-                let turn = decode(&record.payload)?;
+                let turn = decode(&record.payload)
+                    .map_err(|_| EngineError::rejected(ErrorKind::CorruptIndex))?;
                 let key = Key(record.tenant_id, turn.agent_id, turn.session_id.clone());
                 if record.tenant_id == 0 || record.tenant_id as usize > state.tenants.entries.len()
                 {
@@ -226,8 +227,10 @@ fn tape_error(error: EngineError) -> Error {
     match error.kind {
         ErrorKind::IdempotencyConflict => Error::Rejected("idempotency"),
         ErrorKind::ResourceExhausted(resource) => Error::Rejected(resource),
+        ErrorKind::InvalidInput => Error::Rejected("invalid_input"),
+        ErrorKind::CorruptIndex => Error::Rejected("corrupt_index"),
+        ErrorKind::Poisoned => Error::Poisoned,
         ErrorKind::Storage(error) => error,
-        _ => Error::InvalidFrame(error.to_string()),
     }
 }
 impl StateMachine for Machine {
@@ -293,6 +296,57 @@ mod tests {
     use crate::{NewTurn, Role, Trust};
     use zerodb_tape::sim::{SimClock, WriteRequest, WriterCore};
     use zerodb_tape::{Durability, Kind, RecordInput, SimDisk};
+
+    #[test]
+    fn prepare_rejections_keep_typed_engine_errors() {
+        for corrupt in [false, true] {
+            let disk = Arc::new(SimDisk::new(9));
+            let opts = EngineOptions::default();
+            let mut initial = State::new(&opts);
+            initial.tenants.insert("t", 1, 1, 10_000).unwrap();
+            let content = if corrupt {
+                initial.failure = Some(EngineError::rejected(ErrorKind::CorruptIndex));
+                crate::turn::encode(
+                    "a",
+                    "s",
+                    0,
+                    &NewTurn {
+                        role: Role::User,
+                        content: vec![1],
+                        meta: vec![],
+                        trust: Trust::Untrusted,
+                    },
+                    None,
+                )
+                .unwrap()
+            } else {
+                vec![99]
+            };
+            let mut machine =
+                Machine::new(Arc::new(Mutex::new(initial)), disk, "db".into(), opts).unwrap();
+            let mut batch = PreparedBatch::with_salts(
+                vec![RecordInput { kind: Kind::Turn, tenant_id: 1, content }],
+                Durability::Durable,
+                || Ok([1; 16]),
+            )
+            .unwrap();
+            let Prepare::Reject(error) = machine.prepare(&mut batch) else {
+                panic!("expected rejection");
+            };
+            let error = EngineError::write(error);
+            assert_eq!(error.outcome, Outcome::NotCommitted);
+            if corrupt {
+                assert!(matches!(error.kind, ErrorKind::CorruptIndex));
+            } else {
+                assert!(matches!(error.kind, ErrorKind::InvalidInput));
+            }
+        }
+        let error = EngineError::write(WriteError {
+            kind: Error::Poisoned,
+            outcome: Outcome::NotCommitted,
+        });
+        assert_eq!(format!("{:?}", error.kind), "Poisoned");
+    }
 
     #[test]
     fn prepared_overlay_starts_empty_and_shares_the_global_entry_budget() {

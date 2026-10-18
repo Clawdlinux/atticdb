@@ -118,7 +118,9 @@ Publish runs on the writer thread before the ack and does three O(1) installs: t
   - Damage above the last superblock install can be indistinguishable from a torn tail.
     Under continuous load, that window is at most about 1 second of writes.
     A successful open and clean shutdown checkpoint the boundary even for sessions shorter than 1 second.
-- Recovery replays from the minimum watermark across all views (session index, cache, BM25, vectors, fact index, dedup table), across segments. Open time is bounded by checkpoint frequency (every 64 MiB of tape or 60 s).
+- Recovery replays from the minimum watermark across all views, across segments.
+  Checkpoint frequency bounds application replay: every 64 MiB of tape or 60 s.
+  Tape verification still scans every segment on open.
 
 ### Segment roll
 
@@ -308,6 +310,9 @@ Every published number pins the dataset, its revision, models, judge, top-k and 
 
 ## Risks
 
+- Open remains O(tape) for CRC, digest, and chain verification, even with a current checkpoint.
+  Checkpoints bound application replay, not tape verification.
+  A later milestone must add verified-segment markers before we claim checkpoint-bounded open time.
 - Superblock window: up to 1 s of synced bit rot looks like a torn tail. Accepted and documented.
 - Single writer caps write throughput per data dir. Sharding by tenant comes later.
 - Exact vector scan cost grows linearly per tenant. IVF is the planned answer.
