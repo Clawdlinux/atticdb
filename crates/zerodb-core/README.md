@@ -117,9 +117,11 @@ Appending to a shared page uses copy-on-write.
 Cold reads run outside the state lock, then recheck the current backing location before installation.
 Compaction can replace or unlink a captured location. Loading retries against the replacement.
 File writes and syncs also run outside the state lock.
-Each checkpoint data file is buffered into 1 write before its sync.
-Buffering uses memory proportional to the checkpoint file.
-Full compaction can exceed the resident hot-page budget.
+Checkpoint encoding uses a buffer capped at 4 MiB.
+Full buffers write at increasing file offsets. Records never span buffer flushes.
+The file sync runs after all chunks, not after each chunk.
+`checkpoint_buffer_peak_bytes` reports peak occupied encoding bytes among completed checkpoints.
+Snapshot metadata and bounded per-record scratch are separate from that buffer.
 Backing locations install in chunks of 32 pages, releasing State between chunks.
 Old-file removal and directory sync happen after releasing State.
 
@@ -139,11 +141,14 @@ An ambiguous rename keeps the complete file until the next open checks the insta
 Open removes unreferenced checkpoint files after acquiring the tape lock.
 Every record contains a CRC32C, a total length, and a typed payload.
 CRC coverage includes the length and payload.
-File headers carry the watermark and transaction.
+File headers use `ZCK2` and carry the watermark and transaction.
 `CHECKPOINT` names the ordered file chain and its final watermark.
 
-Installation syncs the new file and directory before replacing `CHECKPOINT`.
-The replacement uses a synced staging file, rename, then directory sync.
+Installation syncs the data file before replacing `CHECKPOINT`.
+The replacement uses a synced staging file, rename, then one directory sync.
+There is no directory sync between data and manifest installation.
+After a crash, a durable manifest can reference a missing derived filename.
+Open logs a warning and rebuilds from the authoritative tape in that case.
 The 9th checkpoint compacts the chain into 1 file.
 Old chain files are removed only after installation and backing-location replacement.
 
@@ -151,7 +156,7 @@ Open validates checkpoint CRCs, loads page locations, and replays application re
 Corrupt or missing checkpoint data logs a warning and triggers full replay.
 Checkpoints are derived data. They never authorize truncating tape records.
 Retry checkpoint records include the original sequence receipt.
-Older derived checkpoints without receipts fall back to full tape replay.
+Every `ZCK1` file falls back to full tape replay, rather than guessing its receipt layout.
 The tape payload format is unchanged.
 Tape recovery still verifies the entire tape before application replay.
 The replay counter excludes checkpointed records. It does not measure tape verification work.
@@ -190,6 +195,9 @@ Explicit seeded checkpoints replace the wall-clock timer.
 `enqueue_sim` queues appends. `step_sim` runs their shared production writer step.
 Register tenants before queueing grouped appends. `SimAppend::finish` receives post-publication receipts.
 Seeded I/O callbacks invoke checkpoints between preparation and publication.
+They also run queued writer steps during a checkpoint's own I/O, between snapshot and install.
+The regression requires a later checkpoint to retain newly published page revisions after reopen.
+Removing the revision guard fails at seed 0 and in the dedicated regression.
 `checkpoint_step_sim` services pending byte-threshold wakes through the production wake check.
 Memory-pressure checkpoints and recovery spills also run inline.
 Production defaults retain worker threads and OS entropy.
@@ -201,9 +209,14 @@ Production defaults retain worker threads and OS entropy.
 G1_TURNS=65536 ./bench/g1.sh
 G1_BATCH=1 G1_TURNS=65536 ./bench/g1.sh
 G1_TURNS=192000 G1_REPS=3 G1_HISTORY=0 ./bench/g1.sh
+G1_TURNS=208000 G1_REPS=3 G1_REPLAY_PROBE=1 ./bench/g1.sh
 ```
 
 The default trace appends 1M turns using 16 writers across 1024 sessions.
+`G1_CHECKPOINT_MIB` overrides the checkpoint byte threshold. Its default remains 64.
+The replay probe alternates 64 MiB and 128 MiB across repetitions.
+It measures clean reopen wall time, application replay count, and sampled pre-close pending bytes.
+That time includes full tape verification. It does not measure crash-repair rewriting.
 `G1_REPS` defaults to 3 and cannot be smaller.
 Each repetition runs bare, Tape, then Engine. Summaries report medians and min/max spreads.
 Ratios are paired within repetitions before computing their median.

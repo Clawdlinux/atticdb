@@ -1,3 +1,10 @@
+# Latest result
+
+Latest macOS median target: **PASS**, with Engine/bare p99 **1.399654x** [1.317363x, 1.500114x].
+Tape/bare median is **1.123347x** [1.065021x, 1.159804x].
+See [merge-review measurements](#m2-merge-review) for the trace and tradeoffs.
+Linux NVMe and nightly LazyFS remain pending. The trace omits cache writes until M3.
+
 # M1 append baseline
 
 Measured on 2026-10-18. These are local development numbers, not G1 results.
@@ -224,7 +231,9 @@ Each review fix is signed off and carries the Copilot co-author trailer.
 The simulator models I/O boundaries and torn writes. It doesn't replace real-filesystem crash testing.
 The stress test covers real queue contention, not power loss.
 
-# M2 engine simulation and G1
+# M2 first review (historical)
+
+These measurements describe the first review. The latest merge-review results appear at the end of this file.
 
 Reviewed measurements were recorded on 2026-10-18 on `feat/m2-sim-g1`.
 The review base is `a27f307`. Commit identities for each measured stage appear below.
@@ -568,3 +577,271 @@ These counts include feature-gated simulation entry points and inline test instr
 They are not a production-only size measurement. The previous pre-review line count is withdrawn.
 The engine simulator contains 769 lines.
 Linux NVMe measurements and LazyFS testing remain future work.
+
+# M2 merge review
+
+This section supersedes the first-review verdict above.
+The review base is `b2f6873`. Measurements use the same Apple M4, APFS, and macOS 27.0.1 machine.
+Rust's file `sync_data` uses `F_FULLFSYNC` here.
+Linux NVMe and nightly LazyFS remain pending.
+The trace still omits cache writes until M3.
+
+## Merge-blocking correctness fixes
+
+### Bounded checkpoint encoding
+
+`2cc312d` caps the encoded staging buffer at 4 MiB.
+Full buffers write at increasing offsets without splitting records.
+All data chunks precede the single data-file sync.
+Snapshot references, backing-location metadata, and bounded record scratch remain separate allocations.
+The bound does not claim constant memory for the entire index snapshot.
+
+The original regression observed a single 5,140,624-byte data write.
+`f297302` extends it to 640,000 indexed turns and 10,000 retry entries in a full snapshot.
+That encodes an 8,631,174-byte checkpoint using these data writes:
+
+| Offset | Bytes |
+|---:|---:|
+| 0 | 4,172,146 |
+| 4,172,146 | 4,194,071 |
+| 8,366,217 | 264,957 |
+
+Peak occupied encoding bytes are 4,194,071, below the 4,194,304-byte cap.
+The buffer's reserved capacity is also capped.
+The regression reloads all 128 sessions and 10,000 retry entries.
+It also reads a live backing location beyond the first buffer and compares its slots.
+
+### Publication between checkpoint snapshot and install
+
+`66c0f23` adds the reverse I/O interleaving missing from the earlier simulator.
+The FaultIo callback runs queued `step_sim` work during checkpoint I/O.
+That publishes a newer page revision after the old snapshot but before installing its backing.
+A subsequent checkpoint and reopen must preserve the newly acknowledged turn.
+Seeded workloads exercise both directions: checkpoint inside writer step, and writer step inside checkpoint.
+
+Mutation command, with the revision guard temporarily removed:
+
+```sh
+ZERODB_SIM_SEEDS=300 cargo test -p zerodb-core --release --features sim --test engine_sim
+```
+
+The dedicated regression failed, returning sequences `[1, 2]` instead of `[1, 2, 3]`.
+The randomized test also failed immediately at seed 0. It did not finish 300 seeds.
+The guard was restored. All 300 seeds then passed.
+The final validation reruns 2,000 seeds with the restored guard.
+
+### Asynchronous poison and checkpoint version
+
+`53f1ec9` injects the metadata worker's poison flag after prepare, while a writer step is running.
+The written but unpublished request receives explicit `Unknown`.
+The next queued request receives `NotCommitted`.
+No records become readable, and publication must not run.
+This replaces a dropped reply channel with an explicit error in the deterministic driver.
+The public append path already mapped that dropped channel to `Unknown`.
+
+`dae392e` changes checkpoint-file magic to `ZCK2`.
+The manifest stays `ZCM1`. The authoritative tape format is unchanged.
+A CRC-valid `ZCK1` file now logs a warning and triggers full replay.
+Its keyed retry still returns the original sequences.
+
+## Metadata flush policy
+
+### Deferred superblocks
+
+`781d781` requests helper installation after any published segment roll.
+Without a roll, the defaults are 30 seconds or 256 MiB of published encoded tape bytes.
+Both thresholds are configurable and must be positive.
+The byte counter includes roll padding.
+Requests run after replies and do not wait for helper completion.
+Open and shutdown retain synchronous installs. Shutdown joins the helper before its final install.
+Every installed LSN still comes from the already-synced published boundary.
+
+The tradeoff is a larger recovery rewrite and corruption-detection window above the completed superblock.
+With default 64 MiB segments, rolls generally request installation before the 256 MiB trigger.
+The byte trigger protects configurations with larger segments or a longer time interval.
+Trigger accounting can overshoot by one published group.
+Helper scheduling and I/O can extend the completed-install lag.
+Thus 256 MiB is a request budget, not an unconditional hard repair-size ceiling under stalled I/O.
+Blocking acknowledgements to impose that ceiling would contradict the required asynchronous policy.
+Repair additionally covers crash-time unsynced bytes and final unused segment preallocation.
+The default preallocation is 64 MiB. Clean shutdown avoids this crash-only lag by installing the final boundary.
+
+Unit tests cover the 30-second boundary, byte-triggered installation, and segment-roll installation without clock progress.
+Existing stale/advanced-superblock and failed-sync regressions retain their protected-boundary checks.
+The M1 randomized driver explicitly configures 1 second to preserve its earlier rapid watermark coverage.
+The 30-second production default is tested separately.
+
+### One checkpoint directory sync
+
+`0e273c8` removes the directory sync between checkpoint data and manifest installation.
+The sequence remains: write data chunks, sync data, write and sync manifest staging, rename, then sync the directory.
+Full compaction still syncs its later old-file cleanup.
+This removes 1 directory sync per checkpoint, not the data or manifest file sync.
+
+A new crash test captures after manifest rename, before the final directory sync.
+It finds an image where the manifest exists but its referenced checkpoint filename disappeared.
+Open must log a warning and replay every authoritative record.
+Both acknowledged turns survive.
+The checkpoint-only crash matrix now requires either a valid chain or an explicit full-replay warning.
+It never permits silently accepting an incomplete derived chain.
+
+## Measured replay budget
+
+The default checkpoint interval remains 64 MiB, not 128 MiB.
+`43b9228` adds an alternating clean-reopen probe using the same mixed turn sizes and concurrent reader load.
+It runs 3 repetitions per setting, with 208,000 timed turns in each phase:
+
+```sh
+G1_TURNS=208000 G1_REPS=3 G1_REPLAY_PROBE=1 ./bench/g1.sh
+```
+
+Cells report median [minimum, maximum].
+
+| Checkpoint interval | Clean open, ms | Replayed application records | Sampled pre-close pending bytes, MiB |
+|---|---|---|---|
+| 64 MiB | 1082.880 [1074.029, 1093.386] | 8904 [8852, 8912] | 25.852 [25.725, 25.865] |
+| 128 MiB | 1459.177 [1458.994, 1468.678] | 31,168 [31,164, 31,244] | 90.317 [90.303, 90.555] |
+
+The 128 MiB setting exceeds the existing 64 MiB replay-byte budget in this probe.
+Its larger record tail also increases measured clean-open time.
+Therefore this change keeps the 64 MiB default.
+`G1_CHECKPOINT_MIB=128` remains available for further experiments, without changing production defaults.
+
+Open time includes complete tape verification, checkpoint loading, and application replay.
+It does not isolate replay CPU time.
+Graceful shutdown installs the final superblock, so this probe does not measure crash-repair rewriting.
+Pending bytes are sampled before shutdown. A checkpoint finishing during shutdown can reduce the actual replay tail.
+
+## Final merge-review G1
+
+Measured at `f297302` on 2026-10-18, after all required validation completed.
+No test workloads from this task overlapped the final benchmark.
+The command completed with status 0:
+
+```sh
+G1_TURNS=1000000 G1_REPS=3 G1_HISTORY=1 G1_REPLAY_PROBE=0 G1_CHECKPOINT_MIB=64 ./bench/g1.sh
+```
+
+Each repetition runs bare, Tape, then Engine with 2 concurrent window readers.
+Every path appends 1,000,000 timed turns per repetition in 4-turn durable batches.
+The trace cycles through 256 B, 512 B, 1 KiB, 4 KiB, and 8 KiB content.
+Initial registration remains outside timing.
+All engine reopens verified the expected final sequence in each of 1024 sessions.
+
+Ratios below are paired within each repetition.
+They retain 6 decimal places to expose the first repetition's narrow threshold miss.
+The verdict uses unrounded ratios, not the rounded CLI display.
+
+| Repetition | Bare p99, ms | Tape p99, ms | Engine p99, ms | Engine/bare | Tape/bare |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 6.042041 | 7.007583 | 9.063750 | 1.500114 | 1.159804 |
+| 2 | 8.511292 | 9.064708 | 11.212458 | 1.317363 | 1.065021 |
+| 3 | 6.904625 | 7.756292 | 9.664083 | 1.399654 | 1.123347 |
+| Median [min, max] | 6.904625 [6.042041, 8.511292] | 7.756292 [7.007583, 9.064708] | 9.664083 [9.063750, 11.212458] | **1.399654 [1.317363, 1.500114]** | **1.123347 [1.065021, 1.159804]** |
+
+**macOS median verdict: PASS against 1.5x.**
+This is not an all-repetitions pass. Repetition 1 is slightly above 1.5x.
+Linux NVMe and nightly LazyFS remain pending.
+This append-only proxy does not certify the later mixed-cache-write G1 workload.
+
+The following cells report median [minimum, maximum] across repetitions.
+Each path contributes 250,000 durable-ack samples per repetition.
+
+| Path | Turns/s | Ack p50, ms | Ack p99, ms | Ack p99.9, ms |
+|---|---|---|---|---|
+| Bare | 16,146.8 [14,480.3, 16,453.7] | 3.958 [3.955, 4.107] | 6.905 [6.042, 8.511] | 14.551 [12.066, 17.698] |
+| Tape | 15,654.2 [15,101.3, 16,282.0] | 4.001 [3.979, 4.085] | 7.756 [7.008, 9.065] | 20.811 [20.041, 23.832] |
+| Engine + readers | 13,823.3 [13,072.4, 14,571.4] | 4.086 [4.042, 4.425] | 9.664 [9.064, 11.212] | 22.040 [21.055, 29.894] |
+
+### Metadata work and memory
+
+Counts are sampled before shutdown, excluding initialization and final shutdown installs.
+
+| Repetition | Tape superblocks | Engine superblocks | Engine checkpoints | Peak encoding buffer, B | Max State hold, us |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 45 | 45 | 45 | 4,194,084 | 654.917 |
+| 2 | 45 | 45 | 45 | 4,194,228 | 1452.292 |
+| 3 | 45 | 45 | 45 | 4,194,244 | 1024.167 |
+
+The largest real-trace encoding buffer remains 60 bytes below the 4 MiB cap.
+Each run ends with 5 checkpoint files.
+The checkpoint sync policy performs 135 normal file/directory sync calls plus 5 compaction cleanup directory syncs.
+The previous 45-checkpoint policy required 185 such calls. The new policy requires 140.
+There is still one data-file sync and one manifest-file sync per checkpoint.
+Only the intermediate directory sync was removed.
+The 45 superblock installs follow the 45 published segment rolls with default 64 MiB segments.
+They no longer follow the former 1-second cadence.
+
+Group formation remains close to 16 requests:
+
+| Repetition | Bare requests/group | Tape requests/group | Engine requests/group |
+|---:|---:|---:|---:|
+| 1 | 16.000 | 15.987 | 15.999 |
+| 2 | 15.999 | 15.993 | 15.996 |
+| 3 | 15.999 | 15.949 | 15.995 |
+
+The first-review Engine/bare median was 1.640x; this run measures 1.399654x.
+Absolute Engine p99 changed from 10.011 ms to 9.664 ms.
+Bare p99 also changed, from 6.085 ms to 6.905 ms.
+Therefore the ratio change must not be presented as an isolated causal speedup.
+This remains a shared macOS machine with visible run-to-run variation.
+
+### Clean reopen and windows
+
+Full-trace clean-open time is 6017.377 ms median [5978.479, 6022.293].
+Application replay is 3720 records median [3704, 3724].
+Full tape verification remains O(tape); these numbers are not checkpoint-bounded startup claims.
+They also exclude crash-only rewriting above an older superblock.
+
+Concurrent readers completed 1,242,813 windows:
+
+| Repetition | Windows | Samples | p50, us | p99, us | p99.9, us |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 418,476 | 6540 | 322.125 | 1014.500 | 1830.042 |
+| 2 | 433,129 | 6768 | 325.583 | 1053.167 | 2263.250 |
+| 3 | 391,208 | 6114 | 325.167 | 960.625 | 1502.250 |
+
+The final history experiment returns 16 turns, with 2000 queries after 100 warmups per cell.
+The harness again asserts exactly 16 tape reads per query.
+
+| History turns | Query | Reads/query | p50, us | p99, us |
+|---:|---|---:|---:|---:|
+| 16 | Last 16 | 16 | 232.458 | 367.667 |
+| 1024 | Last 16 | 16 | 233.042 | 400.417 |
+| 65,536 | Last 16 | 16 | 233.250 | 390.542 |
+| 16 | Since, limit 16 | 16 | 231.667 | 374.291 |
+| 1024 | Since, limit 16 | 16 | 232.458 | 373.083 |
+| 65,536 | Since, limit 16 | 16 | 232.500 | 371.875 |
+
+## Merge-review validation and commits
+
+Both 2,000-seed release simulations passed seeds 0 through 1,999.
+M1 took 18.08 seconds. The expanded engine suite took 120.34 seconds.
+All 7 engine simulation tests passed, including both new checkpoint fallback cases.
+The restored revision guard is present. No mutation is included in the commits.
+
+| Command | Result |
+|---|---|
+| `cargo fmt --all --check` | Passed |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | Passed |
+| `cargo test --workspace` | Passed. 500 default M1 seeds; release-only stress ignored. |
+| `cargo test --workspace --release` | Passed. 500 default M1 seeds and release stress. |
+| `ZERODB_SIM_SEEDS=2000 cargo test -p zerodb-tape --release --features sim --test sim` | Passed |
+| `ZERODB_SIM_SEEDS=2000 cargo test -p zerodb-core --release --features sim --test engine_sim` | Passed. All 7 tests. |
+| `cargo clippy -p zerodb-core --lib --no-default-features -- -D warnings` | Passed |
+| `cargo bench -p zerodb-core --bench g1 --no-run --quiet` | Passed |
+| `G1_TURNS=208000 G1_REPS=3 G1_REPLAY_PROBE=1 ./bench/g1.sh` | Passed. Three alternating probes per checkpoint setting. |
+| `G1_TURNS=1000000 G1_REPS=3 G1_HISTORY=1 G1_REPLAY_PROBE=0 G1_CHECKPOINT_MIB=64 ./bench/g1.sh` | Passed. All 9 timed phases, reopen checks, and history checks. Median target PASS. |
+
+All commits are signed off and carry the requested co-author trailer. Nothing was pushed.
+
+| Commit | Change |
+|---|---|
+| `2cc312d` | Cap checkpoint encoding at 4 MiB, flushing contiguous data chunks. |
+| `66c0f23` | Writer publication during checkpoint I/O and mutation-sensitive revision coverage. |
+| `53f1ec9` | Explicit Unknown replies after asynchronous mid-step poison. |
+| `dae392e` | ZCK2 checkpoint magic with legacy-file full replay. |
+| `781d781` | Roll/time/byte superblock requests and recovery-window accounting. |
+| `0e273c8` | Remove the pre-manifest directory sync with missing-reference crash coverage. |
+| `43b9228` | Replay-budget comparison, metadata counters, and paired Tape/bare reporting. |
+| `f297302` | Full-snapshot index/dedup buffer bound and global backing-offset regression. |

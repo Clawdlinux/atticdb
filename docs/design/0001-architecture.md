@@ -128,7 +128,8 @@ Publish runs on the writer thread before the ack and does three O(1) installs: t
 
 ### Segment roll
 
-- A background task pre-creates the next segment: create, `set_len` to 64 MiB, sync file, sync dir, add to `MANIFEST`.
+- Segment preparation creates the next file and sets its configured length, 64 MiB by default.
+  It syncs the file and directory before installing the manifest.
 - The writer only switches to a segment whose directory entry is already durable. No ack ever depends on an unsynced directory entry.
 
 ### Fsync failure
