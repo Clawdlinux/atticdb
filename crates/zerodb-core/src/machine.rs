@@ -247,7 +247,9 @@ impl StateMachine for Machine {
                 break;
             }
         }
-        if state.bytes.saturating_sub(state.checkpoint_bytes) >= self.opts.checkpoint_bytes {
+        if state.bytes.saturating_sub(state.checkpoint_bytes) >= self.opts.checkpoint_bytes
+            && !state.checkpoint_pending.swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
             if let Some(sender) = &state.notify {
                 let _ = sender.try_send(Command::Wake);
             }
@@ -309,6 +311,24 @@ mod tests {
     use crate::{NewTurn, Role, Trust};
     use zerodb_tape::sim::{SimClock, WriteRequest, WriterCore};
     use zerodb_tape::{Durability, Kind, RecordInput, SimDisk};
+
+    #[test]
+    fn over_threshold_publications_queue_only_one_wake() {
+        let opts = EngineOptions { checkpoint_bytes: 1, ..EngineOptions::default() };
+        let shared = Arc::new(Mutex::new(State::new(&opts)));
+        let (sender, receiver) = std::sync::mpsc::sync_channel(16);
+        {
+            let mut state = shared.lock().unwrap();
+            state.notify = Some(sender);
+            state.bytes = 100;
+        }
+        let mut machine =
+            Machine::new(shared, Arc::new(SimDisk::new(0)), "db".into(), opts).unwrap();
+        for _ in 0..100 {
+            machine.publish(&[]);
+        }
+        assert_eq!(receiver.try_iter().count(), 1);
+    }
 
     #[test]
     fn prepare_rejections_keep_typed_engine_errors() {

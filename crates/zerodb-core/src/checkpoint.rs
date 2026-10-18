@@ -434,6 +434,7 @@ pub(crate) fn save(io: &dyn Io, dir: &Path, shared: &Mutex<State>) -> Result<u64
     }
     state.watermark = snap.lsn;
     state.checkpoint_bytes = snap.bytes;
+    state.checkpoint_saves += 1;
     state.chain = chain;
     if snap.full {
         for name in snap.chain {
@@ -442,6 +443,17 @@ pub(crate) fn save(io: &dyn Io, dir: &Path, shared: &Mutex<State>) -> Result<u64
         let _ = io.sync_dir(dir);
     }
     Ok(snap.lsn)
+}
+
+pub(crate) fn wake(io: &dyn Io, dir: &Path, shared: &Mutex<State>, threshold: u64) -> Result<u64> {
+    {
+        let state = lock(shared)?;
+        state.checkpoint_pending.store(false, std::sync::atomic::Ordering::Release);
+        if state.bytes.saturating_sub(state.checkpoint_bytes) < threshold {
+            return Ok(state.watermark);
+        }
+    }
+    save(io, dir, shared)
 }
 
 #[derive(Debug)]
@@ -484,6 +496,7 @@ impl Worker {
         }
         let (sender, receiver) = mpsc::sync_channel(16);
         let interval = opts.checkpoint_interval;
+        let threshold = opts.checkpoint_bytes;
         let thread = std::thread::Builder::new()
             .name("zerodb-checkpoint".into())
             .spawn(move || loop {
@@ -492,7 +505,14 @@ impl Worker {
                 {
                     break;
                 }
-                let result = save(io.as_ref(), &dir, &state);
+                let result = if matches!(command, Ok(Command::Wake)) {
+                    wake(io.as_ref(), &dir, &state, threshold)
+                } else {
+                    if let Ok(state) = lock(&state) {
+                        state.checkpoint_pending.store(false, std::sync::atomic::Ordering::Release);
+                    }
+                    save(io.as_ref(), &dir, &state)
+                };
                 match command {
                     Ok(Command::Flush(reply)) => {
                         let _ = reply.send(result);
@@ -690,6 +710,22 @@ mod tests {
         let mut state = State::new(&EngineOptions::default());
         state.tenants.insert("t", 1, 1, 10_000).unwrap();
         Mutex::new(state)
+    }
+
+    #[test]
+    fn stale_wakes_do_not_save_below_the_next_threshold() {
+        let disk = SimDisk::new(17);
+        let shared = state();
+        for seq in 1..=100 {
+            append(&shared, seq);
+            shared.lock().unwrap().bytes += 1;
+            if seq.is_multiple_of(10) {
+                for _ in 0..16 {
+                    wake(&disk, Path::new("db"), &shared, 10).unwrap();
+                }
+            }
+        }
+        assert_eq!(shared.lock().unwrap().checkpoint_saves, 10);
     }
 
     #[test]

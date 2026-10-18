@@ -78,6 +78,8 @@ pub struct Metrics {
     pub checkpoint_watermark: u64,
     /// Installed incremental files.
     pub checkpoint_files: usize,
+    /// Completed checkpoint installs during this open.
+    pub checkpoint_saves: u64,
     /// Application records replayed during this open.
     pub replayed_records: u64,
     /// Checkpoints rejected during this open.
@@ -414,6 +416,7 @@ impl Engine {
             dedup_window_effective: state.dedup.effective_window(),
             checkpoint_watermark: state.watermark,
             checkpoint_files: state.chain.len(),
+            checkpoint_saves: state.checkpoint_saves,
             replayed_records: state.replayed,
             checkpoint_warnings: state.warnings,
             checkpoint_snapshot_lock_ns: state.snapshot_lock_ns,
