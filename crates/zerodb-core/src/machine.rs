@@ -4,7 +4,7 @@ use crate::error::{lock, Result};
 use crate::session::{address, Key};
 use crate::state::State;
 use crate::tenant::Registry;
-use crate::turn::{decode, set_seq};
+use crate::turn::{decode_ref as decode, set_seq};
 use crate::{EngineError, EngineOptions, ErrorKind};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -26,6 +26,8 @@ pub(crate) struct Machine {
     first_lsn: u64,
     first_seq: u64,
     hash: blake3::Hasher,
+    #[cfg(test)]
+    prepare_hash_bytes: usize,
 }
 impl Machine {
     pub(crate) fn new(
@@ -49,6 +51,8 @@ impl Machine {
             first_lsn: 0,
             first_seq: 0,
             hash: blake3::Hasher::new(),
+            #[cfg(test)]
+            prepare_hash_bytes: 0,
         };
         Ok(machine)
     }
@@ -75,10 +79,17 @@ impl Machine {
         if tenant == 0 || (create.is_none() && tenant as usize > self.tenants.entries.len()) {
             return Err(EngineError::rejected(ErrorKind::InvalidInput));
         }
-        let key = Key(tenant, first.agent_id, first.session_id.clone());
-        let mut hash = blake3::Hasher::new();
-        for record in turns {
-            let decoded = decode(&record.content)?;
+        let key = Key(tenant, first.agent_id.to_owned(), first.session_id.to_owned());
+        let mut hash = (first.idem_key.is_some() && batch.application_digest().is_none())
+            .then(blake3::Hasher::new);
+        for (i, record) in turns.iter().enumerate() {
+            let next;
+            let decoded = if i == 0 {
+                &first
+            } else {
+                next = decode(&record.content)?;
+                &next
+            };
             if record.kind != zerodb_tape::Kind::Turn
                 || decoded.seq != 0
                 || decoded.agent_id != key.1
@@ -88,11 +99,21 @@ impl Machine {
             {
                 return Err(EngineError::rejected(ErrorKind::InvalidInput));
             }
-            hash.update(&(record.content.len() as u32).to_le_bytes());
-            hash.update(&record.content);
+            if let Some(hash) = &mut hash {
+                hash.update(&(record.content.len() as u32).to_le_bytes());
+                hash.update(&record.content);
+                #[cfg(test)]
+                {
+                    self.prepare_hash_bytes += record.content.len();
+                }
+            }
         }
-        let digest = *hash.finalize().as_bytes();
-        let dedup_key = first.idem_key.map(|id| DedupKey(tenant, first.session_id, id));
+        let digest = batch
+            .application_digest()
+            .or_else(|| hash.map(|h| *h.finalize().as_bytes()))
+            .unwrap_or([0; 32]);
+        let dedup_key =
+            first.idem_key.map(|id| DedupKey(tenant, first.session_id.to_owned(), id.to_owned()));
         let mut state = lock(&self.state)?;
         if let Some(error) = &state.failure {
             return Err(error.clone());
@@ -175,7 +196,8 @@ impl Machine {
                 if self.first_seq == 0 {
                     self.first_seq = turn.seq;
                 }
-                let key = Key(record.tenant_id, turn.agent_id, turn.session_id.clone());
+                let key =
+                    Key(record.tenant_id, turn.agent_id.to_owned(), turn.session_id.to_owned());
                 if record.tenant_id == 0 || record.tenant_id as usize > state.tenants.entries.len()
                 {
                     return Err(EngineError::rejected(ErrorKind::CorruptIndex));
@@ -198,7 +220,7 @@ impl Machine {
                     self.hash.update(&(normalized.len() as u32).to_le_bytes());
                     self.hash.update(&normalized);
                     let entry = Entry {
-                        key: DedupKey(record.tenant_id, turn.session_id, id),
+                        key: DedupKey(record.tenant_id, turn.session_id.to_owned(), id.to_owned()),
                         digest: *self.hash.finalize().as_bytes(),
                         committed: Committed::Durable {
                             txn: record.txn,
@@ -331,12 +353,50 @@ mod tests {
             state.notify = Some(sender);
             state.bytes = 100;
         }
+
         let mut machine =
             Machine::new(shared, Arc::new(SimDisk::new(0)), "db".into(), opts).unwrap();
         for _ in 0..100 {
             machine.publish(&[]);
         }
         assert_eq!(receiver.try_iter().count(), 1);
+    }
+
+    #[test]
+    fn keyless_prepare_does_not_hash_a_retry_digest() {
+        for idem in [None, Some("key")] {
+            let opts = EngineOptions::default();
+            let mut initial = State::new(&opts);
+            initial.tenants.insert("t", 1, 1, 10_000).unwrap();
+            let mut machine = Machine::new(
+                Arc::new(Mutex::new(initial)),
+                Arc::new(SimDisk::new(18)),
+                "db".into(),
+                opts,
+            )
+            .unwrap();
+            let content = crate::turn::encode(
+                "a",
+                "s",
+                0,
+                &NewTurn {
+                    role: Role::User,
+                    content: vec![1; 8192],
+                    meta: vec![],
+                    trust: Trust::Untrusted,
+                },
+                idem,
+            )
+            .unwrap();
+            let mut batch = PreparedBatch::with_salts(
+                vec![RecordInput { kind: Kind::Turn, tenant_id: 1, content }],
+                Durability::Durable,
+                || Ok([1; 16]),
+            )
+            .unwrap();
+            assert!(matches!(machine.prepare(&mut batch), Prepare::Write));
+            assert_eq!(machine.prepare_hash_bytes > 0, idem.is_some());
+        }
     }
 
     #[test]

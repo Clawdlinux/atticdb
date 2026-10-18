@@ -142,9 +142,14 @@ pub struct PreparedBatch {
     size: usize,
     changed: bool,
     reply: Vec<u8>,
+    application_digest: Option<Digest>,
 }
 
 impl PreparedBatch {
+    /// Returns an opaque application digest computed by the caller, if supplied.
+    pub fn application_digest(&self) -> Option<Digest> {
+        self.application_digest
+    }
     /// Stages an application receipt. Durable replies release it only after sync and publication.
     pub fn set_reply(&mut self, reply: Vec<u8>) {
         self.reply = reply;
@@ -243,6 +248,7 @@ impl PreparedBatch {
             size,
             changed: false,
             reply: Vec::new(),
+            application_digest: None,
         })
     }
 }
@@ -849,13 +855,24 @@ impl<S: StateMachine> Tape<S> {
 
     /// Atomically appends a nonempty batch using the requested acknowledgement mode.
     pub fn append(&self, batch: Vec<RecordInput>, mode: Durability) -> WriteResult {
+        self.append_with_digest(batch, mode, None)
+    }
+
+    /// Appends with a caller-computed application digest. Tape's integrity hashes remain independent.
+    pub fn append_with_digest(
+        &self,
+        batch: Vec<RecordInput>,
+        mode: Durability,
+        digest: Option<Digest>,
+    ) -> WriteResult {
         if self.reads.poisoned.load(Ordering::Acquire) {
             return Err(rejected(Error::Poisoned));
         }
         #[cfg(feature = "sim")]
         if let Some(core) = &self.inline {
             let mut core = core.lock().map_err(|_| rejected(Error::Poisoned))?;
-            let batch = PreparedBatch::with_salts(batch, mode, || Ok([0x51; 16]))?;
+            let mut batch = PreparedBatch::with_salts(batch, mode, || Ok([0x51; 16]))?;
+            batch.application_digest = digest;
             let (request, receiver) = WriteRequest::new(batch);
             core.enqueue(request);
             core.step();
@@ -865,7 +882,8 @@ impl<S: StateMachine> Tape<S> {
                 .map_err(|_| WriteError { kind: Error::Poisoned, outcome: Outcome::Unknown })?;
         }
         let entropy = self.entropy.as_ref().ok_or_else(|| rejected(Error::Poisoned))?;
-        let batch = PreparedBatch::with_entropy(batch, mode, || Ok(Entropy(entropy)))?;
+        let mut batch = PreparedBatch::with_entropy(batch, mode, || Ok(Entropy(entropy)))?;
+        batch.application_digest = digest;
         let (request, receiver) = WriteRequest::new(batch);
         self.sender
             .as_ref()

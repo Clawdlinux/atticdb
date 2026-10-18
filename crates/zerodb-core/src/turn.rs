@@ -140,12 +140,38 @@ pub fn encode(
 
 /// Decodes an exact payload, rejecting trailing bytes and unknown tags or versions.
 pub fn decode(payload: &[u8]) -> Result<DecodedTurn, CodecError> {
+    let parsed = decode_ref(payload)?;
+    Ok(DecodedTurn {
+        agent_id: parsed.agent_id.to_owned(),
+        session_id: parsed.session_id.to_owned(),
+        seq: parsed.seq,
+        turn: NewTurn {
+            role: parsed.role,
+            content: parsed.content.to_vec(),
+            meta: parsed.meta.to_vec(),
+            trust: parsed.trust,
+        },
+        idem_key: parsed.idem_key.map(str::to_owned),
+    })
+}
+
+pub(crate) struct ParsedTurn<'a> {
+    pub(crate) agent_id: &'a str,
+    pub(crate) session_id: &'a str,
+    pub(crate) seq: u64,
+    role: Role,
+    content: &'a [u8],
+    meta: &'a [u8],
+    trust: Trust,
+    pub(crate) idem_key: Option<&'a str>,
+}
+pub(crate) fn decode_ref(payload: &[u8]) -> Result<ParsedTurn<'_>, CodecError> {
     let mut cur = Cursor(payload);
     if cur.byte()? != 1 {
         return Err(CodecError);
     }
-    let agent_id = cur.string(255)?;
-    let session_id = cur.string(255)?;
+    let agent_id = std::str::from_utf8(cur.blob(255)?).map_err(|_| CodecError)?;
+    let session_id = std::str::from_utf8(cur.blob(255)?).map_err(|_| CodecError)?;
     let seq = cur.u64()?;
     let role = match cur.byte()? {
         0 => Role::System,
@@ -154,8 +180,8 @@ pub fn decode(payload: &[u8]) -> Result<DecodedTurn, CodecError> {
         3 => Role::Tool,
         _ => return Err(CodecError),
     };
-    let meta = cur.blob(65536)?.to_vec();
-    let content = cur.blob(4 * 1024 * 1024)?.to_vec();
+    let meta = cur.blob(65536)?;
+    let content = cur.blob(4 * 1024 * 1024)?;
     let trust = match cur.byte()? {
         0 => Trust::Trusted,
         1 => Trust::Untrusted,
@@ -163,17 +189,11 @@ pub fn decode(payload: &[u8]) -> Result<DecodedTurn, CodecError> {
     };
     let idem_key = match cur.byte()? {
         0 => None,
-        1 => Some(cur.string(128)?),
+        1 => Some(std::str::from_utf8(cur.blob(128)?).map_err(|_| CodecError)?),
         _ => return Err(CodecError),
     };
     cur.end()?;
-    Ok(DecodedTurn {
-        agent_id,
-        session_id,
-        seq,
-        turn: NewTurn { role, content, meta, trust },
-        idem_key,
-    })
+    Ok(ParsedTurn { agent_id, session_id, seq, role, content, meta, trust, idem_key })
 }
 
 pub(crate) fn set_seq(payload: &mut [u8], seq: u64) -> Result<(), CodecError> {

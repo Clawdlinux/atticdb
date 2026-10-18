@@ -196,6 +196,14 @@ impl Engine {
             .iter()
             .map(|turn| encode(&scope.agent, &scope.session, 0, turn, idem_key))
             .collect::<std::result::Result<Vec<_>, _>>()?;
+        let digest = idem_key.map(|_| {
+            let mut hash = blake3::Hasher::new();
+            for payload in &payloads {
+                hash.update(&(payload.len() as u32).to_le_bytes());
+                hash.update(payload);
+            }
+            *hash.finalize().as_bytes()
+        });
         let mut tenant = lock(&self.state)?.tenants.get(&scope.tenant);
         let _creation = if tenant.is_none() {
             let guard = lock(&self.tenant_creation)?;
@@ -230,8 +238,10 @@ impl Engine {
                 }
                 result => result?,
             };
-            let result =
-                self.tape.append(records.clone(), Durability::Durable).map_err(EngineError::write);
+            let result = self
+                .tape
+                .append_with_digest(records.clone(), Durability::Durable, digest)
+                .map_err(EngineError::write);
             drop(pin);
             match result {
                 Err(EngineError { kind: ErrorKind::ResourceExhausted("hot_pages"), .. })
