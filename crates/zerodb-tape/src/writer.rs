@@ -103,6 +103,8 @@ pub struct TapeOptions {
     pub superblock_bytes: u64,
     /// Resident LSN-index budget, including page bookkeeping. Minimum 4224 bytes.
     pub lsn_index_bytes: usize,
+    /// Bytes kept free after group bytes and any new segments. Defaults to min(1 GiB, 5% of capacity).
+    pub free_space_floor: Option<u64>,
     /// Runs the writer inline. Only for deterministic simulations.
     #[cfg(feature = "sim")]
     pub inline_sim: bool,
@@ -118,6 +120,7 @@ impl Default for TapeOptions {
             superblock_interval: Duration::from_secs(30),
             superblock_bytes: 256 * 1024 * 1024,
             lsn_index_bytes: DEFAULT_BUDGET,
+            free_space_floor: None,
             #[cfg(feature = "sim")]
             inline_sim: false,
         }
@@ -224,6 +227,7 @@ struct ReadState {
     index: Mutex<LsnIndex>,
     durable_lsn: AtomicU64,
     poisoned: AtomicBool,
+    read_only: AtomicBool,
     groups: AtomicU64,
     grouped_requests: AtomicU64,
     superblock_installs: AtomicU64,
@@ -316,6 +320,7 @@ pub struct WriterCore<S: StateMachine = NoopStateMachine> {
     superblock_bytes: u64,
     superblock_position: (u64, u64),
     synced_position: (u64, u64),
+    free_space_floor: u64,
 }
 
 impl<S: StateMachine> std::fmt::Debug for WriterCore<S> {
@@ -361,6 +366,10 @@ impl<S: StateMachine> WriterCore<S> {
         }
         let mut dir =
             DataDir::open(io.clone(), path, opts.server_address.as_deref(), opts.segment_size)?;
+        let free_space_floor = match opts.free_space_floor {
+            Some(floor) => floor,
+            None => (io.total_bytes(&dir.path)? / 20).min(1 << 30),
+        };
         let mut recovered = recover_with_budget(&mut dir, opts.segment_size, opts.lsn_index_bytes)?;
         if recovered.report.durable_lsn > dir.superblock() {
             dir.install_superblock(recovered.report.durable_lsn)?;
@@ -371,6 +380,7 @@ impl<S: StateMachine> WriterCore<S> {
             index: Mutex::new(recovered.index.take().ok_or(Error::Poisoned)?),
             durable_lsn: AtomicU64::new(recovered.report.durable_lsn),
             poisoned: AtomicBool::new(false),
+            read_only: AtomicBool::new(false),
             groups: AtomicU64::new(0),
             grouped_requests: AtomicU64::new(0),
             superblock_installs: AtomicU64::new(0),
@@ -390,6 +400,7 @@ impl<S: StateMachine> WriterCore<S> {
             superblock_bytes: opts.superblock_bytes,
             superblock_position: position,
             synced_position: position,
+            free_space_floor,
             clock,
             reads,
             queue: VecDeque::new(),
@@ -417,6 +428,11 @@ impl<S: StateMachine> WriterCore<S> {
     /// Reports whether a storage failure requires reopening.
     pub fn is_poisoned(&self) -> bool {
         self.reads.poisoned.load(Ordering::Acquire)
+    }
+
+    /// True when the last group failed its free-space check. A passing check clears it.
+    pub fn read_only(&self) -> bool {
+        self.reads.read_only.load(Ordering::Acquire)
     }
 
     /// Returns charged index memory and backing-page reads.
@@ -542,6 +558,51 @@ impl<S: StateMachine> WriterCore<S> {
             self.reads.groups.fetch_add(1, Ordering::Relaxed);
             self.reads.grouped_requests.fetch_add(self.queue.len() as u64, Ordering::Relaxed);
         }
+        if !self.is_poisoned() {
+            let capacity = self.segments.capacity();
+            self.queue.retain(|request| {
+                if request.batch.size as u64 > capacity {
+                    let _ = request.reply.send(Err(rejected(Error::BatchTooLarge)));
+                    false
+                } else {
+                    true
+                }
+            });
+            if !self.queue.is_empty() {
+                let needed =
+                    self.segments.group_space(self.queue.iter().map(|r| r.batch.size as u64));
+                let available = self.reads.io.available_bytes(&self.reads.path);
+                match available {
+                    Ok(free)
+                        if free
+                            .checked_sub(needed)
+                            .is_none_or(|left| left < self.free_space_floor) =>
+                    {
+                        self.reads.read_only.store(true, Ordering::Release);
+                        for request in self.queue.drain(..) {
+                            let _ = request.reply.send(Err(rejected(Error::DiskFull)));
+                        }
+                        return;
+                    }
+                    Ok(_) => self.reads.read_only.store(false, Ordering::Release),
+                    Err(error) => {
+                        self.reject_storage_group(error);
+                        return;
+                    }
+                }
+                if let Err(error) =
+                    self.segments.prepare_group(self.queue.iter().map(|r| r.batch.size as u64))
+                {
+                    self.reject_storage_group(error);
+                    return;
+                }
+                // Activate the first placement before application preparation.
+                if let Err(error) = self.segments.reserve_batch(self.queue[0].batch.size) {
+                    self.reject_storage_group(error);
+                    return;
+                }
+            }
+        }
         let mut replies = Vec::new();
         while let Some(mut request) = self.queue.pop_front() {
             if self.is_poisoned() {
@@ -592,6 +653,7 @@ impl<S: StateMachine> WriterCore<S> {
                 }
             }
         }
+        self.segments.finish_group();
         if self.is_poisoned() {
             for (reply, _) in replies {
                 let _ = reply
@@ -614,6 +676,18 @@ impl<S: StateMachine> WriterCore<S> {
         }
     }
 
+    fn reject_storage_group(&mut self, error: Error) {
+        self.reads.poisoned.store(true, Ordering::Release);
+        let error = match error {
+            Error::Io(std::io::ErrorKind::StorageFull, _) => Error::DiskFull,
+            error => error,
+        };
+        for request in self.queue.drain(..) {
+            let _ = request.reply.send(Err(rejected(error.clone())));
+        }
+        self.segments.finish_group();
+    }
+
     /// Called after replies. Metadata failure poisons future writes, not earlier acknowledgements.
     #[cfg(any(test, feature = "sim"))]
     pub fn update_superblock(&mut self) -> Result<()> {
@@ -624,6 +698,7 @@ impl<S: StateMachine> WriterCore<S> {
     }
     fn superblock_due(&self) -> bool {
         !self.is_poisoned()
+            && !self.read_only()
             && (self.synced_position.0 != self.superblock_position.0
                 || self.synced_position.1.saturating_sub(self.superblock_position.1)
                     >= self.superblock_bytes
@@ -958,6 +1033,16 @@ impl<S: StateMachine> Tape<S> {
     /// Returns the highest record LSN available to durable readers.
     pub fn durable_lsn(&self) -> u64 {
         self.reads.durable_lsn.load(Ordering::Acquire)
+    }
+
+    /// True while the last free-space check failed. Reads remain available.
+    pub fn read_only(&self) -> bool {
+        self.reads.read_only.load(Ordering::Acquire)
+    }
+
+    /// True after a storage failure. Reopen before accepting more writes.
+    pub fn is_poisoned(&self) -> bool {
+        self.reads.poisoned.load(Ordering::Acquire)
     }
 
     /// Reads a complete durable record, or returns `None` for an unpublished LSN.

@@ -2,7 +2,7 @@
 
 use crate::dir::{DataDir, Handle};
 use crate::{Error, Result};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// Default preallocated segment length.
 pub const DEFAULT_SEGMENT_SIZE: u64 = 64 * 1024 * 1024;
@@ -16,6 +16,8 @@ pub struct SegmentWriter {
     offset: u64,
     size: u64,
     written_bytes: u64,
+    ready: VecDeque<u64>,
+    group_reserved: bool,
 }
 
 impl std::fmt::Debug for SegmentWriter {
@@ -35,6 +37,46 @@ impl SegmentWriter {
 
     pub(crate) fn position(&self) -> (u64, u64) {
         (self.active, self.written_bytes)
+    }
+
+    pub(crate) fn group_space(&self, sizes: impl Iterator<Item = u64>) -> u64 {
+        let mut remaining = self.size - self.offset;
+        let mut rolls = 0u64;
+        let mut bytes = 0u64;
+        for size in sizes {
+            bytes = bytes.saturating_add(size);
+            if size > remaining {
+                rolls += 1;
+                remaining = self.size;
+            }
+            remaining -= size;
+        }
+        bytes
+            .saturating_add(rolls.saturating_sub(self.ready.len() as u64).saturating_mul(self.size))
+    }
+
+    pub(crate) fn prepare_group(&mut self, sizes: impl Iterator<Item = u64>) -> Result<()> {
+        let mut remaining = self.size - self.offset;
+        let mut rolls = 0;
+        for size in sizes {
+            if size > remaining {
+                rolls += 1;
+                remaining = self.size;
+            }
+            remaining -= size;
+        }
+        while self.ready.len() < rolls {
+            let id = self.dir.prepare_next_segment(self.size)?;
+            let file = Handle::open(self.dir.io.clone(), &self.dir.segment_path(id))?;
+            self.files.insert(id, file);
+            self.ready.push_back(id);
+        }
+        self.group_reserved = true;
+        Ok(())
+    }
+
+    pub(crate) fn finish_group(&mut self) {
+        self.group_reserved = false;
     }
 
     /// Opens the last prepared segment at its recovered transaction boundary.
@@ -59,6 +101,8 @@ impl SegmentWriter {
             offset,
             size,
             written_bytes: 0,
+            ready: VecDeque::new(),
+            group_reserved: false,
         })
     }
 
@@ -69,9 +113,16 @@ impl SegmentWriter {
         }
         if len as u64 > self.size - self.offset {
             let padding = self.size - self.offset;
-            let id = self.dir.prepare_next_segment(self.size)?;
-            let file = Handle::open(self.dir.io.clone(), &self.dir.segment_path(id))?;
-            self.files.insert(id, file);
+            let id = if let Some(id) = self.ready.pop_front() {
+                id
+            } else if self.group_reserved {
+                return Err(Error::InvalidFrame("prepared group outgrew reserved segments".into()));
+            } else {
+                let id = self.dir.prepare_next_segment(self.size)?;
+                let file = Handle::open(self.dir.io.clone(), &self.dir.segment_path(id))?;
+                self.files.insert(id, file);
+                id
+            };
             self.active = id;
             self.offset = 0;
             self.written_bytes = self.written_bytes.saturating_add(padding);
@@ -98,7 +149,7 @@ impl SegmentWriter {
             self.dir.io.sync_data(file.id).map_err(|e| Error::SyncFailed(e.to_string()))?;
         }
         self.dirty.clear();
-        self.files.retain(|id, _| *id == self.active);
+        self.files.retain(|id, _| *id == self.active || self.ready.contains(id));
         Ok(())
     }
 

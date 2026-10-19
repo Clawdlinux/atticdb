@@ -42,6 +42,8 @@ pub enum Prepare {
 /// Preparation can reserve sequences before storage fails. Such failures poison the writer.
 /// No later preparation can observe those reservations. Reopening reconstructs state through replay.
 /// A rejected or cached batch must leave no new reservations behind.
+/// The writer reserves group segments before prepare, using the queued batch sizes.
+/// Rewrites that need additional segments fail and poison instead of allocating after prepare.
 ///
 /// Preparation may cache dedup entries for writes still pending in the current group.
 /// Return their durable acknowledgement through `Prepare::Reply`; it shares the original write's sync outcome.
