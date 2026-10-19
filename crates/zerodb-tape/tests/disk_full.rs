@@ -241,7 +241,9 @@ fn growing_hooks_cannot_allocate_after_prepare() {
 fn failed_allocation_does_not_change_manifest() {
     let disk = Arc::new(SimDisk::new(2));
     let mut dir = DataDir::open(disk.clone(), "db", None, 4096).unwrap();
+    let available_before = disk.available_bytes(Path::new("db")).unwrap();
     dir.prepare_next_segment(4096).unwrap();
+    assert_eq!(available_before - disk.available_bytes(Path::new("db")).unwrap(), 4096);
     let before = dir.segments().to_vec();
     let free = disk.available_bytes(Path::new("db")).unwrap();
     let total = disk.total_bytes(Path::new("db")).unwrap();
@@ -255,4 +257,24 @@ fn failed_allocation_does_not_change_manifest() {
     disk.set_capacity(total).unwrap();
     let dir = DataDir::open(disk, "db", None, 4096).unwrap();
     assert_eq!(dir.segments(), before);
+}
+
+#[test]
+fn simulated_capacity_charges_blocks_not_metadata_length_changes() {
+    let disk = SimDisk::new(7);
+    disk.set_capacity(1024).unwrap();
+    let file = disk.create(Path::new("db/file")).unwrap();
+    disk.write_at(file, 0, b"x").unwrap();
+    assert_eq!(disk.available_bytes(Path::new("db")).unwrap(), 512);
+    disk.write_at(file, 511, b"x").unwrap();
+    assert_eq!(disk.available_bytes(Path::new("db")).unwrap(), 512);
+    disk.write_at(file, 512, b"x").unwrap();
+    assert_eq!(disk.available_bytes(Path::new("db")).unwrap(), 0);
+    assert!(matches!(
+        disk.write_at(file, 1024, b"x"),
+        Err(Error::Io(std::io::ErrorKind::StorageFull, _))
+    ));
+    assert_eq!(disk.len(file).unwrap(), 513);
+    disk.set_len(file, 512).unwrap();
+    assert_eq!(disk.available_bytes(Path::new("db")).unwrap(), 512);
 }

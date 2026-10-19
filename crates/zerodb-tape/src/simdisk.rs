@@ -156,12 +156,18 @@ fn io_error(kind: ErrorKind, message: &str) -> Error {
     Error::Io(kind, message.into())
 }
 
+const ALLOCATION_UNIT: u64 = 512;
+
+fn allocated_bytes(len: usize) -> u64 {
+    (len as u64).div_ceil(ALLOCATION_UNIT).saturating_mul(ALLOCATION_UNIT)
+}
+
 impl State {
     fn available(&self) -> u64 {
         let used = self
             .files
             .values()
-            .fold(0u64, |used, file| used.saturating_add(file.visible.len() as u64));
+            .fold(0u64, |used, file| used.saturating_add(allocated_bytes(file.visible.len())));
         self.capacity.saturating_sub(used)
     }
 
@@ -222,6 +228,7 @@ impl State {
 /// Paths are logical names. Parent directories exist implicitly.
 /// Clones share live state. A crash returns an independent image without locks.
 /// Syncing either side of a cross-directory rename persists both directories.
+/// Capacity charges file lengths rounded to 512-byte allocation units.
 #[derive(Clone, Debug)]
 pub struct SimDisk {
     state: Arc<Mutex<State>>,
@@ -403,18 +410,15 @@ impl Io for SimDisk {
 
     fn write_at(&self, file: FileId, off: u64, data: &[u8]) -> Result<()> {
         let offset = position(off)?;
-        let end = offset
+        offset
             .checked_add(data.len())
             .ok_or_else(|| io_error(ErrorKind::InvalidInput, "write offset overflow"))?;
         let mut state = lock(&self.state)?;
         let len = state.file(file)?.visible.len();
-        let growth = end.saturating_sub(len);
-        let free = usize::try_from(state.available()).unwrap_or(usize::MAX);
-        let capacity_count = if growth > free {
-            len.saturating_add(free).saturating_sub(offset).min(data.len())
-        } else {
-            data.len()
-        };
+        let free = state.available() / ALLOCATION_UNIT * ALLOCATION_UNIT;
+        let limit =
+            usize::try_from(allocated_bytes(len).saturating_add(free)).unwrap_or(usize::MAX);
+        let capacity_count = limit.saturating_sub(offset).min(data.len());
         let count = state.space.map_or(capacity_count, |left| left.min(capacity_count));
         if let Some(left) = &mut state.space {
             *left -= count;
@@ -451,7 +455,7 @@ impl Io for SimDisk {
         let len = position(len)?;
         let mut state = lock(&self.state)?;
         let old = state.file(file)?.visible.len();
-        if len.saturating_sub(old) as u64 > state.available() {
+        if allocated_bytes(len).saturating_sub(allocated_bytes(old)) > state.available() {
             return Err(io_error(ErrorKind::StorageFull, "allocation exceeds capacity"));
         }
         state.file(file)?.write(Write::Resize(len));

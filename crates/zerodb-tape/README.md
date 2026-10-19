@@ -169,6 +169,12 @@ Both backends return sorted full paths from directory listings.
 `StdIo` uses real files. `SimDisk` uses logical paths.
 `SimClock` advances manually. `SystemClock` can move backwards.
 
+`StdIo::allocate` reserves blocks through rustix on Linux and macOS, then exposes the requested file length.
+On macOS, rustix tries contiguous `F_PREALLOCATE`, then `F_ALLOCATEALL`, and calls `ftruncate`.
+Zero lengths skip preallocation. Other platforms fall back to `set_len`.
+Preallocation does not guarantee later writes on APFS or btrfs. The free-space floor remains the guard.
+`SimDisk` charges capacity in 512-byte allocation units, including metadata files.
+
 `SimDisk::crash()` returns an independent image without changing the original.
 The same seed and operations produce the same image.
 Synced bytes and directory entries survive. Unsynced sectors can disappear, reorder or retain only a prefix.

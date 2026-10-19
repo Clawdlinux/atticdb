@@ -100,7 +100,7 @@ Arbiter disposition: APPROVED once D58 to D61 landed, with carry items listed in
 | D68 | Facts scoped per tenant, prefixes for agent-local keys | Avoids split-brain facts between agents |
 | D69 | Forget is "hide, not erase" with an LSN cutoff | Evidence asks to stop recall, not forensic erase. Honest naming |
 | D70 | Markdown import deferred | Direct fixes cover the evidence |
-| D71 | `rustix =1.1.2` in zerodb-tape, defaults disabled, features `fs` and `std` | Replaces D34. `fs` provides statvfs and Linux fallocate. `std` supports file handles and error conversion. No safe macOS preallocation wrapper exists in this version. macOS uses set_len |
+| D71 | `rustix =1.1.2` in zerodb-tape, defaults disabled, features `fs` and `std` | Replaces D34. `fs` provides statvfs and safe Linux and macOS fallocate. `std` supports file handles and error conversion. On macOS, fallocate tries contiguous F_PREALLOCATE, then F_ALLOCATEALL, and calls ftruncate. Other platforms use set_len |
 | D72 | Build in steps S1 to S6, each with two independent reviews and real use | Avoid designing ahead of evidence |
 | D73 | Operator truncation accepts 0 or a whole transaction boundary. Interior cuts name both nearest boundaries and fail. | I2 forbids partial transactions. Never round silently. |
 

@@ -153,16 +153,21 @@ impl Io for StdIo {
         Ok(lock(self.file(file)?.as_ref())?.set_len(n)?)
     }
 
-    /// Linux reserves blocks with `fallocate`. Other platforms use `set_len`.
+    /// Linux and macOS reserve blocks with rustix `fallocate`. Other platforms use `set_len`.
     ///
-    /// rustix 1.1.2 has no safe macOS `F_PREALLOCATE` wrapper. That fallback creates sparse files.
+    /// On macOS, rustix tries contiguous `F_PREALLOCATE`, then noncontiguous allocation, then calls `ftruncate`.
+    /// Zero lengths use `set_len` without preallocation.
     /// APFS and btrfs can need extra space after preallocation. The writer's floor remains the guard.
     fn allocate(&self, file: FileId, len: u64) -> Result<()> {
         let file = self.file(file)?;
         let file = lock(&file)?;
-        #[cfg(target_os = "linux")]
-        rustix::fs::fallocate(&*file, rustix::fs::FallocateFlags::empty(), 0, len)
-            .map_err(std::io::Error::from)?;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if len != 0 {
+            rustix::fs::fallocate(&*file, rustix::fs::FallocateFlags::empty(), 0, len)
+                .map_err(std::io::Error::from)?;
+            #[cfg(target_os = "macos")]
+            return Ok(());
+        }
         Ok(file.set_len(len)?)
     }
 
