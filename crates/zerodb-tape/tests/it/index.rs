@@ -1,5 +1,3 @@
-#![allow(clippy::unwrap_used)]
-
 use std::sync::Arc;
 use zerodb_tape::sim::{PreparedBatch, SimClock, WriteRequest, WriterCore};
 use zerodb_tape::{Durability, Kind, RecordInput, SimDisk, TapeOptions};

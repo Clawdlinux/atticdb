@@ -324,6 +324,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "10,000 filesystem installs; run the slow-tests CI job"]
     fn ten_thousand_atomic_installs_release_open_handles() {
         let dir = std::env::current_dir()
             .unwrap()

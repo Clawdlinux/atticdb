@@ -1,85 +1,10 @@
-#![allow(clippy::unwrap_used)]
-
-use std::sync::{Arc, Barrier, Mutex};
-use zerodb_tape::sim::{SimClock, WriteRequest, WriterCore};
+use crate::support::hooks_fixtures::*;
+use std::sync::{Arc, Barrier};
+use zerodb_tape::sim::{SimClock, WriterCore};
 use zerodb_tape::{
-    Committed, CommittedRecord, Durability, Error, Kind, Outcome, Prepare, PreparedBatch,
-    RecordInput, Result, SimDisk, StateMachine, Tape, TapeOptions, WriteError,
+    Committed, CommittedRecord, Durability, Error, Kind, Outcome, Prepare, PreparedBatch, Result,
+    SimDisk, StateMachine, Tape, TapeOptions,
 };
-
-#[derive(Debug, Default)]
-struct Log {
-    published: Vec<CommittedRecord>,
-    replayed: Vec<CommittedRecord>,
-    prepares: usize,
-    threads: Vec<std::thread::ThreadId>,
-}
-
-#[derive(Debug, Default)]
-struct Machine {
-    log: Arc<Mutex<Log>>,
-    seq: u64,
-    fail_replay: bool,
-}
-
-fn cached() -> Committed {
-    Committed::Durable { txn: 77, first_lsn: 88, last_lsn: 88, reply: Vec::new() }
-}
-
-impl StateMachine for Machine {
-    fn prepare(&mut self, batch: &mut PreparedBatch) -> Prepare {
-        let mut log = self.log.lock().unwrap();
-        log.prepares += 1;
-        log.threads.push(std::thread::current().id());
-        match batch.records().next().unwrap().content.as_slice() {
-            b"reject" => {
-                return Prepare::Reject(WriteError {
-                    kind: Error::InvalidFrame("rejected".into()),
-                    outcome: Outcome::NotCommitted,
-                });
-            }
-            b"reply" => return Prepare::Reply(cached()),
-            _ => {}
-        }
-        for record in batch.records_mut() {
-            self.seq += 1;
-            record.content = self.seq.to_le_bytes().to_vec();
-        }
-        Prepare::Write
-    }
-
-    fn publish(&mut self, committed: &[CommittedRecord]) {
-        self.log.lock().unwrap().published.extend_from_slice(committed);
-    }
-
-    fn replay(&mut self, record: &CommittedRecord) -> Result<()> {
-        if self.fail_replay {
-            return Err(Error::Configuration("replay failed".into()));
-        }
-        self.seq = u64::from_le_bytes(record.payload.as_ref().try_into().unwrap());
-        self.log.lock().unwrap().replayed.push(record.clone());
-        Ok(())
-    }
-}
-
-fn input(kind: Kind, content: &[u8]) -> RecordInput {
-    RecordInput { kind, tenant_id: 7, content: content.to_vec() }
-}
-
-fn options() -> TapeOptions {
-    TapeOptions { segment_size: 512, ..TapeOptions::default() }
-}
-
-fn enqueue<S: StateMachine>(
-    core: &mut WriterCore<S>,
-    kind: Kind,
-    mode: Durability,
-) -> std::sync::mpsc::Receiver<zerodb_tape::WriteResult> {
-    let batch = PreparedBatch::new(vec![input(kind, &[0; 8])], mode).unwrap();
-    let (request, reply) = WriteRequest::new(batch);
-    core.enqueue(request);
-    reply
-}
 
 #[test]
 fn writer_assigns_dense_sequences_and_publishes_before_reply_under_eight_threads() {
@@ -418,4 +343,73 @@ fn scan_reports_corruption_and_stops_after_the_bad_frame() {
     assert_eq!(scan.next().unwrap().unwrap().lsn, 1);
     assert!(matches!(scan.next().unwrap(), Err(Error::CorruptionDetected { lsn: 2, .. })));
     assert!(scan.next().is_none());
+}
+
+mod retries {
+    use std::sync::Arc;
+    use zerodb_tape::sim::{SimClock, WriterCore};
+    use zerodb_tape::{Error, Outcome, SimDisk, TapeOptions};
+
+    use crate::support::retry_fixtures::*;
+
+    #[test]
+    fn grouped_retries_share_sync_publication_and_partial_write_outcomes() {
+        for (case, partial, fail_sync) in [
+            ("complete group", false, false),
+            ("complete group sync failure", false, true),
+            ("partial tail", true, false),
+            ("partial tail sync failure", true, true),
+        ] {
+            let disk = Arc::new(SimDisk::new(1));
+            let machine = Dedup::default();
+            let replies = machine.replies.clone();
+            let published = machine.published.clone();
+            let (mut core, _) = WriterCore::open_with(
+                machine,
+                disk.clone(),
+                Arc::new(SimClock::default()),
+                "db",
+                TapeOptions { segment_size: 2048, ..TapeOptions::default() },
+            )
+            .unwrap();
+            for _ in 0..2 {
+                let (request, reply) = request(b"original");
+                replies.lock().unwrap().push(reply);
+                core.enqueue(request);
+            }
+            let trailing_reply = if partial {
+                let (trailing, reply) = request(b"trailing");
+                core.enqueue(trailing);
+                disk.enospc_after_bytes(125).unwrap();
+                Some(reply)
+            } else {
+                None
+            };
+            if fail_sync {
+                disk.fail_next_sync().unwrap();
+            }
+            core.step();
+            for reply in replies.lock().unwrap().iter() {
+                let result = reply.recv().unwrap();
+                if fail_sync {
+                    let error = result.unwrap_err();
+                    if !partial {
+                        assert!(matches!(error.kind, Error::SyncFailed(_)), "{case}");
+                    }
+                    assert_eq!(error.outcome, Outcome::Unknown, "{case}");
+                } else {
+                    assert_eq!(result.unwrap(), original(), "{case}");
+                }
+            }
+            if let Some(reply) = trailing_reply {
+                assert!(reply.recv().unwrap().is_err(), "{case}");
+            }
+            assert_eq!(core.is_poisoned(), partial || fail_sync, "{case}");
+            assert_eq!(
+                published.lock().unwrap().as_slice(),
+                if fail_sync { &[][..] } else { &[1] },
+                "{case}",
+            );
+        }
+    }
 }

@@ -101,6 +101,18 @@ ZERODB_SIM_SEEDS=2000 cargo test -p zerodb-tape --release --features sim --test 
 ZERODB_SIM_SEEDS=2000 cargo test -p zerodb-core --release --features sim --test engine_sim
 ```
 
+See [TESTING.md](TESTING.md) before adding or changing coverage.
+Each crate has 1 integration binary in `tests/it/main.rs`.
+Behavior modules share fixtures through `tests/it/support.rs`.
+The `sim` and `engine_sim` targets keep their CI names.
+
+Run a behavior module with `cargo test -p zerodb-tape --test it recovery::`.
+Filesystem stress is opt-in. The separate `slow-tests` CI job runs it:
+
+```sh
+cargo test --workspace --release -- --ignored
+```
+
 ## License
 
 MIT OR Apache-2.0.

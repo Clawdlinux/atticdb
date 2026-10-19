@@ -1,31 +1,13 @@
-#![allow(clippy::unwrap_used)]
-mod support;
+use crate::support;
+use crate::support::engine_fixtures::*;
+use crate::support::TestDir;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 use std::time::Duration;
-use zerodb_core::{Engine, EngineOptions, ErrorKind, NewTurn, Outcome, Role, Scope, WindowQuery};
+use zerodb_core::{Engine, EngineOptions, ErrorKind, Outcome, WindowQuery};
 use zerodb_tape::sim::SimClock;
-use zerodb_tape::{Io, Kind, SimDisk, Tape, TapeOptions};
-
-fn scope(session: &str) -> Scope {
-    Scope { tenant: "tenant".into(), agent: "agent".into(), session: session.into() }
-}
-fn turn(value: u64) -> NewTurn {
-    NewTurn { role: Role::User, content: value.to_le_bytes().to_vec(), meta: vec![] }
-}
-fn options() -> EngineOptions {
-    EngineOptions {
-        tape: TapeOptions { segment_size: 64 * 1024, ..TapeOptions::default() },
-        checkpoint_interval: Duration::from_secs(3600),
-        checkpoint_bytes: u64::MAX,
-        ..EngineOptions::default()
-    }
-}
-fn open(disk: Arc<SimDisk>, opts: EngineOptions) -> Engine {
-    Engine::open_with(disk, Arc::new(SimClock::default()), "db", opts).unwrap()
-}
+use zerodb_tape::{Io, Kind, SimDisk, Tape};
 
 #[test]
 fn windows_are_dense_and_read_cost_depends_only_on_returned_turns() {
@@ -98,31 +80,92 @@ fn retries_conflicts_scope_isolation_and_replay() {
 
 #[test]
 fn tenant_ids_survive_reopen_and_limit_is_typed() {
-    let disk = Arc::new(SimDisk::new(3));
-    let opts = EngineOptions { max_tenants: 2, ..options() };
+    for (case, limit) in [("small configured limit", 2), ("default tenant limit", 10_000)] {
+        let disk = Arc::new(SimDisk::new(3));
+        let opts = EngineOptions { max_tenants: limit, ..options() };
+        let engine = open(disk.clone(), opts.clone());
+        let mut scopes = Vec::new();
+        for id in 1..=limit {
+            let mut tenant = scope("s");
+            if id > 1 {
+                tenant.tenant = format!("tenant-{id}");
+            }
+            let receipt = engine.append(&tenant, vec![turn(id as u64)], None).unwrap();
+            assert_eq!(receipt.seqs, vec![1], "{case}, tenant={id}");
+            scopes.push(tenant);
+        }
+        for (index, tenant) in scopes.iter().enumerate() {
+            let window = engine.window(tenant, WindowQuery::Last(1)).unwrap();
+            assert_eq!(
+                window[0].content,
+                (index as u64 + 1).to_le_bytes(),
+                "{case}, tenant={index}"
+            );
+        }
+        let mut overflow = scope("s");
+        overflow.tenant = "overflow".into();
+        let error = engine.append(&overflow, vec![turn(1)], None).unwrap_err();
+        assert!(matches!(error.kind, ErrorKind::ResourceExhausted("tenants")), "{case}");
+        assert_eq!(error.outcome, Outcome::NotCommitted, "{case}");
+        drop(engine);
+        let (tape, _) =
+            Tape::open(disk.clone(), Arc::new(SimClock::default()), "db", opts.tape.clone())
+                .unwrap();
+        let creates: Vec<_> = tape
+            .scan(0)
+            .map(|record| record.unwrap())
+            .filter(|record| record.kind == Kind::TenantCreate)
+            .collect();
+        assert_eq!(creates.len(), limit, "{case}");
+        for (index, record) in creates.iter().enumerate() {
+            assert_eq!(record.tenant_id as usize, index + 1, "{case}, tenant={index}");
+        }
+        assert_eq!(creates[0].payload.as_ref(), b"tenant", "{case}");
+        drop(tape);
+        let engine = open(disk.clone(), opts.clone());
+        engine.append(&scope("s"), vec![turn(2)], None).unwrap();
+        assert_eq!(engine.window(&scope("s"), WindowQuery::Last(2)).unwrap().len(), 2, "{case}");
+        assert_eq!(engine.metrics().unwrap().tenants, limit, "{case}");
+    }
+}
+
+#[test]
+fn dedup_scope_bounds_and_oldest_eviction_survive_the_public_api() {
+    let disk = Arc::new(SimDisk::new(40));
+    let opts = EngineOptions { dedup_per_tenant: 2, dedup_global: 3, ..options() };
     let engine = open(disk.clone(), opts.clone());
-    engine.append(&scope("s"), vec![turn(1)], None).unwrap();
-    let mut other = scope("s");
-    other.tenant = "other".into();
-    engine.append(&other, vec![turn(1)], None).unwrap();
-    other.tenant = "overflow".into();
-    let error = engine.append(&other, vec![turn(1)], None).unwrap_err();
-    assert!(matches!(error.kind, ErrorKind::ResourceExhausted("tenants")));
-    assert_eq!(error.outcome, Outcome::NotCommitted);
-    drop(engine);
-    let (tape, _) =
-        Tape::open(disk.clone(), Arc::new(SimClock::default()), "db", opts.tape.clone()).unwrap();
-    let creates: Vec<_> =
-        tape.scan(0).map(|r| r.unwrap()).filter(|r| r.kind == Kind::TenantCreate).collect();
-    assert_eq!(creates.len(), 2);
-    assert_eq!(creates[0].tenant_id, 1);
-    assert_eq!(creates[1].tenant_id, 2);
-    assert_eq!(creates[0].payload.as_ref(), b"tenant");
-    drop(tape);
-    let engine = open(disk, opts);
-    engine.append(&scope("s"), vec![turn(2)], None).unwrap();
-    assert_eq!(engine.window(&scope("s"), WindowQuery::Last(2)).unwrap().len(), 2);
-    assert_eq!(engine.metrics().unwrap().tenants, 2);
+    for (case, tenant, session, key, expected_seq, expected_entries) in [
+        ("first tenant", "first", "s", "k", 1, 1),
+        ("session scope", "first", "other", "k", 1, 2),
+        ("tenant scope", "second", "s", "k", 1, 3),
+        ("per-tenant oldest eviction", "first", "s", "new", 2, 3),
+        ("global oldest eviction", "third", "s", "k", 1, 3),
+        ("other tenant key survives", "second", "s", "k", 1, 3),
+        ("oldest session key was evicted", "first", "other", "k", 2, 3),
+    ] {
+        let mut scope = scope(session);
+        scope.tenant = tenant.into();
+        let before = engine.metrics().unwrap().durable_lsn;
+        let receipt = engine.append(&scope, vec![turn(1)], Some(key)).unwrap();
+        assert_eq!(receipt.seqs, vec![expected_seq], "{case}");
+        assert_eq!(engine.metrics().unwrap().dedup_entries, expected_entries, "{case}");
+        if case == "other tenant key survives" {
+            assert_eq!(engine.metrics().unwrap().durable_lsn, before, "{case}");
+        } else {
+            assert!(engine.metrics().unwrap().durable_lsn > before, "{case}");
+        }
+        if expected_entries == 3 {
+            assert_eq!(engine.metrics().unwrap().dedup_window_effective, 1, "{case}");
+        }
+        if case == "per-tenant oldest eviction" {
+            engine.checkpoint().unwrap();
+            let image = Arc::new(disk.crash().unwrap());
+            let fork = open(image, opts.clone());
+            let retry = fork.append(&scope, vec![turn(1)], Some("k")).unwrap();
+            assert_eq!(retry.seqs, vec![3], "{case}: the evicted key must write again");
+            assert!(fork.metrics().unwrap().durable_lsn > receipt.last_lsn, "{case}");
+        }
+    }
 }
 
 #[test]
@@ -593,25 +636,6 @@ fn checkpoints_advance_while_tiny_budget_writers_append_continuously() {
     }
 }
 
-struct TestDir(PathBuf);
-impl TestDir {
-    fn new() -> Self {
-        static ID: AtomicU64 = AtomicU64::new(0);
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target").join(format!(
-            "core-e2e-{}-{}",
-            std::process::id(),
-            ID.fetch_add(1, Ordering::SeqCst)
-        ));
-        std::fs::create_dir_all(&path).unwrap();
-        Self(path)
-    }
-}
-impl Drop for TestDir {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0).unwrap();
-    }
-}
-
 #[test]
 fn stdio_eight_threads_sixty_four_sessions_reopen_equals_oracle() {
     let dir = TestDir::new();
@@ -652,4 +676,30 @@ fn stdio_eight_threads_sixty_four_sessions_reopen_equals_oracle() {
         assert_eq!(window.iter().map(|t| (t.seq, t.content.clone())).collect::<Vec<_>>(), values);
     }
     drop(engine);
+}
+
+mod metrics {
+    use crate::support::engine_fixtures::*;
+    use std::sync::Arc;
+    use zerodb_core::EngineOptions;
+    use zerodb_tape::{SimDisk, TapeOptions};
+
+    #[test]
+    fn engine_metrics_expose_eviction_without_changing_the_index_budget() {
+        let opts = EngineOptions {
+            tape: TapeOptions { segment_size: 8192, lsn_index_bytes: 12 * 1024, ..options().tape },
+            ..options()
+        };
+        let engine = open(Arc::new(SimDisk::new(78)), opts);
+        assert_eq!(engine.metrics().unwrap().tape_index.page_evictions, 0);
+        let scope = scope("s");
+        for _ in 0..20 {
+            engine.append(&scope, vec![turn(u64::from_le_bytes([7; 8])); 64], None).unwrap();
+        }
+        let index = engine.metrics().unwrap().tape_index;
+        assert!(index.page_evictions > 0);
+        assert!(index.dirty_page_evictions > 0);
+        assert_eq!(index.budget_bytes, 12 * 1024);
+        assert!(index.resident_bytes <= index.budget_bytes);
+    }
 }

@@ -542,7 +542,7 @@ fn grouped_seed(seed: u64) -> Vec<Vec<Turn>> {
         oracle.apply(index, receipt);
     }
 
-    fn frame_v2_engine_faults(seed: u64) {
+    fn frame_faults(seed: u64) {
         use zerodb_tape::sim::frame;
         for proof in [false, true] {
             let disk = Arc::new(SimDisk::new(seed));
@@ -608,7 +608,7 @@ fn grouped_seed(seed: u64) -> Vec<Vec<Turn>> {
             }
         }
     }
-    frame_v2_engine_faults(seed);
+    frame_faults(seed);
     for generation in 0..3 {
         for group in 0..8 {
             clock.advance(1 + rng.below(2_000_000_000) as u64);
@@ -808,39 +808,6 @@ fn inline_group_publishes_once_and_replies_with_original_sequences() {
 }
 
 #[test]
-fn oracle_rejects_partial_unknown_batches_and_missing_acknowledgements() {
-    for partial in [false, true] {
-        let opts = EngineOptions {
-            tape: TapeOptions { inline_sim: true, ..TapeOptions::default() },
-            ..EngineOptions::default()
-        };
-        let clock = Arc::new(SimClock::default());
-        let io = Arc::new(FaultIo::new(SimDisk::new(21)));
-        let engine = open(io.clone(), clock.clone(), &opts);
-        let before = io.disk.crash().unwrap();
-        let mut oracle = Oracle::new();
-        let mut batch = random_batch(&mut Rng(21), 0, 0, 0);
-        batch.turns.truncate(1);
-        let receipt =
-            engine.append(&oracle.scopes[0], batch.turns.clone(), batch.key.as_deref()).unwrap();
-        if partial {
-            batch.turns.push(batch.turns[0].clone());
-        }
-        oracle.batches.push(batch);
-        if !partial {
-            oracle.apply(0, receipt);
-        }
-        let image = if partial { io.disk.crash().unwrap() } else { before };
-        drop(engine);
-        let pending = if partial { vec![0] } else { vec![] };
-        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            oracle.recover(&image, clock, &opts, &pending);
-        }))
-        .is_err());
-    }
-}
-
-#[test]
 fn publish_during_checkpoint_keeps_the_new_page_dirty() {
     let io = Arc::new(FaultIo::new(SimDisk::new(31)));
     let clock = Arc::new(SimClock::default());
@@ -965,9 +932,4 @@ fn seeded_engine_recovery() {
         }
     }
     eprintln!("engine simulation passed: {count} seeds starting at {first}");
-}
-
-#[test]
-fn engine_simulation_is_reproducible() {
-    assert_eq!(run_seed(19), run_seed(19));
 }

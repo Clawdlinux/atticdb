@@ -1,5 +1,4 @@
-#![allow(clippy::unwrap_used)]
-
+use crate::support::writer_fixtures::*;
 use std::sync::{Arc, Barrier};
 use zerodb_tape::sim::{PreparedBatch, SimClock, WriteRequest, WriterCore};
 use zerodb_tape::Error;
@@ -7,17 +6,9 @@ use zerodb_tape::{
     Committed, Durability, Kind, Outcome, RecordInput, SimDisk, Tape, TapeOptions as Options,
 };
 
-mod support;
+use crate::support;
 use std::sync::atomic::Ordering;
 use support::ObservedIo;
-
-fn record(kind: Kind) -> RecordInput {
-    RecordInput { kind, tenant_id: 1, content: b"hello".to_vec() }
-}
-
-fn prepared(mode: Durability) -> PreparedBatch {
-    PreparedBatch::new(vec![record(Kind::Turn)], mode).unwrap()
-}
 
 #[test]
 fn short_sessions_bound_rewrite_bytes_to_previous_session_writes() {
@@ -337,17 +328,24 @@ fn sync_failure_is_unknown_then_poisoned_reads_keep_working() {
     let (mut core, _) =
         WriterCore::open(disk.clone(), Arc::new(SimClock::new(0)), "db", Options::default())
             .unwrap();
-    let (request, committed) = WriteRequest::new(prepared(Durability::Durable));
-    core.enqueue(request);
-    core.step();
-    committed.recv().unwrap().unwrap();
+    for lsn in 1..=2 {
+        let (request, committed) = WriteRequest::new(prepared(Durability::Durable));
+        core.enqueue(request);
+        core.step();
+        committed.recv().unwrap().unwrap();
+        assert_eq!(core.durable_lsn(), lsn, "acknowledged lsn={lsn}");
+        for visible in 1..=lsn {
+            assert!(core.read(visible).unwrap().is_some(), "ack={lsn}, visible={visible}");
+        }
+    }
     disk.fail_next_sync().unwrap();
     let (request, failed) = WriteRequest::new(prepared(Durability::Durable));
     core.enqueue(request);
     core.step();
     assert_eq!(failed.recv().unwrap().unwrap_err().outcome, Outcome::Unknown);
     assert!(core.read(1).unwrap().is_some());
-    assert!(core.read(2).unwrap().is_none());
+    assert!(core.read(2).unwrap().is_some());
+    assert!(core.read(3).unwrap().is_none());
     let (request, later) = WriteRequest::new(prepared(Durability::Durable));
     core.enqueue(request);
     core.step();
@@ -357,35 +355,69 @@ fn sync_failure_is_unknown_then_poisoned_reads_keep_working() {
 }
 
 #[test]
-fn durable_records_publish_before_acknowledgement() {
-    let disk = Arc::new(SimDisk::new(0));
-    let (mut core, _) =
-        WriterCore::open(disk, Arc::new(SimClock::new(0)), "db", Options::default()).unwrap();
-    let (request, reply) = WriteRequest::new(prepared(Durability::Durable));
-    core.enqueue(request);
-    core.step();
-    reply.recv().unwrap().unwrap();
-    assert!(core.read(1).unwrap().is_some());
-    let (request, reply) = WriteRequest::new(prepared(Durability::Durable));
-    core.enqueue(request);
-    core.step();
-    reply.recv().unwrap().unwrap();
-    assert!(core.read(1).unwrap().is_some());
+fn invalid_batches_never_enter_the_writer() {
+    for (case, batch, oversized) in [
+        ("too many records", vec![record(Kind::Turn); 1025], true),
+        (
+            "frame exceeds byte limit",
+            vec![RecordInput { content: vec![0; 4 * 1024 * 1024], ..record(Kind::Turn) }],
+            true,
+        ),
+        ("caller supplied footer", vec![record(Kind::Footer)], false),
+        ("empty batch", vec![], false),
+    ] {
+        let error = PreparedBatch::new(batch, Durability::Durable).unwrap_err();
+        assert_eq!(error.outcome, Outcome::NotCommitted, "{case}");
+        if oversized {
+            assert!(matches!(error.kind, Error::BatchTooLarge), "{case}");
+        }
+    }
 }
 
 #[test]
-fn invalid_batches_never_enter_the_writer() {
-    for (batch, mode) in [
-        (vec![record(Kind::Turn); 1025], Durability::Durable),
-        (
-            vec![RecordInput { content: vec![0; 4 * 1024 * 1024], ..record(Kind::Turn) }],
-            Durability::Durable,
-        ),
-        (vec![record(Kind::Footer)], Durability::Durable),
-        (vec![], Durability::Durable),
+fn superblock_installation_obeys_clock_byte_and_roll_thresholds() {
+    use zerodb_tape::sim::DataDir;
+
+    for (case, segment_size, budget, count) in [
+        ("clock threshold", 4096, 256 * 1024 * 1024, 1),
+        ("byte threshold", 4096, 300, 3),
+        ("segment roll", 200, 256 * 1024 * 1024, 2),
     ] {
-        let error = PreparedBatch::new(batch, mode).unwrap_err();
-        assert_eq!(error.outcome, Outcome::NotCommitted);
+        let io = Arc::new(ObservedIo::new(35));
+        let clock = Arc::new(SimClock::default());
+        let opts = Options { segment_size, superblock_bytes: budget, ..Options::default() };
+        let (mut core, _) = WriterCore::open(io.clone(), clock.clone(), "db", opts).unwrap();
+        io.events.lock().unwrap().clear();
+        let boundary = || {
+            DataDir::open(Arc::new(io.disk.crash().unwrap()), "db", None, segment_size)
+                .unwrap()
+                .superblock()
+        };
+        for lsn in 1..=count {
+            let (request, reply) = WriteRequest::new(prepared(Durability::Durable));
+            core.enqueue(request);
+            core.step();
+            reply.recv().unwrap().unwrap();
+            core.update_superblock().unwrap();
+            let expected = if case != "clock threshold" && lsn == count { count } else { 0 };
+            assert_eq!(boundary(), expected, "{case}, lsn={lsn}");
+        }
+        if case == "clock threshold" {
+            clock.advance(29_999_999_999);
+            core.update_superblock().unwrap();
+            assert_eq!(boundary(), 0, "{case}, before threshold");
+            clock.advance(1);
+            core.update_superblock().unwrap();
+            assert_eq!(boundary(), 1, "{case}, at threshold");
+        }
+        let installs = io
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| event.as_str() == "rename db/SUPERBLOCK.tmp db/SUPERBLOCK")
+            .count();
+        assert_eq!(installs, 1, "{case}");
     }
 }
 
@@ -775,5 +807,164 @@ fn segment_size_mismatch_is_rejected_without_mutation() {
         assert!(io.handles.lock().unwrap().is_empty());
         let (_, report) = WriterCore::open(io, clock, "db", opts).unwrap();
         assert_eq!(report.records, 1);
+    }
+}
+
+#[test]
+fn commit_time_survives_a_restart_with_a_backwards_clock() {
+    use std::sync::Arc;
+    use zerodb_tape::sim::{PreparedBatch, SimClock, WriteRequest, WriterCore};
+    use zerodb_tape::{Durability, RecordInput, SimDisk, TapeOptions};
+    let disk = Arc::new(SimDisk::new(1));
+    let opts = TapeOptions { segment_size: 1024, ..TapeOptions::default() };
+    let mut previous = 0;
+    for clock in [1000, 1, 0] {
+        let (mut core, _) =
+            WriterCore::open(disk.clone(), Arc::new(SimClock::new(clock)), "db", opts.clone())
+                .unwrap();
+        let batch = PreparedBatch::new(
+            vec![RecordInput { kind: Kind::Turn, tenant_id: 1, content: vec![] }],
+            Durability::Durable,
+        )
+        .unwrap();
+        let (request, reply) = WriteRequest::new(batch);
+        core.enqueue(request);
+        core.step();
+        reply.recv().unwrap().unwrap();
+        let time = core.read(core.durable_lsn()).unwrap().unwrap().header.commit_time_ns;
+        assert!(time > previous);
+        previous = time;
+    }
+}
+
+mod public_api {
+    use std::sync::Arc;
+    use zerodb_tape::{
+        Clock, Committed, Digest, Durability, FileId, Frame, Header, Io, Kind, LockGuard, Outcome,
+        RecordInput, RecoveryReport, SimDisk, StdIo, SystemClock, Tape, TapeOptions, WriteError,
+        WriteResult,
+    };
+
+    #[test]
+    fn root_api_supports_append_read_and_custom_backends() {
+        let disk = Arc::new(SimDisk::new(0));
+        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+        let io: Arc<dyn Io> = disk;
+        let _: StdIo = StdIo::new();
+        let _: FileId = FileId(1);
+        let _: Digest = [0; 32];
+        let _: Option<Header> = None;
+        let _: Option<Frame> = None;
+        let _: Option<RecoveryReport> = None;
+        let _: WriteResult =
+            Err(WriteError { kind: zerodb_tape::Error::Poisoned, outcome: Outcome::NotCommitted });
+        let _guard = LockGuard::new(|| {});
+        let (tape, _) = Tape::open(io, clock, "db", TapeOptions::default()).unwrap();
+        let record = RecordInput { tenant_id: 1, kind: Kind::Turn, content: b"public".to_vec() };
+        let Committed::Durable { first_lsn, .. } =
+            tape.append(vec![record], Durability::Durable).unwrap();
+        assert_eq!(&tape.read(first_lsn).unwrap().unwrap().payload, b"public");
+    }
+}
+
+mod tenants {
+    use std::sync::Arc;
+    use zerodb_tape::sim::SimClock;
+    use zerodb_tape::{Durability, Kind, RecordInput, SimDisk, Tape, TapeOptions};
+
+    #[test]
+    fn tenant_create_is_decodable_unchained_and_atomic_with_turns() {
+        let disk = Arc::new(SimDisk::new(5));
+        let opts = TapeOptions { segment_size: 4096, ..TapeOptions::default() };
+        let (tape, _) =
+            Tape::open(disk.clone(), Arc::new(SimClock::default()), "db", opts.clone()).unwrap();
+        for _ in 0..2 {
+            tape.append(
+                vec![
+                    RecordInput {
+                        kind: Kind::TenantCreate,
+                        tenant_id: 1,
+                        content: b"tenant".to_vec(),
+                    },
+                    RecordInput { kind: Kind::Turn, tenant_id: 1, content: b"turn".to_vec() },
+                ],
+                Durability::Durable,
+            )
+            .unwrap();
+        }
+        let tenant = tape.read(3).unwrap().unwrap();
+        assert_eq!(tenant.header.kind, Kind::TenantCreate);
+        drop(tape);
+        let (tape, _) = Tape::open(disk, Arc::new(SimClock::default()), "db", opts).unwrap();
+        assert_eq!(tape.scan(0).count(), 4);
+    }
+}
+
+mod concurrency {
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Barrier};
+    use zerodb_tape::{
+        Committed, Durability, Kind, RecordInput, StdIo, SystemClock, Tape, TapeOptions as Options,
+    };
+
+    #[test]
+    #[ignore = "20,000 filesystem syncs; run the slow-tests CI job"]
+    fn concurrent_durable_appends_survive_reopen() {
+        let path =
+            std::env::current_dir().unwrap().join(format!("target/stress-{}", std::process::id()));
+        std::fs::create_dir_all(&path).unwrap();
+        let io = Arc::new(StdIo::new());
+        let clock = Arc::new(SystemClock);
+        let (tape, _) = Tape::open(io.clone(), clock.clone(), &path, Options::default()).unwrap();
+        let barrier = Barrier::new(16);
+        let acknowledged = std::thread::scope(|scope| {
+            let threads: Vec<_> = (0..16u32)
+                .map(|tenant| {
+                    let tape = &tape;
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        let mut rng = u64::from(tenant) + 1;
+                        barrier.wait();
+                        (0..1250u32)
+                            .map(|sequence| {
+                                rng ^= rng << 13;
+                                rng ^= rng >> 7;
+                                rng ^= rng << 17;
+                                let mut content = vec![rng as u8; (rng % 8193) as usize];
+                                let prefix = sequence.to_le_bytes();
+                                let count = content.len().min(prefix.len());
+                                content[..count].copy_from_slice(&prefix[..count]);
+                                let record = RecordInput {
+                                    tenant_id: tenant,
+                                    kind: Kind::Turn,
+                                    content: content.clone(),
+                                };
+                                let ack = tape.append(vec![record], Durability::Durable).unwrap();
+                                let Committed::Durable { first_lsn, last_lsn, .. } = ack;
+                                assert_eq!(first_lsn, last_lsn);
+                                (first_lsn, tenant, content)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            threads.into_iter().flat_map(|thread| thread.join().unwrap()).collect::<Vec<_>>()
+        });
+        assert_eq!(acknowledged.len(), 20_000);
+        assert_eq!(tape.durable_lsn(), 20_000);
+        drop(tape);
+        let (tape, report) = Tape::open(io, clock, &path, Options::default()).unwrap();
+        assert_eq!(report.records, 20_000);
+        let mut unique = BTreeMap::new();
+        for (lsn, tenant, content) in acknowledged {
+            assert!(unique.insert(lsn, ()).is_none());
+            let frame = tape.read(lsn).unwrap().unwrap();
+            assert_eq!(frame.header.lsn, lsn);
+            assert_eq!(frame.header.tenant_id, tenant);
+            assert_eq!(frame.header.kind, Kind::Turn);
+            assert_eq!(frame.payload, content);
+        }
+        drop(tape);
+        std::fs::remove_dir_all(path).unwrap();
     }
 }

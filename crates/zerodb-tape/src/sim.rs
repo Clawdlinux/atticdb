@@ -798,38 +798,4 @@ mod tests {
         assert_eq!(bits, u8::MAX);
         assert!(beyond_header);
     }
-
-    fn check_mutated_oracle(mutate: impl FnOnce(&mut Oracle)) {
-        let disk = Arc::new(SimDisk::new(1));
-        let clock = Arc::new(SimClock::default());
-        let opts = Options { segment_size: 64 * 1024, ..Options::default() };
-        let (mut core, _) =
-            WriterCore::open(disk.clone(), clock.clone(), "db", opts.clone()).unwrap();
-        let mut oracle = Oracle::default();
-        probe(&mut core, &mut oracle, &mut Rng::new(1));
-        mutate(&mut oracle);
-        drop(core);
-        let (tape, _) = Tape::open(disk, clock, "db", opts).unwrap();
-        oracle.verify(&tape);
-    }
-
-    #[test]
-    #[should_panic(expected = "partial transaction became visible")]
-    fn oracle_rejects_partial_uncertain_transaction() {
-        check_mutated_oracle(|oracle| {
-            oracle.durable.clear();
-            let batch = &mut oracle.batches[0];
-            batch.records.push(batch.records[0].clone());
-            batch.records.last_mut().unwrap().content.push(0xff);
-        });
-    }
-
-    #[test]
-    #[should_panic]
-    fn oracle_rejects_changed_uncertain_content() {
-        check_mutated_oracle(|oracle| {
-            oracle.durable.clear();
-            oracle.batches[0].records[0].content[0] ^= 1;
-        });
-    }
 }

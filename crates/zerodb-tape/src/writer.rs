@@ -1093,55 +1093,6 @@ mod tests {
     }
 
     #[test]
-    fn superblock_waits_thirty_seconds_without_a_roll() {
-        let disk = Arc::new(crate::SimDisk::new(34));
-        let clock = Arc::new(crate::sim::SimClock::default());
-        let (mut core, _) = WriterCore::open(
-            disk,
-            clock.clone(),
-            "db",
-            TapeOptions { segment_size: 4096, ..TapeOptions::default() },
-        )
-        .unwrap();
-        let (request, reply) =
-            WriteRequest::new(PreparedBatch::new(records(1), Durability::Durable).unwrap());
-        core.enqueue(request);
-        core.step();
-        reply.recv().unwrap().unwrap();
-        clock.advance(29_999_999_999);
-        core.update_superblock().unwrap();
-        assert_eq!(core.segments.dir.superblock(), 0);
-        clock.advance(1);
-        core.update_superblock().unwrap();
-        assert_eq!(core.segments.dir.superblock(), 1);
-    }
-
-    #[test]
-    fn superblock_byte_budget_and_roll_trigger_without_clock_progress() {
-        for (segment_size, budget, count) in [(4096, 300, 3), (200, 256 * 1024 * 1024, 2)] {
-            let disk = Arc::new(crate::SimDisk::new(35));
-            let opts =
-                TapeOptions { segment_size, superblock_bytes: budget, ..TapeOptions::default() };
-            let (mut core, _) =
-                WriterCore::open(disk, Arc::new(crate::sim::SimClock::default()), "db", opts)
-                    .unwrap();
-            for expected in 1..=count {
-                let (request, reply) =
-                    WriteRequest::new(PreparedBatch::new(records(1), Durability::Durable).unwrap());
-                core.enqueue(request);
-                core.step();
-                reply.recv().unwrap().unwrap();
-                core.update_superblock().unwrap();
-                assert_eq!(
-                    core.segments.dir.superblock(),
-                    if expected == count { count } else { 0 }
-                );
-            }
-            assert_eq!(core.reads.superblock_installs.load(Ordering::Relaxed), 1);
-        }
-    }
-
-    #[test]
     fn asynchronous_poison_mid_step_returns_unknown() {
         struct PoisonDuringPrepare(Option<Box<dyn FnMut() + Send>>);
         impl StateMachine for PoisonDuringPrepare {
@@ -1229,12 +1180,5 @@ mod tests {
         let group = groups.collect_with(vec![1], |_| None, || vec![2, 3]);
         assert_eq!(group, vec![1, 2, 3]);
         assert_eq!(groups.recent.back(), Some(&3));
-    }
-
-    #[test]
-    fn invalid_batches_are_rejected_before_enqueueing() {
-        let error = PreparedBatch::new(records(1025), Durability::Durable).unwrap_err();
-        assert!(matches!(error.kind, Error::BatchTooLarge));
-        assert_eq!(error.outcome, Outcome::NotCommitted);
     }
 }

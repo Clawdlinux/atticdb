@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::Mutex;
 use zerodb_tape::{Error, FileId, Io, LockGuard, Result, SimDisk};
@@ -103,5 +103,80 @@ impl Io for ProbeIo {
     }
     fn try_lock_exclusive(&self, p: &Path) -> Result<LockGuard> {
         self.disk.try_lock_exclusive(p)
+    }
+}
+
+pub(crate) mod engine_fixtures {
+
+    use std::sync::Arc;
+    use std::time::Duration;
+    use zerodb_core::{Engine, EngineOptions, NewTurn, Role, Scope};
+    use zerodb_tape::sim::SimClock;
+    use zerodb_tape::{SimDisk, TapeOptions};
+
+    pub(crate) fn scope(session: &str) -> Scope {
+        Scope { tenant: "tenant".into(), agent: "agent".into(), session: session.into() }
+    }
+
+    pub(crate) fn turn(value: u64) -> NewTurn {
+        NewTurn { role: Role::User, content: value.to_le_bytes().to_vec(), meta: vec![] }
+    }
+
+    pub(crate) fn options() -> EngineOptions {
+        EngineOptions {
+            tape: TapeOptions { segment_size: 64 * 1024, ..TapeOptions::default() },
+            checkpoint_interval: Duration::from_secs(3600),
+            checkpoint_bytes: u64::MAX,
+            ..EngineOptions::default()
+        }
+    }
+
+    pub(crate) fn open(disk: Arc<SimDisk>, opts: EngineOptions) -> Engine {
+        Engine::open_with(disk, Arc::new(SimClock::default()), "db", opts).unwrap()
+    }
+}
+
+pub(crate) mod payloads_fixtures {
+
+    use zerodb_core::fact;
+
+    pub(crate) fn fact() -> fact::Fact {
+        fact::Fact {
+            key: String::new(),
+            content: vec![],
+            meta: vec![],
+            agent: String::new(),
+            source_refs: vec![],
+            idem_key: None,
+            tombstone: false,
+        }
+    }
+}
+
+pub(crate) mod turn_fixtures {
+
+    use zerodb_core::turn::{NewTurn, Role};
+
+    pub(crate) fn turn() -> NewTurn {
+        NewTurn { role: Role::User, content: b"hello".to_vec(), meta: vec![] }
+    }
+}
+
+pub(crate) struct TestDir(pub(crate) PathBuf);
+impl TestDir {
+    pub(crate) fn new() -> Self {
+        static ID: AtomicU64 = AtomicU64::new(0);
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target").join(format!(
+            "core-e2e-{}-{}",
+            std::process::id(),
+            ID.fetch_add(1, Ordering::SeqCst)
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        Self(path)
+    }
+}
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).unwrap();
     }
 }

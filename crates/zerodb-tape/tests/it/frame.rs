@@ -1,35 +1,9 @@
-#![allow(clippy::unwrap_used)]
-
+use crate::support::frame_fixtures::*;
 use proptest::prelude::*;
 use zerodb_tape::sim::frame::{
-    self, DecodeError, Footer, Frame, Header, Kind, HEADER_LEN, MAX_FRAME_SIZE, VERSION,
+    self, DecodeError, Footer, Kind, HEADER_LEN, MAX_FRAME_SIZE, VERSION,
 };
 use zerodb_tape::Error;
-
-fn frame(kind: Kind, content: &[u8]) -> Frame {
-    Frame {
-        header: Header {
-            kind,
-            version: VERSION,
-            flags: 0,
-            txn: 11,
-            lsn: 22,
-            commit_time_ns: 33,
-            tenant_id: 44,
-        },
-        payload: content.to_vec(),
-    }
-}
-fn encode(frame: &Frame) -> zerodb_tape::Result<Vec<u8>> {
-    frame::encode(frame, 7, 128)
-}
-fn decode(bytes: &[u8]) -> Result<(Frame, usize), DecodeError> {
-    frame::decode(bytes, 7, 128)
-}
-fn refresh_crc(bytes: &mut [u8]) {
-    let crc = frame::checksum(7, 128, &bytes[4..]);
-    bytes[..4].copy_from_slice(&crc.to_le_bytes());
-}
 
 proptest! {
     #[test]
@@ -74,6 +48,29 @@ fn fixed_header_layout_is_little_endian() {
     assert_eq!(&bytes[28..36], &33u64.to_le_bytes());
     assert_eq!(&bytes[36..40], &44u32.to_le_bytes());
     assert_eq!(&bytes[40..], &original.payload);
+    assert_eq!(VERSION, 2);
+    assert_eq!(bytes.len(), HEADER_LEN + original.payload.len());
+    assert_eq!(decode(&bytes).unwrap().0, original);
+    for (case, segment, offset) in [("different segment", 8, 128), ("different offset", 7, 129)] {
+        assert_eq!(frame::decode(&bytes, segment, offset), Err(DecodeError::BadCrc), "{case}");
+    }
+}
+
+#[test]
+fn footer_layout_and_payload_lengths_follow_the_wire_contract() {
+    let footer =
+        Footer { txn: 7, first_lsn: 11, synced_lsn: 10, record_count: 3, records_crc: 0x12345678 };
+    let payload = footer.encode();
+    assert_eq!(payload.len(), 32);
+    assert_eq!(&payload[..8], &7u64.to_le_bytes());
+    assert_eq!(&payload[8..16], &11u64.to_le_bytes());
+    assert_eq!(&payload[16..24], &10u64.to_le_bytes());
+    assert_eq!(&payload[24..28], &3u32.to_le_bytes());
+    assert_eq!(&payload[28..], &0x12345678u32.to_le_bytes());
+    assert_eq!(Footer::decode(&payload).unwrap(), footer);
+    for (case, len) in [("short footer", 31), ("long footer", 33)] {
+        assert!(Footer::decode(&vec![0; len]).is_err(), "{case}");
+    }
 }
 
 #[test]
@@ -136,6 +133,61 @@ fn maximum_frame_size_and_invalid_metadata_are_enforced() {
     invalid.header.flags = 0;
     invalid.header.version = 1;
     assert!(matches!(encode(&invalid), Err(Error::InvalidFrame(_))));
-    assert!(Footer::decode(&[0; 31]).is_err());
-    assert!(Footer::decode(&[0; 33]).is_err());
+}
+
+mod wire {
+    use zerodb_tape::sim::frame::{self, DecodeError};
+
+    #[test]
+    fn legacy_checksum_reports_an_unsupported_format() {
+        let mut bytes = vec![0; 120];
+        bytes[4..8].copy_from_slice(&120u32.to_le_bytes());
+        bytes[8] = 1;
+        bytes[9] = 1;
+        let crc = zerodb_tape::sim::crc32c(&bytes[4..]);
+        bytes[..4].copy_from_slice(&crc.to_le_bytes());
+        assert_eq!(frame::decode(&bytes, 1, 0), Err(DecodeError::UnknownVersion));
+    }
+}
+
+mod checksum {
+    use proptest::prelude::*;
+    use zerodb_tape::sim::{crc32c, Crc32c};
+
+    #[test]
+    fn known_vectors() {
+        assert_eq!(crc32c(b"123456789"), 0xE306_9283);
+        assert_eq!(crc32c(b""), 0);
+        assert_eq!(crc32c(&[0; 32]), 0x8A91_36AA);
+    }
+
+    proptest! {
+        #[test]
+        fn incremental_matches_one_shot(
+            data in prop::collection::vec(any::<u8>(), 0..8192),
+            splits in prop::collection::vec(any::<usize>(), 0..64),
+        ) {
+            let mut checksum = Crc32c::new();
+            let mut start = 0;
+            for split in splits {
+                let end = start + split % (data.len() - start + 1);
+                checksum.update(&data[start..end]);
+                start = end;
+            }
+            checksum.update(&data[start..]);
+            prop_assert_eq!(checksum.finish(), crc32c(&data));
+        }
+
+        #[test]
+        fn slicing_matches_bitwise(data in prop::collection::vec(any::<u8>(), 0..4096)) {
+            let mut crc = !0u32;
+            for byte in &data {
+                crc ^= u32::from(*byte);
+                for _ in 0..8 {
+                    crc = (crc >> 1) ^ (0x82F6_3B78 & 0u32.wrapping_sub(crc & 1));
+                }
+            }
+            prop_assert_eq!(crc32c(&data), !crc);
+        }
+    }
 }

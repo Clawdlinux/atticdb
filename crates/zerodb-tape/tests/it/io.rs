@@ -1,32 +1,8 @@
-#![allow(clippy::unwrap_used)]
-
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::support::io_fixtures::*;
 use std::sync::Arc;
 use zerodb_tape::sim::SimClock;
 use zerodb_tape::Error;
 use zerodb_tape::{Clock, Io, SimDisk, StdIo, SystemClock};
-
-struct TestDir(PathBuf);
-
-impl TestDir {
-    fn new() -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let path = std::env::current_dir().unwrap().join("target").join(format!(
-            "io-test-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&path).unwrap();
-        Self(path)
-    }
-}
-
-impl Drop for TestDir {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0).unwrap();
-    }
-}
 
 #[test]
 fn filesystem_operations_through_trait_object() {
@@ -74,49 +50,45 @@ fn exclusive_lock_reports_holder_and_releases() {
 }
 
 #[test]
-fn allocation_sets_length_and_reserves_real_blocks() {
-    let dir = TestDir::new();
-    let io = StdIo::new();
-    let path = dir.0.join("allocated");
-    let file = io.create(&path).unwrap();
-    let len = 1024 * 1024;
-    io.allocate(file, len).unwrap();
-    io.sync_data(file).unwrap();
-    assert_eq!(io.len(file).unwrap(), len);
-    let metadata = std::fs::metadata(&path).unwrap();
-    assert_eq!(metadata.len(), len);
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    {
-        use std::os::unix::fs::MetadataExt;
-        assert!(metadata.blocks() * 512 >= len);
-    }
-    io.close(file).unwrap();
-}
-
-#[test]
 fn allocation_sets_length_for_growth_repeats_and_shrink() {
     let dir = TestDir::new();
     let io = StdIo::new();
     let path = dir.0.join("resized");
     let file = io.create(&path).unwrap();
     let metadata_file = std::fs::OpenOptions::new().read(true).write(true).open(&path).unwrap();
-    for len in [0, 1024 * 1024, 1024 * 1024, 512 * 1024, 2 * 1024 * 1024, 2 * 1024 * 1024, 0] {
+    for (case, len) in [
+        ("empty file", 0),
+        ("initial reservation", 1024 * 1024),
+        ("repeated reservation", 1024 * 1024),
+        ("shrink", 512 * 1024),
+        ("growth", 2 * 1024 * 1024),
+        ("repeated growth", 2 * 1024 * 1024),
+        ("truncate", 0),
+    ] {
         #[cfg(target_os = "macos")]
         let before = {
             metadata_file.sync_all().unwrap();
             metadata_file.metadata().unwrap()
         };
         io.allocate(file, len).unwrap();
-        assert_eq!(io.len(file).unwrap(), len);
+        assert_eq!(io.len(file).unwrap(), len, "{case}: length={len}");
+        if case == "initial reservation" {
+            io.sync_data(file).unwrap();
+        }
         metadata_file.sync_all().unwrap();
         let metadata = metadata_file.metadata().unwrap();
-        assert_eq!(metadata.len(), len);
+        assert_eq!(metadata.len(), len, "{case}: length={len}");
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if case == "initial reservation" {
+            use std::os::unix::fs::MetadataExt;
+            assert!(metadata.blocks() * 512 >= len, "{case}: length={len}");
+        }
         #[cfg(target_os = "macos")]
         if len != 0 && len <= before.len() {
             use std::os::unix::fs::MetadataExt;
             assert!(
                 metadata.blocks() * 512 < before.len() + len / 2,
-                "equal or smaller lengths must not reserve a whole extra length"
+                "{case}: length={len} must not reserve a whole extra length"
             );
         }
     }
@@ -186,5 +158,114 @@ fn directory_exists_and_list_match_across_backends() {
         assert!(io.list(&branch.join("missing")).is_err());
         io.remove(&direct).unwrap();
         io.remove(&leaf).unwrap();
+    }
+}
+
+mod directory {
+    use std::path::Path;
+    use std::sync::Arc;
+    use zerodb_tape::sim::{atomic_install, DataDir};
+    use zerodb_tape::Error;
+    use zerodb_tape::{Io, SimDisk, StdIo};
+
+    use crate::support;
+
+    #[test]
+    fn metadata_roundtrip_and_crc() {
+        let io = Arc::new(SimDisk::new(1));
+        let mut dir = DataDir::open(io.clone(), "db", Some("localhost:77"), 1024).unwrap();
+        dir.install_manifest(&[1, 2]).unwrap();
+        dir.install_superblock(99).unwrap();
+        drop(dir);
+        let dir = DataDir::open(io.clone(), "db", None, 1024).unwrap();
+        assert_eq!(dir.segments(), &[1, 2]);
+        assert_eq!(dir.superblock(), 99);
+        assert_eq!(dir.segment_size(), 1024);
+        drop(dir);
+        let file = io.open(Path::new("db/MANIFEST")).unwrap();
+        let mut prefix = [0; 20];
+        io.read_at(file, 0, &mut prefix).unwrap();
+        assert_eq!(prefix[8..12], 2u32.to_le_bytes());
+        assert_eq!(prefix[12..20], 1024u64.to_le_bytes());
+        io.flip_bit(file, 12).unwrap();
+        io.close(file).unwrap();
+        assert!(matches!(
+            DataDir::open(io, "db", None, 1024),
+            Err(Error::CorruptionDetected { .. })
+        ));
+    }
+
+    #[test]
+    fn atomic_install_is_old_or_new_at_every_crash_point() {
+        for seed in 0..100 {
+            let io = Arc::new(support::ObservedIo::new(seed));
+            let _dir = DataDir::open(io.clone(), "db", None, 1024).unwrap();
+            atomic_install(io.clone(), Path::new("db"), "TEST", b"old").unwrap();
+            io.capture.store(true, std::sync::atomic::Ordering::SeqCst);
+            atomic_install(io.clone(), Path::new("db"), "TEST", b"new-content").unwrap();
+            assert!(io.handles.lock().unwrap().is_empty());
+            for crash in io.images.lock().unwrap().iter() {
+                let file = crash.open(Path::new("db/TEST")).unwrap();
+                let mut bytes = vec![0; crash.len(file).unwrap() as usize];
+                crash.read_at(file, 0, &mut bytes).unwrap();
+                crash.close(file).unwrap();
+                assert!(bytes == b"old" || bytes == b"new-content");
+            }
+        }
+    }
+
+    #[test]
+    fn lock_is_first_and_reports_the_holder() {
+        let path = std::env::current_dir()
+            .unwrap()
+            .join(format!("target/dir-test-{}", std::process::id()));
+        std::fs::create_dir_all(&path).unwrap();
+        let io = Arc::new(StdIo::new());
+        let dir = DataDir::open(io.clone(), &path, Some("localhost:77"), 1024).unwrap();
+        std::fs::write(path.join("MANIFEST"), b"invalid").unwrap();
+        match DataDir::open(io, &path, None, 1024) {
+            Err(Error::DataDirLocked { holder }) => {
+                assert!(holder.contains(&std::process::id().to_string()));
+                assert!(holder.contains("localhost:77"));
+            }
+
+            other => panic!("{other:?}"),
+        }
+        drop(dir);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn missing_manifest_cannot_reinitialize_existing_segments() {
+        let io = Arc::new(SimDisk::new(1));
+        let mut dir = DataDir::open(io.clone(), "db", None, 1024).unwrap();
+        dir.prepare_next_segment(1024).unwrap();
+        drop(dir);
+        io.remove(Path::new("db/MANIFEST")).unwrap();
+        assert!(matches!(
+            DataDir::open(io, "db", None, 1024),
+            Err(Error::CorruptionDetected { .. })
+        ));
+    }
+
+    #[test]
+    fn retry_persists_orphan_removal_after_directory_sync_failure() {
+        for seed in 0..32 {
+            let io = Arc::new(SimDisk::new(seed));
+            let mut dir = DataDir::open(io.clone(), "db", None, 1024).unwrap();
+            dir.prepare_next_segment(1024).unwrap();
+            let id = dir.prepare_next_segment(1024).unwrap();
+            let orphan = dir.segment_path(id);
+            dir.install_manifest(&[1]).unwrap();
+            drop(dir);
+            io.fail_next_sync().unwrap();
+            assert!(matches!(
+                DataDir::open(io.clone(), "db", None, 1024),
+                Err(Error::SyncFailed(_))
+            ));
+            assert!(!io.exists(&orphan).unwrap());
+            let _retry = DataDir::open(io.clone(), "db", None, 1024).unwrap();
+            assert!(!io.crash().unwrap().exists(&orphan).unwrap(), "seed={seed}");
+        }
     }
 }
