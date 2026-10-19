@@ -27,7 +27,7 @@ pub struct NewTurn {
     pub meta: Vec<u8>,
 }
 
-/// A decoded tape payload, excluding its salt.
+/// A decoded tape payload.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DecodedTurn {
     /// Agent identifier, at most 255 UTF-8 bytes.
@@ -93,7 +93,7 @@ impl<'a> Cursor<'a> {
     }
 }
 
-/// Encodes a turn without a salt. Callers pass sequence 0 before preparation.
+/// Encodes a turn. Callers pass sequence 0 before preparation.
 ///
 /// The optional key uses a presence byte, followed by its length-prefixed UTF-8 bytes.
 pub fn encode(

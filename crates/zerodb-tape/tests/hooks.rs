@@ -75,8 +75,7 @@ fn enqueue<S: StateMachine>(
     kind: Kind,
     mode: Durability,
 ) -> std::sync::mpsc::Receiver<zerodb_tape::WriteResult> {
-    let batch =
-        PreparedBatch::with_salts(vec![input(kind, &[0; 8])], mode, || Ok([3; 16])).unwrap();
+    let batch = PreparedBatch::new(vec![input(kind, &[0; 8])], mode).unwrap();
     let (request, reply) = WriteRequest::new(batch);
     core.enqueue(request);
     reply
@@ -402,8 +401,13 @@ fn scan_skips_footers_and_handles_an_empty_maximum_lsn_range() {
 fn scan_reports_corruption_and_stops_after_the_bad_frame() {
     use zerodb_tape::Io;
     let disk = Arc::new(SimDisk::new(7));
-    let (tape, _) =
-        Tape::open(disk.clone(), Arc::new(SimClock::default()), "db", options()).unwrap();
+    let (tape, _) = Tape::open(
+        disk.clone(),
+        Arc::new(SimClock::default()),
+        "db",
+        TapeOptions { segment_size: 160, ..options() },
+    )
+    .unwrap();
     for _ in 0..3 {
         tape.append(vec![input(Kind::Turn, &[0; 8])], Durability::Durable).unwrap();
     }

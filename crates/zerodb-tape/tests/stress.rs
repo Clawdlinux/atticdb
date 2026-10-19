@@ -65,7 +65,7 @@ fn concurrent_durable_appends_survive_reopen() {
         assert_eq!(frame.header.lsn, lsn);
         assert_eq!(frame.header.tenant_id, tenant);
         assert_eq!(frame.header.kind, Kind::Turn);
-        assert_eq!(&frame.payload[16..], content);
+        assert_eq!(frame.payload, content);
     }
     drop(tape);
     std::fs::remove_dir_all(path).unwrap();

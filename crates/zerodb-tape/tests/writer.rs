@@ -16,7 +16,7 @@ fn record(kind: Kind) -> RecordInput {
 }
 
 fn prepared(mode: Durability) -> PreparedBatch {
-    PreparedBatch::with_salts(vec![record(Kind::Turn)], mode, || Ok([7; 16])).unwrap()
+    PreparedBatch::new(vec![record(Kind::Turn)], mode).unwrap()
 }
 
 #[test]
@@ -35,7 +35,7 @@ fn short_sessions_bound_rewrite_bytes_to_previous_session_writes() {
             assert_eq!(io.segment_syncs.load(Ordering::SeqCst), 0);
         }
         // Fill a segment exactly, so preallocated-tail overhead cannot hide growing rewrites.
-        let input = RecordInput { content: vec![session as u8; 756], ..record(Kind::Turn) };
+        let input = RecordInput { content: vec![session as u8; 912], ..record(Kind::Turn) };
         tape.append(vec![input], Durability::Durable).unwrap();
         previous_writes = io.segment_bytes.load(Ordering::SeqCst);
         assert_eq!(previous_writes, 1024);
@@ -120,7 +120,7 @@ fn clean_shutdown_forces_superblock_after_durable_records() {
     assert_eq!(dir.superblock(), 1);
     drop(dir);
     let (tape, _) = Tape::open(image, clock, "db", opts).unwrap();
-    assert_eq!(&tape.read(1).unwrap().unwrap().payload[16..], b"hello");
+    assert_eq!(&tape.read(1).unwrap().unwrap().payload, b"hello");
 }
 
 #[test]
@@ -158,10 +158,9 @@ fn live_restart_after_failed_sync_redirties_survivors_before_acknowledging() {
                 WriterCore::open(disk.clone(), clock.clone(), "db", opts.clone()).unwrap();
             disk.fail_next_sync().unwrap();
             let (request, reply) = WriteRequest::new(
-                PreparedBatch::with_salts(
+                PreparedBatch::new(
                     vec![RecordInput { content: b"A".to_vec(), ..record(Kind::Turn) }],
                     Durability::Durable,
-                    || Ok([1; 16]),
                 )
                 .unwrap(),
             );
@@ -178,10 +177,9 @@ fn live_restart_after_failed_sync_redirties_survivors_before_acknowledging() {
                 WriterCore::open(disk.clone(), clock.clone(), "db", opts.clone()).unwrap();
             assert_eq!(report.durable_lsn, 1);
             let (request, reply) = WriteRequest::new(
-                PreparedBatch::with_salts(
+                PreparedBatch::new(
                     vec![RecordInput { content: b"B".to_vec(), ..record(Kind::Turn) }],
                     Durability::Durable,
-                    || Ok([2; 16]),
                 )
                 .unwrap(),
             );
@@ -199,8 +197,8 @@ fn live_restart_after_failed_sync_redirties_survivors_before_acknowledging() {
             let (tape, report) =
                 Tape::open(Arc::new(disk.crash().unwrap()), clock, "db", opts).unwrap();
             assert_eq!(report.durable_lsn, 2, "seed={seed}, superblock={advance_superblock}");
-            assert_eq!(&tape.read(1).unwrap().unwrap().payload[16..], b"A");
-            assert_eq!(&tape.read(2).unwrap().unwrap().payload[16..], b"B");
+            assert_eq!(&tape.read(1).unwrap().unwrap().payload, b"A");
+            assert_eq!(&tape.read(2).unwrap().unwrap().payload, b"B");
         }
     }
 }
@@ -210,7 +208,7 @@ fn live_restart_rewrites_across_rolls_and_before_a_trimmed_tail() {
     use zerodb_tape::Io;
     let io = Arc::new(ObservedIo::new(0));
     let clock = Arc::new(SimClock::default());
-    let opts = Options { segment_size: 1024, ..Options::default() };
+    let opts = Options { segment_size: 435, ..Options::default() };
     let (mut core, _) = WriterCore::open(io.clone(), clock.clone(), "db", opts.clone()).unwrap();
     let (request, reply) = WriteRequest::new(prepared(Durability::Durable));
     core.enqueue(request);
@@ -232,7 +230,7 @@ fn live_restart_rewrites_across_rolls_and_before_a_trimmed_tail() {
     }
     drop(core);
     let file = io.open(std::path::Path::new("db/seg-0000000000000002.zdb")).unwrap();
-    io.write_at(file, 273, &[1; 8]).unwrap();
+    io.write_at(file, 117, &[1; 8]).unwrap();
     io.close(file).unwrap();
     io.events.lock().unwrap().clear();
     let (mut core, report) =
@@ -240,7 +238,7 @@ fn live_restart_rewrites_across_rolls_and_before_a_trimmed_tail() {
     assert_eq!(report.durable_lsn, 4);
     assert!(report.truncated.is_some());
     let events = io.events.lock().unwrap().clone();
-    assert!(events.iter().any(|e| e == "write db/seg-0000000000000001.zdb 273"));
+    assert!(events.iter().any(|e| e == "write db/seg-0000000000000001.zdb 117"));
     assert!(events.iter().any(|e| e == "write db/seg-0000000000000002.zdb 0"));
     assert!(!events.iter().any(|e| e == "write db/seg-0000000000000001.zdb 0"));
     let (request, reply) = WriteRequest::new(prepared(Durability::Durable));
@@ -251,7 +249,7 @@ fn live_restart_rewrites_across_rolls_and_before_a_trimmed_tail() {
     let (tape, report) = Tape::open(Arc::new(io.disk.crash().unwrap()), clock, "db", opts).unwrap();
     assert_eq!(report.durable_lsn, 5);
     for lsn in 1..=5 {
-        assert_eq!(&tape.read(lsn).unwrap().unwrap().payload[16..], b"hello");
+        assert_eq!(&tape.read(lsn).unwrap().unwrap().payload, b"hello");
     }
 }
 
@@ -322,7 +320,7 @@ fn concurrent_callers_get_dense_lsn_and_immediate_visibility() {
                     tape.append(vec![record(Kind::Turn)], Durability::Durable).unwrap();
                 assert_eq!(first_lsn, last_lsn);
                 assert_eq!(txn, first_lsn);
-                assert_eq!(tape.read(last_lsn).unwrap().unwrap().payload[16..], *b"hello");
+                assert_eq!(tape.read(last_lsn).unwrap().unwrap().payload, *b"hello");
                 lsns.push(last_lsn);
             }
             lsns
@@ -386,7 +384,7 @@ fn invalid_batches_never_enter_the_writer() {
         (vec![record(Kind::Footer)], Durability::Durable),
         (vec![], Durability::Durable),
     ] {
-        let error = PreparedBatch::with_salts(batch, mode, || Ok([0; 16])).unwrap_err();
+        let error = PreparedBatch::new(batch, mode).unwrap_err();
         assert_eq!(error.outcome, Outcome::NotCommitted);
     }
 }
@@ -400,10 +398,9 @@ fn batch_larger_than_configured_segment_does_not_poison() {
         Options { segment_size: 512, ..Options::default() },
     )
     .unwrap();
-    let batch = PreparedBatch::with_salts(
+    let batch = PreparedBatch::new(
         vec![RecordInput { content: vec![0; 1000], ..record(Kind::Turn) }],
         Durability::Durable,
-        || Ok([0; 16]),
     )
     .unwrap();
     let (request, reply) = WriteRequest::new(batch);
@@ -483,9 +480,7 @@ fn batch_is_all_or_nothing_on_partial_write() {
     let (mut core, _) =
         WriterCore::open(io.clone(), Arc::new(SimClock::new(0)), "db", opts.clone()).unwrap();
     io.enospc_after_bytes(200).unwrap();
-    let batch =
-        PreparedBatch::with_salts(vec![record(Kind::Turn); 3], Durability::Durable, || Ok([0; 16]))
-            .unwrap();
+    let batch = PreparedBatch::new(vec![record(Kind::Turn); 3], Durability::Durable).unwrap();
     let (request, reply) = WriteRequest::new(batch);
     core.enqueue(request);
     core.step();
@@ -561,7 +556,7 @@ fn crash_during_a_group_spanning_roll_retains_every_prior_ack() {
                 opts.clone(),
             )
             .unwrap();
-            assert_eq!(&reopened.read(1).unwrap().unwrap().payload[16..], b"hello", "seed={seed}");
+            assert_eq!(&reopened.read(1).unwrap().unwrap().payload, b"hello", "seed={seed}");
         }
         let (mut reopened, report) = WriterCore::open(
             Arc::new(io.disk.crash().unwrap()),
@@ -572,7 +567,7 @@ fn crash_during_a_group_spanning_roll_retains_every_prior_ack() {
         .unwrap();
         assert_eq!(report.records, 4, "seed={seed}");
         for lsn in 1..=4 {
-            assert_eq!(&reopened.read(lsn).unwrap().unwrap().payload[16..], b"hello");
+            assert_eq!(&reopened.read(lsn).unwrap().unwrap().payload, b"hello");
         }
         let (request, reply) = WriteRequest::new(prepared(Durability::Durable));
         reopened.enqueue(request);
@@ -588,7 +583,7 @@ fn failed_sync_after_roll_keeps_entire_group_unpublished() {
         io.clone(),
         Arc::new(SimClock::new(0)),
         "db",
-        Options { segment_size: 512, ..Options::default() },
+        Options { segment_size: 128, ..Options::default() },
     )
     .unwrap();
     io.syncs.store(0, Ordering::SeqCst);
@@ -618,7 +613,7 @@ fn successful_group_prefix_commits_when_the_next_write_is_partial() {
     let opts = Options { segment_size: 65536, ..Options::default() };
     let (mut core, _) =
         WriterCore::open(io.clone(), Arc::new(SimClock::new(0)), "db", opts.clone()).unwrap();
-    io.enospc_after_bytes(273 + 100).unwrap();
+    io.enospc_after_bytes(117 + 100).unwrap();
     let (first, first_reply) = WriteRequest::new(prepared(Durability::Durable));
     let (second, second_reply) = WriteRequest::new(prepared(Durability::Durable));
     core.enqueue(first);
@@ -683,7 +678,7 @@ fn real_files_reopen_with_multiple_tenants_and_rebuilt_chain_heads() {
         let (tape, report) = Tape::open(io.clone(), clock.clone(), &path, opts.clone()).unwrap();
         assert_eq!(report.records, 4);
         for lsn in 1..=4 {
-            assert_eq!(&tape.read(lsn).unwrap().unwrap().payload[16..], b"hello");
+            assert_eq!(&tape.read(lsn).unwrap().unwrap().payload, b"hello");
         }
         tape.append(vec![record(Kind::Turn)], Durability::Durable).unwrap();
     }

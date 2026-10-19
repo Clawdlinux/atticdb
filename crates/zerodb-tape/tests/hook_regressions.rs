@@ -43,10 +43,9 @@ impl StateMachine for Dedup {
 
 fn request(content: &[u8]) -> (WriteRequest, mpsc::Receiver<WriteResult>) {
     WriteRequest::new(
-        PreparedBatch::with_salts(
+        PreparedBatch::new(
             vec![RecordInput { kind: Kind::Turn, tenant_id: 1, content: content.to_vec() }],
             Durability::Durable,
-            || Ok([0; 16]),
         )
         .unwrap(),
     )
@@ -113,7 +112,7 @@ fn same_group_retry_shares_the_prefix_fate_after_a_partial_write() {
         }
         let (trailing, trailing_reply) = request(b"trailing");
         core.enqueue(trailing);
-        disk.enospc_after_bytes(276 + 5).unwrap();
+        disk.enospc_after_bytes(120 + 5).unwrap();
         if fail_sync {
             disk.fail_next_sync().unwrap();
         }

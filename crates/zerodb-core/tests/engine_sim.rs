@@ -158,7 +158,10 @@ impl Oracle {
         }
     }
     fn apply(&mut self, index: usize, receipt: Appended) {
+        let previous =
+            self.history.iter().flatten().map(|turn| turn.commit_time_ns).max().unwrap_or(0);
         let b = &mut self.batches[index];
+        b.time = b.time.max(previous + 1);
         let history = &mut self.history[b.scope];
         assert_eq!(
             receipt.seqs,

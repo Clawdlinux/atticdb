@@ -9,8 +9,8 @@ pub use crate::recovery::{recover, Recovered};
 pub use crate::segment::{SegmentWriter, DEFAULT_SEGMENT_SIZE};
 pub use crate::writer::{Coalescer, PreparedBatch, WriteRequest, WriterCore};
 use crate::{
-    Clock, Committed, CommittedRecord, Digest, Durability, Error, FileId, Io, Kind, LockGuard,
-    Outcome, Prepare, RecordInput, RecoveryReport, Result, SimDisk, StateMachine, Tape,
+    Clock, Committed, CommittedRecord, Durability, Error, FileId, Io, Kind, LockGuard, Outcome,
+    Prepare, RecordInput, RecoveryReport, Result, SimDisk, StateMachine, Tape,
     TapeOptions as Options, WriteResult,
 };
 use std::collections::BTreeMap;
@@ -148,13 +148,12 @@ impl Io for CrashIo {
 #[derive(Debug)]
 struct Batch {
     records: Vec<RecordInput>,
-    digests: Vec<Digest>,
 }
 
 #[derive(Debug, Default)]
 struct Oracle {
     batches: Vec<Batch>,
-    durable: BTreeMap<u64, Digest>,
+    durable: BTreeMap<u64, Vec<u8>>,
 }
 
 #[derive(Debug, Default)]
@@ -231,8 +230,11 @@ impl Oracle {
         match reply {
             Some(Ok(Committed::Durable { first_lsn, last_lsn, .. })) => {
                 assert_eq!(last_lsn - first_lsn + 1, batch.records.len() as u64);
-                for (i, digest) in batch.digests.iter().enumerate() {
-                    assert!(self.durable.insert(first_lsn + i as u64, *digest).is_none());
+                for (i, record) in batch.records.iter().enumerate() {
+                    assert!(self
+                        .durable
+                        .insert(first_lsn + i as u64, record.content.clone())
+                        .is_none());
                 }
             }
             Some(Err(error)) if error.outcome == Outcome::NotCommitted => return,
@@ -247,40 +249,34 @@ impl Oracle {
             .iter()
             .enumerate()
             .flat_map(|(b, batch)| {
-                batch.digests.iter().enumerate().map(move |(r, digest)| (*digest, (b, r)))
+                batch
+                    .records
+                    .iter()
+                    .enumerate()
+                    .map(move |(r, record)| (record.content.clone(), (b, r)))
             })
             .collect();
         let mut seen = vec![Vec::new(); self.batches.len()];
-        let mut heads = BTreeMap::new();
         let mut observed = BTreeMap::new();
         let mut last_txn = 0;
         for lsn in 1..=tape.durable_lsn() {
             let record = tape.read(lsn).unwrap().unwrap();
             let h = &record.header;
-            observed.insert(lsn, h.content_digest);
+            observed.insert(lsn, record.payload.clone());
             assert_eq!(h.lsn, lsn, "LSNs must strictly increase");
-            let &(b, r) = candidates.get(&h.content_digest).unwrap();
+            let &(b, r) = candidates.get(&record.payload).unwrap();
             let expected = &self.batches[b].records[r];
             assert_eq!(h.kind, expected.kind);
             assert_eq!(h.tenant_id, expected.tenant_id);
-            assert_eq!(&record.payload[16..], expected.content);
-            let salt: [u8; 16] = record.payload[..16].try_into().unwrap();
-            assert_eq!(frame::content_digest(&salt, &expected.content), h.content_digest);
+            assert_eq!(record.payload, expected.content);
             if r == 0 {
-                assert!(h.txn > last_txn, "transactions must strictly increase");
+                assert_eq!(h.txn, last_txn + 1, "transactions must be dense");
                 last_txn = h.txn;
             } else {
                 assert_eq!(seen[b].last(), Some(&(lsn - 1, h.txn, r - 1)));
                 assert_eq!(h.txn, last_txn);
             }
             seen[b].push((lsn, h.txn, r));
-            if h.kind.is_chained() {
-                let prev = heads.entry(h.tenant_id).or_insert([0; 32]);
-                assert_eq!(h.tenant_prev_chain, *prev);
-                *prev = frame::chain_next(prev, h, &h.content_digest);
-            } else {
-                assert_eq!(h.tenant_prev_chain, [0; 32]);
-            }
         }
         for (batch, seen) in self.batches.iter().zip(seen) {
             assert!(
@@ -300,20 +296,12 @@ fn enqueue<S: StateMachine>(
     core: &mut WriterCore<S>,
     records: Vec<RecordInput>,
     mode: Durability,
-    rng: &mut Rng,
+    _rng: &mut Rng,
 ) -> (Batch, mpsc::Receiver<WriteResult>) {
-    let mut digests = Vec::new();
-    let mut index = 0;
-    let prepared = PreparedBatch::with_salts(records.clone(), mode, || {
-        let salt: [u8; 16] = rng.bytes(16).try_into().unwrap();
-        digests.push(frame::content_digest(&salt, &records[index].content));
-        index += 1;
-        Ok(salt)
-    })
-    .unwrap();
+    let prepared = PreparedBatch::new(records.clone(), mode).unwrap();
     let (request, receiver) = WriteRequest::new(prepared);
     core.enqueue(request);
-    (Batch { records, digests }, receiver)
+    (Batch { records }, receiver)
 }
 
 fn probe<S: StateMachine>(core: &mut WriterCore<S>, oracle: &mut Oracle, rng: &mut Rng) {
@@ -342,7 +330,11 @@ fn workload(rng: &mut Rng, tenants: usize) -> (Vec<RecordInput>, Durability) {
                 rng.below(8193)
             };
             let kind = [Kind::Turn, Kind::Fact, Kind::Forget][rng.below(3)];
-            RecordInput { kind, tenant_id: 1 + rng.below(tenants) as u32, content: rng.bytes(len) }
+            RecordInput {
+                kind,
+                tenant_id: 1 + rng.below(tenants) as u32,
+                content: rng.bytes(len + 16),
+            }
         })
         .collect();
     (records, mode)
@@ -357,7 +349,7 @@ fn damage_durable(disk: &SimDisk, dir: &DataDir, rng: &mut Rng) -> (u64, u64, u8
         disk.read_at(file, 0, &mut bytes).unwrap();
         disk.close(file).unwrap();
         let mut offset = 0;
-        while let Ok((record, used)) = frame::decode(&bytes[offset..]) {
+        while let Ok((record, used)) = frame::decode(&bytes[offset..], segment, offset as u64) {
             offset += used;
             if record.header.kind == Kind::Footer && record.header.lsn == dir.superblock() {
                 boundary = true;
@@ -547,7 +539,7 @@ mod tests {
         let disk = Arc::new(SimDisk::new(0));
         let clock = Arc::new(SimClock::default());
         let opts = Options {
-            segment_size: 1024,
+            segment_size: 512,
             superblock_interval: std::time::Duration::from_secs(1),
             ..Options::default()
         };
@@ -601,12 +593,12 @@ mod tests {
             oracle.durable.clear();
             let batch = &mut oracle.batches[0];
             batch.records.push(batch.records[0].clone());
-            batch.digests.push([0xff; 32]);
+            batch.records.last_mut().unwrap().content.push(0xff);
         });
     }
 
     #[test]
-    #[should_panic(expected = "assertion `left == right` failed")]
+    #[should_panic]
     fn oracle_rejects_changed_uncertain_content() {
         check_mutated_oracle(|oracle| {
             oracle.durable.clear();

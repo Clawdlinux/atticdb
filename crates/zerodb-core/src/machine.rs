@@ -240,7 +240,7 @@ impl Machine {
             _ => return Err(EngineError::rejected(ErrorKind::CorruptIndex)),
         }
         state.bytes = state.bytes.saturating_add(
-            record.payload.len() as u64 + 120 + if state.txn != record.txn { 148 } else { 0 },
+            record.payload.len() as u64 + 40 + if state.txn != record.txn { 72 } else { 0 },
         );
         state.txn = record.txn;
         state.published_lsn = record.lsn;
@@ -364,10 +364,9 @@ mod tests {
                 None,
             )
             .unwrap();
-            let mut batch = PreparedBatch::with_salts(
+            let mut batch = PreparedBatch::new(
                 vec![RecordInput { kind, tenant_id: 1, content }],
                 Durability::Durable,
-                || Ok([0; 16]),
             )
             .unwrap();
             assert!(matches!(machine.prepare(&mut batch), Prepare::Reject(_)));
@@ -415,10 +414,9 @@ mod tests {
                 idem,
             )
             .unwrap();
-            let mut batch = PreparedBatch::with_salts(
+            let mut batch = PreparedBatch::new(
                 vec![RecordInput { kind: Kind::Turn, tenant_id: 1, content }],
                 Durability::Durable,
-                || Ok([1; 16]),
             )
             .unwrap();
             assert!(matches!(machine.prepare(&mut batch), Prepare::Write));
@@ -448,10 +446,9 @@ mod tests {
             };
             let mut machine =
                 Machine::new(Arc::new(Mutex::new(initial)), disk, "db".into(), opts).unwrap();
-            let mut batch = PreparedBatch::with_salts(
+            let mut batch = PreparedBatch::new(
                 vec![RecordInput { kind: Kind::Turn, tenant_id: 1, content }],
                 Durability::Durable,
-                || Ok([1; 16]),
             )
             .unwrap();
             let Prepare::Reject(error) = machine.prepare(&mut batch) else {
@@ -507,10 +504,9 @@ mod tests {
                 Some("key"),
             )
             .unwrap();
-            let mut batch = PreparedBatch::with_salts(
+            let mut batch = PreparedBatch::new(
                 vec![RecordInput { kind: Kind::Turn, tenant_id: 1, content }],
                 Durability::Durable,
-                || Ok([1; 16]),
             )
             .unwrap();
             assert!(matches!(machine.prepare(&mut batch), Prepare::Write));
@@ -562,10 +558,9 @@ mod tests {
             None,
         )
         .unwrap();
-        let mut batch = PreparedBatch::with_salts(
+        let mut batch = PreparedBatch::new(
             vec![RecordInput { kind: Kind::Turn, tenant_id: 1, content }],
             Durability::Durable,
-            || Ok([1; 16]),
         )
         .unwrap();
         assert!(matches!(machine.prepare(&mut batch), Prepare::Write));
@@ -620,8 +615,7 @@ mod tests {
                 ],
                 vec![turn.clone()],
             ] {
-                let batch = PreparedBatch::with_salts(records, Durability::Durable, || Ok([3; 16]))
-                    .unwrap();
+                let batch = PreparedBatch::new(records, Durability::Durable).unwrap();
                 let (request, reply) = WriteRequest::new(batch);
                 core.enqueue(request);
                 replies.push(reply);
@@ -636,9 +630,7 @@ mod tests {
                     .iter()
                     .all(|r| r.as_ref().unwrap_err().outcome == Outcome::Unknown));
                 assert!(core.is_poisoned());
-                let batch =
-                    PreparedBatch::with_salts(vec![turn], Durability::Durable, || Ok([3; 16]))
-                        .unwrap();
+                let batch = PreparedBatch::new(vec![turn], Durability::Durable).unwrap();
                 let (request, reply) = WriteRequest::new(batch);
                 core.enqueue(request);
                 core.step();

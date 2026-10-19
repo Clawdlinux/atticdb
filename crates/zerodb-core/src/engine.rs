@@ -452,13 +452,8 @@ impl Engine {
                 .tape
                 .read(lsn)?
                 .ok_or_else(|| EngineError::rejected(ErrorKind::CorruptIndex))?;
-            let decoded = decode(
-                frame
-                    .payload
-                    .get(16..)
-                    .ok_or_else(|| EngineError::rejected(ErrorKind::CorruptIndex))?,
-            )
-            .map_err(|_| EngineError::rejected(ErrorKind::CorruptIndex))?;
+            let decoded = decode(&frame.payload)
+                .map_err(|_| EngineError::rejected(ErrorKind::CorruptIndex))?;
             if frame.header.kind != Kind::Turn
                 || frame.header.tenant_id != tenant
                 || decoded.agent_id != scope.agent

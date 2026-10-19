@@ -1,7 +1,7 @@
 //! Footer-atomic replay and durable-boundary validation.
 
 use crate::dir::{corruption, read_exact, DataDir, Handle};
-use crate::frame::{self, Digest, Footer, Frame, Kind};
+use crate::frame::{self, Footer, Frame, Kind};
 use crate::{Error, Result};
 use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
@@ -19,61 +19,48 @@ pub struct RecoveryReport {
     pub records: usize,
 }
 
-/// Rebuilt writer state. Only complete transactions contribute records or chain heads.
+/// Rebuilt writer state. Only complete transactions contribute records.
 #[derive(Debug, Default)]
 pub struct Recovered {
     /// Recovery results exposed by the deterministic driver.
     pub report: RecoveryReport,
     pub(crate) index: BTreeMap<u64, (u64, u64)>,
-    pub(crate) chains: BTreeMap<u32, Digest>,
     pub(crate) txn: u64,
+    pub(crate) commit_time_ns: u64,
+    pub(crate) synced_lsn: u64,
     pub(crate) offset: u64,
 }
 
-fn verify(records: &[(Frame, u64)], footer: &Frame, state: &Recovered) -> Result<()> {
+fn verify(records: &[(Frame, u64)], footer: &Frame, state: &Recovered, segment: u64) -> Result<()> {
     let end = Footer::decode(&footer.payload).map_err(|e| Error::InvalidFrame(e.to_string()))?;
     if records.is_empty()
         || end.txn != footer.header.txn
-        || end.txn <= state.txn
+        || state.txn.checked_add(1) != Some(end.txn)
+        || state.report.durable_lsn.checked_add(1) != Some(end.first_lsn)
         || end.record_count as usize != records.len()
         || footer.header.flags != 0
         || footer.header.tenant_id != 0
-        || footer.header.content_digest != [0; 32]
+        || end.synced_lsn < state.synced_lsn
+        || end.synced_lsn >= end.first_lsn
+        || footer.header.commit_time_ns <= state.commit_time_ns
     {
         return Err(Error::InvalidFrame("invalid transaction footer".into()));
     }
     let mut lsn = state.report.durable_lsn;
-    let mut heads = BTreeMap::new();
-    let mut digests = Vec::new();
-    for (record, _) in records {
+    let mut crc = crate::crc32c::Crc32c::new();
+    for (record, offset) in records {
         let h = &record.header;
-        if h.txn != end.txn || h.lsn <= lsn || h.commit_time_ns != footer.header.commit_time_ns {
+        if h.txn != end.txn
+            || lsn.checked_add(1) != Some(h.lsn)
+            || h.commit_time_ns != footer.header.commit_time_ns
+        {
             return Err(Error::InvalidFrame("transaction or LSN order".into()));
         }
         lsn = h.lsn;
-        {
-            let salt: [u8; 16] = record.payload[..16]
-                .try_into()
-                .map_err(|_| Error::InvalidFrame("missing salt".into()))?;
-            if frame::content_digest(&salt, &record.payload[16..]) != h.content_digest {
-                return Err(Error::InvalidFrame("content digest mismatch".into()));
-            }
-        }
-        if h.kind.is_chained() {
-            let prev = heads
-                .get(&h.tenant_id)
-                .or_else(|| state.chains.get(&h.tenant_id))
-                .copied()
-                .unwrap_or([0; 32]);
-            if prev != h.tenant_prev_chain {
-                return Err(Error::InvalidFrame("tenant chain mismatch".into()));
-            }
-            heads.insert(h.tenant_id, frame::chain_next(&prev, h, &h.content_digest));
-        }
-        digests.push(h.content_digest);
+        crc.update(&frame::encode(record, segment, *offset)?[..4]);
     }
-    if footer.header.lsn != lsn || frame::batch_digest(&digests) != end.batch_digest {
-        return Err(Error::InvalidFrame("footer digest or LSN mismatch".into()));
+    if footer.header.lsn != lsn || crc.finish() != end.records_crc {
+        return Err(Error::InvalidFrame("footer CRC or LSN mismatch".into()));
     }
     Ok(())
 }
@@ -90,22 +77,23 @@ fn zero_tail(dir: &DataDir, file: &Handle, from: u64, size: u64) -> Result<()> {
     Ok(())
 }
 
-fn last_decodable_lsn(mut bytes: &[u8]) -> u64 {
+fn last_decodable_lsn(mut bytes: &[u8], segment: u64, mut offset: u64) -> u64 {
     let mut last = 0;
     while bytes.len() >= 8 {
         let len = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
         if !(frame::HEADER_LEN..=frame::MAX_FRAME_SIZE).contains(&len) || len > bytes.len() {
             break;
         }
-        if let Ok((record, _)) = frame::decode(&bytes[..len]) {
+        if let Ok((record, _)) = frame::decode(&bytes[..len], segment, offset) {
             last = last.max(record.header.lsn);
         }
         bytes = &bytes[len..];
+        offset += len as u64;
     }
     last
 }
 
-/// Scans prepared segments, verifies chains, and syncs repaired tails before returning.
+/// Scans prepared segments and syncs repaired tails before returning.
 pub fn recover(dir: &mut DataDir, size: u64) -> Result<Recovered> {
     dir.check_segment_size(size)?;
     let mut state = Recovered::default();
@@ -141,7 +129,7 @@ pub fn recover(dir: &mut DataDir, size: u64) -> Result<Recovered> {
             if len <= size {
                 let mut bytes = vec![0; len as usize];
                 read_exact(dir.io.as_ref(), file.id, 0, &mut bytes)?;
-                last_lost = last_lost.max(last_decodable_lsn(&bytes));
+                last_lost = last_lost.max(last_decodable_lsn(&bytes, segment, 0));
             }
             cleared += len;
             continue;
@@ -177,7 +165,7 @@ pub fn recover(dir: &mut DataDir, size: u64) -> Result<Recovered> {
                     ));
                 }
                 if state.report.durable_lsn < dir.superblock()
-                    && tail.len() > frame::MAX_FRAME_SIZE + frame::HEADER_LEN + 44
+                    && tail.len() > frame::MAX_FRAME_SIZE + frame::HEADER_LEN + 32
                 {
                     return Err(corruption(
                         state.report.durable_lsn.saturating_add(1),
@@ -186,17 +174,24 @@ pub fn recover(dir: &mut DataDir, size: u64) -> Result<Recovered> {
                         "oversized zero padding",
                     ));
                 }
-                let oversized = tail.len() > frame::MAX_FRAME_SIZE + frame::HEADER_LEN + 44;
+                let oversized = tail.len() > frame::MAX_FRAME_SIZE + frame::HEADER_LEN + 32;
                 if len == size && !((offset == 0 || oversized) && position + 1 < segments.len()) {
                     break;
                 }
                 Err("end of tape or short segment".to_owned())
             } else {
-                frame::decode(tail).map_err(|e| e.to_string())
+                match frame::decode(tail, segment, offset as u64) {
+                    Err(frame::DecodeError::UnknownVersion) => {
+                        return Err(Error::InvalidFrame(
+                            "unsupported frame version: expected v2".into(),
+                        ));
+                    }
+                    result => result.map_err(|e| e.to_string()),
+                }
             };
             let result = decoded.and_then(|(record, used)| {
                 if record.header.kind == Kind::Footer {
-                    verify(&pending, &record, &state).map_err(|e| e.to_string())?;
+                    verify(&pending, &record, &state, segment).map_err(|e| e.to_string())?;
                     if rewrite_from.is_none() && record.header.lsn >= dir.superblock() {
                         rewrite_from = Some(if record.header.lsn == dir.superblock() {
                             offset + used
@@ -207,20 +202,17 @@ pub fn recover(dir: &mut DataDir, size: u64) -> Result<Recovered> {
                     for (record, off) in pending.drain(..) {
                         let h = &record.header;
                         state.index.insert(h.lsn, (segment, off));
-                        if h.kind.is_chained() {
-                            state.chains.insert(
-                                h.tenant_id,
-                                frame::chain_next(&h.tenant_prev_chain, h, &h.content_digest),
-                            );
-                        }
                         state.report.durable_lsn = h.lsn;
                         state.report.records += 1;
                     }
                     state.txn = record.header.txn;
+                    state.commit_time_ns = record.header.commit_time_ns;
+                    state.synced_lsn =
+                        Footer::decode(&record.payload).map_err(|e| e.to_string())?.synced_lsn;
                 } else {
                     let start = pending.first().map_or(offset, |(_, off)| *off as usize);
                     if pending.len() == 1024
-                        || offset + used - start + frame::HEADER_LEN + 44 > frame::MAX_FRAME_SIZE
+                        || offset + used - start + frame::HEADER_LEN + 32 > frame::MAX_FRAME_SIZE
                     {
                         return Err("transaction exceeds batch limits".into());
                     }
@@ -237,7 +229,8 @@ pub fn recover(dir: &mut DataDir, size: u64) -> Result<Recovered> {
                 }
                 first_lost =
                     pending.first().map_or(next, |(record, _)| record.header.lsn.max(next));
-                last_lost = last_decodable_lsn(&bytes[start as usize..]).max(first_lost);
+                last_lost =
+                    last_decodable_lsn(&bytes[start as usize..], segment, start).max(first_lost);
                 zero_tail(dir, &file, start, size)?;
                 touched = true;
                 cleared += size - start;
