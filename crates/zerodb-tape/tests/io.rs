@@ -35,7 +35,8 @@ fn filesystem_operations_through_trait_object() {
     let path = dir.0.join("data");
     assert!(!io.exists(&path).unwrap());
     let file = io.create(&path).unwrap();
-    io.set_len(file, 32).unwrap();
+    assert!(io.available_bytes(&dir.0).unwrap() <= io.total_bytes(&dir.0).unwrap());
+    io.allocate(file, 32).unwrap();
     io.write_at(file, 4, b"hello").unwrap();
     io.sync_data(file).unwrap();
     io.sync_dir(&dir.0).unwrap();

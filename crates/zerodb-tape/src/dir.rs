@@ -272,7 +272,7 @@ impl DataDir {
             }
         }
         let file = Handle::create(self.io.clone(), &self.segment_path(id))?;
-        self.io.set_len(file.id, size)?;
+        self.io.allocate(file.id, size)?;
         self.io.sync_data(file.id).map_err(|e| Error::SyncFailed(e.to_string()))?;
         self.io.sync_dir(&self.path).map_err(|e| Error::SyncFailed(e.to_string()))?;
         let mut segments = self.segments.clone();

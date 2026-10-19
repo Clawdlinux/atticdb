@@ -336,6 +336,15 @@ impl Io for CrashIo {
     fn set_len(&self, file: FileId, len: u64) -> Result<()> {
         self.after(self.disk.set_len(file, len))
     }
+    fn allocate(&self, file: FileId, len: u64) -> Result<()> {
+        self.after(self.disk.allocate(file, len))
+    }
+    fn available_bytes(&self, dir: &Path) -> Result<u64> {
+        self.disk.available_bytes(dir)
+    }
+    fn total_bytes(&self, dir: &Path) -> Result<u64> {
+        self.disk.total_bytes(dir)
+    }
     fn sync_data(&self, file: FileId) -> Result<()> {
         self.before_sync()?;
         self.after(self.disk.sync_data(file))

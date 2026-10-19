@@ -62,6 +62,12 @@ pub trait Io: Send + Sync {
     fn len(&self, file: FileId) -> Result<u64>;
     /// Truncates or zero-extends a file.
     fn set_len(&self, file: FileId, n: u64) -> Result<()>;
+    /// Reserves blocks and sets the file length. Copy-on-write filesystems can still run out later.
+    fn allocate(&self, file: FileId, len: u64) -> Result<()>;
+    /// Returns bytes available to an unprivileged writer in this directory.
+    fn available_bytes(&self, dir: &Path) -> Result<u64>;
+    /// Returns the filesystem capacity in bytes.
+    fn total_bytes(&self, dir: &Path) -> Result<u64>;
     /// Persists file data and its length, but not its directory entry.
     fn sync_data(&self, file: FileId) -> Result<()>;
     /// Persists directory entries.
@@ -145,6 +151,29 @@ impl Io for StdIo {
 
     fn set_len(&self, file: FileId, n: u64) -> Result<()> {
         Ok(lock(self.file(file)?.as_ref())?.set_len(n)?)
+    }
+
+    /// Linux reserves blocks with `fallocate`. Other platforms use `set_len`.
+    ///
+    /// rustix 1.1.2 has no safe macOS `F_PREALLOCATE` wrapper. That fallback creates sparse files.
+    /// APFS and btrfs can need extra space after preallocation. The writer's floor remains the guard.
+    fn allocate(&self, file: FileId, len: u64) -> Result<()> {
+        let file = self.file(file)?;
+        let file = lock(&file)?;
+        #[cfg(target_os = "linux")]
+        rustix::fs::fallocate(&*file, rustix::fs::FallocateFlags::empty(), 0, len)
+            .map_err(std::io::Error::from)?;
+        Ok(file.set_len(len)?)
+    }
+
+    fn available_bytes(&self, dir: &Path) -> Result<u64> {
+        let stat = rustix::fs::statvfs(dir).map_err(std::io::Error::from)?;
+        Ok(stat.f_bavail.saturating_mul(stat.f_frsize))
+    }
+
+    fn total_bytes(&self, dir: &Path) -> Result<u64> {
+        let stat = rustix::fs::statvfs(dir).map_err(std::io::Error::from)?;
+        Ok(stat.f_blocks.saturating_mul(stat.f_frsize))
     }
 
     fn sync_data(&self, file: FileId) -> Result<()> {

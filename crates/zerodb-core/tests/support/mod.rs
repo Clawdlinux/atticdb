@@ -74,6 +74,15 @@ impl Io for ProbeIo {
     fn set_len(&self, f: FileId, n: u64) -> Result<()> {
         self.disk.set_len(f, n)
     }
+    fn allocate(&self, f: FileId, n: u64) -> Result<()> {
+        self.disk.allocate(f, n)
+    }
+    fn available_bytes(&self, dir: &Path) -> Result<u64> {
+        self.disk.available_bytes(dir)
+    }
+    fn total_bytes(&self, dir: &Path) -> Result<u64> {
+        self.disk.total_bytes(dir)
+    }
     fn sync_data(&self, f: FileId) -> Result<()> {
         self.disk.sync_data(f)
     }

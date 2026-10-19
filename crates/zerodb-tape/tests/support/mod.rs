@@ -85,6 +85,17 @@ impl Io for ObservedIo {
         self.event(format!("resize {} {len}", self.name(file).display()));
         result
     }
+    fn allocate(&self, file: FileId, len: u64) -> Result<()> {
+        let result = self.disk.allocate(file, len);
+        self.event(format!("resize {} {len}", self.name(file).display()));
+        result
+    }
+    fn available_bytes(&self, dir: &Path) -> Result<u64> {
+        self.disk.available_bytes(dir)
+    }
+    fn total_bytes(&self, dir: &Path) -> Result<u64> {
+        self.disk.total_bytes(dir)
+    }
     fn sync_data(&self, file: FileId) -> Result<()> {
         if self.name(file).file_name().unwrap().to_string_lossy().starts_with("seg-") {
             self.segment_syncs.fetch_add(1, Ordering::SeqCst);
