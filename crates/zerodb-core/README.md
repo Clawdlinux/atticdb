@@ -3,7 +3,7 @@
 Durable session history on `zerodb-tape`. No async runtime or new third-party packages.
 
 ```rust,no_run
-use zerodb_core::{Engine, EngineOptions, NewTurn, Role, Scope, Trust, WindowQuery};
+use zerodb_core::{Engine, EngineOptions, NewTurn, Role, Scope, WindowQuery};
 
 let engine = Engine::open("memory", EngineOptions::default())?;
 let scope = Scope {
@@ -17,7 +17,6 @@ let receipt = engine.append(
         role: Role::User,
         content: b"hello".to_vec(),
         meta: Vec::new(),
-        trust: Trust::Untrusted,
     }],
     Some("request-1"),
 )?;
@@ -29,7 +28,7 @@ let recent = engine.window(&scope, WindowQuery::Last(8))?;
 
 Sequences start at 1. `Since { seq, limit }` includes `seq`. Sequence 0 starts at 1.
 `Last(0)` returns nothing. An unknown scope also returns nothing.
-Windows include every trust label. They pin a durable LSN and read each returned turn once.
+Windows pin a durable LSN and read each returned turn once.
 The `window_reads` metric counts those `Tape::read` calls.
 
 Append receipts cover turn LSNs, excluding any preceding tenant record.
@@ -44,15 +43,15 @@ The digest covers the ordered encoded turns, with sequences normalized to 0.
 Each payload includes its byte length in that digest.
 Keyless appends skip the retry digest. Keyed appends compute it on the caller.
 Preparation and publication parse borrowed payload views without copying turn content.
-Tape integrity hashes still cover every salted payload, including assigned sequences.
-Changing an agent, role, trust, metadata, content, or batch boundary produces a conflict.
+Location-bound frame CRCs cover every payload, including assigned sequences.
+Changing an agent, role, metadata, content, or batch boundary produces a conflict.
 Retries return the original transaction, turn LSNs, and sequences.
 Keys outside the count window are new requests.
 `dedup_window_effective` reports the smallest retained count among tenants with retained keys.
 
-Tenant creation is atomic with its first turns. `TenantCreate = 6` does not advance provenance chains.
+Tenant creation is atomic with its first turns. `TenantCreate = 6` consumes 1 record LSN.
 The first tenant transaction allows 1023 turns. Later transactions allow 1024.
-The tape's 4 MiB encoded batch limit includes headers, salts, and the footer.
+The tape's 4 MiB encoded batch limit includes headers and the footer.
 That limit can reject content below the codec's independent 4 MiB field limit.
 
 ## Payload format
@@ -67,7 +66,6 @@ u64 seq
 u8 role: system=0, user=1, assistant=2, tool=3
 meta: length + bytes, <=65536 bytes
 content: length + bytes, <=4194304 bytes
-u8 trust: trusted=0, untrusted=1
 u8 key_present: 0 or 1
 if present: idem_key length + UTF-8, <=128 bytes
 ```
@@ -194,9 +192,12 @@ Live reopen preserves failed page-cache writes. Crash reopen uses a captured Sim
 A captured mid-append cut does not excuse later acknowledged loss.
 When append returns successfully, a second post-return crash image must retain its receipt.
 Keyless turns carry unique oracle metadata, so their uncertain outcomes remain independently checkable.
-Corruption flips checkpoint page-record checksum bytes, not file magic.
+Checkpoint corruption flips page-record checksum bytes, not file magic.
+S1 also flips tape payload and length bytes above the superblock.
+Later footers must prove corruption. Without a proof, recovery reports a truncated tail.
+Some seeds constrain the tape index to 12 KiB, forcing page reloads during recovery.
 
-`TapeOptions::inline_sim` disables background workers and uses fixed salts.
+`TapeOptions::inline_sim` disables background workers.
 It is feature-gated and defaults to false. Never enable it for real storage.
 Explicit seeded checkpoints replace the wall-clock timer.
 `enqueue_sim` queues appends. `step_sim` runs their shared production writer step.
@@ -207,7 +208,7 @@ The regression requires a later checkpoint to retain newly published page revisi
 Removing the revision guard fails at seed 0 and in the dedicated regression.
 `checkpoint_step_sim` services pending byte-threshold wakes through the production wake check.
 Memory-pressure checkpoints and recovery spills also run inline.
-Production defaults retain worker threads and OS entropy.
+Production defaults retain worker threads.
 
 ## G1 performance harness
 
@@ -237,7 +238,7 @@ Reader latency samples every 64th completed query. All queries contribute to the
 Reopen verifies every session's final sequence outside timing.
 
 The bare baseline reuses M1's framing, segment preallocation, append, and sync code.
-It preframes the same turn codec, metadata, salts, transaction footer, and byte counts.
+It preframes the same turn codec, metadata, transaction footer, and byte counts.
 Its fixed headers exclude hashing and caller preparation, as in M1.
 All paths use the same content-size trace and transaction batching.
 Bare and Tape share the same adaptive coalescer.
@@ -245,7 +246,7 @@ Bare and Tape share the same adaptive coalescer.
 It targets the largest of the previous 64 groups until that bounded timeout.
 After waiting, it drains ready arrivals without blocking again.
 Group boundaries still depend on scheduling. Every path reports its observed request-group size.
-Tape keeps 1 entropy handle open and reads each batch's salts together before hashing.
+Tape computes frame CRCs after reserving each transaction's segment and offset.
 Periodic superblocks run on a helper using only published, already-synced LSNs.
 Requests follow segment rolls, 30 seconds of active writes, or 256 MiB of published bytes.
 `TapeOptions::superblock_interval` and `superblock_bytes` configure the latter thresholds. Both must be positive.
@@ -265,5 +266,5 @@ This proves flat record-read work. Timing still depends on filesystem caching an
 Measurements live in `bench/RESULTS.md`.
 macOS uses `sync_data`, which invokes `F_FULLFSYNC` in this Rust toolchain.
 The local macOS target is median Engine/bare durable-ack p99 at most 1.5x.
-This is an append-only M2 proxy. Cache writes aren't implemented until M3.
+This is an append-only proxy. Facts and forget are not measured.
 G1 remains pending until Linux NVMe runs the full trace and nightly LazyFS crash checks.

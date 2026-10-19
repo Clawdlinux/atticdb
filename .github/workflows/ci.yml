@@ -20,4 +20,9 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace
       - run: cargo test --workspace --release
+      - run: cargo test -p zerodb-tape --release --features sim --test sim
+        env:
+          ZERODB_SIM_SEEDS: "2000"
       - run: cargo test -p zerodb-core --release --features sim --test engine_sim
+        env:
+          ZERODB_SIM_SEEDS: "2000"

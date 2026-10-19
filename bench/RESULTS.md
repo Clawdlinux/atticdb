@@ -1,10 +1,10 @@
 # Latest result
 
-Latest macOS median target: **PASS**, with Engine/bare p99 **1.399654x** [1.317363x, 1.500114x].
-Tape/bare median is **1.123347x** [1.065021x, 1.159804x].
-See [merge-review measurements](#m2-merge-review) for the trace and tradeoffs.
-Linux NVMe and nightly LazyFS remain pending. The trace omits cache writes until M3.
-These performance numbers precede the final checkpoint identity fix documented below. G1 was not rerun for that fix.
+Latest S1 macOS repeat: Engine/bare p99 **1.323846x** [1.088324x, 1.387704x].
+Tape/bare median is **1.073751x** [1.004362x, 1.285391x].
+Both repeat medians beat the published M2 medians. The first S1 run missed both.
+See [S1 measurements](#s1-frame-v2-macos) for both runs and the scope limits.
+Linux NVMe and nightly LazyFS remain pending. This trace measures appends, not facts or forget.
 
 # M1 append baseline
 
@@ -830,6 +830,108 @@ The restored revision guard is present. No mutation is included in the commits.
 | `ZERODB_SIM_SEEDS=2000 cargo test -p zerodb-tape --release --features sim --test sim` | Passed |
 | `ZERODB_SIM_SEEDS=2000 cargo test -p zerodb-core --release --features sim --test engine_sim` | Passed. All 7 tests. |
 | `cargo clippy -p zerodb-core --lib --no-default-features -- -D warnings` | Passed |
+
+# S1 frame v2 (macOS)
+
+Measured on 2026-10-19, after T1 through T4 and the final T5 correctness changes.
+Machine: Apple M4, arm64, macOS 27.0.1 build 26A434.
+Compiler: `rustc 1.99.1 (58cf8f9c3 2026-10-13)`.
+This is a shared machine. No test or simulation from this task overlapped either timed run.
+
+## Storage changes
+
+The fixed header shrank from 104 bytes to 40 bytes. Each record also drops its 16-byte salt.
+The footer payload shrank from 44 bytes to 32 bytes.
+Its full encoded size is 72 bytes, down from 148 bytes.
+A 4-record transaction saves 396 encoded bytes.
+CRC32C binds each frame to its manifest segment ID and offset.
+Footer CRCs bind exactly the records they close.
+
+The LSN index uses per-segment offset arrays with a paged routing directory.
+The default resident budget is 8 MiB. Page charges include cache bookkeeping.
+Derived backing files use 8 offset bytes and 16 routing bytes per record, before page padding.
+Both files are rebuilt at open. They are not another recovery authority.
+Small-budget tests cover eviction, reloads, cross-segment reads and failed index writeback.
+
+## Trace and comparison
+
+Each command runs 3 interleaved repetitions: bare, Tape, then Engine.
+Every path writes 192,000 timed turns per repetition, using 4-turn batches and 16 writers.
+Each path contributes 48,000 durable-ack samples per repetition.
+The Engine also serves 2 window readers across 1024 sessions.
+Content sizes cycle through 256 B, 512 B, 1 KiB, 4 KiB and 8 KiB.
+Ratios are paired within repetitions. Spreads below are minimum through maximum, not pooled quantiles.
+
+```sh
+G1_TURNS=192000 G1_REPS=3 G1_HISTORY=0 G1_REPLAY_PROBE=0 G1_CHECKPOINT_MIB=64 ./bench/g1.sh
+```
+
+The command ran twice without code or configuration changes. Both executions returned status 0.
+The first execution printed `FAIL` for its 1.5x performance verdict.
+The bare path varied sharply, so the same trace was repeated once.
+No run was discarded. Both sets of measurements follow.
+
+| Run | Repetition | Bare p99, ms | Tape p99, ms | Engine p99, ms | Engine/bare | Tape/bare |
+|---|---:|---:|---:|---:|---:|---:|
+| First | 1 | 6.055417 | 7.022292 | 8.020084 | 1.324448 | 1.159671 |
+| First | 2 | 5.175958 | 7.073500 | 12.563459 | 2.427272 | 1.366607 |
+| First | 3 | 6.473458 | 7.968041 | 11.004625 | 1.699961 | 1.230879 |
+| Repeat | 1 | 6.839791 | 6.869625 | 9.054833 | 1.323846 | 1.004362 |
+| Repeat | 2 | 5.452459 | 5.854584 | 5.934042 | 1.088324 | 1.073751 |
+| Repeat | 3 | 6.252833 | 8.037333 | 8.677084 | 1.387704 | 1.285391 |
+
+| Measurement | Engine/bare median [min, max] | Tape/bare median [min, max] | Against published M2 medians |
+|---|---|---|---|
+| M2 merge review | 1.399654 [1.317363, 1.500114] | 1.123347 [1.065021, 1.159804] | Reference |
+| S1 first run | 1.699961 [1.324448, 2.427272] | 1.230879 [1.159671, 1.366607] | Miss |
+| S1 unchanged repeat | 1.323846 [1.088324, 1.387704] | 1.073751 [1.004362, 1.285391] | Pass |
+
+The repeat meets both M2 median targets. Its Engine p99 median is 8.677084 ms.
+Its Tape p99 median is 6.869625 ms.
+The M2 medians were 9.664083 ms and 7.756292 ms, respectively.
+The M2 reference used 1M timed turns per path. S1 uses the plan's requested 192,000 turns.
+These trace lengths differ. Neither result proves a causal speedup or a stable hardware-independent bound.
+The first S1 miss remains a performance-variance warning.
+
+All 1024 session tails verified after every engine reopen in both runs.
+Each engine repetition completed 8 checkpoints and 8 periodic superblock installs.
+The repeat's clean-open median was 1148.107 ms [1102.494, 1173.573].
+Open still includes a full tape CRC scan. Checkpoints reduce application replay, not that scan.
+
+## Correctness and fault coverage
+
+The final source passed every command below before the T5 commit.
+The release workspace run includes the filesystem stress test skipped by the debug run.
+The 10,000-seed runs cover seeds 0 through 9,999. CI now sets 2,000 seeds explicitly for both sims.
+
+| Command | Result |
+|---|---|
+| `cargo fmt --all --check` | Passed |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | Passed |
+| `cargo test --workspace` | Passed |
+| `cargo test --workspace --release` | Passed |
+| `ZERODB_SIM_SEEDS=2000 cargo test -p zerodb-tape --release --features sim --test sim` | Passed. 2,000 seeds. |
+| `ZERODB_SIM_SEEDS=2000 cargo test -p zerodb-core --release --features sim --test engine_sim` | Passed. 2,000 seeds. All 7 tests passed. |
+| `ZERODB_SIM_SEEDS=10000 cargo test -p zerodb-tape --release --features sim --test sim` | Passed. 10,000 seeds. 105.41 seconds. |
+| `ZERODB_SIM_SEEDS=10000 cargo test -p zerodb-core --release --features sim --test engine_sim` | Passed. 10,000 seeds. All 7 tests passed. 877.31 seconds. |
+
+Tape seeds exercise stale footers, corrupt lengths and corruption proofs within and across segments.
+They also cover damaged footer kinds, zeroed footers, reply-only sync steps and reordered same-group tails.
+Each tape seed injects an operator-cut crash.
+Engine seeds add tape corruption and small-index-budget recovery to the existing checkpoint and retry oracle.
+Separate regressions check backwards clocks, footer guards and the first bad LSN.
+Operator-cut tests check both transaction boundaries and every captured I/O crash point.
+An explicit dropped-byte field also covers tails with no decodable dropped LSNs.
+
+D73 rejects interior cuts and names both valid boundaries.
+It validates the retained prefix before changing data.
+A durable intent bridges zeroed-data sync and superblock lowering.
+An interrupted cut resumes before normal recovery checks the durable floor.
+The operator report and log identify the cut, dropped range and dropped bytes.
+Dropped LSNs may be reused, including acknowledged LSNs. This is the documented exception to I3.
+
+The additional unchanged G1 repeat is the only validation-plan deviation.
+Linux NVMe, nightly LazyFS and later fact/forget workloads remain unmeasured here.
 | `cargo bench -p zerodb-core --bench g1 --no-run --quiet` | Passed |
 | `G1_TURNS=208000 G1_REPS=3 G1_REPLAY_PROBE=1 ./bench/g1.sh` | Passed. Three alternating probes per checkpoint setting. |
 | `G1_TURNS=1000000 G1_REPS=3 G1_HISTORY=1 G1_REPLAY_PROBE=0 G1_CHECKPOINT_MIB=64 ./bench/g1.sh` | Passed. All 9 timed phases, reopen checks, and history checks. Median target PASS. |

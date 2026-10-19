@@ -353,7 +353,12 @@ fn corrupt_page_checksum(disk: &SimDisk, rng: &mut Rng) {
 fn run_seed(seed: u64) -> Vec<Vec<Turn>> {
     let mut rng = Rng(seed);
     let opts = EngineOptions {
-        tape: TapeOptions { segment_size: 64 * 1024, inline_sim: true, ..TapeOptions::default() },
+        tape: TapeOptions {
+            segment_size: 64 * 1024,
+            inline_sim: true,
+            lsn_index_bytes: if seed.is_multiple_of(3) { 12 * 1024 } else { 8 * 1024 * 1024 },
+            ..TapeOptions::default()
+        },
         hot_page_bytes: if seed.is_multiple_of(2) { 4096 } else { 1024 * 1024 },
         checkpoint_bytes: 4096,
         ..EngineOptions::default()
@@ -527,6 +532,74 @@ fn grouped_seed(seed: u64) -> Vec<Vec<Turn>> {
         oracle.batches.push(batch);
         oracle.apply(index, receipt);
     }
+
+    fn frame_v2_engine_faults(seed: u64) {
+        use zerodb_tape::sim::frame;
+        for proof in [false, true] {
+            let disk = Arc::new(SimDisk::new(seed));
+            let opts = EngineOptions {
+                tape: TapeOptions {
+                    segment_size: 4096,
+                    inline_sim: true,
+                    ..TapeOptions::default()
+                },
+                checkpoint_bytes: u64::MAX,
+                checkpoint_interval: std::time::Duration::from_secs(3600),
+                ..EngineOptions::default()
+            };
+            let clock = Arc::new(SimClock::new(1000));
+            let engine = Engine::open_with(disk.clone(), clock, "db", opts.clone()).unwrap();
+            let scope = Scope { tenant: "t".into(), agent: "a".into(), session: "s".into() };
+            for index in 0..if proof { 3 } else { 1 } {
+                engine
+                    .append(
+                        &scope,
+                        vec![NewTurn { role: Role::User, content: vec![index], meta: vec![] }],
+                        Some(&format!("key-{index}")),
+                    )
+                    .unwrap();
+            }
+            let image = Arc::new(disk.crash().unwrap());
+            drop(engine);
+            let path = Path::new("db/seg-0000000000000001.zdb");
+            let file = image.open(path).unwrap();
+            let mut bytes = vec![0; 4096];
+            image.read_at(file, 0, &mut bytes).unwrap();
+            let mut offset = 0;
+            while let Ok((record, used)) = frame::decode(&bytes[offset..], 1, offset as u64) {
+                if record.header.kind == Kind::Turn {
+                    break;
+                }
+                offset += used;
+            }
+            image
+                .flip_bit_at(
+                    file,
+                    (offset + if seed.is_multiple_of(2) { 4 } else { 40 }) as u64,
+                    (seed % 8) as u8,
+                )
+                .unwrap();
+            image.close(file).unwrap();
+            let result = Engine::open_with(image, Arc::new(SimClock::new(0)), "db", opts);
+            if proof {
+                assert!(
+                    matches!(
+                        result,
+                        Err(zerodb_core::EngineError {
+                            kind: ErrorKind::Storage(Error::CorruptionDetected { lsn: 2, .. }),
+                            ..
+                        })
+                    ),
+                    "seed={seed}"
+                );
+            } else {
+                let engine = result.unwrap();
+                assert_eq!(engine.metrics().unwrap().durable_lsn, 0);
+                assert!(engine.window(&scope, WindowQuery::Last(10)).unwrap().is_empty());
+            }
+        }
+    }
+    frame_v2_engine_faults(seed);
     for generation in 0..3 {
         for group in 0..8 {
             clock.advance(1 + rng.below(2_000_000_000) as u64);

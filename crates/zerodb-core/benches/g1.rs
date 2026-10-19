@@ -442,5 +442,5 @@ fn main() {
     if env_number("G1_HISTORY", 1) != 0 {
         history_windows();
     }
-    println!("macOS local 1.5x verdict: {} (median ratio={ratio:.3}). Linux NVMe and nightly LazyFS remain pending. Cache writes wait until M3.", if ratio <= 1.5 { "PASS" } else { "FAIL" });
+    println!("macOS local 1.5x verdict: {} (median ratio={ratio:.3}). Linux NVMe and nightly LazyFS remain pending. Append-only trace.", if ratio <= 1.5 { "PASS" } else { "FAIL" });
 }

@@ -1,89 +1,104 @@
 # zerodb
 
-Agent memory database written in Rust. Fast and crash safe first.
+Agent memory database written in Rust. Durable writes and fast recent-history reads.
 
-Status: early. Milestones 1 (the tape) and 2 (the session log engine) are done. Nothing here is ready for production use.
-M2 Groups D and E add durable session history. G1 and engine simulation remain separate acceptance work.
+Status: early. The tape, session engine and S1 storage changes are implemented. This isn't ready for production.
 
 ## Why
 
-Agents need memory that does not lose writes and does not slow down as history grows. Today teams glue Redis, a vector DB and a memory framework together. We keep seeing the same failures:
+We want memory that keeps acknowledged writes and stays fast as history grows.
+Session history lives in 1 append-only log. Every index can be rebuilt from that log.
+Facts, forget and export come in later steps. Search is deferred.
 
-- writes that report success but never persist;
-- "last N turns" that gets slower as a session grows;
-- scoped search that leaks or misses records;
-- two processes sharing one memory file and overwriting each other.
+The current scope is [0003: slim v0.1](docs/design/0003-slim-v0.1.md).
+The [decision log](docs/design/0002-decision-log.md) explains the choices.
+[0001](docs/design/0001-architecture.md) retains historical mechanics, not the current feature scope.
 
-zerodb puts session history, hybrid recall and a cache behind one durable commit point.
+## What exists
 
-## Design in one paragraph
+- `zerodb-tape`: location-bound CRC32C frames, whole-transaction footers, group commit and guarded recovery.
+- `zerodb-core`: `append`, `window`, tenant isolation, idempotent retries and incremental checkpoints.
+- `SimDisk`: seeded crashes, reordered writes, torn sectors, failed syncs, bit flips and full-disk faults.
 
-One append-only, checksummed, per-tenant hash-chained log (the tape) is the write-ahead log, the data store and the provenance chain at once. Every other structure is a view rebuilt from the tape. Group commit keeps the durable ack close to a bare append plus sync. Full design: [docs/design/0001-architecture.md](docs/design/0001-architecture.md). Decision log: [docs/design/0002-decision-log.md](docs/design/0002-decision-log.md).
+Frame v2 uses a 40-byte header instead of 104 bytes. Its footer payload is 32 bytes.
+Record LSNs and transaction IDs are dense. Footers repeat the final record LSN.
+Every write waits for sync and publication. There is no lossy acknowledgement mode.
+Commit timestamps stay monotonic across restarts, even when the clock moves backwards.
 
-## What exists today (M1, M2)
+`Fact` and `Forget` payload v1 codecs exist. The engine rejects these kinds until their behavior ships.
+There are no hash chains, signatures or tamper-evidence guarantees.
+Someone with write access to the directory can edit history.
 
-- `crates/zerodb-tape`: frames, CRC32C, BLAKE3 tenant chains, segment files, manifest and superblock, a group-commit writer, and recovery.
-- `SimDisk`: a deterministic fault-injecting disk. It loses, reorders and tears unsynced writes, fails syncs fsyncgate-style, flips bits, and runs out of space.
-- A seeded simulation that crashes the writer at random points across 2 to 3 generations per seed and checks that no acked write is lost. 10,000 seeds pass.
-- `crates/zerodb-core`: the session log engine. `append` and `window` with dense per-session seqs, read-your-writes, O(returned) windows, idempotent retries, tenants, and incremental checkpoints.
-- An engine-level seeded simulation with grouped commits, crashes, live reopens and corrupt checkpoints. 10,000 seeds pass.
-- Benchmarks against a bare append-plus-sync baseline: [bench/RESULTS.md](bench/RESULTS.md).
+### Tape hooks
 
-### Tape hooks (M2 Group D)
-
-`Tape::open_with(state_machine, io, clock, path, options)` attaches application state to the tape.
-`Tape::open(...)` keeps the tape-only behavior through `NoopStateMachine`.
-
-Implement `StateMachine` to assign sequences during `prepare`, then install synced records during `publish`.
-Preparation runs once per batch, in queue order, on the writer thread.
-`PreparedBatch::records_mut()` allows content and metadata rewrites. Changed content gets fresh digests before framing.
+`Tape::open_with(state_machine, io, clock, path, options)` attaches application state.
+`Tape::open(...)` uses `NoopStateMachine`.
+The writer runs `prepare` once per batch, in queue order.
+`PreparedBatch::records_mut()` allows validated rewrites before framing.
 `Prepare::Reject` and `Prepare::Reply` write nothing.
-Keep preparation reservations private. Storage failures poison the writer, so later writes cannot observe those reservations.
-Preparation may cache dedup entries for writes still pending in the current group.
-Cached durable replies wait for sync and publication. Failed syncs return `Unknown` for originals and retries.
-Fast requests never receive LSNs, including cached replies.
 
-Publication runs before durable replies. Fast batches publish only after a successful sync, including clean shutdown.
-Fast-only traffic forces sync after a segment roll or when buffered encoded bytes exceed a threshold.
-`TapeOptions::max_unpublished_bytes` configures that threshold. `None` uses the segment size.
-The threshold is checked at the end of each writer step. Successful syncs release rolled segment handles.
-During open, recovery finishes and syncs before ordered `replay` callbacks start.
-Set `TapeOptions::replay_from_lsn` to your loaded checkpoint's watermark. Only records strictly above it replay.
-A replay error aborts open.
+Keep preparation reservations private until `publish`.
+Cached replies share the original group's sync and publication outcome.
+A failed sync poisons writes and returns `Unknown`. Reads retain the published view.
+Publication runs before the durable LSN advances and before replies leave the writer.
 
-`Tape::scan(from_lsn)` yields durable `CommittedRecord` values in LSN order, starting inclusively.
-The iterator captures its durable boundary and reads one indexed frame at a time across segments.
-Footers and redacted husks are skipped. Application payloads exclude salts.
+Recovery verifies and syncs the tape before ordered `replay` callbacks begin.
+Set `TapeOptions::replay_from_lsn` to the loaded checkpoint watermark.
+`Tape::scan(from_lsn)` captures a durable boundary and yields application records, without footers.
 
-### Session engine (M2 Group E)
+### Bounds and recovery
 
-`crates/zerodb-core` provides `Engine::open`, `append`, and ordered `window` reads.
-The writer assigns dense session sequences and publishes the index before acknowledging durable writes.
-Retry keys detect conflicts and return original receipts within bounded per-tenant and global windows.
-Geometric session pages use a global LRU budget. Cold pages reload from incremental checkpoint files.
-Checkpoint I/O runs on a separate worker through the tape's `Io` trait.
-Corrupt checkpoints trigger full replay with a warning.
+`TapeOptions::lsn_index_bytes` bounds resident offset pages and their routing directory. The default is 8 MiB.
+Per-segment offset arrays have arithmetic slots. Their routing directory is also paged.
+Lookup needs a fixed number of page accesses, regardless of log length.
+The derived `LSN-OFFSETS` and `LSN-ROUTES` files are rebuilt at open.
 
-See [the core API and storage notes](crates/zerodb-core/README.md) for formats, limits, and recovery behavior.
+Open verifies the whole tape with CRC32C. Checkpoints reduce application replay, not that full scan.
+Open time therefore grows with log size. There is no compaction yet.
 
-## Roadmap
+Damage below the superblock is `CorruptionDetected`.
+Above it, a later validated footer can prove that damaged records were already synced.
+Without that proof, recovery truncates and reports the discarded range and byte count.
+Damage inside the last synced group can lack a later proof. See I1 in 0003.
 
-| Milestone | Scope |
+`Tape::recover_truncate_at(directory, lsn)` is an explicit operator escape. Close the database first.
+Use 0 or the final LSN of a whole transaction.
+An interior cut fails with both nearest valid boundaries. The retained prefix must validate.
+A durable intent resumes an interrupted cut before normal recovery checks the superblock.
+The report and log name the cut, dropped range and byte count.
+Dropped LSNs may be reused, including acknowledged LSNs. D73 documents this exception to I3.
+CLI wiring arrives with the server binary in S3.
+
+### Session engine
+
+The writer assigns dense session sequences. Windows cost O(returned), not O(history).
+Retry keys return original receipts within bounded tenant and global windows.
+Session pages use a resident-memory budget. Cold pages reload from checkpoints.
+A bad checkpoint triggers full replay with a warning.
+
+See [the core API notes](crates/zerodb-core/README.md) for formats and limits.
+See [benchmark results](bench/RESULTS.md) for the measured macOS workload and its limits.
+
+## Next steps
+
+| Step | Scope |
 |---|---|
-| M1 | Tape, I/O, recovery, simulation. Done. |
-| M2 | Session index, append and window, idempotency, checkpoints. Done. G1 passes on macOS (1.40x median vs 1.5x gate). Linux NVMe run pending. |
-| M3 | Cache with TTL, pub-sub, temporal facts. |
-| M4 | Compaction, forget, retention, signed checkpoints, verify, export. |
-| M5 | BM25, exact vector scan, RRF. Kill gate G2. |
-| M6 | HTTP server with auth, MCP stdio adapter, Python SDK, markdown import and export. |
-| M7 | PrefixLedger, prefix-cache-stable context assembly. Kill gate G3. |
+| S1 | Frame v2, guarded recovery, bounded tape index. |
+| S2 | Disk-full floor and real preallocation. |
+| S3 | Shared server, auth, HTTP, MCP and Python client. |
+| S4 | Tenant-scoped fact revisions and conditional updates. |
+| S5 | Hide requests and markdown export. |
+| S6 | Dogfood and measure the remaining gaps. |
 
 ## Build and test
 
 ```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
 cargo test --workspace --release
-ZERODB_SIM_SEEDS=10000 cargo test --release --features sim --test sim
+ZERODB_SIM_SEEDS=2000 cargo test -p zerodb-tape --release --features sim --test sim
+ZERODB_SIM_SEEDS=2000 cargo test -p zerodb-core --release --features sim --test engine_sim
 ```
 
 ## License

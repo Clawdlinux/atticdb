@@ -21,6 +21,8 @@ pub struct RecoveryReport {
     pub cut_lsn: Option<u64>,
     /// An operator cut permits reuse of dropped LSNs, including acknowledged LSNs.
     pub lsns_may_be_reused: bool,
+    /// Bytes cleared or removed, including preallocated tails without decodable records.
+    pub dropped_bytes: u64,
 }
 
 /// Rebuilt writer state. Only complete transactions contribute records.
@@ -160,6 +162,20 @@ fn lookahead(
     }
     Ok(false)
 }
+fn expected_bad_lsn(state: &Recovered, pending: &[(Frame, u64)], tail: &[u8]) -> u64 {
+    let next = state.report.durable_lsn.saturating_add(pending.len() as u64).saturating_add(1);
+    if let Some((last, _)) = pending.last() {
+        // A damaged kind or zeroed footer cannot advance its expected LSN past the pending records.
+        if tail.get(8) == Some(&(Kind::Footer as u8))
+            || tail.iter().take(8).all(|&byte| byte == 0)
+            || tail.get(20..28) == Some(last.header.lsn.to_le_bytes().as_slice())
+        {
+            return last.header.lsn;
+        }
+    }
+    next
+}
+
 fn zero_tail(dir: &DataDir, file: &Handle, from: u64, size: u64) -> Result<()> {
     dir.io.set_len(file.id, size)?;
     let zeros = [0; 64 * 1024];
@@ -227,23 +243,12 @@ fn cut_prefix(dir: &DataDir, size: u64, cut: u64) -> Result<Cut> {
             }
             let expected =
                 state.report.durable_lsn.saturating_add(pending.len() as u64).saturating_add(1);
-            let (record, used) =
-                frame::decode(&bytes[offset..], segment, offset as u64).map_err(|error| {
-                    corruption(
-                        if bytes.get(offset + 8) == Some(&(Kind::Footer as u8)) {
-                            expected.saturating_sub(1)
-                        } else {
-                            expected
-                        },
-                        segment,
-                        offset as u64,
-                        error,
-                    )
-                })?;
+            let bad_lsn = expected_bad_lsn(&state, &pending, &bytes[offset..]);
+            let (record, used) = frame::decode(&bytes[offset..], segment, offset as u64)
+                .map_err(|error| corruption(bad_lsn, segment, offset as u64, error))?;
             if record.header.kind == Kind::Footer {
-                verify(&pending, &record, &state, segment).map_err(|error| {
-                    corruption(expected.saturating_sub(1), segment, offset as u64, error)
-                })?;
+                verify(&pending, &record, &state, segment)
+                    .map_err(|error| corruption(bad_lsn, segment, offset as u64, error))?;
                 let last = record.header.lsn;
                 if last >= cut {
                     if last != cut {
@@ -269,6 +274,10 @@ fn cut_prefix(dir: &DataDir, size: u64, cut: u64) -> Result<Cut> {
             } else {
                 if record.header.lsn != expected
                     || state.txn.checked_add(1) != Some(record.header.txn)
+                    || pending.first().is_some_and(|(first, _)| {
+                        first.header.commit_time_ns != record.header.commit_time_ns
+                    })
+                    || record.header.commit_time_ns <= state.commit_time_ns
                 {
                     return Err(corruption(
                         expected,
@@ -352,6 +361,7 @@ fn finish_cut(dir: &mut DataDir, size: u64, values: &[u64]) -> Result<RecoveryRe
         records: prefix.records,
         cut_lsn: Some(*lsn),
         lsns_may_be_reused: true,
+        dropped_bytes: *cleared,
     };
     eprintln!("zerodb: operator cut LSN {lsn}, dropped LSNs {:?}, dropped bytes {cleared}; dropped LSNs may be reused", report.truncated.as_ref().map(|(range, _)| range));
     Ok(report)
@@ -508,13 +518,7 @@ pub(crate) fn recover_with_budget(
                     result => result.map_err(|e| e.to_string()),
                 }
             };
-            let bad_lsn = if tail.get(8) == Some(&(Kind::Footer as u8)) {
-                pending.last().map_or(state.report.durable_lsn.saturating_add(1), |(record, _)| {
-                    record.header.lsn
-                })
-            } else {
-                state.report.durable_lsn.saturating_add(pending.len() as u64).saturating_add(1)
-            };
+            let bad_lsn = expected_bad_lsn(&state, &pending, tail);
             let mut index_error = None;
             let result = decoded.and_then(|(record, used)| {
                 if record.header.kind == Kind::Footer {
@@ -626,6 +630,7 @@ pub(crate) fn recover_with_budget(
     dir.io.sync_dir(&dir.path)?;
     if trimming {
         state.report.truncated = Some((first_lost..=last_lost.max(first_lost), cleared));
+        state.report.dropped_bytes = cleared;
         eprintln!(
             "zerodb: truncated torn tail LSNs {first_lost}..={}, dropped bytes {cleared}",
             last_lost.max(first_lost)
@@ -636,6 +641,7 @@ pub(crate) fn recover_with_budget(
         state.report.cut_lsn = report.cut_lsn;
         state.report.lsns_may_be_reused = true;
         state.report.truncated = report.truncated;
+        state.report.dropped_bytes = report.dropped_bytes;
     }
     Ok(state)
 }

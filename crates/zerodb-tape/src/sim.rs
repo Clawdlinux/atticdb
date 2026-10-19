@@ -27,6 +27,195 @@ pub mod frame {
 #[derive(Debug)]
 struct Rng(u64);
 
+fn fault_request<S: StateMachine>(
+    core: &mut WriterCore<S>,
+    value: u8,
+    count: usize,
+) -> mpsc::Receiver<WriteResult> {
+    let batch = PreparedBatch::new(
+        vec![RecordInput { kind: Kind::Turn, tenant_id: 1, content: vec![value; 8] }; count],
+        Durability::Durable,
+    )
+    .unwrap();
+    let (request, reply) = WriteRequest::new(batch);
+    core.enqueue(request);
+    reply
+}
+
+/// Checks v2 corruption proofs, stale footers, reordered tails, empty sync steps and operator-cut crashes.
+pub fn frame_v2_faults(seed: u64) {
+    let mut rng = Rng::new(seed ^ 0xf2f2_95ba);
+    for proof in [false, true] {
+        let disk = Arc::new(SimDisk::new(seed));
+        let size = if seed.is_multiple_of(2) { 128 } else { 1024 };
+        let opts = Options { segment_size: size, ..Options::default() };
+        let (mut core, _) =
+            WriterCore::open(disk.clone(), Arc::new(SimClock::new(1000)), "db", opts.clone())
+                .unwrap();
+        for _ in 0..if proof { 3 } else { 1 } {
+            let reply = fault_request(&mut core, 7, 1);
+            core.step();
+            reply.recv().unwrap().unwrap();
+        }
+        drop(core);
+        let file = disk.open(Path::new("db/seg-0000000000000001.zdb")).unwrap();
+        if seed % 7 == 5 {
+            disk.write_at(file, 48, &[0; 72]).unwrap();
+            disk.sync_data(file).unwrap();
+        } else {
+            let offset = match seed % 7 {
+                0 => 4,
+                2 => 48 + 8,
+                3 => 48 + 20,
+                4 => 48 + 40 + 8,
+                _ => 40,
+            };
+            disk.flip_bit_at(file, offset, rng.below(8) as u8).unwrap();
+        }
+        disk.close(file).unwrap();
+        let result = Tape::open(disk, Arc::new(SimClock::new(0)), "db", opts);
+        if proof {
+            assert!(matches!(result, Err(Error::CorruptionDetected { lsn: 1, .. })), "seed={seed}");
+        } else {
+            let (_, report) = result.unwrap();
+            assert_eq!(report.durable_lsn, 0);
+            assert_eq!(report.truncated.unwrap().0, 1..=1);
+        }
+    }
+
+    // Reuse the exact old location and transaction fields. Only footer-to-record binding can reject this.
+    let disk = Arc::new(SimDisk::new(seed));
+    let mut dir = DataDir::open(disk.clone(), "stale", None, 1024).unwrap();
+    let segment = dir.prepare_next_segment(1024).unwrap();
+    let header = frame::Header {
+        kind: Kind::Turn,
+        version: frame::VERSION,
+        flags: 0,
+        txn: 1,
+        lsn: 1,
+        commit_time_ns: 1,
+        tenant_id: 1,
+    };
+    let first =
+        frame::encode(&frame::Frame { header: header.clone(), payload: vec![1; 8] }, segment, 0)
+            .unwrap();
+    let second = frame::encode(
+        &frame::Frame { header: frame::Header { lsn: 2, ..header.clone() }, payload: vec![2; 8] },
+        segment,
+        first.len() as u64,
+    )
+    .unwrap();
+    let footer = frame::Footer {
+        txn: 1,
+        first_lsn: 1,
+        synced_lsn: 0,
+        record_count: 2,
+        records_crc: crc32c(&[&first[..4], &second[..4]].concat()),
+    };
+    let end = frame::encode(
+        &frame::Frame {
+            header: frame::Header { kind: Kind::Footer, lsn: 2, tenant_id: 0, ..header.clone() },
+            payload: footer.encode().to_vec(),
+        },
+        segment,
+        (first.len() + second.len()) as u64,
+    )
+    .unwrap();
+    let replacement =
+        frame::encode(&frame::Frame { header, payload: vec![3; 8] }, segment, 0).unwrap();
+    let file = disk.open(&dir.segment_path(segment)).unwrap();
+    disk.write_at(file, 0, &[first, second, end].concat()).unwrap();
+    disk.sync_data(file).unwrap();
+    disk.write_at(file, 0, &replacement).unwrap();
+    disk.sync_data(file).unwrap();
+    disk.close(file).unwrap();
+    let report = recover(&mut dir, 1024).unwrap().report;
+    assert_eq!(report.durable_lsn, 0);
+    assert_eq!(report.truncated.unwrap().0, 1..=2);
+    drop(dir);
+
+    struct Replies(Arc<std::sync::atomic::AtomicBool>);
+    impl StateMachine for Replies {
+        fn prepare(&mut self, _: &mut PreparedBatch) -> Prepare {
+            if self.0.load(Ordering::SeqCst) {
+                Prepare::Reply(Committed::Durable {
+                    txn: 1,
+                    first_lsn: 1,
+                    last_lsn: 1,
+                    reply: vec![],
+                })
+            } else {
+                Prepare::Write
+            }
+        }
+        fn publish(&mut self, _: &[CommittedRecord]) {}
+        fn replay(&mut self, _: &CommittedRecord) -> Result<()> {
+            Ok(())
+        }
+    }
+    let io = Arc::new(CrashIo::new(SimDisk::new(seed)));
+    let replies_only = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let opts = Options { segment_size: 1024, ..Options::default() };
+    let (mut core, _) = WriterCore::open_with(
+        Replies(replies_only.clone()),
+        io.clone(),
+        Arc::new(SimClock::default()),
+        "db",
+        opts.clone(),
+    )
+    .unwrap();
+    let reply = fault_request(&mut core, 1, 1);
+    core.step();
+    reply.recv().unwrap().unwrap();
+    replies_only.store(true, Ordering::SeqCst);
+    for _ in 0..1 + rng.below(4) {
+        let reply = fault_request(&mut core, 1, 1);
+        core.step();
+        reply.recv().unwrap().unwrap();
+        assert_eq!(core.durable_lsn(), 1);
+    }
+    replies_only.store(false, Ordering::SeqCst);
+    let replies: Vec<_> = (2..=4).map(|value| fault_request(&mut core, value, 1)).collect();
+    io.cut.store(1 + rng.below(3), Ordering::SeqCst);
+    core.step();
+    for reply in replies {
+        reply.recv().unwrap().unwrap();
+    }
+    drop(core);
+    let image = Arc::new(io.image.lock().unwrap().take().unwrap());
+    let (tape, report) =
+        Tape::open(image, Arc::new(SimClock::default()), "db", opts.clone()).unwrap();
+    assert!(
+        (1..=4).contains(&report.durable_lsn),
+        "same-group writeback cannot prove its own torn tail"
+    );
+    drop(tape);
+    let file = io.disk.open(Path::new("db/seg-0000000000000001.zdb")).unwrap();
+    io.disk.flip_bit_at(file, 120 + 40, rng.below(8) as u8).unwrap();
+    io.disk.close(file).unwrap();
+    let (_, report) =
+        Tape::open(Arc::new(io.disk.clone()), Arc::new(SimClock::default()), "db", opts).unwrap();
+    assert_eq!(report.durable_lsn, 1, "later footers in the same sync group are not proof");
+
+    let io = Arc::new(CrashIo::new(SimDisk::new(seed)));
+    let opts = Options { segment_size: 128, ..Options::default() };
+    let (mut core, _) =
+        WriterCore::open(io.clone(), Arc::new(SimClock::default()), "cut", opts.clone()).unwrap();
+    for _ in 0..3 {
+        let reply = fault_request(&mut core, 1, 1);
+        core.step();
+        reply.recv().unwrap().unwrap();
+    }
+    core.shutdown().unwrap();
+    drop(core);
+    io.cut.store(1 + rng.below(24), Ordering::SeqCst);
+    Tape::recover_truncate_at_with(io.clone(), "cut", 1).unwrap();
+    let image = io.image.lock().unwrap().take().unwrap_or_else(|| io.disk.crash().unwrap());
+    let (_, report) =
+        Tape::open(Arc::new(image), Arc::new(SimClock::default()), "cut", opts).unwrap();
+    assert!(report.durable_lsn == 1 || report.durable_lsn == 3);
+}
+
 impl Rng {
     fn new(seed: u64) -> Self {
         Self(seed)
@@ -378,6 +567,7 @@ fn damage_durable(disk: &SimDisk, dir: &DataDir, rng: &mut Rng) -> (u64, u64, u8
 
 /// Runs 2 or 3 crash generations, retaining acknowledged and uncertain transactions in an oracle.
 pub fn run_seed(seed: u64) {
+    frame_v2_faults(seed);
     if seed % 97 == 1 {
         large_record(seed);
     }
@@ -387,6 +577,7 @@ pub fn run_seed(seed: u64) {
     let opts = Options {
         segment_size: 64 * 1024,
         superblock_interval: std::time::Duration::from_secs(1),
+        lsn_index_bytes: if seed.is_multiple_of(3) { 12 * 1024 } else { 8 * 1024 * 1024 },
         ..Options::default()
     };
     let clock = Arc::new(SimClock::default());

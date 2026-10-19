@@ -1,4 +1,8 @@
-# 0001: zerodb architecture (v0.1)
+# 0001: zerodb architecture (historical)
+
+Scope superseded by [0003: slim v0.1](0003-slim-v0.1.md).
+Its frame v2 and recovery rules replace the storage fields below.
+The removed features are historical, not current guarantees.
 
 Status: Revised after review rounds 1 and 2 (Skeptic, Constraint Guardian, User Advocate). Decision log in `0002-decision-log.md`.
 
