@@ -652,6 +652,51 @@ fn metadata_sync_failure_cannot_retract_an_acknowledgement() {
 }
 
 #[test]
+fn prefix_commits_when_tail_reservation_fails_unless_sparse_resize_also_fails() {
+    use std::path::Path;
+    use zerodb_tape::Io;
+
+    for fallback_fails in [false, true] {
+        let io = Arc::new(ObservedIo::new(19));
+        let opts = Options { segment_size: 4096, free_space_floor: Some(0), ..Options::default() };
+        let clock = Arc::new(SimClock::default());
+        let (mut core, _) =
+            WriterCore::open(io.clone(), clock.clone(), "db", opts.clone()).unwrap();
+        let used = io.disk.total_bytes(Path::new("db")).unwrap()
+            - io.disk.available_bytes(Path::new("db")).unwrap();
+        *io.capacity_after_space_check.lock().unwrap() = Some(used - 512);
+        io.disk.enospc_after_bytes(117 + 100).unwrap();
+        io.fail_extension.store(fallback_fails, Ordering::SeqCst);
+        let (first, first_reply) = WriteRequest::new(prepared(Durability::Durable));
+        let (second, second_reply) = WriteRequest::new(prepared(Durability::Durable));
+        core.enqueue(first);
+        core.enqueue(second);
+        core.step();
+        let first = first_reply.recv().unwrap();
+        let second = second_reply.recv().unwrap().unwrap_err();
+        assert!(core.is_poisoned());
+        assert!(matches!(second.kind, Error::DiskFull));
+        if fallback_fails {
+            assert_eq!(first.unwrap_err().outcome, Outcome::Unknown);
+            assert_eq!(second.outcome, Outcome::Unknown);
+            assert_eq!(core.durable_lsn(), 0);
+            continue;
+        }
+        assert!(matches!(first.unwrap(), Committed::Durable { last_lsn: 1, .. }));
+        assert_eq!(second.outcome, Outcome::NotCommitted);
+        assert_eq!(core.durable_lsn(), 1);
+        assert_eq!(io.disk.available_bytes(Path::new("db")).unwrap(), 3072);
+        let image = Arc::new(io.disk.crash().unwrap());
+        image.set_capacity(1 << 30).unwrap();
+        drop(core);
+        let (reopened, report) = WriterCore::open(image, clock, "db", opts).unwrap();
+        assert_eq!(report.records, 1);
+        assert_eq!(reopened.read(1).unwrap().unwrap().payload, b"hello");
+        assert!(reopened.read(2).unwrap().is_none());
+    }
+}
+
+#[test]
 fn real_files_reopen_with_multiple_tenants_and_rebuilt_chain_heads() {
     let path =
         std::env::current_dir().unwrap().join(format!("target/tape-test-{}", std::process::id()));

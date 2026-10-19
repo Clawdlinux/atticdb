@@ -24,6 +24,7 @@ pub struct ObservedIo {
     pub full_next_create: AtomicBool,
     pub full_manifest_write: AtomicBool,
     pub fail_directory_sync: AtomicBool,
+    pub fail_extension: AtomicBool,
 }
 
 impl ObservedIo {
@@ -44,6 +45,7 @@ impl ObservedIo {
             full_next_create: AtomicBool::new(false),
             full_manifest_write: AtomicBool::new(false),
             fail_directory_sync: AtomicBool::new(false),
+            fail_extension: AtomicBool::new(false),
         }
     }
 
@@ -105,6 +107,9 @@ impl Io for ObservedIo {
         self.disk.len(file)
     }
     fn set_len(&self, file: FileId, len: u64) -> Result<()> {
+        if len > self.disk.len(file)? && self.fail_extension.swap(false, Ordering::SeqCst) {
+            return Err(Error::Io(std::io::ErrorKind::Other, "injected extension failure".into()));
+        }
         let result = self.disk.set_len(file, len);
         self.event(format!("resize {} {len}", self.name(file).display()));
         result

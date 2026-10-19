@@ -186,8 +186,10 @@ Zero lengths skip preallocation. Other platforms fall back to sparse `set_len`.
 Preallocation does not guarantee later writes on APFS or btrfs. The free-space floor remains the guard.
 `SimDisk` charges reserved or written 512-byte blocks, including metadata.
 Its `set_len` extension stays sparse until written or allocated. Truncation frees the discarded blocks.
-Partial-write cleanup truncates and re-reserves the tail with `allocate`.
-A failed re-reservation poisons the writer and reports `Unknown`, rather than treating the tail as reserved.
+Partial-write cleanup truncates and tries to re-reserve the tail with `allocate`.
+Any reservation error falls back to sparse `set_len`, so the successful prefix can still sync and publish.
+The failed write then reports `NotCommitted`. The writer remains poisoned.
+Truncation, resize, or sync failures can still report `Unknown`.
 
 `SimDisk::crash()` returns an independent image without changing the original.
 The same seed and operations produce the same image.

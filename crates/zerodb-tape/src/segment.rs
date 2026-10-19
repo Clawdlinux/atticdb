@@ -156,10 +156,16 @@ impl SegmentWriter {
         Ok(())
     }
 
+    /// Removes partial bytes and restores the tail. Reservation is best-effort.
+    /// macOS `F_PREALLOCATE` reserves `len` past the physical end of file.
+    /// Sparse fallback lets the poisoned writer sync and publish its successful prefix.
     pub(crate) fn discard_partial(&mut self) -> Result<()> {
         let file = self.files.get(&self.active).ok_or(Error::Poisoned)?;
         self.dir.io.set_len(file.id, self.offset)?;
-        self.dir.io.allocate(file.id, self.size)
+        self.dir
+            .io
+            .allocate(file.id, self.size)
+            .or_else(|_| self.dir.io.set_len(file.id, self.size))
     }
 }
 
@@ -172,7 +178,7 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    fn discard_reserves_freed_tail_or_reports_a_second_storage_full() {
+    fn discard_keeps_a_sparse_tail_when_reservation_fails() {
         for lost_space in [false, true] {
             let disk = Arc::new(SimDisk::new(18));
             let dir = DataDir::open(disk.clone(), "db", None, 4096).unwrap();
@@ -193,9 +199,8 @@ mod tests {
             let file = writer.files[&writer.active].id;
             disk.enospc_after_bytes(usize::MAX).unwrap();
             if lost_space {
-                assert!(matches!(result, Err(Error::Io(std::io::ErrorKind::StorageFull, _))));
-                assert_eq!(disk.len(file).unwrap(), 512);
-                disk.set_len(file, 4096).unwrap();
+                result.unwrap();
+                assert_eq!(disk.len(file).unwrap(), 4096);
                 assert_eq!(disk.available_bytes(Path::new("db")).unwrap(), 3072);
                 disk.write_at(file, 512, &[3; 3072]).unwrap();
                 assert!(matches!(
