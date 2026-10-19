@@ -467,5 +467,13 @@ fn main() {
     if env_number("G1_HISTORY", 1) != 0 {
         history_windows();
     }
-    println!("macOS local 1.5x verdict: {} (median ratio={ratio:.3}). Linux NVMe and nightly LazyFS remain pending. Append-only trace.", if ratio <= 1.5 { "PASS" } else { "FAIL" });
+    let (platform, pending) = match std::env::consts::OS {
+        "macos" => ("macOS", "Linux NVMe and nightly LazyFS remain pending."),
+        "linux" => ("Linux", "Nightly LazyFS remains pending."),
+        other => (other, "Linux NVMe and nightly LazyFS remain pending."),
+    };
+    println!(
+        "{platform} local 1.5x verdict: {} (median ratio={ratio:.3}). {pending} Append-only trace.",
+        if ratio <= 1.5 { "PASS" } else { "FAIL" }
+    );
 }
