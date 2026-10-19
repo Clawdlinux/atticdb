@@ -26,12 +26,3 @@ jobs:
       - run: cargo test -p zerodb-core --release --features sim --test engine_sim
         env:
           ZERODB_SIM_SEEDS: "2000"
-  slow-tests:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --workspace --release -- --ignored

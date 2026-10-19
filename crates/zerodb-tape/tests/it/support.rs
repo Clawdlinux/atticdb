@@ -185,6 +185,17 @@ pub(crate) mod writer_fixtures {
     pub(crate) fn prepared(mode: Durability) -> PreparedBatch {
         PreparedBatch::new(vec![record(Kind::Turn)], mode).unwrap()
     }
+
+    pub(crate) fn superblock(io: &super::ObservedIo, size: u64) -> u64 {
+        zerodb_tape::sim::DataDir::open(
+            std::sync::Arc::new(io.disk.crash().unwrap()),
+            "db",
+            None,
+            size,
+        )
+        .unwrap()
+        .superblock()
+    }
 }
 
 pub(crate) mod frame_fixtures {
@@ -390,14 +401,14 @@ pub(crate) mod disk_full_fixtures {
     }
 
     pub(crate) fn primed_writer(
+        floor: Option<u64>,
+        capacity: u64,
     ) -> (Arc<support::ObservedIo>, WriterCore<Machine>, Arc<AtomicUsize>) {
         let io = Arc::new(support::ObservedIo::new(8));
+        io.disk.set_capacity(capacity).unwrap();
         let prepares = Arc::new(AtomicUsize::new(0));
-        let opts = TapeOptions {
-            segment_size: 4096,
-            free_space_floor: Some(100),
-            ..TapeOptions::default()
-        };
+        let opts =
+            TapeOptions { segment_size: 4096, free_space_floor: floor, ..TapeOptions::default() };
         let (mut core, _) = WriterCore::open_with(
             Machine(prepares.clone()),
             io.clone(),
@@ -406,9 +417,11 @@ pub(crate) mod disk_full_fixtures {
             opts,
         )
         .unwrap();
+        io.disk.set_capacity(capacity.max(16384)).unwrap();
         let first = queue_size(&mut core, 3800);
         core.step();
         first.recv().unwrap().unwrap();
+        io.disk.set_capacity(capacity).unwrap();
         (io, core, prepares)
     }
 
@@ -515,10 +528,71 @@ pub(crate) mod boundary_fixtures {
         reply.recv().unwrap().unwrap();
     }
 
-    pub(crate) fn flip(disk: &SimDisk, segment: u64, offset: u64) {
-        let path = format!("db/seg-{segment:016}.zdb");
-        let file = disk.open(Path::new(&path)).unwrap();
-        disk.flip_bit(file, offset).unwrap();
+    #[derive(Clone, Copy, Debug)]
+    pub(crate) enum Damage {
+        Flip(u64),
+        ZeroFooter(u64),
+        GarbageFooter,
+        MisdirectedFooter,
+        InvalidProof(usize),
+    }
+
+    pub(crate) fn damage(disk: &SimDisk, size: u64, fault: Damage, case: &str) {
+        use zerodb_tape::sim::frame;
+        let first = disk.open(Path::new("db/seg-0000000000000001.zdb")).unwrap();
+        match fault {
+            Damage::Flip(offset) => disk.flip_bit(first, offset).unwrap(),
+            Damage::ZeroFooter(offset) => disk.write_at(first, offset, &[0; 72]).unwrap(),
+            Damage::GarbageFooter => disk.write_at(first, 48, &[0xff; 72]).unwrap(),
+            Damage::MisdirectedFooter => {
+                let (segment, offset) = if size == 128 { (2, 0) } else { (1, 120) };
+                let file = disk.open(Path::new(&format!("db/seg-{segment:016}.zdb"))).unwrap();
+                let mut bytes = [0; 48];
+                assert_eq!(disk.read_at(file, offset, &mut bytes).unwrap(), 48, "{case}");
+                disk.close(file).unwrap();
+                disk.write_at(first, 48, &bytes).unwrap();
+            }
+            Damage::InvalidProof(field) => {
+                let mut bytes = vec![0; size as usize];
+                assert_eq!(disk.read_at(first, 0, &mut bytes).unwrap(), bytes.len(), "{case}");
+                bytes[40] ^= 1;
+                let footer = 168;
+                bytes[footer + 40 + field] ^= if field == 16 { 2 } else { 1 };
+                let crc = frame::checksum(1, footer as u64, &bytes[footer + 4..footer + 72]);
+                bytes[footer..footer + 4].copy_from_slice(&crc.to_le_bytes());
+                disk.write_at(first, 0, &bytes).unwrap();
+            }
+        }
+        disk.sync_data(first).unwrap();
+        disk.close(first).unwrap();
+    }
+
+    pub(crate) fn empty_footer(disk: &SimDisk) {
+        use zerodb_tape::sim::frame::{self, Footer, Frame, Header, VERSION};
+        let footer = Frame {
+            header: Header {
+                kind: Kind::Footer,
+                version: VERSION,
+                flags: 0,
+                txn: 1,
+                lsn: 1,
+                commit_time_ns: 1,
+                tenant_id: 0,
+            },
+            payload: Footer {
+                txn: 1,
+                first_lsn: 1,
+                synced_lsn: 0,
+                record_count: 1,
+                records_crc: 0,
+            }
+            .encode()
+            .to_vec(),
+        };
+        let bytes = frame::encode(&footer, 1, 0).unwrap();
+        let file = disk.open(Path::new("db/seg-0000000000000001.zdb")).unwrap();
+        disk.write_at(file, 0, &bytes).unwrap();
+        disk.sync_data(file).unwrap();
         disk.close(file).unwrap();
     }
 }

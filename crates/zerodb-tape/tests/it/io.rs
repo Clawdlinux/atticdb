@@ -30,11 +30,7 @@ fn filesystem_operations_through_trait_object() {
     io.remove(&renamed).unwrap();
     assert!(!io.exists(&renamed).unwrap());
     assert!(matches!(io.open(&renamed), Err(Error::Io(_, _))));
-}
 
-#[test]
-fn exclusive_lock_reports_holder_and_releases() {
-    let dir = TestDir::new();
     let path = dir.0.join("LOCK");
     let first = StdIo::new();
     let file = first.create(&path).unwrap();

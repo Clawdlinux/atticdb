@@ -107,10 +107,13 @@ Behavior modules share fixtures through `tests/it/support.rs`.
 The `sim` and `engine_sim` targets keep their CI names.
 
 Run a behavior module with `cargo test -p zerodb-tape --test it recovery::`.
-Filesystem stress is opt-in. The separate `slow-tests` CI job runs it:
+Debug builds skip slow filesystem tests and seeded tape schedules.
+The existing release CI step runs the filesystem checks.
+The named simulation commands run 2,000 seeds.
+To run the ignored checks in debug:
 
 ```sh
-cargo test --workspace --release -- --ignored
+cargo test --workspace -- --ignored
 ```
 
 ## License

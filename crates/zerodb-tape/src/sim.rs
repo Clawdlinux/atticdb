@@ -43,7 +43,7 @@ fn fault_request<S: StateMachine>(
 }
 
 /// Checks v2 corruption proofs, stale footers, reordered tails, empty sync steps and operator-cut crashes.
-pub fn frame_v2_faults(seed: u64) {
+pub fn frame_faults(seed: u64) {
     let mut rng = Rng::new(seed ^ 0xf2f2_95ba);
     for proof in [false, true] {
         let disk = Arc::new(SimDisk::new(seed));
@@ -603,7 +603,7 @@ fn damage_durable(disk: &SimDisk, dir: &DataDir, rng: &mut Rng) -> (u64, u64, u8
 
 /// Runs 2 or 3 crash generations, retaining acknowledged and uncertain transactions in an oracle.
 pub fn run_seed(seed: u64) {
-    frame_v2_faults(seed);
+    frame_faults(seed);
     if seed % 97 == 1 {
         large_record(seed);
     }

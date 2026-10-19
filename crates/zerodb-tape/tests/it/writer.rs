@@ -11,131 +11,172 @@ use std::sync::atomic::Ordering;
 use support::ObservedIo;
 
 #[test]
-fn short_sessions_bound_rewrite_bytes_to_previous_session_writes() {
-    let io = Arc::new(ObservedIo::new(0));
-    let clock = Arc::new(SimClock::default());
-    let opts = Options { segment_size: 1024, ..Options::default() };
-    let mut previous_writes = 0;
-    for session in 0..16 {
-        io.segment_bytes.store(0, Ordering::SeqCst);
-        io.segment_syncs.store(0, Ordering::SeqCst);
-        let (tape, _) = Tape::open(io.clone(), clock.clone(), "db", opts.clone()).unwrap();
-        let rewritten = io.segment_bytes.swap(0, Ordering::SeqCst);
-        assert!(rewritten <= previous_writes, "session={session}, rewritten={rewritten}");
-        if session > 0 {
-            assert_eq!(io.segment_syncs.load(Ordering::SeqCst), 0);
+fn superblock_thresholds_rate_limits_and_sync_failures() {
+    for (case, size, budget, count, failure) in [
+        ("clock and rate limit", 4096, 256 * 1024 * 1024, 3, 0),
+        ("byte threshold", 4096, 300, 3, 0),
+        ("segment roll", 200, 256 * 1024 * 1024, 2, 0),
+        ("metadata sync failure", 4096, 256 * 1024 * 1024, 1, 1),
+        ("shutdown sync failure", 4096, 256 * 1024 * 1024, 1, 2),
+    ] {
+        let io = Arc::new(ObservedIo::new(35));
+        let clock = Arc::new(SimClock::default());
+        let opts = Options { segment_size: size, superblock_bytes: budget, ..Options::default() };
+        let (mut core, _) = WriterCore::open(io.clone(), clock.clone(), "db", opts).unwrap();
+        io.syncs.store(0, Ordering::SeqCst);
+        io.events.lock().unwrap().clear();
+        for lsn in 1..=count {
+            let (request, reply) = WriteRequest::new(prepared(Durability::Durable));
+            core.enqueue(request);
+            if failure == 2 {
+                io.disk.fail_next_sync().unwrap();
+                assert!(matches!(core.shutdown(), Err(Error::Poisoned)), "{case}");
+                assert_eq!(reply.recv().unwrap().unwrap_err().outcome, Outcome::Unknown, "{case}");
+                assert_eq!(core.durable_lsn(), 0, "{case}");
+                let syncs = io.syncs.load(Ordering::SeqCst);
+                assert!(matches!(core.shutdown(), Err(Error::Poisoned)), "{case}");
+                assert_eq!(io.syncs.load(Ordering::SeqCst), syncs, "{case}");
+                break;
+            }
+            core.step();
+            reply.try_recv().unwrap().unwrap();
+            assert!(core.read(lsn).unwrap().is_some(), "{case}, ack={lsn}");
+            if case == "clock and rate limit" {
+                assert_eq!(
+                    io.syncs.load(Ordering::SeqCst),
+                    lsn as usize + usize::from(lsn == 3),
+                    "{case}, ack={lsn}"
+                );
+                if lsn == 1 {
+                    clock.advance(29_999_999_999);
+                }
+                if lsn == 2 {
+                    clock.advance(1);
+                }
+            }
+            if failure == 1 {
+                clock.advance(30_000_000_000);
+                io.disk.fail_next_sync().unwrap();
+                assert!(core.update_superblock().is_err(), "{case}");
+                assert!(core.is_poisoned(), "{case}");
+                assert!(core.read(1).unwrap().is_some(), "{case}: acknowledgement survives");
+            } else {
+                core.update_superblock().unwrap();
+                let expected = if case == "clock and rate limit" {
+                    if lsn > 1 {
+                        2
+                    } else {
+                        0
+                    }
+                } else if lsn == count {
+                    count
+                } else {
+                    0
+                };
+                assert_eq!(superblock(&io, size), expected, "{case}, lsn={lsn}");
+            }
         }
-        // Fill a segment exactly, so preallocated-tail overhead cannot hide growing rewrites.
-        let input = RecordInput { content: vec![session as u8; 912], ..record(Kind::Turn) };
-        tape.append(vec![input], Durability::Durable).unwrap();
-        previous_writes = io.segment_bytes.load(Ordering::SeqCst);
-        assert_eq!(previous_writes, 1024);
-        drop(tape);
-        clock.advance(500_000_000);
+        let installs = io
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| event.as_str() == "rename db/SUPERBLOCK.tmp db/SUPERBLOCK")
+            .count();
+        assert_eq!(installs, usize::from(failure == 0), "{case}");
+        if case == "clock and rate limit" {
+            assert_eq!(io.syncs.load(Ordering::SeqCst), 4, "{case}");
+        }
+        drop(core);
+        if failure != 0 {
+            assert_eq!(superblock(&io, size), 0, "{case}");
+        }
+        assert!(io.handles.lock().unwrap().is_empty(), "{case}");
     }
 }
 
 #[test]
-fn short_clean_sessions_protect_previous_session_data_from_corruption() {
+fn open_and_shutdown_install_superblocks_with_bounded_rewrites() {
     use zerodb_tape::Io;
-    let io = Arc::new(SimDisk::new(0));
-    let clock = Arc::new(SimClock::default());
-    let opts = Options { segment_size: 1024, ..Options::default() };
-    for session in 1..=8 {
-        let (tape, _) = Tape::open(io.clone(), clock.clone(), "db", opts.clone()).unwrap();
-        tape.append(vec![record(Kind::Turn)], Durability::Durable).unwrap();
-        drop(tape);
-        clock.advance(500_000_000);
-        let image = Arc::new(io.crash().unwrap());
-        let first = image.open(std::path::Path::new("db/seg-0000000000000001.zdb")).unwrap();
-        image.flip_bit(first, 0).unwrap();
-        image.close(first).unwrap();
-        assert!(
-            matches!(
-                Tape::open(image, clock.clone(), "db", opts.clone()),
-                Err(Error::CorruptionDetected { .. })
-            ),
-            "session={session}"
-        );
-        let dir = zerodb_tape::sim::DataDir::open(io.clone(), "db", None, 1024).unwrap();
-        assert_eq!(dir.superblock(), session);
+    for (case, payload_len, sessions) in [("preallocated tails", 5, 8), ("full segments", 912, 16)]
+    {
+        let io = Arc::new(ObservedIo::new(0));
+        let clock = Arc::new(SimClock::default());
+        let opts = Options { segment_size: 1024, ..Options::default() };
+        let mut previous_writes = 0;
+        for session in 0..sessions {
+            let label = format!("{case}, session={session}");
+            io.segment_bytes.store(0, Ordering::SeqCst);
+            io.segment_syncs.store(0, Ordering::SeqCst);
+            let (tape, report) = Tape::open(io.clone(), clock.clone(), "db", opts.clone()).unwrap();
+            assert_eq!(report.durable_lsn, session, "{label}");
+            let rewritten = io.segment_bytes.swap(0, Ordering::SeqCst);
+            if payload_len == 912 {
+                assert!(rewritten <= previous_writes, "{label}, rewritten={rewritten}");
+            }
+            if payload_len == 912 && session > 0 {
+                assert_eq!(io.segment_syncs.load(Ordering::SeqCst), 0, "{label}");
+            }
+            let content = vec![session as u8; payload_len];
+            tape.append(
+                vec![RecordInput { content: content.clone(), ..record(Kind::Turn) }],
+                Durability::Durable,
+            )
+            .unwrap();
+            assert_eq!(tape.durable_lsn(), session + 1, "{label}");
+            previous_writes = io.segment_bytes.load(Ordering::SeqCst);
+            assert_eq!(previous_writes, (payload_len + 112) as u64, "{label}");
+            io.events.lock().unwrap().clear();
+            drop(tape);
+            assert!(
+                io.events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|e| e == "rename db/SUPERBLOCK.tmp db/SUPERBLOCK"),
+                "{label}"
+            );
+            assert_eq!(superblock(&io, 1024), session + 1, "{label}");
+            let image = Arc::new(io.disk.crash().unwrap());
+            let (tape, report) =
+                Tape::open(image.clone(), clock.clone(), "db", opts.clone()).unwrap();
+            assert_eq!(report.durable_lsn, session + 1, "{label}");
+            assert_eq!(tape.read(session + 1).unwrap().unwrap().payload, content, "{label}");
+            drop(tape);
+            let file = image.open(std::path::Path::new("db/seg-0000000000000001.zdb")).unwrap();
+            image.flip_bit(file, 0).unwrap();
+            image.close(file).unwrap();
+            assert!(
+                matches!(
+                    Tape::open(image, clock.clone(), "db", opts.clone()),
+                    Err(Error::CorruptionDetected { .. })
+                ),
+                "{label}: clean-session data stays protected"
+            );
+            clock.advance(500_000_000);
+        }
+        let (mut core, _) =
+            WriterCore::open(io.clone(), clock.clone(), "db", opts.clone()).unwrap();
+        let (request, reply) = WriteRequest::new(prepared(Durability::Durable));
+        core.enqueue(request);
+        core.step();
+        reply.recv().unwrap().unwrap();
+        drop(core);
+        io.events.lock().unwrap().clear();
+        let (core, report) = WriterCore::open(io.clone(), clock, "db", opts).unwrap();
+        assert_eq!(report.durable_lsn, sessions + 1, "{case}: recovered survivor");
+        assert_eq!(superblock(&io, 1024), sessions + 1, "{case}");
+        assert_eq!(&core.read(sessions + 1).unwrap().unwrap().payload, b"hello", "{case}");
+        let events = io.events.lock().unwrap();
+        let rewritten = events.iter().position(|e| e.starts_with("write db/seg-")).unwrap();
+        let synced = events.iter().position(|e| e.starts_with("sync db/seg-")).unwrap();
+        let installed =
+            events.iter().position(|e| e == "rename db/SUPERBLOCK.tmp db/SUPERBLOCK").unwrap();
+        let recovered_dir = events[..installed].iter().rposition(|e| e == "dir-sync db").unwrap();
+        let final_dir = events.iter().rposition(|e| e == "dir-sync db").unwrap();
+        assert!(rewritten < synced && synced < recovered_dir, "{case}");
+        assert!(recovered_dir < installed && installed < final_dir, "{case}");
     }
-}
-
-#[test]
-fn recovered_survivors_install_superblock_before_open_returns() {
-    let io = Arc::new(ObservedIo::new(0));
-    let clock = Arc::new(SimClock::default());
-    let opts = Options { segment_size: 1024, ..Options::default() };
-    let (mut core, _) = WriterCore::open(io.clone(), clock.clone(), "db", opts.clone()).unwrap();
-    let (request, reply) = WriteRequest::new(prepared(Durability::Durable));
-    core.enqueue(request);
-    core.step();
-    reply.recv().unwrap().unwrap();
-    drop(core);
-    io.events.lock().unwrap().clear();
-    let (core, report) = WriterCore::open(io.clone(), clock, "db", opts).unwrap();
-    assert_eq!(report.durable_lsn, 1);
-    drop(core);
-    let events = io.events.lock().unwrap();
-    let rewritten = events.iter().position(|e| e == "write db/seg-0000000000000001.zdb 0").unwrap();
-    let synced = events.iter().position(|e| e == "sync db/seg-0000000000000001.zdb").unwrap();
-    let installed = events.iter().position(|e| e == "rename db/SUPERBLOCK.tmp db/SUPERBLOCK");
-    assert!(installed.is_some(), "recovery must install its durable boundary");
-    let installed = installed.unwrap();
-    let recovered_dir = events[..installed].iter().rposition(|e| e == "dir-sync db").unwrap();
-    let directory = events.iter().rposition(|e| e == "dir-sync db").unwrap();
-    assert!(rewritten < synced && synced < recovered_dir);
-    assert!(recovered_dir < installed && installed < directory);
-    let dir = zerodb_tape::sim::DataDir::open(Arc::new(io.disk.crash().unwrap()), "db", None, 1024)
-        .unwrap();
-    assert_eq!(dir.superblock(), 1);
-}
-
-#[test]
-fn clean_shutdown_forces_superblock_after_durable_records() {
-    let io = Arc::new(ObservedIo::new(0));
-    let clock = Arc::new(SimClock::default());
-    let opts = Options { segment_size: 1024, ..Options::default() };
-    let (tape, _) = Tape::open(io.clone(), clock.clone(), "db", opts.clone()).unwrap();
-    tape.append(vec![record(Kind::Turn)], Durability::Durable).unwrap();
-    assert_eq!(tape.durable_lsn(), 1);
-    io.events.lock().unwrap().clear();
-    drop(tape);
-    let events = io.events.lock().unwrap().clone();
-    let installed =
-        events.iter().position(|e| e == "rename db/SUPERBLOCK.tmp db/SUPERBLOCK").unwrap();
-    assert!(installed > 0);
-    let image = Arc::new(io.disk.crash().unwrap());
-    let dir = zerodb_tape::sim::DataDir::open(image.clone(), "db", None, 1024).unwrap();
-    assert_eq!(dir.superblock(), 1);
-    drop(dir);
-    let (tape, _) = Tape::open(image, clock, "db", opts).unwrap();
-    assert_eq!(&tape.read(1).unwrap().unwrap().payload, b"hello");
-}
-
-#[test]
-fn failed_final_sync_does_not_advance_the_shutdown_superblock() {
-    let io = Arc::new(ObservedIo::new(0));
-    let (mut core, _) = WriterCore::open(
-        io.clone(),
-        Arc::new(SimClock::default()),
-        "db",
-        Options { segment_size: 1024, ..Options::default() },
-    )
-    .unwrap();
-    let (request, reply) = WriteRequest::new(prepared(Durability::Durable));
-    core.enqueue(request);
-    io.disk.fail_next_sync().unwrap();
-    assert!(matches!(core.shutdown(), Err(Error::Poisoned)));
-    assert_eq!(reply.recv().unwrap().unwrap_err().outcome, Outcome::Unknown);
-    assert_eq!(core.durable_lsn(), 0);
-    let syncs = io.syncs.load(Ordering::SeqCst);
-    assert!(matches!(core.shutdown(), Err(Error::Poisoned)));
-    assert_eq!(io.syncs.load(Ordering::SeqCst), syncs);
-    drop(core);
-    let dir = zerodb_tape::sim::DataDir::open(io, "db", None, 1024).unwrap();
-    assert_eq!(dir.superblock(), 0);
 }
 
 #[test]
@@ -294,35 +335,6 @@ fn live_retry_of_failed_tail_repair_persists_roll_padding() {
 }
 
 #[test]
-fn concurrent_callers_get_dense_lsn_and_immediate_visibility() {
-    let disk = Arc::new(SimDisk::new(0));
-    let (tape, _) = Tape::open(disk, Arc::new(SimClock::new(0)), "db", Options::default()).unwrap();
-    let tape = Arc::new(tape);
-    let gate = Arc::new(Barrier::new(8));
-    let mut threads = Vec::new();
-    for _ in 0..8 {
-        let tape = tape.clone();
-        let gate = gate.clone();
-        threads.push(std::thread::spawn(move || {
-            gate.wait();
-            let mut lsns = Vec::new();
-            for _ in 0..20 {
-                let Committed::Durable { txn, first_lsn, last_lsn, .. } =
-                    tape.append(vec![record(Kind::Turn)], Durability::Durable).unwrap();
-                assert_eq!(first_lsn, last_lsn);
-                assert_eq!(txn, first_lsn);
-                assert_eq!(tape.read(last_lsn).unwrap().unwrap().payload, *b"hello");
-                lsns.push(last_lsn);
-            }
-            lsns
-        }));
-    }
-    let mut lsns: Vec<_> = threads.into_iter().flat_map(|t| t.join().unwrap()).collect();
-    lsns.sort();
-    assert_eq!(lsns, (1..=160).collect::<Vec<_>>());
-}
-
-#[test]
 fn sync_failure_is_unknown_then_poisoned_reads_keep_working() {
     let disk = Arc::new(SimDisk::new(0));
     let (mut core, _) =
@@ -371,53 +383,6 @@ fn invalid_batches_never_enter_the_writer() {
         if oversized {
             assert!(matches!(error.kind, Error::BatchTooLarge), "{case}");
         }
-    }
-}
-
-#[test]
-fn superblock_installation_obeys_clock_byte_and_roll_thresholds() {
-    use zerodb_tape::sim::DataDir;
-
-    for (case, segment_size, budget, count) in [
-        ("clock threshold", 4096, 256 * 1024 * 1024, 1),
-        ("byte threshold", 4096, 300, 3),
-        ("segment roll", 200, 256 * 1024 * 1024, 2),
-    ] {
-        let io = Arc::new(ObservedIo::new(35));
-        let clock = Arc::new(SimClock::default());
-        let opts = Options { segment_size, superblock_bytes: budget, ..Options::default() };
-        let (mut core, _) = WriterCore::open(io.clone(), clock.clone(), "db", opts).unwrap();
-        io.events.lock().unwrap().clear();
-        let boundary = || {
-            DataDir::open(Arc::new(io.disk.crash().unwrap()), "db", None, segment_size)
-                .unwrap()
-                .superblock()
-        };
-        for lsn in 1..=count {
-            let (request, reply) = WriteRequest::new(prepared(Durability::Durable));
-            core.enqueue(request);
-            core.step();
-            reply.recv().unwrap().unwrap();
-            core.update_superblock().unwrap();
-            let expected = if case != "clock threshold" && lsn == count { count } else { 0 };
-            assert_eq!(boundary(), expected, "{case}, lsn={lsn}");
-        }
-        if case == "clock threshold" {
-            clock.advance(29_999_999_999);
-            core.update_superblock().unwrap();
-            assert_eq!(boundary(), 0, "{case}, before threshold");
-            clock.advance(1);
-            core.update_superblock().unwrap();
-            assert_eq!(boundary(), 1, "{case}, at threshold");
-        }
-        let installs = io
-            .events
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|event| event.as_str() == "rename db/SUPERBLOCK.tmp db/SUPERBLOCK")
-            .count();
-        assert_eq!(installs, 1, "{case}");
     }
 }
 
@@ -477,35 +442,6 @@ fn one_step_group_shares_one_sync_and_closes_all_handles() {
 }
 
 #[test]
-fn slow_sync_groups_concurrent_callers() {
-    let io = Arc::new(ObservedIo::new(0));
-    let (tape, _) = Tape::open(
-        io.clone(),
-        Arc::new(SimClock::new(0)),
-        "db",
-        Options { segment_size: 65536, ..Options::default() },
-    )
-    .unwrap();
-    let tape = Arc::new(tape);
-    io.syncs.store(0, Ordering::SeqCst);
-    io.slow_ms.store(50, Ordering::SeqCst);
-    let gate = Arc::new(Barrier::new(16));
-    let mut threads = Vec::new();
-    for _ in 0..16 {
-        let tape = tape.clone();
-        let gate = gate.clone();
-        threads.push(std::thread::spawn(move || {
-            gate.wait();
-            tape.append(vec![record(Kind::Turn)], Durability::Durable).unwrap();
-        }));
-    }
-    for thread in threads {
-        thread.join().unwrap();
-    }
-    assert!(io.syncs.load(Ordering::SeqCst) < 16);
-}
-
-#[test]
 fn batch_is_all_or_nothing_on_partial_write() {
     let io = Arc::new(SimDisk::new(0));
     let opts = Options { segment_size: 65536, ..Options::default() };
@@ -526,36 +462,6 @@ fn batch_is_all_or_nothing_on_partial_write() {
     let (core, report) = WriterCore::open(crash, Arc::new(SimClock::new(0)), "db", opts).unwrap();
     assert_eq!(report.records, 0);
     assert_eq!(core.durable_lsn(), 0);
-}
-
-#[test]
-fn periodic_superblock_is_off_reply_path_and_rate_limited() {
-    let io = Arc::new(ObservedIo::new(0));
-    let clock = Arc::new(SimClock::new(0));
-    let (mut core, _) = WriterCore::open(
-        io.clone(),
-        clock.clone(),
-        "db",
-        Options { segment_size: 65536, ..Options::default() },
-    )
-    .unwrap();
-    io.syncs.store(0, Ordering::SeqCst);
-    for i in 0..3 {
-        let (request, reply) = WriteRequest::new(prepared(Durability::Durable));
-        core.enqueue(request);
-        core.step();
-        reply.try_recv().unwrap().unwrap();
-        if i == 1 {
-            clock.advance(30_000_000_000);
-        }
-        core.update_superblock().unwrap();
-    }
-    assert_eq!(io.syncs.load(Ordering::SeqCst), 4);
-    drop(core);
-    let dir = zerodb_tape::sim::DataDir::open(io.clone(), "db", None, 65536).unwrap();
-    assert_eq!(dir.superblock(), 2);
-    drop(dir);
-    assert!(io.handles.lock().unwrap().is_empty());
 }
 
 #[test]
@@ -659,28 +565,6 @@ fn successful_group_prefix_commits_when_the_next_write_is_partial() {
     assert_eq!(report.records, 1);
     assert!(reopened.read(1).unwrap().is_some());
     assert!(reopened.read(2).unwrap().is_none());
-}
-
-#[test]
-fn metadata_sync_failure_cannot_retract_an_acknowledgement() {
-    let io = Arc::new(SimDisk::new(0));
-    let clock = Arc::new(SimClock::new(0));
-    let (mut core, _) = WriterCore::open(
-        io.clone(),
-        clock.clone(),
-        "db",
-        Options { segment_size: 65536, ..Options::default() },
-    )
-    .unwrap();
-    let (request, reply) = WriteRequest::new(prepared(Durability::Durable));
-    core.enqueue(request);
-    core.step();
-    reply.try_recv().unwrap().unwrap();
-    clock.advance(30_000_000_000);
-    io.fail_next_sync().unwrap();
-    assert!(core.update_superblock().is_err());
-    assert!(core.is_poisoned());
-    assert!(core.read(1).unwrap().is_some());
 }
 
 #[test]
@@ -908,7 +792,7 @@ mod concurrency {
     };
 
     #[test]
-    #[ignore = "20,000 filesystem syncs; run the slow-tests CI job"]
+    #[cfg_attr(debug_assertions, ignore = "slow in debug")]
     fn concurrent_durable_appends_survive_reopen() {
         let path =
             std::env::current_dir().unwrap().join(format!("target/stress-{}", std::process::id()));
@@ -966,5 +850,49 @@ mod concurrency {
         }
         drop(tape);
         std::fs::remove_dir_all(path).unwrap();
+    }
+}
+
+#[test]
+fn concurrent_callers_share_syncs_and_observe_dense_commits() {
+    for (case, delay, threads, writes) in
+        [("dense reads", 0, 8, 20), ("slow group sync", 20, 16, 1)]
+    {
+        let disk = Arc::new(ObservedIo::new(0));
+        disk.slow_ms.store(delay, Ordering::SeqCst);
+        let (tape, _) = Tape::open(
+            disk.clone(),
+            Arc::new(SimClock::new(0)),
+            "db",
+            Options { segment_size: 65536, ..Options::default() },
+        )
+        .unwrap();
+        disk.syncs.store(0, Ordering::SeqCst);
+        let tape = Arc::new(tape);
+        let gate = Arc::new(Barrier::new(threads));
+        let mut workers = Vec::new();
+        for _ in 0..threads {
+            let tape = tape.clone();
+            let gate = gate.clone();
+            workers.push(std::thread::spawn(move || {
+                gate.wait();
+                let mut lsns = Vec::new();
+                for _ in 0..writes {
+                    let Committed::Durable { txn, first_lsn, last_lsn, .. } =
+                        tape.append(vec![record(Kind::Turn)], Durability::Durable).unwrap();
+                    assert_eq!(first_lsn, last_lsn, "{case}");
+                    assert_eq!(txn, first_lsn, "{case}");
+                    assert_eq!(tape.read(last_lsn).unwrap().unwrap().payload, *b"hello", "{case}");
+                    lsns.push(last_lsn);
+                }
+                lsns
+            }));
+        }
+        let mut lsns: Vec<_> = workers.into_iter().flat_map(|t| t.join().unwrap()).collect();
+        lsns.sort();
+        assert_eq!(lsns, (1..=(threads * writes) as u64).collect::<Vec<_>>(), "{case}");
+        if delay > 0 {
+            assert!(disk.syncs.load(Ordering::SeqCst) < threads, "{case}");
+        }
     }
 }

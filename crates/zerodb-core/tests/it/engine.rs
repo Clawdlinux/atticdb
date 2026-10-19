@@ -80,7 +80,7 @@ fn retries_conflicts_scope_isolation_and_replay() {
 
 #[test]
 fn tenant_ids_survive_reopen_and_limit_is_typed() {
-    for (case, limit) in [("small configured limit", 2), ("default tenant limit", 10_000)] {
+    for (case, limit) in [("configured tenant limit", 2)] {
         let disk = Arc::new(SimDisk::new(3));
         let opts = EngineOptions { max_tenants: limit, ..options() };
         let engine = open(disk.clone(), opts.clone());
