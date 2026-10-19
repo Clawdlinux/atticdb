@@ -3,7 +3,7 @@
 use crate::{Committed, Kind, PreparedBatch, Result, WriteError};
 use std::sync::Arc;
 
-/// A durable application record. Footers and redacted husks aren't application records.
+/// A durable application record. Footers aren't application records.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommittedRecord {
     /// Record log sequence number.
@@ -16,7 +16,7 @@ pub struct CommittedRecord {
     pub tenant_id: u32,
     /// Commit timestamp in nanoseconds since the Unix epoch.
     pub commit_time_ns: u64,
-    /// Application content, without the tape's generated salt.
+    /// Application content.
     pub payload: Arc<[u8]>,
 }
 
@@ -30,7 +30,6 @@ pub enum Prepare {
     /// Return a cached acknowledgement without writing anything.
     ///
     /// Durable replies wait for the group's sync and publication, including retries of pending writes.
-    /// Fast requests always receive `Committed::Fast`, without identifiers.
     Reply(Committed),
 }
 
@@ -52,7 +51,6 @@ pub trait StateMachine: Send {
 
     /// Installs synced records in LSN order before durable replies. Must take O(records) work.
     ///
-    /// Fast records wait for a successful sync, including automatic Fast-only flushes and clean shutdown.
     /// A failed sync never publishes its pending records.
     fn publish(&mut self, committed: &[CommittedRecord]);
 

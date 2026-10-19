@@ -4,7 +4,7 @@ use crate::machine::Machine;
 use crate::session::{address, Key};
 use crate::state::State;
 use crate::turn::{decode, encode};
-use crate::{EngineError, EngineOptions, ErrorKind, NewTurn, Role, Trust};
+use crate::{EngineError, EngineOptions, ErrorKind, NewTurn, Role};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -47,8 +47,6 @@ pub struct Turn {
     pub content: Vec<u8>,
     /// Opaque metadata.
     pub meta: Vec<u8>,
-    /// Asserted trust, without filtering.
-    pub trust: Trust,
 }
 /// An ordered session window.
 #[derive(Clone, Copy, Debug)]
@@ -68,6 +66,8 @@ pub enum WindowQuery {
 pub struct Metrics {
     /// Highest readable tape LSN.
     pub durable_lsn: u64,
+    /// Tape-index resident memory, reloads and eviction counters.
+    pub tape_index: zerodb_tape::LsnIndexStats,
     /// Resident session-slot capacity.
     pub hot_page_bytes: usize,
     /// Retained published retry keys.
@@ -267,7 +267,6 @@ impl Engine {
                 Ok(Committed::Durable { txn, last_lsn, reply, .. }) => {
                     return self.receipt(turns.len() as u64, txn, last_lsn, &reply);
                 }
-                Ok(Committed::Fast) => unreachable!("turns always use durable acknowledgement"),
             }
         }
         Err(EngineError::rejected(ErrorKind::ResourceExhausted("hot_pages")))
@@ -455,13 +454,8 @@ impl Engine {
                 .tape
                 .read(lsn)?
                 .ok_or_else(|| EngineError::rejected(ErrorKind::CorruptIndex))?;
-            let decoded = decode(
-                frame
-                    .payload
-                    .get(16..)
-                    .ok_or_else(|| EngineError::rejected(ErrorKind::CorruptIndex))?,
-            )
-            .map_err(|_| EngineError::rejected(ErrorKind::CorruptIndex))?;
+            let decoded = decode(&frame.payload)
+                .map_err(|_| EngineError::rejected(ErrorKind::CorruptIndex))?;
             if frame.header.kind != Kind::Turn
                 || frame.header.tenant_id != tenant
                 || decoded.agent_id != scope.agent
@@ -477,7 +471,6 @@ impl Engine {
                 role: decoded.turn.role,
                 content: decoded.turn.content,
                 meta: decoded.turn.meta,
-                trust: decoded.turn.trust,
             });
         }
         Ok(out)
@@ -489,9 +482,11 @@ impl Engine {
 
     /// Returns published memory, checkpoint, and query counters.
     pub fn metrics(&self) -> Result<Metrics> {
+        let tape_index = self.tape.index_stats()?;
         let state = lock(&self.state)?;
         Ok(Metrics {
             durable_lsn: self.tape.durable_lsn(),
+            tape_index,
             hot_page_bytes: state.index.hot_bytes,
             dedup_entries: state.dedup.entries.len(),
             dedup_window_effective: state.dedup.effective_window(),
@@ -543,7 +538,6 @@ impl SimAppend<'_> {
             Committed::Durable { txn, last_lsn, reply, .. } => {
                 self.engine.receipt(self.count, txn, last_lsn, &reply)
             }
-            Committed::Fast => unreachable!("engine writes require durable acknowledgements"),
         }
     }
 }

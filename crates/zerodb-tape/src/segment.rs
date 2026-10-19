@@ -33,9 +33,6 @@ impl SegmentWriter {
         self.size
     }
 
-    pub(crate) fn has_rolled(&self) -> bool {
-        self.files.len() > 1
-    }
     pub(crate) fn position(&self) -> (u64, u64) {
         (self.active, self.written_bytes)
     }
@@ -65,27 +62,32 @@ impl SegmentWriter {
         })
     }
 
-    /// Rolls before writing if needed. Returns the segment and starting offset.
-    pub fn write_batch(&mut self, bytes: &[u8]) -> Result<(u64, u64)> {
-        if bytes.len() as u64 > self.size {
+    /// Reserves a whole transaction's location before its CRCs are computed.
+    pub fn reserve_batch(&mut self, len: usize) -> Result<(u64, u64)> {
+        if len as u64 > self.size {
             return Err(Error::BatchTooLarge);
         }
-        let mut padding = 0;
-        if bytes.len() as u64 > self.size - self.offset {
-            padding = self.size - self.offset;
+        if len as u64 > self.size - self.offset {
+            let padding = self.size - self.offset;
             let id = self.dir.prepare_next_segment(self.size)?;
             let file = Handle::open(self.dir.io.clone(), &self.dir.segment_path(id))?;
             self.files.insert(id, file);
             self.active = id;
             self.offset = 0;
+            self.written_bytes = self.written_bytes.saturating_add(padding);
         }
+        Ok((self.active, self.offset))
+    }
+
+    /// Writes a whole transaction at its reserved location.
+    pub fn write_batch(&mut self, bytes: &[u8]) -> Result<(u64, u64)> {
+        self.reserve_batch(bytes.len())?;
         let file = self.files.get(&self.active).ok_or(Error::Poisoned)?;
         let start = (self.active, self.offset);
         self.dirty.insert(self.active);
         self.dir.io.write_at(file.id, self.offset, bytes)?;
         self.offset += bytes.len() as u64;
-        self.written_bytes =
-            self.written_bytes.saturating_add(padding).saturating_add(bytes.len() as u64);
+        self.written_bytes = self.written_bytes.saturating_add(bytes.len() as u64);
         Ok(start)
     }
 

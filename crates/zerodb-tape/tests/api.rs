@@ -24,9 +24,6 @@ fn root_api_supports_append_read_and_custom_backends() {
     let (tape, _) = Tape::open(io, clock, "db", TapeOptions::default()).unwrap();
     let record = RecordInput { tenant_id: 1, kind: Kind::Turn, content: b"public".to_vec() };
     let Committed::Durable { first_lsn, .. } =
-        tape.append(vec![record], Durability::Durable).unwrap()
-    else {
-        panic!("expected durable acknowledgement");
-    };
-    assert_eq!(&tape.read(first_lsn).unwrap().unwrap().payload[16..], b"public");
+        tape.append(vec![record], Durability::Durable).unwrap();
+    assert_eq!(&tape.read(first_lsn).unwrap().unwrap().payload, b"public");
 }

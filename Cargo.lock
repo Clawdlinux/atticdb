@@ -563,7 +563,6 @@ dependencies = [
 name = "zerodb-tape"
 version = "0.0.1"
 dependencies = [
- "blake3",
  "criterion",
  "proptest",
  "zerodb-tape",

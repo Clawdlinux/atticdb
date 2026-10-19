@@ -1,10 +1,10 @@
 #![allow(clippy::unwrap_used)]
 
 use proptest::prelude::*;
-use zerodb_core::turn::{decode, encode, NewTurn, Role, Trust};
+use zerodb_core::turn::{decode, encode, NewTurn, Role};
 
 fn turn() -> NewTurn {
-    NewTurn { role: Role::User, content: b"hello".to_vec(), meta: vec![], trust: Trust::Untrusted }
+    NewTurn { role: Role::User, content: b"hello".to_vec(), meta: vec![] }
 }
 
 #[test]
@@ -39,12 +39,11 @@ proptest! {
         agent in ".{0,40}", session in ".{0,40}", seq in any::<u64>(),
         content in prop::collection::vec(any::<u8>(), 0..4096),
         meta in prop::collection::vec(any::<u8>(), 0..1024),
-        key in prop::option::of(".{0,30}"), role in 0u8..4, trusted in any::<bool>(),
+        key in prop::option::of(".{0,30}"), role in 0u8..4,
     ) {
         let value = NewTurn {
             role: [Role::System, Role::User, Role::Assistant, Role::Tool][role as usize],
             content, meta,
-            trust: if trusted { Trust::Trusted } else { Trust::Untrusted },
         };
         let bytes = encode(&agent, &session, seq, &value, key.as_deref()).unwrap();
         let decoded = decode(&bytes).unwrap();

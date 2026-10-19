@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Barrier};
 use std::time::{Duration, Instant};
 use support::{encoded_batch, Bare, BenchDir};
-use zerodb_core::{turn::encode, Engine, EngineOptions, NewTurn, Role, Scope, Trust, WindowQuery};
+use zerodb_core::{turn::encode, Engine, EngineOptions, NewTurn, Role, Scope, WindowQuery};
 use zerodb_tape::{Durability, Kind, RecordInput, StdIo, SystemClock, Tape, TapeOptions};
 
 const WRITERS: usize = 16;
@@ -27,7 +27,6 @@ fn turns(iteration: usize, batch: usize) -> Vec<NewTurn> {
     (0..batch)
         .map(|i| NewTurn {
             role: Role::User,
-            trust: Trust::Untrusted,
             meta: vec![0x42; 16],
             content: vec![0x5a; SIZES[(iteration * batch + i) % SIZES.len()]],
         })
@@ -70,6 +69,19 @@ struct Reopen {
     records: u64,
     tail_bytes: u64,
 }
+
+fn index_report(label: &str, stats: zerodb_tape::LsnIndexStats, turns: usize) {
+    println!(
+        "{label}/lsn_index: resident_bytes={} budget_bytes={} page_evictions={} dirty_page_evictions={} page_reloads={}",
+        stats.resident_bytes, stats.budget_bytes, stats.page_evictions,
+        stats.dirty_page_evictions, stats.page_reloads,
+    );
+    assert!(stats.resident_bytes <= stats.budget_bytes);
+    if turns >= 1_000_000 && env_number("G1_LSN_INDEX_MIB", 0) == 0 {
+        assert!(stats.page_evictions > 0, "1M G1 must exercise index eviction");
+    }
+}
+
 fn report(label: &str, elapsed: Duration, n: usize, mut samples: Vec<Duration>) -> Stats {
     println!(
         "{label}: turns={n} seconds={:.3} turns_per_sec={:.1} batches_per_sec={:.1}",
@@ -200,8 +212,7 @@ fn bare(iterations: usize, batch: usize, n: usize) -> Stats {
 fn tape(iterations: usize, batch: usize, n: usize) -> Stats {
     let dir = BenchDir::new();
     let (tape, _) =
-        Tape::open(Arc::new(StdIo::new()), Arc::new(SystemClock), &dir.0, TapeOptions::default())
-            .unwrap();
+        Tape::open(Arc::new(StdIo::new()), Arc::new(SystemClock), &dir.0, tape_options()).unwrap();
     let templates = (0..SIZES.len()).map(|i| records(&scope(0, 0), i, batch)).collect::<Vec<_>>();
     let (elapsed, samples, _, _) = writers(
         iterations,
@@ -219,12 +230,13 @@ fn tape(iterations: usize, batch: usize, n: usize) -> Stats {
         requests as f64 / groups as f64,
         tape.superblock_installs()
     );
+    index_report("tape", tape.index_stats().unwrap(), n);
     report("tape", elapsed, n, samples)
 }
 
 fn engine(iterations: usize, batch: usize, n: usize, checkpoint_bytes: u64) -> Stats {
     let dir = BenchDir::new();
-    let opts = EngineOptions { checkpoint_bytes, ..EngineOptions::default() };
+    let opts = EngineOptions { checkpoint_bytes, tape: tape_options(), ..EngineOptions::default() };
     let engine = Engine::open(&dir.0, opts.clone()).unwrap();
     // Register every tenant and session before timing, so timed bytes match the bare trace.
     std::thread::scope(|threads| {
@@ -261,6 +273,7 @@ fn engine(iterations: usize, batch: usize, n: usize, checkpoint_bytes: u64) -> S
     latency("engine/window", &mut reads);
     let mut stats = report("engine", elapsed, n, samples);
     let metrics = engine.metrics().unwrap();
+    index_report("engine", metrics.tape_index, n);
     println!(
         "engine: writer_groups={} mean_requests_per_group={:.3}",
         metrics.writer_groups - warmup.writer_groups,
@@ -310,12 +323,7 @@ fn history_windows() {
     for target in [16, 1024, 65536] {
         while length < target {
             let count = (target - length).min(256);
-            let turn = NewTurn {
-                role: Role::User,
-                trust: Trust::Untrusted,
-                meta: vec![],
-                content: vec![0x5a; 256],
-            };
+            let turn = NewTurn { role: Role::User, meta: vec![], content: vec![0x5a; 256] };
             engine.append(&scope, vec![turn; count], None).unwrap();
             length += count;
         }
@@ -350,6 +358,17 @@ fn history_windows() {
             );
             latency(&format!("window/{name}/{target}"), &mut samples);
         }
+    }
+}
+
+/// `G1_LSN_INDEX_MIB` overrides the tape LSN index budget for eviction A/B runs.
+fn tape_options() -> TapeOptions {
+    let default = TapeOptions::default();
+    let mib = env_number("G1_LSN_INDEX_MIB", 0);
+    if mib == 0 {
+        default
+    } else {
+        TapeOptions { lsn_index_bytes: mib * 1024 * 1024, ..default }
     }
 }
 
@@ -448,5 +467,5 @@ fn main() {
     if env_number("G1_HISTORY", 1) != 0 {
         history_windows();
     }
-    println!("macOS local 1.5x verdict: {} (median ratio={ratio:.3}). Linux NVMe and nightly LazyFS remain pending. Cache writes wait until M3.", if ratio <= 1.5 { "PASS" } else { "FAIL" });
+    println!("macOS local 1.5x verdict: {} (median ratio={ratio:.3}). Linux NVMe and nightly LazyFS remain pending. Append-only trace.", if ratio <= 1.5 { "PASS" } else { "FAIL" });
 }

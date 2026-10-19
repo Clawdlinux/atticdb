@@ -21,7 +21,6 @@ fn tenant_create_is_decodable_unchained_and_atomic_with_turns() {
     }
     let tenant = tape.read(3).unwrap().unwrap();
     assert_eq!(tenant.header.kind, Kind::TenantCreate);
-    assert_eq!(tenant.header.tenant_prev_chain, [0; 32]);
     drop(tape);
     let (tape, _) = Tape::open(disk, Arc::new(SimClock::default()), "db", opts).unwrap();
     assert_eq!(tape.scan(0).count(), 4);

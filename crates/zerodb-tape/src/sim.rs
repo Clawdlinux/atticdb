@@ -9,8 +9,8 @@ pub use crate::recovery::{recover, Recovered};
 pub use crate::segment::{SegmentWriter, DEFAULT_SEGMENT_SIZE};
 pub use crate::writer::{Coalescer, PreparedBatch, WriteRequest, WriterCore};
 use crate::{
-    Clock, Committed, CommittedRecord, Digest, Durability, Error, FileId, Io, Kind, LockGuard,
-    Outcome, Prepare, RecordInput, RecoveryReport, Result, SimDisk, StateMachine, Tape,
+    Clock, Committed, CommittedRecord, Durability, Error, FileId, Io, Kind, LockGuard, Outcome,
+    Prepare, RecordInput, RecoveryReport, Result, SimDisk, StateMachine, Tape,
     TapeOptions as Options, WriteResult,
 };
 use std::collections::BTreeMap;
@@ -26,6 +26,222 @@ pub mod frame {
 /// SplitMix64 keeps workload generation independent from disk crash randomness.
 #[derive(Debug)]
 struct Rng(u64);
+
+fn fault_request<S: StateMachine>(
+    core: &mut WriterCore<S>,
+    value: u8,
+    count: usize,
+) -> mpsc::Receiver<WriteResult> {
+    let batch = PreparedBatch::new(
+        vec![RecordInput { kind: Kind::Turn, tenant_id: 1, content: vec![value; 8] }; count],
+        Durability::Durable,
+    )
+    .unwrap();
+    let (request, reply) = WriteRequest::new(batch);
+    core.enqueue(request);
+    reply
+}
+
+/// Checks v2 corruption proofs, stale footers, reordered tails, empty sync steps and operator-cut crashes.
+pub fn frame_v2_faults(seed: u64) {
+    let mut rng = Rng::new(seed ^ 0xf2f2_95ba);
+    for proof in [false, true] {
+        let disk = Arc::new(SimDisk::new(seed));
+        let size = if seed.is_multiple_of(2) { 128 } else { 1024 };
+        let opts = Options { segment_size: size, ..Options::default() };
+        let (mut core, _) =
+            WriterCore::open(disk.clone(), Arc::new(SimClock::new(1000)), "db", opts.clone())
+                .unwrap();
+        for _ in 0..if proof { 3 } else { 1 } {
+            let reply = fault_request(&mut core, 7, 1);
+            core.step();
+            reply.recv().unwrap().unwrap();
+        }
+        drop(core);
+        let file = disk.open(Path::new("db/seg-0000000000000001.zdb")).unwrap();
+        if seed % 9 == 7 {
+            disk.write_at(file, 48, &[0xff; 72]).unwrap();
+            disk.sync_data(file).unwrap();
+        } else if seed % 9 == 8 {
+            let misplaced = frame::encode(
+                &frame::Frame {
+                    header: frame::Header {
+                        kind: Kind::Turn,
+                        version: 2,
+                        flags: 0,
+                        txn: 2,
+                        lsn: 2,
+                        commit_time_ns: 1001,
+                        tenant_id: 1,
+                    },
+                    payload: vec![7; 8],
+                },
+                99,
+                0,
+            )
+            .unwrap();
+            disk.write_at(file, 48, &misplaced).unwrap();
+            disk.sync_data(file).unwrap();
+        } else if seed % 9 == 5 {
+            disk.write_at(file, 48, &[0; 72]).unwrap();
+            disk.sync_data(file).unwrap();
+        } else {
+            let offset = match seed % 9 {
+                0 => 4,
+                2 => 48 + 8,
+                3 => 48 + 20,
+                4 => 48 + 40 + 8,
+                _ => 40,
+            };
+            disk.flip_bit_at(file, offset, rng.below(8) as u8).unwrap();
+        }
+        disk.close(file).unwrap();
+        let result = Tape::open(disk, Arc::new(SimClock::new(0)), "db", opts);
+        if proof {
+            let reported = if seed % 9 >= 7 { 2 } else { 1 };
+            assert!(
+                matches!(result, Err(Error::CorruptionDetected { lsn, .. }) if lsn == reported),
+                "seed={seed}"
+            );
+        } else {
+            let (_, report) = result.unwrap();
+            assert_eq!(report.durable_lsn, 0);
+            assert_eq!(report.truncated.unwrap().0, 1..=1);
+        }
+    }
+
+    // Reuse the exact old location and transaction fields. Only footer-to-record binding can reject this.
+    let disk = Arc::new(SimDisk::new(seed));
+    let mut dir = DataDir::open(disk.clone(), "stale", None, 1024).unwrap();
+    let segment = dir.prepare_next_segment(1024).unwrap();
+    let header = frame::Header {
+        kind: Kind::Turn,
+        version: frame::VERSION,
+        flags: 0,
+        txn: 1,
+        lsn: 1,
+        commit_time_ns: 1,
+        tenant_id: 1,
+    };
+    let first =
+        frame::encode(&frame::Frame { header: header.clone(), payload: vec![1; 8] }, segment, 0)
+            .unwrap();
+    let second = frame::encode(
+        &frame::Frame { header: frame::Header { lsn: 2, ..header.clone() }, payload: vec![2; 8] },
+        segment,
+        first.len() as u64,
+    )
+    .unwrap();
+    let footer = frame::Footer {
+        txn: 1,
+        first_lsn: 1,
+        synced_lsn: 0,
+        record_count: 2,
+        records_crc: crc32c(&[&first[..4], &second[..4]].concat()),
+    };
+    let end = frame::encode(
+        &frame::Frame {
+            header: frame::Header { kind: Kind::Footer, lsn: 2, tenant_id: 0, ..header.clone() },
+            payload: footer.encode().to_vec(),
+        },
+        segment,
+        (first.len() + second.len()) as u64,
+    )
+    .unwrap();
+    let replacement =
+        frame::encode(&frame::Frame { header, payload: vec![3; 8] }, segment, 0).unwrap();
+    let file = disk.open(&dir.segment_path(segment)).unwrap();
+    disk.write_at(file, 0, &[first, second, end].concat()).unwrap();
+    disk.sync_data(file).unwrap();
+    disk.write_at(file, 0, &replacement).unwrap();
+    disk.sync_data(file).unwrap();
+    disk.close(file).unwrap();
+    let report = recover(&mut dir, 1024).unwrap().report;
+    assert_eq!(report.durable_lsn, 0);
+    assert_eq!(report.truncated.unwrap().0, 1..=2);
+    drop(dir);
+
+    struct Replies(Arc<std::sync::atomic::AtomicBool>);
+    impl StateMachine for Replies {
+        fn prepare(&mut self, _: &mut PreparedBatch) -> Prepare {
+            if self.0.load(Ordering::SeqCst) {
+                Prepare::Reply(Committed::Durable {
+                    txn: 1,
+                    first_lsn: 1,
+                    last_lsn: 1,
+                    reply: vec![],
+                })
+            } else {
+                Prepare::Write
+            }
+        }
+        fn publish(&mut self, _: &[CommittedRecord]) {}
+        fn replay(&mut self, _: &CommittedRecord) -> Result<()> {
+            Ok(())
+        }
+    }
+    let io = Arc::new(CrashIo::new(SimDisk::new(seed)));
+    let replies_only = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let opts = Options { segment_size: 1024, ..Options::default() };
+    let (mut core, _) = WriterCore::open_with(
+        Replies(replies_only.clone()),
+        io.clone(),
+        Arc::new(SimClock::default()),
+        "db",
+        opts.clone(),
+    )
+    .unwrap();
+    let reply = fault_request(&mut core, 1, 1);
+    core.step();
+    reply.recv().unwrap().unwrap();
+    replies_only.store(true, Ordering::SeqCst);
+    for _ in 0..1 + rng.below(4) {
+        let reply = fault_request(&mut core, 1, 1);
+        core.step();
+        reply.recv().unwrap().unwrap();
+        assert_eq!(core.durable_lsn(), 1);
+    }
+    replies_only.store(false, Ordering::SeqCst);
+    let replies: Vec<_> = (2..=4).map(|value| fault_request(&mut core, value, 1)).collect();
+    io.cut.store(1 + rng.below(3), Ordering::SeqCst);
+    core.step();
+    for reply in replies {
+        reply.recv().unwrap().unwrap();
+    }
+    drop(core);
+    let image = Arc::new(io.image.lock().unwrap().take().unwrap());
+    let (tape, report) =
+        Tape::open(image, Arc::new(SimClock::default()), "db", opts.clone()).unwrap();
+    assert!(
+        (1..=4).contains(&report.durable_lsn),
+        "same-group writeback cannot prove its own torn tail"
+    );
+    drop(tape);
+    let file = io.disk.open(Path::new("db/seg-0000000000000001.zdb")).unwrap();
+    io.disk.flip_bit_at(file, 120 + 40, rng.below(8) as u8).unwrap();
+    io.disk.close(file).unwrap();
+    let (_, report) =
+        Tape::open(Arc::new(io.disk.clone()), Arc::new(SimClock::default()), "db", opts).unwrap();
+    assert_eq!(report.durable_lsn, 1, "later footers in the same sync group are not proof");
+
+    let io = Arc::new(CrashIo::new(SimDisk::new(seed)));
+    let opts = Options { segment_size: 128, ..Options::default() };
+    let (mut core, _) =
+        WriterCore::open(io.clone(), Arc::new(SimClock::default()), "cut", opts.clone()).unwrap();
+    for _ in 0..3 {
+        let reply = fault_request(&mut core, 1, 1);
+        core.step();
+        reply.recv().unwrap().unwrap();
+    }
+    core.shutdown().unwrap();
+    drop(core);
+    io.cut.store(1 + rng.below(24), Ordering::SeqCst);
+    Tape::recover_truncate_at_with(io.clone(), "cut", 1).unwrap();
+    let image = io.image.lock().unwrap().take().unwrap_or_else(|| io.disk.crash().unwrap());
+    let (_, report) =
+        Tape::open(Arc::new(image), Arc::new(SimClock::default()), "cut", opts).unwrap();
+    assert!(report.durable_lsn == 1 || report.durable_lsn == 3);
+}
 
 impl Rng {
     fn new(seed: u64) -> Self {
@@ -148,13 +364,12 @@ impl Io for CrashIo {
 #[derive(Debug)]
 struct Batch {
     records: Vec<RecordInput>,
-    digests: Vec<Digest>,
 }
 
 #[derive(Debug, Default)]
 struct Oracle {
     batches: Vec<Batch>,
-    durable: BTreeMap<u64, Digest>,
+    durable: BTreeMap<u64, Vec<u8>>,
 }
 
 #[derive(Debug, Default)]
@@ -231,8 +446,11 @@ impl Oracle {
         match reply {
             Some(Ok(Committed::Durable { first_lsn, last_lsn, .. })) => {
                 assert_eq!(last_lsn - first_lsn + 1, batch.records.len() as u64);
-                for (i, digest) in batch.digests.iter().enumerate() {
-                    assert!(self.durable.insert(first_lsn + i as u64, *digest).is_none());
+                for (i, record) in batch.records.iter().enumerate() {
+                    assert!(self
+                        .durable
+                        .insert(first_lsn + i as u64, record.content.clone())
+                        .is_none());
                 }
             }
             Some(Err(error)) if error.outcome == Outcome::NotCommitted => return,
@@ -247,40 +465,34 @@ impl Oracle {
             .iter()
             .enumerate()
             .flat_map(|(b, batch)| {
-                batch.digests.iter().enumerate().map(move |(r, digest)| (*digest, (b, r)))
+                batch
+                    .records
+                    .iter()
+                    .enumerate()
+                    .map(move |(r, record)| (record.content.clone(), (b, r)))
             })
             .collect();
         let mut seen = vec![Vec::new(); self.batches.len()];
-        let mut heads = BTreeMap::new();
         let mut observed = BTreeMap::new();
         let mut last_txn = 0;
         for lsn in 1..=tape.durable_lsn() {
             let record = tape.read(lsn).unwrap().unwrap();
             let h = &record.header;
-            observed.insert(lsn, h.content_digest);
+            observed.insert(lsn, record.payload.clone());
             assert_eq!(h.lsn, lsn, "LSNs must strictly increase");
-            let &(b, r) = candidates.get(&h.content_digest).unwrap();
+            let &(b, r) = candidates.get(&record.payload).unwrap();
             let expected = &self.batches[b].records[r];
             assert_eq!(h.kind, expected.kind);
             assert_eq!(h.tenant_id, expected.tenant_id);
-            assert_eq!(&record.payload[16..], expected.content);
-            let salt: [u8; 16] = record.payload[..16].try_into().unwrap();
-            assert_eq!(frame::content_digest(&salt, &expected.content), h.content_digest);
+            assert_eq!(record.payload, expected.content);
             if r == 0 {
-                assert!(h.txn > last_txn, "transactions must strictly increase");
+                assert_eq!(h.txn, last_txn + 1, "transactions must be dense");
                 last_txn = h.txn;
             } else {
                 assert_eq!(seen[b].last(), Some(&(lsn - 1, h.txn, r - 1)));
                 assert_eq!(h.txn, last_txn);
             }
             seen[b].push((lsn, h.txn, r));
-            if h.kind.is_chained() {
-                let prev = heads.entry(h.tenant_id).or_insert([0; 32]);
-                assert_eq!(h.tenant_prev_chain, *prev);
-                *prev = frame::chain_next(prev, h, &h.content_digest);
-            } else {
-                assert_eq!(h.tenant_prev_chain, [0; 32]);
-            }
         }
         for (batch, seen) in self.batches.iter().zip(seen) {
             assert!(
@@ -300,20 +512,12 @@ fn enqueue<S: StateMachine>(
     core: &mut WriterCore<S>,
     records: Vec<RecordInput>,
     mode: Durability,
-    rng: &mut Rng,
+    _rng: &mut Rng,
 ) -> (Batch, mpsc::Receiver<WriteResult>) {
-    let mut digests = Vec::new();
-    let mut index = 0;
-    let prepared = PreparedBatch::with_salts(records.clone(), mode, || {
-        let salt: [u8; 16] = rng.bytes(16).try_into().unwrap();
-        digests.push(frame::content_digest(&salt, &records[index].content));
-        index += 1;
-        Ok(salt)
-    })
-    .unwrap();
+    let prepared = PreparedBatch::new(records.clone(), mode).unwrap();
     let (request, receiver) = WriteRequest::new(prepared);
     core.enqueue(request);
-    (Batch { records, digests }, receiver)
+    (Batch { records }, receiver)
 }
 
 fn probe<S: StateMachine>(core: &mut WriterCore<S>, oracle: &mut Oracle, rng: &mut Rng) {
@@ -328,7 +532,7 @@ fn probe<S: StateMachine>(core: &mut WriterCore<S>, oracle: &mut Oracle, rng: &m
 }
 
 fn workload(rng: &mut Rng, tenants: usize) -> (Vec<RecordInput>, Durability) {
-    let mode = if rng.below(4) == 0 { Durability::Fast } else { Durability::Durable };
+    let mode = Durability::Durable;
     let count = 1 + rng.below(64);
     let small = rng.below(2) == 0;
     let large = rng.below(80) == 0;
@@ -341,12 +545,12 @@ fn workload(rng: &mut Rng, tenants: usize) -> (Vec<RecordInput>, Durability) {
             } else {
                 rng.below(8193)
             };
-            let kind = if mode == Durability::Fast {
-                Kind::Cache
-            } else {
-                [Kind::Turn, Kind::Fact, Kind::Cache, Kind::Redaction][rng.below(4)]
-            };
-            RecordInput { kind, tenant_id: 1 + rng.below(tenants) as u32, content: rng.bytes(len) }
+            let kind = [Kind::Turn, Kind::Fact, Kind::Forget][rng.below(3)];
+            RecordInput {
+                kind,
+                tenant_id: 1 + rng.below(tenants) as u32,
+                content: rng.bytes(len + 16),
+            }
         })
         .collect();
     (records, mode)
@@ -361,7 +565,7 @@ fn damage_durable(disk: &SimDisk, dir: &DataDir, rng: &mut Rng) -> (u64, u64, u8
         disk.read_at(file, 0, &mut bytes).unwrap();
         disk.close(file).unwrap();
         let mut offset = 0;
-        while let Ok((record, used)) = frame::decode(&bytes[offset..]) {
+        while let Ok((record, used)) = frame::decode(&bytes[offset..], segment, offset as u64) {
             offset += used;
             if record.header.kind == Kind::Footer && record.header.lsn == dir.superblock() {
                 boundary = true;
@@ -390,6 +594,7 @@ fn damage_durable(disk: &SimDisk, dir: &DataDir, rng: &mut Rng) -> (u64, u64, u8
 
 /// Runs 2 or 3 crash generations, retaining acknowledged and uncertain transactions in an oracle.
 pub fn run_seed(seed: u64) {
+    frame_v2_faults(seed);
     if seed % 97 == 1 {
         large_record(seed);
     }
@@ -399,6 +604,7 @@ pub fn run_seed(seed: u64) {
     let opts = Options {
         segment_size: 64 * 1024,
         superblock_interval: std::time::Duration::from_secs(1),
+        lsn_index_bytes: if seed.is_multiple_of(3) { 12 * 1024 } else { 8 * 1024 * 1024 },
         ..Options::default()
     };
     let clock = Arc::new(SimClock::default());
@@ -551,7 +757,7 @@ mod tests {
         let disk = Arc::new(SimDisk::new(0));
         let clock = Arc::new(SimClock::default());
         let opts = Options {
-            segment_size: 1024,
+            segment_size: 512,
             superblock_interval: std::time::Duration::from_secs(1),
             ..Options::default()
         };
@@ -605,12 +811,12 @@ mod tests {
             oracle.durable.clear();
             let batch = &mut oracle.batches[0];
             batch.records.push(batch.records[0].clone());
-            batch.digests.push([0xff; 32]);
+            batch.records.last_mut().unwrap().content.push(0xff);
         });
     }
 
     #[test]
-    #[should_panic(expected = "assertion `left == right` failed")]
+    #[should_panic]
     fn oracle_rejects_changed_uncertain_content() {
         check_mutated_oracle(|oracle| {
             oracle.durable.clear();

@@ -16,16 +16,6 @@ pub enum Role {
     Tool,
 }
 
-/// The asserted trust of a turn.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
-pub enum Trust {
-    /// Content approved by the caller's authority.
-    Trusted,
-    /// Content without that approval.
-    Untrusted,
-}
-
 /// A turn before the writer assigns its sequence.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NewTurn {
@@ -35,11 +25,9 @@ pub struct NewTurn {
     pub content: Vec<u8>,
     /// Opaque metadata, at most 64 KiB.
     pub meta: Vec<u8>,
-    /// Caller-asserted trust.
-    pub trust: Trust,
 }
 
-/// A decoded tape payload, excluding its salt.
+/// A decoded tape payload.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DecodedTurn {
     /// Agent identifier, at most 255 UTF-8 bytes.
@@ -105,7 +93,7 @@ impl<'a> Cursor<'a> {
     }
 }
 
-/// Encodes a turn without a salt. Callers pass sequence 0 before preparation.
+/// Encodes a turn. Callers pass sequence 0 before preparation.
 ///
 /// The optional key uses a presence byte, followed by its length-prefixed UTF-8 bytes.
 pub fn encode(
@@ -130,7 +118,6 @@ pub fn encode(
     out.push(turn.role as u8);
     bytes(&mut out, &turn.meta);
     bytes(&mut out, &turn.content);
-    out.push(turn.trust as u8);
     out.push(u8::from(idem_key.is_some()));
     if let Some(key) = idem_key {
         bytes(&mut out, key.as_bytes());
@@ -149,7 +136,6 @@ pub fn decode(payload: &[u8]) -> Result<DecodedTurn, CodecError> {
             role: parsed.role,
             content: parsed.content.to_vec(),
             meta: parsed.meta.to_vec(),
-            trust: parsed.trust,
         },
         idem_key: parsed.idem_key.map(str::to_owned),
     })
@@ -162,7 +148,6 @@ pub(crate) struct ParsedTurn<'a> {
     role: Role,
     content: &'a [u8],
     meta: &'a [u8],
-    trust: Trust,
     pub(crate) idem_key: Option<&'a str>,
 }
 pub(crate) fn decode_ref(payload: &[u8]) -> Result<ParsedTurn<'_>, CodecError> {
@@ -182,18 +167,13 @@ pub(crate) fn decode_ref(payload: &[u8]) -> Result<ParsedTurn<'_>, CodecError> {
     };
     let meta = cur.blob(65536)?;
     let content = cur.blob(4 * 1024 * 1024)?;
-    let trust = match cur.byte()? {
-        0 => Trust::Trusted,
-        1 => Trust::Untrusted,
-        _ => return Err(CodecError),
-    };
     let idem_key = match cur.byte()? {
         0 => None,
         1 => Some(std::str::from_utf8(cur.blob(128)?).map_err(|_| CodecError)?),
         _ => return Err(CodecError),
     };
     cur.end()?;
-    Ok(ParsedTurn { agent_id, session_id, seq, role, content, meta, trust, idem_key })
+    Ok(ParsedTurn { agent_id, session_id, seq, role, content, meta, idem_key })
 }
 
 pub(crate) fn set_seq(payload: &mut [u8], seq: u64) -> Result<(), CodecError> {

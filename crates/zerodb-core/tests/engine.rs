@@ -5,9 +5,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 use std::time::Duration;
-use zerodb_core::{
-    Engine, EngineOptions, ErrorKind, NewTurn, Outcome, Role, Scope, Trust, WindowQuery,
-};
+use zerodb_core::{Engine, EngineOptions, ErrorKind, NewTurn, Outcome, Role, Scope, WindowQuery};
 use zerodb_tape::sim::SimClock;
 use zerodb_tape::{Io, Kind, SimDisk, Tape, TapeOptions};
 
@@ -15,12 +13,7 @@ fn scope(session: &str) -> Scope {
     Scope { tenant: "tenant".into(), agent: "agent".into(), session: session.into() }
 }
 fn turn(value: u64) -> NewTurn {
-    NewTurn {
-        role: Role::User,
-        content: value.to_le_bytes().to_vec(),
-        meta: vec![],
-        trust: Trust::Untrusted,
-    }
+    NewTurn { role: Role::User, content: value.to_le_bytes().to_vec(), meta: vec![] }
 }
 fn options() -> EngineOptions {
     EngineOptions {

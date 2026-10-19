@@ -26,11 +26,11 @@ impl Drop for BenchDir {
     }
 }
 
-// Preframe fixed metadata, as in M1. Match salts, headers, payloads, and transaction footers.
+// Preframe fixed metadata, as in M1. Match headers, payloads, and transaction footers.
 pub fn encoded_batch(inputs: &[RecordInput]) -> Vec<u8> {
     assert!(!inputs.is_empty());
     let mut bytes = Vec::new();
-    let mut digests = Vec::new();
+    let mut crc = zerodb_tape::sim::Crc32c::new();
     let mut header = Header {
         kind: Kind::Turn,
         version: VERSION,
@@ -39,29 +39,36 @@ pub fn encoded_batch(inputs: &[RecordInput]) -> Vec<u8> {
         lsn: 1,
         commit_time_ns: 0,
         tenant_id: 1,
-        tenant_prev_chain: [0; 32],
-        content_digest: [0; 32],
     };
     for (i, input) in inputs.iter().enumerate() {
         header.kind = input.kind;
         header.tenant_id = input.tenant_id;
         header.lsn = i as u64 + 1;
-        header.content_digest = frame::content_digest(&[0; 16], &input.content);
-        digests.push(header.content_digest);
-        let mut payload = vec![0; 16];
-        payload.extend_from_slice(&input.content);
-        bytes.extend(frame::encode(&Frame { header: header.clone(), payload }).unwrap());
+        let encoded = frame::encode(
+            &Frame { header: header.clone(), payload: input.content.clone() },
+            1,
+            bytes.len() as u64,
+        )
+        .unwrap();
+        crc.update(&encoded[..4]);
+        bytes.extend(encoded);
     }
     let footer = Footer {
         txn: 1,
+        first_lsn: 1,
+        synced_lsn: 0,
         record_count: inputs.len() as u32,
-        batch_digest: frame::batch_digest(&digests),
+        records_crc: crc.finish(),
     };
     bytes.extend(
-        frame::encode(&Frame {
-            header: Header { kind: Kind::Footer, tenant_id: 0, content_digest: [0; 32], ..header },
-            payload: footer.encode().to_vec(),
-        })
+        frame::encode(
+            &Frame {
+                header: Header { kind: Kind::Footer, tenant_id: 0, ..header },
+                payload: footer.encode().to_vec(),
+            },
+            1,
+            bytes.len() as u64,
+        )
         .unwrap(),
     );
     bytes

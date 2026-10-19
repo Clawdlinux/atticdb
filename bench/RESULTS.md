@@ -1,10 +1,10 @@
 # Latest result
 
-Latest macOS median target: **PASS**, with Engine/bare p99 **1.399654x** [1.317363x, 1.500114x].
-Tape/bare median is **1.123347x** [1.065021x, 1.159804x].
-See [merge-review measurements](#m2-merge-review) for the trace and tradeoffs.
-Linux NVMe and nightly LazyFS remain pending. The trace omits cache writes until M3.
-These performance numbers precede the final checkpoint identity fix documented below. G1 was not rerun for that fix.
+Latest S1 macOS 1M run: Engine/bare p99 **1.189216x** [1.085449x, 1.675773x].
+Tape/bare median is **1.021696x** [0.996803x, 1.310008x].
+Both paired-ratio medians beat M2. Absolute p99 medians are higher, and Engine repetition 1 misses 1.5x.
+See [the 1M review run](#s1-review-fixes-and-1m-g1-macos) for eviction evidence and cause analysis.
+Linux NVMe and nightly LazyFS remain pending. This trace measures appends, not facts or forget.
 
 # M1 append baseline
 
@@ -830,6 +830,233 @@ The restored revision guard is present. No mutation is included in the commits.
 | `ZERODB_SIM_SEEDS=2000 cargo test -p zerodb-tape --release --features sim --test sim` | Passed |
 | `ZERODB_SIM_SEEDS=2000 cargo test -p zerodb-core --release --features sim --test engine_sim` | Passed. All 7 tests. |
 | `cargo clippy -p zerodb-core --lib --no-default-features -- -D warnings` | Passed |
+
+# S1 frame v2 (macOS)
+
+Measured on 2026-10-19, after T1 through T4 and the final T5 correctness changes.
+Machine: Apple M4, arm64, macOS 27.0.1 build 26A434.
+Compiler: `rustc 1.99.1 (58cf8f9c3 2026-10-13)`.
+This is a shared machine. No test or simulation from this task overlapped either timed run.
+
+## Storage changes
+
+The fixed header shrank from 104 bytes to 40 bytes. Each record also drops its 16-byte salt.
+The footer payload shrank from 44 bytes to 32 bytes.
+Its full encoded size is 72 bytes, down from 148 bytes.
+A 4-record transaction saves 396 encoded bytes.
+CRC32C binds each frame to its manifest segment ID and offset.
+Footer CRCs bind exactly the records they close.
+
+The LSN index uses per-segment offset arrays with a paged routing directory.
+The default resident budget is 8 MiB. Page charges include cache bookkeeping.
+Derived backing files use 8 offset bytes and 16 routing bytes per record, before page padding.
+Both files are rebuilt at open. They are not another recovery authority.
+Small-budget tests cover eviction, reloads, cross-segment reads and failed index writeback.
+
+## Trace and comparison
+
+Each command runs 3 interleaved repetitions: bare, Tape, then Engine.
+Every path writes 192,000 timed turns per repetition, using 4-turn batches and 16 writers.
+Each path contributes 48,000 durable-ack samples per repetition.
+The Engine also serves 2 window readers across 1024 sessions.
+Content sizes cycle through 256 B, 512 B, 1 KiB, 4 KiB and 8 KiB.
+Ratios are paired within repetitions. Spreads below are minimum through maximum, not pooled quantiles.
+
+```sh
+G1_TURNS=192000 G1_REPS=3 G1_HISTORY=0 G1_REPLAY_PROBE=0 G1_CHECKPOINT_MIB=64 ./bench/g1.sh
+```
+
+The command ran twice without code or configuration changes. Both executions returned status 0.
+The first execution printed `FAIL` for its 1.5x performance verdict.
+The bare path varied sharply, so the same trace was repeated once.
+No run was discarded. Both sets of measurements follow.
+
+| Run | Repetition | Bare p99, ms | Tape p99, ms | Engine p99, ms | Engine/bare | Tape/bare |
+|---|---:|---:|---:|---:|---:|---:|
+| First | 1 | 6.055417 | 7.022292 | 8.020084 | 1.324448 | 1.159671 |
+| First | 2 | 5.175958 | 7.073500 | 12.563459 | 2.427272 | 1.366607 |
+| First | 3 | 6.473458 | 7.968041 | 11.004625 | 1.699961 | 1.230879 |
+| Repeat | 1 | 6.839791 | 6.869625 | 9.054833 | 1.323846 | 1.004362 |
+| Repeat | 2 | 5.452459 | 5.854584 | 5.934042 | 1.088324 | 1.073751 |
+| Repeat | 3 | 6.252833 | 8.037333 | 8.677084 | 1.387704 | 1.285391 |
+
+| Measurement | Engine/bare median [min, max] | Tape/bare median [min, max] | Against published M2 medians |
+|---|---|---|---|
+| M2 merge review | 1.399654 [1.317363, 1.500114] | 1.123347 [1.065021, 1.159804] | Reference |
+| S1 first run | 1.699961 [1.324448, 2.427272] | 1.230879 [1.159671, 1.366607] | Miss |
+| S1 unchanged repeat | 1.323846 [1.088324, 1.387704] | 1.073751 [1.004362, 1.285391] | Pass |
+
+The repeat meets both M2 median targets. Its Engine p99 median is 8.677084 ms.
+Its Tape p99 median is 6.869625 ms.
+The M2 medians were 9.664083 ms and 7.756292 ms, respectively.
+The M2 reference used 1M timed turns per path. S1 uses the plan's requested 192,000 turns.
+These trace lengths differ. Neither result proves a causal speedup or a stable hardware-independent bound.
+The first S1 miss remains a performance-variance warning.
+
+All 1024 session tails verified after every engine reopen in both runs.
+Each engine repetition completed 8 checkpoints and 8 periodic superblock installs.
+The repeat's clean-open median was 1148.107 ms [1102.494, 1173.573].
+Open still includes a full tape CRC scan. Checkpoints reduce application replay, not that scan.
+
+## Correctness and fault coverage
+
+The final source passed every command below before the T5 commit.
+The release workspace run includes the filesystem stress test skipped by the debug run.
+The 10,000-seed runs cover seeds 0 through 9,999. CI now sets 2,000 seeds explicitly for both sims.
+
+| Command | Result |
+|---|---|
+| `cargo fmt --all --check` | Passed |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | Passed |
+| `cargo test --workspace` | Passed |
+| `cargo test --workspace --release` | Passed |
+| `ZERODB_SIM_SEEDS=2000 cargo test -p zerodb-tape --release --features sim --test sim` | Passed. 2,000 seeds. |
+| `ZERODB_SIM_SEEDS=2000 cargo test -p zerodb-core --release --features sim --test engine_sim` | Passed. 2,000 seeds. All 7 tests passed. |
+| `ZERODB_SIM_SEEDS=10000 cargo test -p zerodb-tape --release --features sim --test sim` | Passed. 10,000 seeds. 105.41 seconds. |
+| `ZERODB_SIM_SEEDS=10000 cargo test -p zerodb-core --release --features sim --test engine_sim` | Passed. 10,000 seeds. All 7 tests passed. 877.31 seconds. |
+
+Tape seeds exercise stale footers, corrupt lengths and corruption proofs within and across segments.
+They also cover damaged footer kinds, zeroed footers, reply-only sync steps and reordered same-group tails.
+Each tape seed injects an operator-cut crash.
+Engine seeds add tape corruption and small-index-budget recovery to the existing checkpoint and retry oracle.
+Separate regressions check backwards clocks, footer guards and the first bad LSN.
+Operator-cut tests check both transaction boundaries and every captured I/O crash point.
+An explicit dropped-byte field also covers tails with no decodable dropped LSNs.
+
+D73 rejects interior cuts and names both valid boundaries.
+It validates the retained prefix before changing data.
+A durable intent bridges zeroed-data sync and superblock lowering.
+An interrupted cut resumes before normal recovery checks the durable floor.
+The operator report and log identify the cut, dropped range and dropped bytes.
+Dropped LSNs may be reused, including acknowledged LSNs. This is the documented exception to I3.
+
+The additional unchanged G1 repeat is the only validation-plan deviation.
+Linux NVMe, nightly LazyFS and later fact/forget workloads remain unmeasured here.
+
+# S1 review fixes and 1M G1 (macOS)
+
+Measured on 2026-10-19 after recovery fixes `57ec8ce` and `87506c3`.
+This run also includes eviction-counter instrumentation.
+Machine: Apple M4, arm64, macOS 27.0.1 build 26A434.
+Compiler: `rustc 1.99.1 (58cf8f9c3 2026-10-13)`.
+No tests or simulations from this task overlapped the benchmark.
+
+## Review fixes
+
+Corruption proof now uses the first dropped LSN, not information inferred from a damaged footer.
+Garbage sectors and valid frames copied over footers cannot hide the next synced transaction.
+The tape sim includes both faults.
+All footers in a torn group carry the previous group's durable LSN, so they cannot falsely prove that group's damage.
+
+Lookahead skips decoded record runs after checking their footer.
+A footer can validate an overlapping suffix after a false start.
+Work-count tests cover valid and invalid unproving footers, including 1024-record transactions.
+Verification consumes stored record CRC bytes. It does not re-encode records.
+
+Operator-cut tests now cover default-size zero gaps, final preallocation and oversized discarded segments.
+The first missing LSN is reported correctly.
+Cuts only lower the superblock. They never raise it over retained data that still needs recovery rewriting.
+D73 states that rule.
+The tape README now documents frame v2 and the paged index.
+
+## Untuned 1M trace
+
+The command matches M2's reference scale and settings:
+
+```sh
+G1_TURNS=1000000 G1_REPS=3 G1_HISTORY=1 G1_REPLAY_PROBE=0 G1_CHECKPOINT_MIB=64 ./bench/g1.sh
+```
+
+There was 1 run, with 3 interleaved repetitions: bare, Tape, then Engine.
+Each path writes 1M timed turns per repetition, using 16 writers and 4-turn durable batches.
+Each path contributes 250,000 latency samples per repetition.
+The Engine also serves 2 last-16 readers across 1024 sessions.
+The default 8 MiB tape-index budget and 64 MiB checkpoint interval were unchanged.
+No workload, coalescing or memory settings were tuned.
+New counters are printed after timing. They do not add timed metric sampling.
+The command returned status 0 and printed a median 1.5x verdict of `PASS`.
+
+| Repetition | Bare p99, ms | Tape p99, ms | Engine p99, ms | Engine/bare | Tape/bare |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 6.027666 | 7.896292 | 10.101000 | 1.675773 | 1.310008 |
+| 2 | 9.126042 | 9.324042 | 10.852833 | 1.189216 | 1.021696 |
+| 3 | 8.954167 | 8.925542 | 9.719292 | 1.085449 | 0.996803 |
+
+Ratios are paired within repetitions. Each spread is minimum through maximum, not a pooled quantile.
+
+| Measurement | Engine/bare median [min, max] | Tape/bare median [min, max] |
+|---|---|---|
+| M2 1M reference | 1.399654 [1.317363, 1.500114] | 1.123347 [1.065021, 1.159804] |
+| S1 1M review run | 1.189216 [1.085449, 1.675773] | 1.021696 [0.996803, 1.310008] |
+
+Both S1 median ratios beat M2. This is not an all-repetitions pass.
+Engine repetition 1 exceeds 1.5x, and both ratio spreads are wider than M2's.
+
+## Eviction evidence
+
+Counters below are identical across all 3 repetitions.
+They are sampled before closing the database, not during reopen.
+
+| Path | Budget, B | Charged resident, B | Evicted pages | Dirty evictions | Derived writeback, B | Page reloads |
+|---|---:|---:|---:|---:|---:|---:|
+| Tape | 8,388,608 | 8,384,640 | 3876 | 3876 | 15,876,096 | 0 |
+| Engine | 8,388,608 | 8,384,640 | 3882 | 3882 | 15,900,672 | 0 |
+
+Each dirty eviction writes 4096 bytes.
+The Engine also indexes untimed registration records, which explains its slightly larger page count.
+Every repetition therefore exercised dirty eviction at the unchanged default budget.
+This recent-window trace did not exercise cold index reloads. Targeted index tests cover those separately.
+The counters also verify that failed eviction writebacks are not counted as successful evictions.
+
+## Absolute regression and cause analysis
+
+The paired-ratio improvement is not an absolute latency improvement:
+
+| Path | M2 median p99, ms | S1 median p99, ms | Change |
+|---|---:|---:|---:|
+| Bare | 6.904625 | 8.954167 | +29.68% |
+| Tape | 7.756292 | 8.925542 | +15.07% |
+| Engine | 9.664083 | 10.101000 | +4.52% |
+
+Bare p99 varied from 6.027666 ms to 9.126042 ms within this run.
+The slower bare denominator contributes to the lower paired ratios.
+It does not explain away the higher absolute Tape and Engine p99s.
+
+The bounded index adds about 3,880 dirty writebacks per repetition, absent from the earlier 192k run.
+Dirty writeback holds the index mutex, which reads also share.
+This adds scale-dependent I/O and a possible source of reader/writer stalls.
+There were no cold index reloads, so those cannot explain this run's index I/O cost.
+These observations identify added work. They do not isolate its causal share of the latency regression.
+
+Group formation stayed near 16 requests: Tape averaged 15.998 through 16.000, and Engine averaged 15.998.
+Batch fragmentation is not supported as an explanation.
+Both paths made 43 periodic superblock installs per repetition. The Engine completed 43 checkpoints.
+M2 completed 45 of each, so more periodic metadata work is not the explanation either.
+Engine median throughput was 13,810 turns/s, close to M2's 13,823.
+Tape median throughput fell to 12,766 turns/s from M2's 15,654.
+Index writeback cost and shared-machine variation remain plausible contributors. No causal isolation run or tuning was performed.
+
+All 1024 session tails verified after every reopen.
+Median clean-open time was 3928.306 ms [3727.210, 4597.007].
+The separate history checks returned 16 turns with exactly 16 tape reads at histories of 1024 and 65,536 turns.
+
+## Review validation
+
+Every review-fix commit ran the full command list.
+Both sims used seeds 0 through 1,999 before each commit.
+The release workspace run includes the real-filesystem stress test skipped by the debug run.
+
+| Command | Result |
+|---|---|
+| `cargo fmt --all --check` | Passed |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | Passed |
+| `cargo test --workspace` | Passed |
+| `cargo test --workspace --release` | Passed |
+| `ZERODB_SIM_SEEDS=2000 cargo test -p zerodb-tape --release --features sim --test sim` | Passed. 2,000 seeds. |
+| `ZERODB_SIM_SEEDS=2000 cargo test -p zerodb-core --release --features sim --test engine_sim` | Passed. 2,000 seeds. All 7 tests passed. |
+
+The prior S1 10,000-seed measurements remain historical. This review pass required 2,000 seeds per sim.
+Linux NVMe, nightly LazyFS and later fact/forget workloads remain unmeasured here.
 | `cargo bench -p zerodb-core --bench g1 --no-run --quiet` | Passed |
 | `G1_TURNS=208000 G1_REPS=3 G1_REPLAY_PROBE=1 ./bench/g1.sh` | Passed. Three alternating probes per checkpoint setting. |
 | `G1_TURNS=1000000 G1_REPS=3 G1_HISTORY=1 G1_REPLAY_PROBE=0 G1_CHECKPOINT_MIB=64 ./bench/g1.sh` | Passed. All 9 timed phases, reopen checks, and history checks. Median target PASS. |
@@ -892,3 +1119,31 @@ Validation completed before committing the fix:
 | `ZERODB_SIM_SEEDS=2000 cargo test -p zerodb-tape --release --features sim --test sim` | Passed. 18.37 seconds. |
 | `ZERODB_SIM_SEEDS=2000 cargo test -p zerodb-core --release --features sim --test engine_sim` | Passed. All 7 tests, 122.45 seconds. |
 | `cargo clippy -p zerodb-core --lib --no-default-features -- -D warnings` | Passed |
+
+## S1 index eviction A/B (macOS)
+
+Review round 2 asked whether dirty index-page writeback on the publish path explains the 1M spread.
+`G1_LSN_INDEX_MIB` overrides the tape index budget. The default stays 8 MiB.
+At 64 MiB the 1M trace never evicts, so the eviction assert only runs at the default budget.
+
+Order: 8 MiB, 64 MiB, 8 MiB, 64 MiB. Same build, same machine, back to back.
+
+```sh
+G1_LSN_INDEX_MIB=<8|64> G1_TURNS=1000000 G1_REPS=3 G1_HISTORY=1 G1_REPLAY_PROBE=0 G1_CHECKPOINT_MIB=64 ./bench/g1.sh
+```
+
+| Run | Budget | Evictions per rep | Engine/bare p99, per rep | Tape/bare p99, per rep | Bare p99 median, ms | Tape p99 median, ms | Engine p99 median, ms |
+|---|---|---:|---|---|---:|---:|---:|
+| 1 | 8 MiB | 3,876 tape, 3,882 engine | 1.666, 1.550, 1.045 | 1.298, 0.932, 1.032 | 6.464 | 7.838 | 10.018 |
+| 1 | 64 MiB | 0 | 1.513, 1.667, 0.957 | 1.331, 1.406, 0.961 | 7.982 | 9.974 | 10.798 |
+| 2 | 8 MiB | 3,876 tape, 3,882 engine | 1.338, 0.866, 1.071 | 1.170, 0.873, 1.040 | 9.385 | 9.120 | 9.042 |
+| 2 | 64 MiB | 0 | 0.935, 1.553, 1.016 | 0.864, 1.783, 1.006 | 8.460 | 9.848 | 9.535 |
+
+Findings:
+- No eviction does not help. Tape p99 medians are higher at 64 MiB in both runs.
+- Repetitions above 1.5x happen with and without eviction. The worst single tape ratio (1.783) had zero evictions.
+- Tape throughput overlaps across budgets (12.2K to 23.1K turns/s at 8 MiB, 12.2K to 20.9K at 64 MiB).
+- Bare p99 alone moves between 6.0 and 10.4 ms on this machine.
+
+Decision: index writeback stays on the publish path. The spread is macOS `F_FULLFSYNC` variance on this machine.
+The 1.5x G1 gate is not judged on macOS. It needs a Linux NVMe run before any G1 claim.

@@ -8,41 +8,43 @@ use zerodb_tape::{Io, SimDisk};
 
 mod support;
 
-fn transaction(lsn: u64, txn: u64, prev: [u8; 32]) -> (Vec<u8>, [u8; 32]) {
+fn transaction(lsn: u64, txn: u64, location: (u64, u64)) -> (Vec<u8>, (u64, u64)) {
     let header = Header {
         kind: Kind::Turn,
         version: VERSION,
         flags: 0,
         txn,
         lsn,
-        commit_time_ns: 10,
+        commit_time_ns: txn,
         tenant_id: 1,
-        tenant_prev_chain: prev,
-        content_digest: frame::content_digest(&[0; 16], b"hello"),
     };
-    let head = frame::chain_next(&prev, &header, &header.content_digest);
-    let mut payload = vec![0; 16];
-    payload.extend_from_slice(b"hello");
-    let mut bytes = frame::encode(&Frame { header: header.clone(), payload }).unwrap();
+    let (segment, offset) = location;
+    let mut bytes = frame::encode(
+        &Frame { header: header.clone(), payload: b"hello".to_vec() },
+        segment,
+        offset,
+    )
+    .unwrap();
     let footer = Footer {
         txn,
+        first_lsn: lsn,
+        synced_lsn: 0,
         record_count: 1,
-        batch_digest: frame::batch_digest(&[header.content_digest]),
+        records_crc: zerodb_tape::sim::crc32c(&bytes[..4]),
     };
     bytes.extend(
-        frame::encode(&Frame {
-            header: Header {
-                kind: Kind::Footer,
-                tenant_id: 0,
-                tenant_prev_chain: [0; 32],
-                content_digest: [0; 32],
-                ..header
+        frame::encode(
+            &Frame {
+                header: Header { kind: Kind::Footer, tenant_id: 0, ..header },
+                payload: footer.encode().to_vec(),
             },
-            payload: footer.encode().to_vec(),
-        })
+            segment,
+            offset + bytes.len() as u64,
+        )
         .unwrap(),
     );
-    (bytes, head)
+    let next = (segment, offset + bytes.len() as u64);
+    (bytes, next)
 }
 
 fn setup() -> (Arc<SimDisk>, DataDir) {
@@ -60,41 +62,45 @@ fn write(io: &SimDisk, dir: &DataDir, id: u64, offset: u64, bytes: &[u8]) {
 }
 
 #[test]
-fn clean_reopen_and_chain_heads_allow_lsn_gaps() {
+fn clean_reopen_checks_dense_lsns() {
     let (io, mut dir) = setup();
-    let (first, head) = transaction(1, 1, [0; 32]);
-    let (second, _) = transaction(8, 2, head);
+    let (first, head) = transaction(1, 1, (1, 0));
+    let (second, _) = transaction(2, 2, head);
     write(&io, &dir, 1, 0, &[first, second].concat());
-    dir.install_superblock(8).unwrap();
+    dir.install_superblock(2).unwrap();
     let recovered = recover(&mut dir, 1024).unwrap();
-    assert_eq!(recovered.report.durable_lsn, 8);
+    assert_eq!(recovered.report.durable_lsn, 2);
     assert_eq!(recovered.report.records, 2);
     assert!(recovered.report.truncated.is_none());
 }
 
 #[test]
-fn corruption_after_maximum_lsn_reports_saturated_lsn() {
+fn lsn_gaps_cannot_bypass_dense_recovery() {
     for superblock in [0, u64::MAX] {
         let (io, mut dir) = setup();
         let second = dir.prepare_next_segment(1024).unwrap();
-        let (valid, _) = transaction(u64::MAX, 1, [0; 32]);
+        let (valid, _) = transaction(u64::MAX, 1, (1, 0));
         write(&io, &dir, 1, 0, &valid);
         dir.install_superblock(superblock).unwrap();
         let file = io.open(&dir.segment_path(second)).unwrap();
         io.set_len(file, 1025).unwrap();
         io.sync_data(file).unwrap();
         io.close(file).unwrap();
-        assert!(matches!(
-            recover(&mut dir, 1024),
-            Err(Error::CorruptionDetected { lsn: u64::MAX, segment: 2, .. })
-        ));
+        let result = recover(&mut dir, 1024);
+        if superblock == 0 {
+            let report = result.unwrap().report;
+            assert_eq!(report.durable_lsn, 0);
+            assert!(report.truncated.is_some());
+        } else {
+            assert!(matches!(result, Err(Error::CorruptionDetected { lsn: 1, .. })));
+        }
     }
 }
 
 #[test]
 fn missing_footer_drops_whole_transaction_and_zeroes_tail() {
     let (io, mut dir) = setup();
-    let (first, head) = transaction(1, 1, [0; 32]);
+    let (first, head) = transaction(1, 1, (1, 0));
     let (second, _) = transaction(2, 2, head);
     write(&io, &dir, 1, 0, &first);
     write(&io, &dir, 1, first.len() as u64, &second[..second.len() - 10]);
@@ -113,7 +119,7 @@ fn missing_footer_drops_whole_transaction_and_zeroes_tail() {
 fn damage_missing_segment_and_early_end_below_superblock_are_corruption() {
     for failure in 0..3 {
         let (io, mut dir) = setup();
-        let (bytes, _) = transaction(1, 1, [0; 32]);
+        let (bytes, _) = transaction(1, 1, (1, 0));
         write(&io, &dir, 1, 0, &bytes);
         dir.install_superblock(1).unwrap();
         match failure {
@@ -130,16 +136,16 @@ fn damage_missing_segment_and_early_end_below_superblock_are_corruption() {
 }
 
 #[test]
-fn bad_chain_or_footer_is_not_replayed() {
+fn bad_footer_binding_is_not_replayed() {
     for footer in [false, true] {
         let (io, mut dir) = setup();
-        let (mut bytes, _) = transaction(1, 1, if footer { [0; 32] } else { [1; 32] });
-        if footer {
-            let (record, used) = frame::decode(&bytes).unwrap();
-            let (mut end, _) = frame::decode(&bytes[used..]).unwrap();
-            end.payload[12] ^= 1;
-            bytes = [frame::encode(&record).unwrap(), frame::encode(&end).unwrap()].concat();
-        }
+        let (bytes, _) = transaction(1, 1, (1, 0));
+        let (record, used) = frame::decode(&bytes, 1, 0).unwrap();
+        let (mut end, _) = frame::decode(&bytes[used..], 1, used as u64).unwrap();
+        end.payload[if footer { 28 } else { 8 }] ^= 1;
+        let bytes =
+            [frame::encode(&record, 1, 0).unwrap(), frame::encode(&end, 1, used as u64).unwrap()]
+                .concat();
 
         write(&io, &dir, 1, 0, &bytes);
         let result = recover(&mut dir, 1024).unwrap();
@@ -152,7 +158,7 @@ fn bad_chain_or_footer_is_not_replayed() {
 fn nonincreasing_lsn_is_truncated_above_and_corruption_below_boundary() {
     for boundary in [0, 2] {
         let (io, mut dir) = setup();
-        let (first, head) = transaction(1, 1, [0; 32]);
+        let (first, head) = transaction(1, 1, (1, 0));
         let (second, _) = transaction(1, 2, head);
         write(&io, &dir, 1, 0, &[first, second].concat());
         dir.install_superblock(boundary).unwrap();
@@ -168,9 +174,9 @@ fn nonincreasing_lsn_is_truncated_above_and_corruption_below_boundary() {
 #[test]
 fn truncation_report_includes_discarded_later_segments() {
     let (io, mut dir) = setup();
-    let (first, head) = transaction(1, 1, [0; 32]);
-    let (second, head) = transaction(2, 2, head);
-    let (third, _) = transaction(3, 3, head);
+    let (first, head) = transaction(1, 1, (1, 0));
+    let (second, _) = transaction(2, 2, head);
+    let (third, _) = transaction(3, 3, (2, 0));
     dir.prepare_next_segment(1024).unwrap();
     write(&io, &dir, 1, 0, &first);
     write(&io, &dir, 1, first.len() as u64, &second[..second.len() - 10]);
@@ -193,27 +199,25 @@ fn truncation_resumes_at_the_cut_and_reopens_twice_after_new_ack() {
                 for _ in 1..count {
                     dir.prepare_next_segment(1024).unwrap();
                 }
-                let (first, mut head) = transaction(10, 1, [0; 32]);
+                let (first, _) = transaction(1, 1, (1, 0));
                 write(&io, &dir, 1, 0, &first);
-                dir.install_superblock(10).unwrap();
-                let mut last = 10;
+                dir.install_superblock(1).unwrap();
+                let mut last = 1;
                 let mut cut = 0;
                 if !offset_zero {
-                    let (prefix, next) = transaction(11, 2, head);
+                    let (prefix, _) = transaction(2, 2, (2, 0));
                     write(&io, &dir, 2, 0, &prefix);
                     cut = prefix.len() as u64;
-                    head = next;
-                    last = 11;
+                    last = 2;
                 }
                 if !empty {
                     write(&io, &dir, 2, cut, &[1; 8]);
                 }
                 for id in 3..=count {
-                    let (bytes, next) = transaction(last + id - 2, id, head);
+                    let (bytes, _) = transaction(last + id - 2, id, (id, 0));
                     let file = io.open(&dir.segment_path(id)).unwrap();
                     io.write_at(file, 0, &bytes).unwrap();
                     io.close(file).unwrap();
-                    head = next;
                 }
                 drop(dir);
                 let opts = Options { segment_size: 1024, ..Options::default() };
@@ -223,14 +227,13 @@ fn truncation_resumes_at_the_cut_and_reopens_twice_after_new_ack() {
                 assert_eq!(report.durable_lsn, last, "count={count} empty={empty} cut={cut}");
                 assert_eq!(report.segments, 2);
                 assert!(report.truncated.is_some());
-                let batch = PreparedBatch::with_salts(
+                let batch = PreparedBatch::new(
                     vec![RecordInput {
                         kind: Kind::Turn,
                         tenant_id: 1,
                         content: b"after repair".to_vec(),
                     }],
                     Durability::Durable,
-                    || Ok([9; 16]),
                 )
                 .unwrap();
                 let (request, reply) = WriteRequest::new(batch);
@@ -247,11 +250,8 @@ fn truncation_resumes_at_the_cut_and_reopens_twice_after_new_ack() {
                     let (core, report) =
                         WriterCore::open(image, clock.clone(), "db", opts.clone()).unwrap();
                     assert!(report.truncated.is_none());
-                    assert_eq!(&core.read(10).unwrap().unwrap().payload[16..], b"hello");
-                    assert_eq!(
-                        &core.read(last + 1).unwrap().unwrap().payload[16..],
-                        b"after repair"
-                    );
+                    assert_eq!(&core.read(1).unwrap().unwrap().payload, b"hello");
+                    assert_eq!(&core.read(last + 1).unwrap().unwrap().payload, b"after repair");
                 }
                 let dir = DataDir::open(io.clone(), "db", None, 1024).unwrap();
                 assert_eq!(dir.segments(), &[1, 2]);
@@ -270,8 +270,8 @@ fn oversized_zero_padding_before_durable_boundary_is_corruption() {
     let mut dir = DataDir::open(io.clone(), "db", None, size).unwrap();
     dir.prepare_next_segment(size).unwrap();
     dir.prepare_next_segment(size).unwrap();
-    let (first, head) = transaction(1, 1, [0; 32]);
-    let (last, _) = transaction(2, 2, head);
+    let (first, _) = transaction(1, 1, (1, 0));
+    let (last, _) = transaction(2, 2, (2, 0));
     write(&io, &dir, 1, 0, &first);
     write(&io, &dir, 2, 0, &last);
     dir.install_superblock(2).unwrap();
@@ -285,8 +285,8 @@ fn oversized_padding_above_boundary_is_not_promoted_into_durable_tape() {
     let mut dir = DataDir::open(io.clone(), "db", None, size).unwrap();
     dir.prepare_next_segment(size).unwrap();
     dir.prepare_next_segment(size).unwrap();
-    let (first, head) = transaction(1, 1, [0; 32]);
-    let (last, _) = transaction(2, 2, head);
+    let (first, _) = transaction(1, 1, (1, 0));
+    let (last, _) = transaction(2, 2, (2, 0));
     write(&io, &dir, 1, 0, &first);
     write(&io, &dir, 2, 0, &last);
     let report = recover(&mut dir, size).unwrap().report;
@@ -310,9 +310,9 @@ fn manifest_is_durable_before_tail_files_are_removed() {
             dir.prepare_next_segment(1024).unwrap();
         }
 
-        let (first, _) = transaction(10, 1, [0; 32]);
+        let (first, _) = transaction(1, 1, (1, 0));
         write(&io.disk, &dir, 1, 0, &first);
-        dir.install_superblock(10).unwrap();
+        dir.install_superblock(1).unwrap();
         write(&io.disk, &dir, 2, 0, &[1; 8]);
         io.events.lock().unwrap().clear();
         io.syncs.store(0, Ordering::SeqCst);
@@ -335,7 +335,7 @@ fn manifest_is_durable_before_tail_files_are_removed() {
             for image in io.images.lock().unwrap().iter() {
                 for _ in 0..2 {
                     let mut dir = DataDir::open(Arc::new(image.clone()), "db", None, 1024).unwrap();
-                    assert_eq!(recover(&mut dir, 1024).unwrap().report.durable_lsn, 10);
+                    assert_eq!(recover(&mut dir, 1024).unwrap().report.durable_lsn, 1);
                 }
             }
         }
@@ -355,7 +355,7 @@ fn reopen_removes_orphans_after_manifest_trim_before_unlink() {
     for _ in 0..3 {
         dir.prepare_next_segment(1024).unwrap();
     }
-    let (first, _) = transaction(1, 1, [0; 32]);
+    let (first, _) = transaction(1, 1, (1, 0));
     write(&io.disk, &dir, 1, 0, &first);
     dir.install_superblock(1).unwrap();
     write(&io.disk, &dir, 2, 0, &[1; 8]);
@@ -380,5 +380,5 @@ fn reopen_removes_orphans_after_manifest_trim_before_unlink() {
     )
     .unwrap();
     assert_eq!(report.durable_lsn, 1);
-    assert_eq!(&tape.read(1).unwrap().unwrap().payload[16..], b"hello");
+    assert_eq!(&tape.read(1).unwrap().unwrap().payload, b"hello");
 }
