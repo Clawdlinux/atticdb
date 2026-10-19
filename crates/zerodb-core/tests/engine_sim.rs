@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use zerodb_core::{
-    turn::decode, Appended, Engine, EngineOptions, ErrorKind, NewTurn, Outcome, Role, Scope, Trust,
-    Turn, WindowQuery,
+    turn::decode, Appended, Engine, EngineOptions, ErrorKind, NewTurn, Outcome, Role, Scope, Turn,
+    WindowQuery,
 };
 use zerodb_tape::sim::SimClock;
 use zerodb_tape::{Clock, Error, FileId, Io, Kind, LockGuard, Result, SimDisk, Tape, TapeOptions};
@@ -174,7 +174,6 @@ impl Oracle {
                 role: turn.role,
                 content: turn.content.clone(),
                 meta: turn.meta.clone(),
-                trust: turn.trust,
             });
         }
         b.receipt = Some(receipt);
@@ -250,7 +249,6 @@ impl Oracle {
                 role: decoded.turn.role,
                 content: decoded.turn.content,
                 meta: decoded.turn.meta,
-                trust: decoded.turn.trust,
             });
         }
         for (&txn, turns) in &transactions {
@@ -307,7 +305,6 @@ fn random_batch(rng: &mut Rng, index: usize, scope: usize, time: u64) -> Batch {
             metadata.extend(rng.bytes(meta));
             NewTurn {
                 role: [Role::System, Role::User, Role::Assistant, Role::Tool][rng.below(4)],
-                trust: if rng.below(2) == 0 { Trust::Trusted } else { Trust::Untrusted },
                 content: rng.bytes(size),
                 meta: metadata,
             }
@@ -706,8 +703,7 @@ fn inline_group_publishes_once_and_replies_with_original_sequences() {
     };
     let engine = open(io.clone(), Arc::new(SimClock::default()), &opts);
     let scope = Scope { tenant: "t".into(), agent: "a".into(), session: "s".into() };
-    let turn =
-        NewTurn { role: Role::User, trust: Trust::Untrusted, content: vec![1], meta: vec![] };
+    let turn = NewTurn { role: Role::User, content: vec![1], meta: vec![] };
     engine.append(&scope, vec![turn.clone()], None).unwrap();
     let before = engine.metrics().unwrap();
     let syncs = io.syncs.load(Ordering::SeqCst);
@@ -769,12 +765,7 @@ fn publish_during_checkpoint_keeps_the_new_page_dirty() {
     };
     let engine = Arc::new(open(io.clone(), clock.clone(), &opts));
     let scope = Scope { tenant: "t".into(), agent: "a".into(), session: "s".into() };
-    let turn = |value| NewTurn {
-        role: Role::User,
-        trust: Trust::Untrusted,
-        content: vec![value],
-        meta: vec![],
-    };
+    let turn = |value| NewTurn { role: Role::User, content: vec![value], meta: vec![] };
     let before = engine.append(&scope, vec![turn(1), turn(2)], None).unwrap();
     let queued = engine.enqueue_sim(&scope, vec![turn(3)], None).unwrap();
     let weak = Arc::downgrade(&engine);
@@ -810,8 +801,7 @@ fn legacy_checkpoint_magic_falls_back_to_full_replay() {
         ..EngineOptions::default()
     };
     let scope = Scope { tenant: "t".into(), agent: "a".into(), session: "s".into() };
-    let turn =
-        NewTurn { role: Role::User, trust: Trust::Untrusted, content: vec![7], meta: vec![] };
+    let turn = NewTurn { role: Role::User, content: vec![7], meta: vec![] };
     let engine = open(io.clone(), clock.clone(), &opts);
     engine.append(&scope, vec![turn.clone(); 2], Some("original")).unwrap();
     engine.checkpoint().unwrap();
@@ -846,8 +836,7 @@ fn missing_checkpoint_filename_after_crash_replays_the_tape() {
         ..EngineOptions::default()
     };
     let scope = Scope { tenant: "t".into(), agent: "a".into(), session: "s".into() };
-    let turn =
-        NewTurn { role: Role::User, trust: Trust::Untrusted, content: vec![9], meta: vec![] };
+    let turn = NewTurn { role: Role::User, content: vec![9], meta: vec![] };
     let mut observed = false;
     for seed in 0..128 {
         let io = Arc::new(FaultIo::new(SimDisk::new(seed)));

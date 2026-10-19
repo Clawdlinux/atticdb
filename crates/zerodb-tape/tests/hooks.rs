@@ -106,10 +106,7 @@ fn writer_assigns_dense_sequences_and_publishes_before_reply_under_eight_threads
                 for _ in 0..16 {
                     let Committed::Durable { first_lsn, last_lsn, .. } = tape
                         .append(vec![input(Kind::Turn, &[0; 8]); 2], Durability::Durable)
-                        .unwrap()
-                    else {
-                        panic!("expected durable reply");
-                    };
+                        .unwrap();
                     let log = log.lock().unwrap();
                     for lsn in first_lsn..=last_lsn {
                         assert_eq!(log.published.iter().filter(|r| r.lsn == lsn).count(), 1);
@@ -161,7 +158,7 @@ fn reject_and_cached_reply_write_nothing() {
 }
 
 #[test]
-fn fast_records_wait_for_later_sync_and_scan_has_a_fixed_durable_boundary() {
+fn durable_records_publish_each_step_and_shutdown_is_idempotent() {
     let machine = Machine::default();
     let log = machine.log.clone();
     let (mut core, _) = WriterCore::open_with(
@@ -173,12 +170,12 @@ fn fast_records_wait_for_later_sync_and_scan_has_a_fixed_durable_boundary() {
     )
     .unwrap();
     for _ in 0..3 {
-        let reply = enqueue(&mut core, Kind::Cache, Durability::Fast);
+        let reply = enqueue(&mut core, Kind::Turn, Durability::Durable);
         core.step();
-        assert_eq!(reply.recv().unwrap().unwrap(), Committed::Fast);
+        reply.recv().unwrap().unwrap();
     }
-    assert!(log.lock().unwrap().published.is_empty());
-    assert_eq!(core.scan(0).count(), 0);
+    assert_eq!(log.lock().unwrap().published.len(), 3);
+    assert_eq!(core.scan(0).count(), 3);
     let reply = enqueue(&mut core, Kind::Turn, Durability::Durable);
     core.step();
     reply.recv().unwrap().unwrap();
@@ -188,10 +185,10 @@ fn fast_records_wait_for_later_sync_and_scan_has_a_fixed_durable_boundary() {
     );
     let old_scan = core.scan(0).collect::<Result<Vec<_>>>().unwrap();
     assert_eq!(old_scan.len(), 4);
-    let reply = enqueue(&mut core, Kind::Cache, Durability::Fast);
+    let reply = enqueue(&mut core, Kind::Turn, Durability::Durable);
     core.step();
     reply.recv().unwrap().unwrap();
-    assert_eq!(core.scan(0).count(), 4);
+    assert_eq!(core.scan(0).count(), 5);
     core.shutdown().unwrap();
     assert_eq!(log.lock().unwrap().published.len(), 5);
     core.shutdown().unwrap();
@@ -212,12 +209,11 @@ fn failed_sync_never_publishes_and_poison_hides_prepare_side_effects() {
             options(),
         )
         .unwrap();
-        let fast = enqueue(&mut core, Kind::Cache, Durability::Fast);
-        core.step();
-        assert_eq!(fast.recv().unwrap().unwrap(), Committed::Fast);
+        let first = enqueue(&mut core, Kind::Turn, Durability::Durable);
         let reply = enqueue(&mut core, Kind::Turn, Durability::Durable);
         disk.fail_next_sync().unwrap();
         core.step();
+        assert_eq!(first.recv().unwrap().unwrap_err().outcome, Outcome::Unknown);
         assert!(matches!(reply.recv().unwrap().unwrap_err().kind, Error::SyncFailed(_)));
         assert_eq!(core.durable_lsn(), 0);
         assert!(log.lock().unwrap().published.is_empty());
@@ -356,11 +352,9 @@ impl StateMachine for InvalidRewrite {
 
 #[test]
 fn rewritten_batches_are_revalidated_without_exposing_reserved_state() {
-    for (content, mode) in [
-        (&b"footer"[..], Durability::Durable),
-        (&b"durable"[..], Durability::Fast),
-        (&b"too large"[..], Durability::Durable),
-    ] {
+    for (content, mode) in
+        [(&b"footer"[..], Durability::Durable), (&b"too large"[..], Durability::Durable)]
+    {
         let (tape, _) = Tape::open_with(
             InvalidRewrite,
             Arc::new(SimDisk::new(9)),
@@ -369,7 +363,7 @@ fn rewritten_batches_are_revalidated_without_exposing_reserved_state() {
             options(),
         )
         .unwrap();
-        let kind = if mode == Durability::Fast { Kind::Cache } else { Kind::Turn };
+        let kind = Kind::Turn;
         assert_eq!(
             tape.append(vec![input(kind, content)], mode).unwrap_err().outcome,
             Outcome::NotCommitted
@@ -384,54 +378,8 @@ fn rewritten_batches_are_revalidated_without_exposing_reserved_state() {
 }
 
 #[test]
-fn scan_skips_husks_and_footers_and_handles_gaps_and_maximum_lsn() {
-    use zerodb_tape::sim::frame::{self, Footer, Frame, Header, FLAG_HUSK, VERSION};
-    use zerodb_tape::sim::DataDir;
-    use zerodb_tape::Io;
-
+fn scan_skips_footers_and_handles_an_empty_maximum_lsn_range() {
     let disk = Arc::new(SimDisk::new(6));
-    let mut dir = DataDir::open(disk.clone(), "db", None, 1024).unwrap();
-    let segment = dir.prepare_next_segment(1024).unwrap();
-    let mut bytes = Vec::new();
-    for (i, (lsn, flags)) in [(1, FLAG_HUSK), (8, 0), (u64::MAX, 0)].into_iter().enumerate() {
-        let header = Header {
-            kind: Kind::Cache,
-            version: VERSION,
-            flags,
-            txn: i as u64 + 1,
-            lsn,
-            commit_time_ns: 9,
-            tenant_id: 7,
-            tenant_prev_chain: [0; 32],
-            content_digest: frame::content_digest(&[0; 16], b"hello"),
-        };
-        let payload = if flags == FLAG_HUSK { vec![] } else { [&[0; 16][..], b"hello"].concat() };
-        bytes.extend(frame::encode(&Frame { header: header.clone(), payload }).unwrap());
-        let footer = Footer {
-            txn: header.txn,
-            record_count: 1,
-            batch_digest: frame::batch_digest(&[header.content_digest]),
-        };
-        bytes.extend(
-            frame::encode(&Frame {
-                header: Header {
-                    kind: Kind::Footer,
-                    flags: 0,
-                    tenant_id: 0,
-                    content_digest: [0; 32],
-                    ..header
-                },
-                payload: footer.encode().to_vec(),
-            })
-            .unwrap(),
-        );
-    }
-    let file = disk.open(&dir.segment_path(segment)).unwrap();
-    disk.write_at(file, 0, &bytes).unwrap();
-    disk.sync_data(file).unwrap();
-    disk.close(file).unwrap();
-    dir.install_superblock(u64::MAX).unwrap();
-    drop(dir);
     let (tape, _) = Tape::open(
         disk,
         Arc::new(SimClock::default()),
@@ -439,11 +387,13 @@ fn scan_skips_husks_and_footers_and_handles_gaps_and_maximum_lsn() {
         TapeOptions { segment_size: 1024, ..TapeOptions::default() },
     )
     .unwrap();
+    for _ in 0..3 {
+        tape.append(vec![input(Kind::Turn, b"hello")], Durability::Durable).unwrap();
+    }
     let records = tape.scan(0).collect::<Result<Vec<_>>>().unwrap();
-    assert_eq!(records.iter().map(|r| r.lsn).collect::<Vec<_>>(), vec![8, u64::MAX]);
+    assert_eq!(records.iter().map(|r| r.lsn).collect::<Vec<_>>(), vec![1, 2, 3]);
     assert!(records.iter().all(|r| r.payload.as_ref() == b"hello"));
     let mut scan = tape.scan(u64::MAX);
-    assert_eq!(scan.next().unwrap().unwrap().lsn, u64::MAX);
     assert!(scan.next().is_none());
     assert!(scan.next().is_none());
 }

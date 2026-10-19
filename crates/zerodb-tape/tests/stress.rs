@@ -43,9 +43,7 @@ fn concurrent_durable_appends_survive_reopen() {
                                 content: content.clone(),
                             };
                             let ack = tape.append(vec![record], Durability::Durable).unwrap();
-                            let Committed::Durable { first_lsn, last_lsn, .. } = ack else {
-                                panic!("durable request received Fast acknowledgement");
-                            };
+                            let Committed::Durable { first_lsn, last_lsn, .. } = ack;
                             assert_eq!(first_lsn, last_lsn);
                             (first_lsn, tenant, content)
                         })

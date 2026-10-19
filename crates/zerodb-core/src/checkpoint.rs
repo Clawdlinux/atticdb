@@ -481,12 +481,11 @@ pub(crate) fn save(io: &dyn Io, dir: &Path, shared: &Mutex<State>) -> Result<u64
         bytes(&mut data, entry.key.1.as_bytes());
         bytes(&mut data, entry.key.2.as_bytes());
         data.extend_from_slice(&entry.digest);
-        if let Committed::Durable { txn, first_lsn, last_lsn, ref reply } = entry.committed {
-            for value in [txn, first_lsn, last_lsn] {
-                data.extend_from_slice(&value.to_le_bytes());
-            }
-            data.extend_from_slice(reply);
+        let Committed::Durable { txn, first_lsn, last_lsn, ref reply } = entry.committed;
+        for value in [txn, first_lsn, last_lsn] {
+            data.extend_from_slice(&value.to_le_bytes());
         }
+        data.extend_from_slice(reply);
         buffer.record(&data)?;
     }
     buffer.flush()?;
@@ -758,11 +757,10 @@ mod tests {
 
     #[test]
     fn replay_failure_after_a_crc_valid_checkpoint_retries_from_zero() {
-        use crate::{Engine, NewTurn, Role, Scope, Trust, WindowQuery};
+        use crate::{Engine, NewTurn, Role, Scope, WindowQuery};
         let disk = Arc::new(SimDisk::new(5));
         let scope = Scope { tenant: "t".into(), agent: "a".into(), session: "s".into() };
-        let turn =
-            NewTurn { role: Role::User, content: vec![1], meta: vec![], trust: Trust::Untrusted };
+        let turn = NewTurn { role: Role::User, content: vec![1], meta: vec![] };
         let engine = Engine::open_with(
             disk.clone(),
             Arc::new(zerodb_tape::sim::SimClock::default()),

@@ -1,7 +1,7 @@
 //! Footer-atomic replay and durable-boundary validation.
 
 use crate::dir::{corruption, read_exact, DataDir, Handle};
-use crate::frame::{self, Digest, Footer, Frame, Kind, FLAG_HUSK};
+use crate::frame::{self, Digest, Footer, Frame, Kind};
 use crate::{Error, Result};
 use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
@@ -51,7 +51,7 @@ fn verify(records: &[(Frame, u64)], footer: &Frame, state: &Recovered) -> Result
             return Err(Error::InvalidFrame("transaction or LSN order".into()));
         }
         lsn = h.lsn;
-        if h.flags & FLAG_HUSK == 0 {
+        {
             let salt: [u8; 16] = record.payload[..16]
                 .try_into()
                 .map_err(|_| Error::InvalidFrame("missing salt".into()))?;

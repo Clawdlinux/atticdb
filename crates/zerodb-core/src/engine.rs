@@ -4,7 +4,7 @@ use crate::machine::Machine;
 use crate::session::{address, Key};
 use crate::state::State;
 use crate::turn::{decode, encode};
-use crate::{EngineError, EngineOptions, ErrorKind, NewTurn, Role, Trust};
+use crate::{EngineError, EngineOptions, ErrorKind, NewTurn, Role};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -47,8 +47,6 @@ pub struct Turn {
     pub content: Vec<u8>,
     /// Opaque metadata.
     pub meta: Vec<u8>,
-    /// Asserted trust, without filtering.
-    pub trust: Trust,
 }
 /// An ordered session window.
 #[derive(Clone, Copy, Debug)]
@@ -267,7 +265,6 @@ impl Engine {
                 Ok(Committed::Durable { txn, last_lsn, reply, .. }) => {
                     return self.receipt(turns.len() as u64, txn, last_lsn, &reply);
                 }
-                Ok(Committed::Fast) => unreachable!("turns always use durable acknowledgement"),
             }
         }
         Err(EngineError::rejected(ErrorKind::ResourceExhausted("hot_pages")))
@@ -477,7 +474,6 @@ impl Engine {
                 role: decoded.turn.role,
                 content: decoded.turn.content,
                 meta: decoded.turn.meta,
-                trust: decoded.turn.trust,
             });
         }
         Ok(out)
@@ -543,7 +539,6 @@ impl SimAppend<'_> {
             Committed::Durable { txn, last_lsn, reply, .. } => {
                 self.engine.receipt(self.count, txn, last_lsn, &reply)
             }
-            Committed::Fast => unreachable!("engine writes require durable acknowledgements"),
         }
     }
 }

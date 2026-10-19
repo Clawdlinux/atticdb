@@ -328,7 +328,7 @@ fn probe<S: StateMachine>(core: &mut WriterCore<S>, oracle: &mut Oracle, rng: &m
 }
 
 fn workload(rng: &mut Rng, tenants: usize) -> (Vec<RecordInput>, Durability) {
-    let mode = if rng.below(4) == 0 { Durability::Fast } else { Durability::Durable };
+    let mode = Durability::Durable;
     let count = 1 + rng.below(64);
     let small = rng.below(2) == 0;
     let large = rng.below(80) == 0;
@@ -341,11 +341,7 @@ fn workload(rng: &mut Rng, tenants: usize) -> (Vec<RecordInput>, Durability) {
             } else {
                 rng.below(8193)
             };
-            let kind = if mode == Durability::Fast {
-                Kind::Cache
-            } else {
-                [Kind::Turn, Kind::Fact, Kind::Cache, Kind::Redaction][rng.below(4)]
-            };
+            let kind = [Kind::Turn, Kind::Fact, Kind::Forget][rng.below(3)];
             RecordInput { kind, tenant_id: 1 + rng.below(tenants) as u32, content: rng.bytes(len) }
         })
         .collect();

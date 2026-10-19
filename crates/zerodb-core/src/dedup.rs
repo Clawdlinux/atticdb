@@ -16,7 +16,6 @@ impl Entry {
     pub(crate) fn age(&self) -> u64 {
         match self.committed {
             Committed::Durable { first_lsn, .. } => first_lsn,
-            Committed::Fast => unreachable!("engine entries are durable"),
         }
     }
 }

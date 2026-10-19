@@ -9,8 +9,6 @@ pub const HEADER_LEN: usize = 104;
 pub const MAX_FRAME_SIZE: usize = 4 * 1024 * 1024;
 /// The supported frame version.
 pub const VERSION: u8 = 1;
-/// A husk retains its header and digest without any payload.
-pub const FLAG_HUSK: u16 = 1;
 /// A BLAKE3 digest or chain head.
 pub type Digest = [u8; 32];
 
@@ -22,10 +20,8 @@ pub enum Kind {
     Turn = 1,
     /// A fact revision.
     Fact = 2,
-    /// An unchained cache entry.
-    Cache = 3,
-    /// A chained redaction record.
-    Redaction = 4,
+    /// A request to hide tenant-local content.
+    Forget = 3,
     /// An unchained transaction footer.
     Footer = 5,
     /// An unchained tenant registry entry.
@@ -35,7 +31,7 @@ pub enum Kind {
 impl Kind {
     /// Reports whether this kind advances a tenant's provenance chain.
     pub fn is_chained(self) -> bool {
-        matches!(self, Self::Turn | Self::Fact | Self::Redaction)
+        matches!(self, Self::Turn | Self::Fact | Self::Forget)
     }
 }
 
@@ -46,8 +42,7 @@ impl TryFrom<u8> for Kind {
         match value {
             1 => Ok(Self::Turn),
             2 => Ok(Self::Fact),
-            3 => Ok(Self::Cache),
-            4 => Ok(Self::Redaction),
+            3 => Ok(Self::Forget),
             5 => Ok(Self::Footer),
             6 => Ok(Self::TenantCreate),
             _ => Err(DecodeError::BadLength),
@@ -62,7 +57,7 @@ pub struct Header {
     pub kind: Kind,
     /// The frame format version.
     pub version: u8,
-    /// Storage flags. Bit 0 marks a husk.
+    /// Reserved. Must be zero.
     pub flags: u16,
     /// The transaction identifier.
     pub txn: u64,
@@ -162,16 +157,10 @@ fn validate(header: &Header, payload: &[u8]) -> Result<(), DecodeError> {
     if header.version != VERSION {
         return Err(DecodeError::UnknownVersion);
     }
-    if header.flags & !FLAG_HUSK != 0
-        || (!header.kind.is_chained() && header.tenant_prev_chain != [0; 32])
-    {
+    if header.flags != 0 || (!header.kind.is_chained() && header.tenant_prev_chain != [0; 32]) {
         return Err(DecodeError::BadLength);
     }
-    if header.flags & FLAG_HUSK != 0 {
-        if !payload.is_empty() {
-            return Err(DecodeError::BadLength);
-        }
-    } else if (header.kind == Kind::Footer && payload.len() != 44)
+    if (header.kind == Kind::Footer && payload.len() != 44)
         || (header.kind != Kind::Footer && payload.len() < 16)
     {
         return Err(DecodeError::BadLength);

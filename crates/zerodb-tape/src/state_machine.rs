@@ -30,7 +30,6 @@ pub enum Prepare {
     /// Return a cached acknowledgement without writing anything.
     ///
     /// Durable replies wait for the group's sync and publication, including retries of pending writes.
-    /// Fast requests always receive `Committed::Fast`, without identifiers.
     Reply(Committed),
 }
 
@@ -52,7 +51,6 @@ pub trait StateMachine: Send {
 
     /// Installs synced records in LSN order before durable replies. Must take O(records) work.
     ///
-    /// Fast records wait for a successful sync, including automatic Fast-only flushes and clean shutdown.
     /// A failed sync never publishes its pending records.
     fn publish(&mut self, committed: &[CommittedRecord]);
 

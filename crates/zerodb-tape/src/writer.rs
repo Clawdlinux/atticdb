@@ -2,7 +2,7 @@
 
 use crate::dir::{read_exact, DataDir, Handle};
 use crate::frame::{
-    self, Digest, Footer, Frame, Header, Kind, FLAG_HUSK, HEADER_LEN, MAX_FRAME_SIZE, VERSION,
+    self, Digest, Footer, Frame, Header, Kind, HEADER_LEN, MAX_FRAME_SIZE, VERSION,
 };
 use crate::io::{lock, Clock, Io};
 use crate::recovery::{recover, RecoveryReport};
@@ -22,8 +22,6 @@ use std::time::{Duration, Instant};
 pub enum Durability {
     /// Acknowledge only after all earlier segment writes have synced.
     Durable,
-    /// Acknowledge Cache-only batches before sync, without assigning a public LSN.
-    Fast,
 }
 
 /// A tenant record supplied to an append transaction.
@@ -37,7 +35,7 @@ pub struct RecordInput {
     pub content: Vec<u8>,
 }
 
-/// Fast acknowledgements expose neither transaction identifiers nor LSNs.
+/// Acknowledgements follow sync and publication.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Committed {
     /// A synced transaction and its inclusive record range.
@@ -51,8 +49,6 @@ pub enum Committed {
         /// Application receipt staged during prepare and returned after publication.
         reply: Vec<u8>,
     },
-    /// An accepted Cache batch whose persistence remains uncertain.
-    Fast,
 }
 
 /// What an append error proves about the transaction's persistence.
@@ -99,12 +95,6 @@ pub struct TapeOptions {
     pub server_address: Option<String>,
     /// Replay records strictly above this checkpoint watermark. Zero replays the entire tape.
     pub replay_from_lsn: u64,
-    /// Encoded-byte threshold for automatic sync at step boundaries, including Fast-only traffic.
-    ///
-    /// `None` uses the segment size. Zero syncs whenever records await publication.
-    /// Accounting includes headers and footers. A group can exceed this threshold before its step ends.
-    /// Segment rolls also force sync, regardless of this threshold.
-    pub max_unpublished_bytes: Option<u64>,
     /// Maximum group-formation wait. Zero disables waiting. Cannot exceed 200 microseconds.
     pub coalescing_window: Duration,
     /// Maximum active-write interval between superblock requests. Must be nonzero.
@@ -122,7 +112,6 @@ impl Default for TapeOptions {
             segment_size: DEFAULT_SEGMENT_SIZE,
             server_address: None,
             replay_from_lsn: 0,
-            max_unpublished_bytes: None,
             coalescing_window: Duration::from_micros(200),
             superblock_interval: Duration::from_secs(30),
             superblock_bytes: 256 * 1024 * 1024,
@@ -144,7 +133,6 @@ struct PreparedRecord {
 pub struct PreparedBatch {
     records: Vec<PreparedRecord>,
     digest: Digest,
-    mode: Durability,
     size: usize,
     changed: bool,
     reply: Vec<u8>,
@@ -176,7 +164,7 @@ impl PreparedBatch {
 
     fn validate<'a>(
         records: impl ExactSizeIterator<Item = &'a RecordInput>,
-        mode: Durability,
+        _mode: Durability,
     ) -> std::result::Result<usize, WriteError> {
         if records.len() > 1024 {
             return Err(rejected(Error::BatchTooLarge));
@@ -186,9 +174,7 @@ impl PreparedBatch {
         }
         let mut size = HEADER_LEN + 44;
         for record in records {
-            if record.kind == Kind::Footer
-                || (mode == Durability::Fast && record.kind != Kind::Cache)
-            {
+            if record.kind == Kind::Footer {
                 return Err(rejected(Error::InvalidFrame("disallowed record kind".into())));
             }
             size = size
@@ -202,7 +188,8 @@ impl PreparedBatch {
 
     fn refresh(&mut self) -> Result<()> {
         if self.changed {
-            self.size = Self::validate(self.records(), self.mode).map_err(|error| error.kind)?;
+            self.size =
+                Self::validate(self.records(), Durability::Durable).map_err(|error| error.kind)?;
             let mut digests = Vec::with_capacity(self.records.len());
             for record in &mut self.records {
                 record.digest = frame::content_digest(&record.salt, &record.input.content);
@@ -249,7 +236,6 @@ impl PreparedBatch {
         Ok(Self {
             records,
             digest: frame::batch_digest(&digests),
-            mode,
             size,
             changed: false,
             reply: Vec::new(),
@@ -288,7 +274,7 @@ impl ReadState {
     fn scan(&self, from_lsn: u64) -> impl Iterator<Item = Result<CommittedRecord>> + '_ {
         let end = self.durable_lsn.load(Ordering::Acquire);
         let mut next = Some(from_lsn);
-        std::iter::from_fn(move || loop {
+        std::iter::from_fn(move || {
             let start = next.filter(|&start| start <= end)?;
             let lsn = match lock(&self.index) {
                 Ok(index) => index.range(start..=end).next().map(|(&lsn, _)| lsn),
@@ -299,22 +285,21 @@ impl ReadState {
             }?;
             next = lsn.checked_add(1);
             match self.read(lsn) {
-                Ok(Some(frame)) if frame.header.flags & FLAG_HUSK == 0 => {
+                Ok(Some(frame)) => {
                     let h = frame.header;
-                    return Some(Ok(CommittedRecord {
+                    Some(Ok(CommittedRecord {
                         lsn: h.lsn,
                         txn: h.txn,
                         kind: h.kind,
                         tenant_id: h.tenant_id,
                         commit_time_ns: h.commit_time_ns,
                         payload: Arc::from(&frame.payload[16..]),
-                    }));
+                    }))
                 }
-                Ok(Some(_)) => continue,
-                Ok(None) => return None,
+                Ok(None) => None,
                 Err(error) => {
                     next = None;
-                    return Some(Err(error));
+                    Some(Err(error))
                 }
             }
         })
@@ -359,7 +344,6 @@ pub struct WriterCore<S: StateMachine = NoopStateMachine> {
     pending: BTreeMap<u64, (u64, u64)>,
     unpublished: Vec<CommittedRecord>,
     unpublished_bytes: u64,
-    max_unpublished_bytes: u64,
     state_machine: S,
     lsn: u64,
     txn: u64,
@@ -449,7 +433,6 @@ impl<S: StateMachine> WriterCore<S> {
             pending: BTreeMap::new(),
             unpublished: Vec::new(),
             unpublished_bytes: 0,
-            max_unpublished_bytes: opts.max_unpublished_bytes.unwrap_or(opts.segment_size),
             state_machine,
             lsn: recovered.report.durable_lsn,
             txn: recovered.txn,
@@ -573,8 +556,6 @@ impl<S: StateMachine> WriterCore<S> {
     }
 
     /// Writes queued transactions and syncs before durable replies.
-    ///
-    /// Fast-only groups also sync after a roll or when unpublished bytes exceed their configured threshold.
     pub fn step(&mut self) {
         if !self.queue.is_empty() {
             self.reads.groups.fetch_add(1, Ordering::Relaxed);
@@ -590,7 +571,6 @@ impl<S: StateMachine> WriterCore<S> {
                 let _ = request.reply.send(Err(rejected(Error::BatchTooLarge)));
                 continue;
             }
-            let mode = request.batch.mode;
             match self.state_machine.prepare(&mut request.batch) {
                 Prepare::Write => {}
                 Prepare::Reject(error) => {
@@ -598,21 +578,12 @@ impl<S: StateMachine> WriterCore<S> {
                     continue;
                 }
                 Prepare::Reply(committed) => {
-                    if mode == Durability::Fast || committed == Committed::Fast {
-                        let _ = request.reply.send(Ok(Committed::Fast));
-                    } else {
-                        replies.push((request.reply, committed));
-                    }
+                    replies.push((request.reply, committed));
                     continue;
                 }
             }
             match self.write(request.batch) {
-                Ok(committed) if mode == Durability::Durable => {
-                    replies.push((request.reply, committed))
-                }
-                Ok(_) => {
-                    let _ = request.reply.send(Ok(Committed::Fast));
-                }
+                Ok(committed) => replies.push((request.reply, committed)),
                 Err(error) => {
                     let error = match error {
                         Error::Io(std::io::ErrorKind::StorageFull, _) => Error::DiskFull,
@@ -647,10 +618,7 @@ impl<S: StateMachine> WriterCore<S> {
             }
             return;
         }
-        if replies.is_empty()
-            && self.unpublished_bytes <= self.max_unpublished_bytes
-            && !self.segments.has_rolled()
-        {
+        if replies.is_empty() {
             return;
         }
         let result = self.segments.sync().and_then(|()| self.publish());
@@ -700,7 +668,7 @@ impl<S: StateMachine> WriterCore<S> {
         result
     }
 
-    /// Drains requests, syncs pending Fast writes, and checkpoints without the periodic time limit.
+    /// Drains requests and checkpoints without the periodic time limit.
     pub fn shutdown(&mut self) -> Result<()> {
         self.step();
         if self.is_poisoned() {

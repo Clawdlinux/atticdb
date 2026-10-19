@@ -4,7 +4,7 @@ use proptest::prelude::*;
 use zerodb_tape::sim::crc32c;
 use zerodb_tape::sim::frame::{
     batch_digest, canon, chain_next, content_digest, decode, encode, DecodeError, Footer, Frame,
-    Header, Kind, FLAG_HUSK, HEADER_LEN, MAX_FRAME_SIZE, VERSION,
+    Header, Kind, HEADER_LEN, MAX_FRAME_SIZE, VERSION,
 };
 use zerodb_tape::Error;
 
@@ -21,7 +21,7 @@ fn frame(kind: Kind, content: &[u8]) -> Frame {
             lsn: 22,
             commit_time_ns: 33,
             tenant_id: 44,
-            tenant_prev_chain: if kind == Kind::Cache || kind == Kind::Footer {
+            tenant_prev_chain: if kind == Kind::TenantCreate || kind == Kind::Footer {
                 [0; 32]
             } else {
                 [5; 32]
@@ -40,7 +40,7 @@ fn refresh_crc(bytes: &mut [u8]) {
 proptest! {
     #[test]
     fn round_trip(
-        kind in 1u8..=5,
+        kind in prop::sample::select(vec![1u8, 2, 3, 5, 6]),
         txn in any::<u64>(),
         lsn in any::<u64>(),
         time in any::<u64>(),
@@ -48,7 +48,6 @@ proptest! {
         salt in any::<[u8; 16]>(),
         prev in any::<[u8; 32]>(),
         content in prop::collection::vec(any::<u8>(), 0..8192),
-        husk in any::<bool>(),
     ) {
         let kind = Kind::try_from(kind).unwrap();
         let mut original = frame(kind, &content);
@@ -56,7 +55,7 @@ proptest! {
         original.header.lsn = lsn;
         original.header.commit_time_ns = time;
         original.header.tenant_id = tenant;
-        if !matches!(kind, Kind::Cache | Kind::Footer) {
+        if !matches!(kind, Kind::TenantCreate | Kind::Footer) {
             original.header.tenant_prev_chain = prev;
         }
         original.header.content_digest = content_digest(&salt, &content);
@@ -67,10 +66,6 @@ proptest! {
                 record_count: tenant,
                 batch_digest: prev,
             }.encode().to_vec();
-        }
-        if husk {
-            original.header.flags = FLAG_HUSK;
-            original.payload.clear();
         }
         let encoded = encode(&original).unwrap();
         let (decoded, consumed) = decode(&encoded).unwrap();
@@ -124,23 +119,8 @@ fn every_single_bit_flip_is_detected() {
 }
 
 #[test]
-fn husks_preserve_chain_and_storage_fields_do_not_enter_canon() {
-    let original = frame(Kind::Fact, b"forgotten");
-    let mut husk = original.clone();
-    husk.header.flags = FLAG_HUSK;
-    husk.payload.clear();
-    let prev = original.header.tenant_prev_chain;
-    let digest = original.header.content_digest;
-    assert_eq!(
-        chain_next(&prev, &original.header, &digest),
-        chain_next(&prev, &husk.header, &digest)
-    );
-    assert_eq!(decode(&encode(&husk).unwrap()).unwrap().0, husk);
-}
-
-#[test]
 fn hashes_use_salt_canonical_headers_and_ordered_content_digests() {
-    let original = frame(Kind::Redaction, b"content");
+    let original = frame(Kind::Forget, b"content");
     let digest = original.header.content_digest;
     assert_eq!(digest, *blake3::hash(&original.payload).as_bytes());
     assert_ne!(digest, content_digest(&[8; 16], b"content"));
@@ -172,7 +152,7 @@ fn footer_layout_and_zero_chain_kinds() {
     let mut full = frame(Kind::Footer, b"");
     full.payload = payload.to_vec();
     assert_eq!(decode(&encode(&full).unwrap()).unwrap().0, full);
-    for kind in [Kind::Cache, Kind::Footer] {
+    for kind in [Kind::TenantCreate, Kind::Footer] {
         let mut full = frame(kind, b"content");
         if kind == Kind::Footer {
             full.payload = payload.to_vec();
@@ -236,7 +216,7 @@ fn encoding_invalid_caller_input_returns_errors() {
     oversized.payload.resize(MAX_FRAME_SIZE, 0);
     assert!(matches!(encode(&oversized), Err(Error::BatchTooLarge)));
     let mut invalid = frame(Kind::Turn, b"content");
-    invalid.header.flags = FLAG_HUSK;
+    invalid.header.flags = 1;
     assert!(matches!(encode(&invalid), Err(Error::InvalidFrame(_))));
     invalid.header.flags = 0;
     invalid.header.version = VERSION + 1;

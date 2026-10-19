@@ -16,12 +16,7 @@ fn record(kind: Kind) -> RecordInput {
 }
 
 fn prepared(mode: Durability) -> PreparedBatch {
-    PreparedBatch::with_salts(
-        vec![record(if mode == Durability::Fast { Kind::Cache } else { Kind::Turn })],
-        mode,
-        || Ok([7; 16]),
-    )
-    .unwrap()
+    PreparedBatch::with_salts(vec![record(Kind::Turn)], mode, || Ok([7; 16])).unwrap()
 }
 
 #[test]
@@ -107,20 +102,19 @@ fn recovered_survivors_install_superblock_before_open_returns() {
 }
 
 #[test]
-fn clean_shutdown_syncs_fast_records_before_forcing_superblock() {
+fn clean_shutdown_forces_superblock_after_durable_records() {
     let io = Arc::new(ObservedIo::new(0));
     let clock = Arc::new(SimClock::default());
     let opts = Options { segment_size: 1024, ..Options::default() };
     let (tape, _) = Tape::open(io.clone(), clock.clone(), "db", opts.clone()).unwrap();
-    assert_eq!(tape.append(vec![record(Kind::Cache)], Durability::Fast).unwrap(), Committed::Fast);
-    assert_eq!(tape.durable_lsn(), 0);
+    tape.append(vec![record(Kind::Turn)], Durability::Durable).unwrap();
+    assert_eq!(tape.durable_lsn(), 1);
     io.events.lock().unwrap().clear();
     drop(tape);
     let events = io.events.lock().unwrap().clone();
-    let synced = events.iter().position(|e| e == "sync db/seg-0000000000000001.zdb").unwrap();
     let installed =
         events.iter().position(|e| e == "rename db/SUPERBLOCK.tmp db/SUPERBLOCK").unwrap();
-    assert!(synced < installed);
+    assert!(installed > 0);
     let image = Arc::new(io.disk.crash().unwrap());
     let dir = zerodb_tape::sim::DataDir::open(image.clone(), "db", None, 1024).unwrap();
     assert_eq!(dir.superblock(), 1);
@@ -139,12 +133,11 @@ fn failed_final_sync_does_not_advance_the_shutdown_superblock() {
         Options { segment_size: 1024, ..Options::default() },
     )
     .unwrap();
-    let (request, reply) = WriteRequest::new(prepared(Durability::Fast));
+    let (request, reply) = WriteRequest::new(prepared(Durability::Durable));
     core.enqueue(request);
-    core.step();
-    assert_eq!(reply.recv().unwrap().unwrap(), Committed::Fast);
     io.disk.fail_next_sync().unwrap();
-    assert!(matches!(core.shutdown(), Err(Error::SyncFailed(_))));
+    assert!(matches!(core.shutdown(), Err(Error::Poisoned)));
+    assert_eq!(reply.recv().unwrap().unwrap_err().outcome, Outcome::Unknown);
     assert_eq!(core.durable_lsn(), 0);
     let syncs = io.syncs.load(Ordering::SeqCst);
     assert!(matches!(core.shutdown(), Err(Error::Poisoned)));
@@ -326,10 +319,7 @@ fn concurrent_callers_get_dense_lsn_and_immediate_visibility() {
             let mut lsns = Vec::new();
             for _ in 0..20 {
                 let Committed::Durable { txn, first_lsn, last_lsn, .. } =
-                    tape.append(vec![record(Kind::Turn)], Durability::Durable).unwrap()
-                else {
-                    panic!()
-                };
+                    tape.append(vec![record(Kind::Turn)], Durability::Durable).unwrap();
                 assert_eq!(first_lsn, last_lsn);
                 assert_eq!(txn, first_lsn);
                 assert_eq!(tape.read(last_lsn).unwrap().unwrap().payload[16..], *b"hello");
@@ -369,15 +359,15 @@ fn sync_failure_is_unknown_then_poisoned_reads_keep_working() {
 }
 
 #[test]
-fn fast_has_no_identifier_and_is_invisible_until_next_sync() {
+fn durable_records_publish_before_acknowledgement() {
     let disk = Arc::new(SimDisk::new(0));
     let (mut core, _) =
         WriterCore::open(disk, Arc::new(SimClock::new(0)), "db", Options::default()).unwrap();
-    let (request, reply) = WriteRequest::new(prepared(Durability::Fast));
+    let (request, reply) = WriteRequest::new(prepared(Durability::Durable));
     core.enqueue(request);
     core.step();
-    assert_eq!(reply.recv().unwrap().unwrap(), Committed::Fast);
-    assert!(core.read(1).unwrap().is_none());
+    reply.recv().unwrap().unwrap();
+    assert!(core.read(1).unwrap().is_some());
     let (request, reply) = WriteRequest::new(prepared(Durability::Durable));
     core.enqueue(request);
     core.step();
@@ -393,7 +383,6 @@ fn invalid_batches_never_enter_the_writer() {
             vec![RecordInput { content: vec![0; 4 * 1024 * 1024], ..record(Kind::Turn) }],
             Durability::Durable,
         ),
-        (vec![record(Kind::Turn)], Durability::Fast),
         (vec![record(Kind::Footer)], Durability::Durable),
         (vec![], Durability::Durable),
     ] {
@@ -677,16 +666,13 @@ fn real_files_reopen_with_multiple_tenants_and_rebuilt_chain_heads() {
     let opts = Options { segment_size: 65536, ..Options::default() };
     {
         let (tape, _) = Tape::open(io.clone(), clock.clone(), &path, opts.clone()).unwrap();
-        assert_eq!(
-            tape.append(vec![record(Kind::Cache)], Durability::Fast).unwrap(),
-            Committed::Fast
-        );
+        tape.append(vec![record(Kind::Turn)], Durability::Durable).unwrap();
         let committed = tape
             .append(
                 vec![
                     record(Kind::Turn),
                     RecordInput { tenant_id: 2, ..record(Kind::Fact) },
-                    record(Kind::Redaction),
+                    record(Kind::Forget),
                 ],
                 Durability::Durable,
             )

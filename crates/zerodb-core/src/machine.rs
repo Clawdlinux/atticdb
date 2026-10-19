@@ -339,9 +339,41 @@ fn recovery_checkpoint(
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
-    use crate::{NewTurn, Role, Trust};
+    use crate::{NewTurn, Role};
     use zerodb_tape::sim::{SimClock, WriteRequest, WriterCore};
     use zerodb_tape::{Durability, Kind, RecordInput, SimDisk};
+
+    #[test]
+    fn fact_and_forget_are_not_applied_as_turns() {
+        for kind in [Kind::Fact, Kind::Forget] {
+            let opts = EngineOptions::default();
+            let mut initial = State::new(&opts);
+            initial.tenants.insert("t", 1, 1, 10_000).unwrap();
+            let mut machine = Machine::new(
+                Arc::new(Mutex::new(initial)),
+                Arc::new(SimDisk::new(0)),
+                "db".into(),
+                opts,
+            )
+            .unwrap();
+            let content = crate::turn::encode(
+                "a",
+                "s",
+                0,
+                &NewTurn { role: Role::User, content: vec![], meta: vec![] },
+                None,
+            )
+            .unwrap();
+            let mut batch = PreparedBatch::with_salts(
+                vec![RecordInput { kind, tenant_id: 1, content }],
+                Durability::Durable,
+                || Ok([0; 16]),
+            )
+            .unwrap();
+            assert!(matches!(machine.prepare(&mut batch), Prepare::Reject(_)));
+            assert_eq!(machine.lsn, 0);
+        }
+    }
 
     #[test]
     fn over_threshold_publications_queue_only_one_wake() {
@@ -379,12 +411,7 @@ mod tests {
                 "a",
                 "s",
                 0,
-                &NewTurn {
-                    role: Role::User,
-                    content: vec![1; 8192],
-                    meta: vec![],
-                    trust: Trust::Untrusted,
-                },
+                &NewTurn { role: Role::User, content: vec![1; 8192], meta: vec![] },
                 idem,
             )
             .unwrap();
@@ -412,12 +439,7 @@ mod tests {
                     "a",
                     "s",
                     0,
-                    &NewTurn {
-                        role: Role::User,
-                        content: vec![1],
-                        meta: vec![],
-                        trust: Trust::Untrusted,
-                    },
+                    &NewTurn { role: Role::User, content: vec![1], meta: vec![] },
                     None,
                 )
                 .unwrap()
@@ -481,12 +503,7 @@ mod tests {
                 "a",
                 session,
                 0,
-                &NewTurn {
-                    role: Role::User,
-                    content: vec![1],
-                    meta: vec![],
-                    trust: Trust::Untrusted,
-                },
+                &NewTurn { role: Role::User, content: vec![1], meta: vec![] },
                 Some("key"),
             )
             .unwrap();
@@ -541,7 +558,7 @@ mod tests {
             "a",
             "pending",
             0,
-            &NewTurn { role: Role::User, content: vec![1], meta: vec![], trust: Trust::Untrusted },
+            &NewTurn { role: Role::User, content: vec![1], meta: vec![] },
             None,
         )
         .unwrap();
@@ -586,12 +603,7 @@ mod tests {
                 "a",
                 "s",
                 0,
-                &NewTurn {
-                    role: Role::User,
-                    content: b"hello".to_vec(),
-                    meta: vec![],
-                    trust: Trust::Untrusted,
-                },
+                &NewTurn { role: Role::User, content: b"hello".to_vec(), meta: vec![] },
                 Some("key"),
             )
             .unwrap();

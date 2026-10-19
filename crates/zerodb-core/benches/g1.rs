@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Barrier};
 use std::time::{Duration, Instant};
 use support::{encoded_batch, Bare, BenchDir};
-use zerodb_core::{turn::encode, Engine, EngineOptions, NewTurn, Role, Scope, Trust, WindowQuery};
+use zerodb_core::{turn::encode, Engine, EngineOptions, NewTurn, Role, Scope, WindowQuery};
 use zerodb_tape::{Durability, Kind, RecordInput, StdIo, SystemClock, Tape, TapeOptions};
 
 const WRITERS: usize = 16;
@@ -27,7 +27,6 @@ fn turns(iteration: usize, batch: usize) -> Vec<NewTurn> {
     (0..batch)
         .map(|i| NewTurn {
             role: Role::User,
-            trust: Trust::Untrusted,
             meta: vec![0x42; 16],
             content: vec![0x5a; SIZES[(iteration * batch + i) % SIZES.len()]],
         })
@@ -310,12 +309,7 @@ fn history_windows() {
     for target in [16, 1024, 65536] {
         while length < target {
             let count = (target - length).min(256);
-            let turn = NewTurn {
-                role: Role::User,
-                trust: Trust::Untrusted,
-                meta: vec![],
-                content: vec![0x5a; 256],
-            };
+            let turn = NewTurn { role: Role::User, meta: vec![], content: vec![0x5a; 256] };
             engine.append(&scope, vec![turn; count], None).unwrap();
             length += count;
         }

@@ -33,9 +33,6 @@ impl SegmentWriter {
         self.size
     }
 
-    pub(crate) fn has_rolled(&self) -> bool {
-        self.files.len() > 1
-    }
     pub(crate) fn position(&self) -> (u64, u64) {
         (self.active, self.written_bytes)
     }
