@@ -59,11 +59,34 @@ pub fn frame_v2_faults(seed: u64) {
         }
         drop(core);
         let file = disk.open(Path::new("db/seg-0000000000000001.zdb")).unwrap();
-        if seed % 7 == 5 {
+        if seed % 9 == 7 {
+            disk.write_at(file, 48, &[0xff; 72]).unwrap();
+            disk.sync_data(file).unwrap();
+        } else if seed % 9 == 8 {
+            let misplaced = frame::encode(
+                &frame::Frame {
+                    header: frame::Header {
+                        kind: Kind::Turn,
+                        version: 2,
+                        flags: 0,
+                        txn: 2,
+                        lsn: 2,
+                        commit_time_ns: 1001,
+                        tenant_id: 1,
+                    },
+                    payload: vec![7; 8],
+                },
+                99,
+                0,
+            )
+            .unwrap();
+            disk.write_at(file, 48, &misplaced).unwrap();
+            disk.sync_data(file).unwrap();
+        } else if seed % 9 == 5 {
             disk.write_at(file, 48, &[0; 72]).unwrap();
             disk.sync_data(file).unwrap();
         } else {
-            let offset = match seed % 7 {
+            let offset = match seed % 9 {
                 0 => 4,
                 2 => 48 + 8,
                 3 => 48 + 20,
@@ -75,7 +98,11 @@ pub fn frame_v2_faults(seed: u64) {
         disk.close(file).unwrap();
         let result = Tape::open(disk, Arc::new(SimClock::new(0)), "db", opts);
         if proof {
-            assert!(matches!(result, Err(Error::CorruptionDetected { lsn: 1, .. })), "seed={seed}");
+            let reported = if seed % 9 >= 7 { 2 } else { 1 };
+            assert!(
+                matches!(result, Err(Error::CorruptionDetected { lsn, .. }) if lsn == reported),
+                "seed={seed}"
+            );
         } else {
             let (_, report) = result.unwrap();
             assert_eq!(report.durable_lsn, 0);

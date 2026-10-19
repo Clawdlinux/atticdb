@@ -4,7 +4,11 @@ use crate::dir::{corruption, read_exact, DataDir, Handle};
 use crate::frame::{self, Footer, Frame, Kind};
 use crate::lsn_index::LsnIndex;
 use crate::{Error, Result};
+use std::collections::VecDeque;
 use std::ops::RangeInclusive;
+#[cfg(test)]
+#[path = "recovery/proof_tests.rs"]
+mod proof_tests;
 
 /// Results of opening and repairing an unsynced tail.
 #[derive(Clone, Debug, Default)]
@@ -37,7 +41,7 @@ pub struct Recovered {
     pub(crate) offset: u64,
 }
 
-fn verify(records: &[(Frame, u64)], footer: &Frame, state: &Recovered, segment: u64) -> Result<()> {
+fn verify(records: &[(Frame, u64)], footer: &Frame, state: &Recovered, bytes: &[u8]) -> Result<()> {
     let end = Footer::decode(&footer.payload).map_err(|e| Error::InvalidFrame(e.to_string()))?;
     if records.is_empty()
         || end.txn != footer.header.txn
@@ -63,7 +67,12 @@ fn verify(records: &[(Frame, u64)], footer: &Frame, state: &Recovered, segment: 
             return Err(Error::InvalidFrame("transaction or LSN order".into()));
         }
         lsn = h.lsn;
-        crc.update(&frame::encode(record, segment, *offset)?[..4]);
+        let offset = *offset as usize;
+        crc.update(
+            bytes
+                .get(offset..offset + 4)
+                .ok_or_else(|| Error::InvalidFrame("missing record CRC".into()))?,
+        );
     }
     if footer.header.lsn != lsn || crc.finish() != end.records_crc {
         return Err(Error::InvalidFrame("footer CRC or LSN mismatch".into()));
@@ -86,53 +95,73 @@ fn next_candidate(bytes: &[u8], mut offset: usize) -> Option<usize> {
     None
 }
 
-fn proving_footer(bytes: &[u8], segment: u64, from: usize, e: u64, known: &Recovered) -> bool {
+fn proving_footer(bytes: &[u8], segment: u64, from: usize, known: &Recovered) -> bool {
+    scan_proof(bytes, segment, from, known, || {})
+}
+
+fn scan_proof(
+    bytes: &[u8],
+    segment: u64,
+    from: usize,
+    known: &Recovered,
+    mut decoded: impl FnMut(),
+) -> bool {
     let mut offset = from;
     let mut previous_synced = known.synced_lsn;
     while let Some(start) = next_candidate(bytes, offset) {
-        offset = start + 1;
-        let Ok((first, used)) = frame::decode(&bytes[start..], segment, start as u64) else {
-            continue;
-        };
-        if first.header.kind == Kind::Footer
-            || first.header.lsn <= e
-            || first.header.txn <= known.txn
-        {
-            continue;
-        }
-        let state = Recovered {
-            txn: first.header.txn - 1,
-            report: RecoveryReport {
-                durable_lsn: first.header.lsn - 1,
-                ..RecoveryReport::default()
-            },
-            commit_time_ns: known.commit_time_ns,
-            synced_lsn: previous_synced,
-            ..Recovered::default()
-        };
-        let mut records = vec![(first, start as u64)];
-        let mut end = start + used;
-        while end - start <= frame::MAX_FRAME_SIZE && records.len() <= 1024 {
+        let mut records = VecDeque::<(Frame, u64)>::new();
+        let mut end = start;
+        loop {
+            decoded();
             let Ok((record, used)) = frame::decode(&bytes[end..], segment, end as u64) else {
+                // Every decoded prefix encounters this same gap. Resume byte-by-byte at the gap.
+                offset = end + 1;
                 break;
             };
-            if end + used - start > frame::MAX_FRAME_SIZE {
-                break;
-            }
             if record.header.kind == Kind::Footer {
-                if verify(&records, &record, &state, segment).is_ok() {
-                    let footer = Footer::decode(&record.payload).ok();
-                    if let Some(footer) = footer {
-                        previous_synced = footer.synced_lsn;
-                        if footer.synced_lsn >= e {
-                            return true;
+                let footer = Footer::decode(&record.payload);
+                if let Ok(footer) = footer {
+                    let count = footer.record_count as usize;
+                    if count > 0 && count <= records.len() {
+                        // A false start may precede the real transaction. Its footer selects the overlapping suffix.
+                        let records = records.make_contiguous();
+                        let records = &records[records.len() - count..];
+                        let first = &records[0].0.header;
+                        let state = Recovered {
+                            txn: first.txn.saturating_sub(1),
+                            report: RecoveryReport {
+                                durable_lsn: first.lsn.saturating_sub(1),
+                                ..RecoveryReport::default()
+                            },
+                            commit_time_ns: known.commit_time_ns,
+                            synced_lsn: previous_synced,
+                            ..Recovered::default()
+                        };
+                        if first.lsn > known.report.durable_lsn
+                            && first.txn > known.txn
+                            && verify(records, &record, &state, bytes).is_ok()
+                        {
+                            previous_synced = footer.synced_lsn;
+                            // Every footer in a torn group carries the previous group's durable LSN.
+                            if footer.synced_lsn > known.report.durable_lsn {
+                                return true;
+                            }
                         }
                     }
                 }
+                // Skip the decoded records. Keep scanning inside the fixed-size footer for overlapping starts.
+                offset = end + 1;
                 break;
             }
-            records.push((record, end as u64));
+            records.push_back((record, end as u64));
             end += used;
+            while records.len() > 1024
+                || records.front().is_some_and(|(_, first)| {
+                    end - *first as usize + frame::HEADER_LEN + 32 > frame::MAX_FRAME_SIZE
+                })
+            {
+                records.pop_front();
+            }
         }
     }
     false
@@ -143,7 +172,6 @@ fn lookahead(
     size: u64,
     position: usize,
     offset: u64,
-    e: u64,
     known: &Recovered,
 ) -> Result<bool> {
     for (index, &segment) in dir.segments().iter().enumerate().skip(position) {
@@ -156,13 +184,13 @@ fn lookahead(
         let mut bytes = vec![0; len as usize];
         read_exact(dir.io.as_ref(), file.id, 0, &mut bytes)?;
         let from = if index == position { offset as usize } else { 0 };
-        if proving_footer(&bytes, segment, from, e, known) {
+        if proving_footer(&bytes, segment, from, known) {
             return Ok(true);
         }
     }
     Ok(false)
 }
-fn expected_bad_lsn(state: &Recovered, pending: &[(Frame, u64)], tail: &[u8]) -> u64 {
+fn reported_bad_lsn(state: &Recovered, pending: &[(Frame, u64)], tail: &[u8]) -> u64 {
     let next = state.report.durable_lsn.saturating_add(pending.len() as u64).saturating_add(1);
     if let Some((last, _)) = pending.last() {
         // A damaged kind or zeroed footer cannot advance its expected LSN past the pending records.
@@ -243,11 +271,11 @@ fn cut_prefix(dir: &DataDir, size: u64, cut: u64) -> Result<Cut> {
             }
             let expected =
                 state.report.durable_lsn.saturating_add(pending.len() as u64).saturating_add(1);
-            let bad_lsn = expected_bad_lsn(&state, &pending, &bytes[offset..]);
+            let bad_lsn = reported_bad_lsn(&state, &pending, &bytes[offset..]);
             let (record, used) = frame::decode(&bytes[offset..], segment, offset as u64)
                 .map_err(|error| corruption(bad_lsn, segment, offset as u64, error))?;
             if record.header.kind == Kind::Footer {
-                verify(&pending, &record, &state, segment)
+                verify(&pending, &record, &state, &bytes)
                     .map_err(|error| corruption(bad_lsn, segment, offset as u64, error))?;
                 let last = record.header.lsn;
                 if last >= cut {
@@ -433,9 +461,8 @@ pub(crate) fn recover_with_budget(
         let file = match Handle::open(dir.io.clone(), &dir.segment_path(segment)) {
             Ok(file) => file,
             Err(Error::Io(std::io::ErrorKind::NotFound, _)) => {
-                let e = state.report.durable_lsn.saturating_add(1);
                 if state.report.durable_lsn < dir.superblock()
-                    || lookahead(dir, size, position + 1, 0, e, &state)?
+                    || lookahead(dir, size, position + 1, 0, &state)?
                 {
                     return Err(corruption(
                         state.report.durable_lsn.saturating_add(1),
@@ -518,11 +545,11 @@ pub(crate) fn recover_with_budget(
                     result => result.map_err(|e| e.to_string()),
                 }
             };
-            let bad_lsn = expected_bad_lsn(&state, &pending, tail);
+            let bad_lsn = reported_bad_lsn(&state, &pending, tail);
             let mut index_error = None;
             let result = decoded.and_then(|(record, used)| {
                 if record.header.kind == Kind::Footer {
-                    verify(&pending, &record, &state, segment).map_err(|e| e.to_string())?;
+                    verify(&pending, &record, &state, &bytes).map_err(|e| e.to_string())?;
                     if rewrite_from.is_none() && record.header.lsn >= dir.superblock() {
                         rewrite_from = Some(if record.header.lsn == dir.superblock() {
                             offset + used
@@ -581,7 +608,7 @@ pub(crate) fn recover_with_budget(
                 let start = pending.first().map_or(offset as u64, |(_, off)| *off);
                 let next = state.report.durable_lsn.saturating_add(1);
                 if state.report.durable_lsn < dir.superblock()
-                    || lookahead(dir, size, position, offset as u64, bad_lsn, &state)?
+                    || lookahead(dir, size, position, offset as u64, &state)?
                 {
                     return Err(corruption(bad_lsn, segment, offset as u64, reason));
                 }
