@@ -109,6 +109,7 @@ D73 recovery details:
 - Validate every retained transaction. Report the first bad LSN as `CorruptionDetected`.
 - Persist a CRC-protected truncation intent before changing data.
 - Truncate, zero and sync data before lowering and syncing the superblock.
+- The superblock is lowered, never raised. Normal recovery rewrites and syncs retained data above that floor.
 - Replay an unfinished intent at open. A crash between those steps must recover.
 - Report and log the cut LSN, dropped LSN range and dropped byte count.
 - Dropped LSNs may be reused, even when acknowledged. This operator escape is the documented exception to I3.

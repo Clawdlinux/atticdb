@@ -256,7 +256,12 @@ fn cut_prefix(dir: &DataDir, size: u64, cut: u64) -> Result<Cut> {
         let mut offset = 0;
         let mut pending = Vec::new();
         while offset < bytes.len() {
+            let expected =
+                state.report.durable_lsn.saturating_add(pending.len() as u64).saturating_add(1);
             if pending.is_empty() && bytes[offset..].iter().all(|&byte| byte == 0) {
+                if dir.segments().last() == Some(&segment) {
+                    break;
+                }
                 if offset == 0
                     || bytes.len() - offset > frame::MAX_FRAME_SIZE + frame::HEADER_LEN + 32
                 {
@@ -269,8 +274,6 @@ fn cut_prefix(dir: &DataDir, size: u64, cut: u64) -> Result<Cut> {
                 }
                 break;
             }
-            let expected =
-                state.report.durable_lsn.saturating_add(pending.len() as u64).saturating_add(1);
             let bad_lsn = reported_bad_lsn(&state, &pending, &bytes[offset..]);
             let (record, used) = frame::decode(&bytes[offset..], segment, offset as u64)
                 .map_err(|error| corruption(bad_lsn, segment, offset as u64, error))?;
@@ -367,8 +370,8 @@ fn finish_cut(dir: &mut DataDir, size: u64, values: &[u64]) -> Result<RecoveryRe
         zero_tail(dir, &file, from, size)?;
         dir.io.sync_data(file.id)?;
     }
-    // Persist the zeroed data first. Then lower the superblock. The durable intent bridges a crash between them.
-    dir.install_superblock(*lsn)?;
+    // Persist the zeroed data first. Then lower the superblock, never raise it. The durable intent bridges a crash.
+    dir.install_superblock((*lsn).min(dir.superblock()))?;
     dir.install_manifest(&prefix.retained)?;
     for &segment in &segments[prefix.retained.len()..] {
         let path = dir.segment_path(segment);
@@ -419,14 +422,14 @@ pub(crate) fn truncate_at(dir: &mut DataDir, size: u64, lsn: u64) -> Result<Reco
             Err(error) => return Err(error),
         };
         let len = dir.io.len(file.id)?;
-        if len > size {
-            return Err(corruption(lsn.saturating_add(1), segment, 0, "invalid segment length"));
-        }
         let from = if position < prefix.retained.len() { prefix.offset.min(len) } else { 0 };
-        let mut bytes = vec![0; (len - from) as usize];
-        read_exact(dir.io.as_ref(), file.id, from, &mut bytes)?;
-        last_lost = last_lost.max(last_decodable_lsn(&bytes, segment, from));
-        cleared = cleared.saturating_add(size - from);
+        if len <= size {
+            let mut bytes = vec![0; (len - from) as usize];
+            read_exact(dir.io.as_ref(), file.id, from, &mut bytes)?;
+            last_lost = last_lost.max(last_decodable_lsn(&bytes, segment, from));
+        }
+        let dropped = if position < prefix.retained.len() { size - from } else { len };
+        cleared = cleared.saturating_add(dropped);
     }
     let values = [lsn, last_lost, cleared];
     let intent = crate::dir::encode(b"ZDBCUT01", 1, &values);
