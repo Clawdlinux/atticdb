@@ -755,6 +755,24 @@ impl<S: StateMachine> std::fmt::Debug for Tape<S> {
 }
 
 impl Tape<NoopStateMachine> {
+    /// Explicitly drops complete transactions after `lsn`. Dropped LSNs may be reused.
+    ///
+    /// The directory must be closed. Mid-transaction cuts are rejected with both valid boundaries.
+    pub fn recover_truncate_at(path: impl AsRef<Path>, lsn: u64) -> Result<RecoveryReport> {
+        Self::recover_truncate_at_with(Arc::new(crate::StdIo::new()), path, lsn)
+    }
+
+    /// Runs operator truncation through a replaceable I/O backend.
+    pub fn recover_truncate_at_with(
+        io: Arc<dyn Io>,
+        path: impl AsRef<Path>,
+        lsn: u64,
+    ) -> Result<RecoveryReport> {
+        let mut dir = DataDir::open_existing(io, path.as_ref())?;
+        let size = dir.segment_size();
+        crate::recovery::truncate_at(&mut dir, size, lsn)
+    }
+
     /// Locks and recovers a directory, then starts its writer and metadata workers.
     pub fn open(
         io: Arc<dyn Io>,

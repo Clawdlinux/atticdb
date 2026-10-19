@@ -46,7 +46,7 @@ pub(crate) fn corruption(lsn: u64, segment: u64, offset: u64, reason: impl ToStr
     Error::CorruptionDetected { lsn, segment, offset, reason: reason.to_string() }
 }
 
-fn encode(magic: &[u8; 8], version: u32, values: &[u64]) -> Vec<u8> {
+pub(crate) fn encode(magic: &[u8; 8], version: u32, values: &[u64]) -> Vec<u8> {
     let mut bytes = magic.to_vec();
     bytes.extend_from_slice(&version.to_le_bytes());
     for value in values {
@@ -60,7 +60,12 @@ pub(crate) fn write_superblock(io: Arc<dyn Io>, path: &Path, durable_lsn: u64) -
     atomic_install(io, path, "SUPERBLOCK", &encode(b"ZDBSUPER", 1, &[durable_lsn]))
 }
 
-fn read(io: Arc<dyn Io>, path: &Path, magic: &[u8; 8], version: u32) -> Result<Vec<u64>> {
+pub(crate) fn read(
+    io: Arc<dyn Io>,
+    path: &Path,
+    magic: &[u8; 8],
+    version: u32,
+) -> Result<Vec<u64>> {
     let file = Handle::open(io.clone(), path)?;
     let len = io.len(file.id)?;
     if !(16..=16 * 1024 * 1024).contains(&len) || (len - 16) % 8 != 0 {
@@ -122,8 +127,22 @@ impl DataDir {
         address: Option<&str>,
         segment_size: u64,
     ) -> Result<Self> {
-        let path = path.as_ref().to_owned();
+        Self::open_inner(io, path.as_ref(), address, Some(segment_size))
+    }
+
+    pub(crate) fn open_existing(io: Arc<dyn Io>, path: &Path) -> Result<Self> {
+        Self::open_inner(io, path, None, None)
+    }
+
+    fn open_inner(
+        io: Arc<dyn Io>,
+        path: &Path,
+        address: Option<&str>,
+        configured: Option<u64>,
+    ) -> Result<Self> {
+        let path = path.to_owned();
         let guard = io.try_lock_exclusive(&path.join("LOCK"))?;
+        let segment_size = configured.unwrap_or(1);
         if segment_size == 0 || usize::try_from(segment_size).is_err() {
             return Err(Error::Configuration("invalid segment size".into()));
         }
@@ -137,7 +156,9 @@ impl DataDir {
                 return Err(corruption(0, 0, 0, "invalid stored segment size"));
             }
             dir.segment_size = *stored;
-            dir.check_segment_size(segment_size)?;
+            if let Some(size) = configured {
+                dir.check_segment_size(size)?;
+            }
             dir.segments = segments.to_vec();
             if dir.segments.windows(2).any(|ids| ids[0] >= ids[1]) {
                 return Err(corruption(0, 0, 0, "unordered manifest"));
@@ -165,6 +186,9 @@ impl DataDir {
             }
             dir.superblock = values[0];
         } else {
+            if configured.is_none() {
+                return Err(corruption(0, 0, 0, "missing manifest"));
+            }
             if dir.io.list(&dir.path)?.iter().any(|path| {
                 path.file_name()
                     .and_then(|name| name.to_str())
@@ -189,7 +213,6 @@ impl DataDir {
     }
 
     /// Returns the segment size stored in manifest version 2.
-    #[cfg(any(test, feature = "sim"))]
     pub fn segment_size(&self) -> u64 {
         self.segment_size
     }

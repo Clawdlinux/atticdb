@@ -102,3 +102,14 @@ Arbiter disposition: APPROVED once D58 to D61 landed, with carry items listed in
 | D70 | Markdown import deferred | Direct fixes cover the evidence |
 | D71 | `rustix` allowed for preallocation and free space | Replaces D34. Needed for disk-full safety |
 | D72 | Build in steps S1 to S6, each with two independent reviews and real use | Avoid designing ahead of evidence |
+| D73 | Operator truncation accepts 0 or a whole transaction boundary. Interior cuts name both nearest boundaries and fail. | I2 forbids partial transactions. Never round silently. |
+
+D73 recovery details:
+
+- Validate every retained transaction. Report the first bad LSN as `CorruptionDetected`.
+- Persist a CRC-protected truncation intent before changing data.
+- Truncate, zero and sync data before lowering and syncing the superblock.
+- Replay an unfinished intent at open. A crash between those steps must recover.
+- Report and log the cut LSN, dropped LSN range and dropped byte count.
+- Dropped LSNs may be reused, even when acknowledged. This operator escape is the documented exception to I3.
+- Recover `commit_time` from the retained tape. It stays monotonic from that point.

@@ -17,6 +17,10 @@ pub struct RecoveryReport {
     pub segments: usize,
     /// Number of replayed records, excluding footers.
     pub records: usize,
+    /// Explicit operator cut, including a resumed cut after a crash.
+    pub cut_lsn: Option<u64>,
+    /// An operator cut permits reuse of dropped LSNs, including acknowledged LSNs.
+    pub lsns_may_be_reused: bool,
 }
 
 /// Rebuilt writer state. Only complete transactions contribute records.
@@ -65,6 +69,97 @@ fn verify(records: &[(Frame, u64)], footer: &Frame, state: &Recovered, segment: 
     Ok(())
 }
 
+fn next_candidate(bytes: &[u8], mut offset: usize) -> Option<usize> {
+    while offset.checked_add(frame::HEADER_LEN)? <= bytes.len() {
+        if bytes[offset..offset + 8].iter().all(|&byte| byte == 0) {
+            let nonzero = bytes[offset + 8..].iter().position(|&byte| byte != 0)?;
+            offset += (nonzero + 1).max(1);
+            continue;
+        }
+        if bytes[offset + 9] == frame::VERSION && bytes[offset + 10..offset + 12] == [0, 0] {
+            return Some(offset);
+        }
+        offset += 1;
+    }
+    None
+}
+
+fn proving_footer(bytes: &[u8], segment: u64, from: usize, e: u64, known: &Recovered) -> bool {
+    let mut offset = from;
+    let mut previous_synced = known.synced_lsn;
+    while let Some(start) = next_candidate(bytes, offset) {
+        offset = start + 1;
+        let Ok((first, used)) = frame::decode(&bytes[start..], segment, start as u64) else {
+            continue;
+        };
+        if first.header.kind == Kind::Footer
+            || first.header.lsn <= e
+            || first.header.txn <= known.txn
+        {
+            continue;
+        }
+        let state = Recovered {
+            txn: first.header.txn - 1,
+            report: RecoveryReport {
+                durable_lsn: first.header.lsn - 1,
+                ..RecoveryReport::default()
+            },
+            commit_time_ns: known.commit_time_ns,
+            synced_lsn: previous_synced,
+            ..Recovered::default()
+        };
+        let mut records = vec![(first, start as u64)];
+        let mut end = start + used;
+        while end - start <= frame::MAX_FRAME_SIZE && records.len() <= 1024 {
+            let Ok((record, used)) = frame::decode(&bytes[end..], segment, end as u64) else {
+                break;
+            };
+            if end + used - start > frame::MAX_FRAME_SIZE {
+                break;
+            }
+            if record.header.kind == Kind::Footer {
+                if verify(&records, &record, &state, segment).is_ok() {
+                    let footer = Footer::decode(&record.payload).ok();
+                    if let Some(footer) = footer {
+                        previous_synced = footer.synced_lsn;
+                        if footer.synced_lsn >= e {
+                            return true;
+                        }
+                    }
+                }
+                break;
+            }
+            records.push((record, end as u64));
+            end += used;
+        }
+    }
+    false
+}
+
+fn lookahead(
+    dir: &DataDir,
+    size: u64,
+    position: usize,
+    offset: u64,
+    e: u64,
+    known: &Recovered,
+) -> Result<bool> {
+    for (index, &segment) in dir.segments().iter().enumerate().skip(position) {
+        let file = match Handle::open(dir.io.clone(), &dir.segment_path(segment)) {
+            Ok(file) => file,
+            Err(Error::Io(std::io::ErrorKind::NotFound, _)) => continue,
+            Err(error) => return Err(error),
+        };
+        let len = dir.io.len(file.id)?.min(size);
+        let mut bytes = vec![0; len as usize];
+        read_exact(dir.io.as_ref(), file.id, 0, &mut bytes)?;
+        let from = if index == position { offset as usize } else { 0 };
+        if proving_footer(&bytes, segment, from, e, known) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
 fn zero_tail(dir: &DataDir, file: &Handle, from: u64, size: u64) -> Result<()> {
     dir.io.set_len(file.id, size)?;
     let zeros = [0; 64 * 1024];
@@ -77,25 +172,234 @@ fn zero_tail(dir: &DataDir, file: &Handle, from: u64, size: u64) -> Result<()> {
     Ok(())
 }
 
-fn last_decodable_lsn(mut bytes: &[u8], segment: u64, mut offset: u64) -> u64 {
+fn last_decodable_lsn(bytes: &[u8], segment: u64, base: u64) -> u64 {
     let mut last = 0;
-    while bytes.len() >= 8 {
-        let len = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
-        if !(frame::HEADER_LEN..=frame::MAX_FRAME_SIZE).contains(&len) || len > bytes.len() {
-            break;
-        }
-        if let Ok((record, _)) = frame::decode(&bytes[..len], segment, offset) {
+    let mut offset = 0;
+    while let Some(start) = next_candidate(bytes, offset) {
+        offset = start + 1;
+        if let Ok((record, used)) = frame::decode(&bytes[start..], segment, base + start as u64) {
             last = last.max(record.header.lsn);
+            offset = start + used;
         }
-        bytes = &bytes[len..];
-        offset += len as u64;
     }
     last
+}
+
+struct Cut {
+    retained: Vec<u64>,
+    offset: u64,
+    records: usize,
+}
+
+fn cut_prefix(dir: &DataDir, size: u64, cut: u64) -> Result<Cut> {
+    if cut == 0 {
+        return Ok(Cut { retained: Vec::new(), offset: 0, records: 0 });
+    }
+    let mut state = Recovered::default();
+    let mut retained = Vec::new();
+    for &segment in dir.segments() {
+        let expected = state.report.durable_lsn.saturating_add(1);
+        let file = Handle::open(dir.io.clone(), &dir.segment_path(segment))
+            .map_err(|error| corruption(expected, segment, 0, error))?;
+        let len = dir.io.len(file.id)?;
+        if len > size {
+            return Err(corruption(expected, segment, 0, "invalid segment length"));
+        }
+        let mut bytes = vec![0; len as usize];
+        read_exact(dir.io.as_ref(), file.id, 0, &mut bytes)
+            .map_err(|error| corruption(expected, segment, 0, error))?;
+        retained.push(segment);
+        let mut offset = 0;
+        let mut pending = Vec::new();
+        while offset < bytes.len() {
+            if pending.is_empty() && bytes[offset..].iter().all(|&byte| byte == 0) {
+                if offset == 0
+                    || bytes.len() - offset > frame::MAX_FRAME_SIZE + frame::HEADER_LEN + 32
+                {
+                    return Err(corruption(
+                        expected,
+                        segment,
+                        offset as u64,
+                        "early end or oversized padding",
+                    ));
+                }
+                break;
+            }
+            let expected =
+                state.report.durable_lsn.saturating_add(pending.len() as u64).saturating_add(1);
+            let (record, used) =
+                frame::decode(&bytes[offset..], segment, offset as u64).map_err(|error| {
+                    corruption(
+                        if bytes.get(offset + 8) == Some(&(Kind::Footer as u8)) {
+                            expected.saturating_sub(1)
+                        } else {
+                            expected
+                        },
+                        segment,
+                        offset as u64,
+                        error,
+                    )
+                })?;
+            if record.header.kind == Kind::Footer {
+                verify(&pending, &record, &state, segment).map_err(|error| {
+                    corruption(expected.saturating_sub(1), segment, offset as u64, error)
+                })?;
+                let last = record.header.lsn;
+                if last >= cut {
+                    if last != cut {
+                        return Err(Error::InvalidFrame(format!(
+                            "cut LSN {cut} is inside a transaction; valid cut points: {} and {last}",
+                            state.report.durable_lsn,
+                        )));
+                    }
+                    return Ok(Cut {
+                        retained,
+                        offset: (offset + used) as u64,
+                        records: state.report.records + pending.len(),
+                    });
+                }
+                state.txn = record.header.txn;
+                state.commit_time_ns = record.header.commit_time_ns;
+                state.synced_lsn = Footer::decode(&record.payload)
+                    .map_err(|error| corruption(last, segment, offset as u64, error))?
+                    .synced_lsn;
+                state.report.durable_lsn = last;
+                state.report.records += pending.len();
+                pending.clear();
+            } else {
+                if record.header.lsn != expected
+                    || state.txn.checked_add(1) != Some(record.header.txn)
+                {
+                    return Err(corruption(
+                        expected,
+                        segment,
+                        offset as u64,
+                        "transaction or LSN order",
+                    ));
+                }
+                let start = pending.first().map_or(offset, |(_, off)| *off as usize);
+                if pending.len() == 1024
+                    || offset + used - start + frame::HEADER_LEN + 32 > frame::MAX_FRAME_SIZE
+                {
+                    return Err(corruption(
+                        expected,
+                        segment,
+                        offset as u64,
+                        "transaction exceeds batch limits",
+                    ));
+                }
+                pending.push((record, offset as u64));
+            }
+            offset += used;
+        }
+        if !pending.is_empty() || len < size {
+            return Err(corruption(
+                state.report.durable_lsn.saturating_add(pending.len() as u64).saturating_add(1),
+                segment,
+                offset as u64,
+                "early end of data",
+            ));
+        }
+    }
+    Err(Error::InvalidFrame(format!(
+        "cut LSN {cut} exceeds last valid cut point {}",
+        state.report.durable_lsn
+    )))
+}
+
+fn finish_cut(dir: &mut DataDir, size: u64, values: &[u64]) -> Result<RecoveryReport> {
+    let [lsn, last_lost, cleared] = values else {
+        return Err(corruption(0, 0, 0, "invalid truncate intent length"));
+    };
+    let prefix = cut_prefix(dir, size, *lsn)?;
+    let segments = dir.segments().to_vec();
+    for (position, &segment) in segments.iter().enumerate() {
+        if position + 1 < prefix.retained.len() {
+            continue;
+        }
+        let file = match Handle::open(dir.io.clone(), &dir.segment_path(segment)) {
+            Ok(file) => file,
+            Err(Error::Io(std::io::ErrorKind::NotFound, _))
+                if position >= prefix.retained.len() =>
+            {
+                continue
+            }
+            Err(error) => return Err(error),
+        };
+        let from = if position < prefix.retained.len() { prefix.offset } else { 0 };
+        zero_tail(dir, &file, from, size)?;
+        dir.io.sync_data(file.id)?;
+    }
+    // Persist the zeroed data first. Then lower the superblock. The durable intent bridges a crash between them.
+    dir.install_superblock(*lsn)?;
+    dir.install_manifest(&prefix.retained)?;
+    for &segment in &segments[prefix.retained.len()..] {
+        let path = dir.segment_path(segment);
+        if dir.io.exists(&path)? {
+            dir.io.remove(&path)?;
+        }
+    }
+    dir.io.sync_dir(&dir.path)?;
+    dir.io.remove(&dir.path.join("TRUNCATE"))?;
+    dir.io.sync_dir(&dir.path)?;
+    let report = RecoveryReport {
+        durable_lsn: *lsn,
+        truncated: lsn
+            .checked_add(1)
+            .filter(|first| first <= last_lost)
+            .map(|first| (first..=*last_lost, *cleared)),
+        segments: prefix.retained.len(),
+        records: prefix.records,
+        cut_lsn: Some(*lsn),
+        lsns_may_be_reused: true,
+    };
+    eprintln!("zerodb: operator cut LSN {lsn}, dropped LSNs {:?}, dropped bytes {cleared}; dropped LSNs may be reused", report.truncated.as_ref().map(|(range, _)| range));
+    Ok(report)
+}
+
+fn resume_truncate(dir: &mut DataDir, size: u64) -> Result<Option<RecoveryReport>> {
+    let path = dir.path.join("TRUNCATE");
+    if !dir.io.exists(&path)? {
+        return Ok(None);
+    }
+    let values = crate::dir::read(dir.io.clone(), &path, b"ZDBCUT01", 1)?;
+    finish_cut(dir, size, &values).map(Some)
+}
+
+pub(crate) fn truncate_at(dir: &mut DataDir, size: u64, lsn: u64) -> Result<RecoveryReport> {
+    resume_truncate(dir, size)?;
+    let prefix = cut_prefix(dir, size, lsn)?;
+    let mut last_lost = lsn;
+    let mut cleared = 0u64;
+    for (position, &segment) in dir.segments().iter().enumerate() {
+        if position + 1 < prefix.retained.len() {
+            continue;
+        }
+        let file = match Handle::open(dir.io.clone(), &dir.segment_path(segment)) {
+            Ok(file) => file,
+            Err(Error::Io(std::io::ErrorKind::NotFound, _)) => continue,
+            Err(error) => return Err(error),
+        };
+        let len = dir.io.len(file.id)?;
+        if len > size {
+            return Err(corruption(lsn.saturating_add(1), segment, 0, "invalid segment length"));
+        }
+        let from = if position < prefix.retained.len() { prefix.offset.min(len) } else { 0 };
+        let mut bytes = vec![0; (len - from) as usize];
+        read_exact(dir.io.as_ref(), file.id, from, &mut bytes)?;
+        last_lost = last_lost.max(last_decodable_lsn(&bytes, segment, from));
+        cleared = cleared.saturating_add(size - from);
+    }
+    let values = [lsn, last_lost, cleared];
+    let intent = crate::dir::encode(b"ZDBCUT01", 1, &values);
+    crate::dir::atomic_install(dir.io.clone(), &dir.path, "TRUNCATE", &intent)?;
+    finish_cut(dir, size, &values)
 }
 
 /// Scans prepared segments and syncs repaired tails before returning.
 pub fn recover(dir: &mut DataDir, size: u64) -> Result<Recovered> {
     dir.check_segment_size(size)?;
+    let resumed = resume_truncate(dir, size)?;
     let mut state = Recovered::default();
     let segments = dir.segments().to_vec();
     let mut retained = Vec::new();
@@ -107,7 +411,10 @@ pub fn recover(dir: &mut DataDir, size: u64) -> Result<Recovered> {
         let file = match Handle::open(dir.io.clone(), &dir.segment_path(segment)) {
             Ok(file) => file,
             Err(Error::Io(std::io::ErrorKind::NotFound, _)) => {
-                if state.report.durable_lsn < dir.superblock() {
+                let e = state.report.durable_lsn.saturating_add(1);
+                if state.report.durable_lsn < dir.superblock()
+                    || lookahead(dir, size, position + 1, 0, e, &state)?
+                {
                     return Err(corruption(
                         state.report.durable_lsn.saturating_add(1),
                         segment,
@@ -189,6 +496,13 @@ pub fn recover(dir: &mut DataDir, size: u64) -> Result<Recovered> {
                     result => result.map_err(|e| e.to_string()),
                 }
             };
+            let bad_lsn = if tail.get(8) == Some(&(Kind::Footer as u8)) {
+                pending.last().map_or(state.report.durable_lsn.saturating_add(1), |(record, _)| {
+                    record.header.lsn
+                })
+            } else {
+                state.report.durable_lsn.saturating_add(pending.len() as u64).saturating_add(1)
+            };
             let result = decoded.and_then(|(record, used)| {
                 if record.header.kind == Kind::Footer {
                     verify(&pending, &record, &state, segment).map_err(|e| e.to_string())?;
@@ -210,6 +524,20 @@ pub fn recover(dir: &mut DataDir, size: u64) -> Result<Recovered> {
                     state.synced_lsn =
                         Footer::decode(&record.payload).map_err(|e| e.to_string())?.synced_lsn;
                 } else {
+                    let expected = state
+                        .report
+                        .durable_lsn
+                        .saturating_add(pending.len() as u64)
+                        .saturating_add(1);
+                    if record.header.lsn != expected
+                        || state.txn.checked_add(1) != Some(record.header.txn)
+                        || pending.first().is_some_and(|(first, _)| {
+                            first.header.commit_time_ns != record.header.commit_time_ns
+                        })
+                        || record.header.commit_time_ns <= state.commit_time_ns
+                    {
+                        return Err("transaction, timestamp or LSN order".into());
+                    }
                     let start = pending.first().map_or(offset, |(_, off)| *off as usize);
                     if pending.len() == 1024
                         || offset + used - start + frame::HEADER_LEN + 32 > frame::MAX_FRAME_SIZE
@@ -224,8 +552,10 @@ pub fn recover(dir: &mut DataDir, size: u64) -> Result<Recovered> {
             if let Err(reason) = result {
                 let start = pending.first().map_or(offset as u64, |(_, off)| *off);
                 let next = state.report.durable_lsn.saturating_add(1);
-                if state.report.durable_lsn < dir.superblock() {
-                    return Err(corruption(next, segment, start, reason));
+                if state.report.durable_lsn < dir.superblock()
+                    || lookahead(dir, size, position, offset as u64, bad_lsn, &state)?
+                {
+                    return Err(corruption(bad_lsn, segment, offset as u64, reason));
                 }
                 first_lost =
                     pending.first().map_or(next, |(record, _)| record.header.lsn.max(next));
@@ -272,7 +602,16 @@ pub fn recover(dir: &mut DataDir, size: u64) -> Result<Recovered> {
     dir.io.sync_dir(&dir.path)?;
     if trimming {
         state.report.truncated = Some((first_lost..=last_lost.max(first_lost), cleared));
+        eprintln!(
+            "zerodb: truncated torn tail LSNs {first_lost}..={}, dropped bytes {cleared}",
+            last_lost.max(first_lost)
+        );
     }
     state.report.segments = retained.len();
+    if let Some(report) = resumed {
+        state.report.cut_lsn = report.cut_lsn;
+        state.report.lsns_may_be_reused = true;
+        state.report.truncated = report.truncated;
+    }
     Ok(state)
 }
