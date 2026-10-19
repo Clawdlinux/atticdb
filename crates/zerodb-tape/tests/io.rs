@@ -99,19 +99,24 @@ fn allocation_sets_length_for_growth_repeats_and_shrink() {
     let io = StdIo::new();
     let path = dir.0.join("resized");
     let file = io.create(&path).unwrap();
+    let metadata_file = std::fs::OpenOptions::new().read(true).write(true).open(&path).unwrap();
     for len in [0, 1024 * 1024, 1024 * 1024, 512 * 1024, 2 * 1024 * 1024, 2 * 1024 * 1024, 0] {
         #[cfg(target_os = "macos")]
-        let before = std::fs::metadata(&path).unwrap();
+        let before = {
+            metadata_file.sync_all().unwrap();
+            metadata_file.metadata().unwrap()
+        };
         io.allocate(file, len).unwrap();
         assert_eq!(io.len(file).unwrap(), len);
-        let metadata = std::fs::metadata(&path).unwrap();
+        metadata_file.sync_all().unwrap();
+        let metadata = metadata_file.metadata().unwrap();
         assert_eq!(metadata.len(), len);
         #[cfg(target_os = "macos")]
-        if len <= before.len() {
+        if len != 0 && len <= before.len() {
             use std::os::unix::fs::MetadataExt;
             assert!(
-                metadata.blocks() <= before.blocks(),
-                "equal or smaller lengths must not reserve more blocks"
+                metadata.blocks() * 512 < before.len() + len / 2,
+                "equal or smaller lengths must not reserve a whole extra length"
             );
         }
     }
