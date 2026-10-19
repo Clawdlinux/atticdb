@@ -176,11 +176,18 @@ Both backends return sorted full paths from directory listings.
 `StdIo` uses real files. `SimDisk` uses logical paths.
 `SimClock` advances manually. `SystemClock` can move backwards.
 
-`StdIo::allocate` reserves blocks through rustix on Linux and macOS, then exposes the requested file length.
+`StdIo::allocate` reserves blocks through rustix on Linux and macOS for empty or shorter files.
+It then exposes the requested file length.
 On macOS, rustix tries contiguous `F_PREALLOCATE`, then `F_ALLOCATEALL`, and calls `ftruncate`.
-Zero lengths skip preallocation. Other platforms fall back to `set_len`.
+Equal or smaller macOS lengths skip preallocation, which would reserve beyond the current physical end.
+Zero lengths skip preallocation. Other platforms fall back to sparse `set_len`.
+`EOPNOTSUPP`, `ENOTSUP`, and Linux `ENOSYS` also fall back to sparse `set_len`.
+`ENOSPC` remains `StorageFull`. Other errors propagate.
 Preallocation does not guarantee later writes on APFS or btrfs. The free-space floor remains the guard.
-`SimDisk` charges capacity in 512-byte allocation units, including metadata files.
+`SimDisk` charges reserved or written 512-byte blocks, including metadata.
+Its `set_len` extension stays sparse until written or allocated. Truncation frees the discarded blocks.
+Partial-write cleanup truncates and re-reserves the tail with `allocate`.
+A failed re-reservation poisons the writer and reports `Unknown`, rather than treating the tail as reserved.
 
 `SimDisk::crash()` returns an independent image without changing the original.
 The same seed and operations produce the same image.

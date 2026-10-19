@@ -62,7 +62,8 @@ pub trait Io: Send + Sync {
     fn len(&self, file: FileId) -> Result<u64>;
     /// Truncates or zero-extends a file.
     fn set_len(&self, file: FileId, n: u64) -> Result<()>;
-    /// Reserves blocks and sets the file length. Copy-on-write filesystems can still run out later.
+    /// Reserves blocks up to `len` on an empty or shorter file, then sets its length.
+    /// Copy-on-write filesystems can still run out later.
     fn allocate(&self, file: FileId, len: u64) -> Result<()>;
     /// Returns bytes available to an unprivileged writer in this directory.
     fn available_bytes(&self, dir: &Path) -> Result<u64>;
@@ -86,6 +87,14 @@ pub trait Io: Send + Sync {
 
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>> {
     mutex.lock().map_err(|_| Error::Io(std::io::ErrorKind::Other, "I/O mutex poisoned".into()))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn preallocation_fallback(error: rustix::io::Errno) -> bool {
+    use rustix::io::Errno;
+    error == Errno::OPNOTSUPP
+        || error == Errno::NOTSUP
+        || (cfg!(target_os = "linux") && error == Errno::NOSYS)
 }
 
 /// Real filesystem I/O with serialized access to each handle.
@@ -156,17 +165,32 @@ impl Io for StdIo {
     /// Linux and macOS reserve blocks with rustix `fallocate`. Other platforms use `set_len`.
     ///
     /// On macOS, rustix tries contiguous `F_PREALLOCATE`, then noncontiguous allocation, then calls `ftruncate`.
-    /// Zero lengths use `set_len` without preallocation.
+    /// macOS skips preallocation for equal or smaller lengths to avoid reserving past the physical end.
+    /// Zero lengths and unsupported preallocation use `set_len`.
     /// APFS and btrfs can need extra space after preallocation. The writer's floor remains the guard.
     fn allocate(&self, file: FileId, len: u64) -> Result<()> {
         let file = self.file(file)?;
         let file = lock(&file)?;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        if len != 0 {
-            rustix::fs::fallocate(&*file, rustix::fs::FallocateFlags::empty(), 0, len)
-                .map_err(std::io::Error::from)?;
+        {
+            #[cfg(target_os = "linux")]
+            let current_len = 0;
             #[cfg(target_os = "macos")]
-            return Ok(());
+            let current_len = file.metadata()?.len();
+            #[cfg(target_os = "macos")]
+            if len == current_len {
+                return Ok(());
+            }
+            if len > current_len {
+                match rustix::fs::fallocate(&*file, rustix::fs::FallocateFlags::empty(), 0, len) {
+                    Ok(()) => {
+                        #[cfg(target_os = "macos")]
+                        return Ok(());
+                    }
+                    Err(error) if preallocation_fallback(error) => {}
+                    Err(error) => return Err(std::io::Error::from(error).into()),
+                }
+            }
         }
         Ok(file.set_len(len)?)
     }
@@ -284,6 +308,20 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn preallocation_errno_policy_preserves_real_errors() {
+        use rustix::io::Errno;
+        for error in [Errno::OPNOTSUPP, Errno::NOTSUP] {
+            assert!(preallocation_fallback(error));
+        }
+        assert_eq!(preallocation_fallback(Errno::NOSYS), cfg!(target_os = "linux"));
+        for error in [Errno::NOSPC, Errno::IO, Errno::INVAL, Errno::PERM, Errno::INTR] {
+            assert!(!preallocation_fallback(error));
+        }
+        assert_eq!(std::io::Error::from(Errno::NOSPC).kind(), std::io::ErrorKind::StorageFull);
+    }
 
     #[test]
     fn ten_thousand_atomic_installs_release_open_handles() {

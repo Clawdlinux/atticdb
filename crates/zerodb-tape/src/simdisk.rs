@@ -7,6 +7,78 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+const ALLOCATION_UNIT: usize = 512;
+
+#[derive(Clone, Debug, Default)]
+struct Blocks(Vec<std::ops::Range<usize>>);
+
+impl Blocks {
+    fn bytes(&self) -> u64 {
+        self.0.iter().fold(0u64, |used, range| {
+            used.saturating_add((range.len() as u64).saturating_mul(ALLOCATION_UNIT as u64))
+        })
+    }
+
+    fn required(&self, offset: usize, len: usize) -> u64 {
+        if len == 0 {
+            return 0;
+        }
+        let start = offset / ALLOCATION_UNIT;
+        let end = (offset + len).div_ceil(ALLOCATION_UNIT);
+        let occupied: usize = self
+            .0
+            .iter()
+            .map(|range| range.end.min(end).saturating_sub(range.start.max(start)))
+            .sum();
+        ((end - start - occupied) as u64).saturating_mul(ALLOCATION_UNIT as u64)
+    }
+
+    fn writable(&self, offset: usize, len: usize, free: u64) -> usize {
+        if self.required(offset, len) <= free {
+            return len;
+        }
+        let (mut low, mut high) = (0, len);
+        while low < high {
+            let middle = low + (high - low).div_ceil(2);
+            if self.required(offset, middle) <= free {
+                low = middle;
+            } else {
+                high = middle - 1;
+            }
+        }
+        low
+    }
+
+    fn reserve(&mut self, offset: usize, len: usize) {
+        if len == 0 {
+            return;
+        }
+        let mut new = offset / ALLOCATION_UNIT..(offset + len).div_ceil(ALLOCATION_UNIT);
+        let mut merged = Vec::new();
+        for range in std::mem::take(&mut self.0) {
+            if range.end < new.start {
+                merged.push(range);
+            } else if new.end < range.start {
+                merged.push(new);
+                new = range;
+            } else {
+                new.start = new.start.min(range.start);
+                new.end = new.end.max(range.end);
+            }
+        }
+        merged.push(new);
+        self.0 = merged;
+    }
+
+    fn truncate(&mut self, len: usize) {
+        let end = len.div_ceil(ALLOCATION_UNIT);
+        for range in &mut self.0 {
+            range.end = range.end.min(end);
+        }
+        self.0.retain(|range| range.start < range.end);
+    }
+}
+
 #[derive(Clone, Debug)]
 struct SplitMix64(u64);
 
@@ -28,18 +100,26 @@ impl SplitMix64 {
 enum Write {
     Bytes(usize, Vec<u8>),
     Resize(usize),
+    Allocate(usize),
 }
 
 impl Write {
-    fn apply(&self, bytes: &mut Vec<u8>) {
+    fn apply(&self, bytes: &mut Vec<u8>, blocks: &mut Blocks) {
         match self {
             Self::Bytes(offset, data) => {
                 if !data.is_empty() {
                     bytes.resize(bytes.len().max(offset + data.len()), 0);
                     bytes[*offset..offset + data.len()].copy_from_slice(data);
+                    blocks.reserve(*offset, data.len());
                 }
             }
-            Self::Resize(len) => bytes.resize(*len, 0),
+            Self::Resize(len) | Self::Allocate(len) => {
+                bytes.resize(*len, 0);
+                blocks.truncate(*len);
+                if matches!(self, Self::Allocate(_)) {
+                    blocks.reserve(0, *len);
+                }
+            }
         }
     }
 }
@@ -48,6 +128,8 @@ impl Write {
 struct SimFile {
     durable: Vec<u8>,
     visible: Vec<u8>,
+    durable_blocks: Blocks,
+    visible_blocks: Blocks,
     pending: Vec<Write>,
     failed_cache: Vec<std::ops::Range<usize>>,
 }
@@ -56,7 +138,7 @@ impl SimFile {
     fn write(&mut self, write: Write) {
         let overwritten = match &write {
             Write::Bytes(offset, data) => *offset..offset + data.len(),
-            Write::Resize(len) => *len..usize::MAX,
+            Write::Resize(len) | Write::Allocate(len) => *len..usize::MAX,
         };
         let mut cached = Vec::new();
         for range in std::mem::take(&mut self.failed_cache) {
@@ -68,12 +150,18 @@ impl SimFile {
             }
         }
         self.failed_cache = cached;
-        write.apply(&mut self.visible);
+        write.apply(&mut self.visible, &mut self.visible_blocks);
         self.pending.push(write);
     }
 }
 
-fn settle(mut writes: Vec<Write>, bytes: &mut Vec<u8>, rng: &mut SplitMix64, sector_size: usize) {
+fn settle(
+    mut writes: Vec<Write>,
+    bytes: &mut Vec<u8>,
+    blocks: &mut Blocks,
+    rng: &mut SplitMix64,
+    sector_size: usize,
+) {
     for i in (1..writes.len()).rev() {
         let j = rng.below(i + 1);
         writes.swap(i, j);
@@ -93,11 +181,12 @@ fn settle(mut writes: Vec<Write>, bytes: &mut Vec<u8>, rng: &mut SplitMix64, sec
                         1 => count,
                         _ => rng.below(count + 1),
                     };
-                    Write::Bytes(offset + start, data[start..start + kept].to_vec()).apply(bytes);
+                    Write::Bytes(offset + start, data[start..start + kept].to_vec())
+                        .apply(bytes, blocks);
                     start += count;
                 }
             }
-            Write::Resize(len) => bytes.resize(len, 0),
+            Write::Resize(_) | Write::Allocate(_) => write.apply(bytes, blocks),
         }
     }
 }
@@ -156,18 +245,12 @@ fn io_error(kind: ErrorKind, message: &str) -> Error {
     Error::Io(kind, message.into())
 }
 
-const ALLOCATION_UNIT: u64 = 512;
-
-fn allocated_bytes(len: usize) -> u64 {
-    (len as u64).div_ceil(ALLOCATION_UNIT).saturating_mul(ALLOCATION_UNIT)
-}
-
 impl State {
     fn available(&self) -> u64 {
         let used = self
             .files
             .values()
-            .fold(0u64, |used, file| used.saturating_add(allocated_bytes(file.visible.len())));
+            .fold(0u64, |used, file| used.saturating_add(file.visible_blocks.bytes()));
         self.capacity.saturating_sub(used)
     }
 
@@ -228,7 +311,7 @@ impl State {
 /// Paths are logical names. Parent directories exist implicitly.
 /// Clones share live state. A crash returns an independent image without locks.
 /// Syncing either side of a cross-directory rename persists both directories.
-/// Capacity charges file lengths rounded to 512-byte allocation units.
+/// Capacity charges reserved or written 512-byte blocks. Extending with `set_len` stays sparse.
 #[derive(Clone, Debug)]
 pub struct SimDisk {
     state: Arc<Mutex<State>>,
@@ -309,7 +392,7 @@ impl SimDisk {
         let shadowed = file.failed_cache.iter().any(|range| range.contains(&offset))
             || file.pending.iter().any(|write| match write {
                 Write::Bytes(start, data) => (*start..start + data.len()).contains(&offset),
-                Write::Resize(len) => *len <= offset,
+                Write::Resize(len) | Write::Allocate(len) => *len <= offset,
             });
         if !shadowed {
             if let Some(byte) = file.visible.get_mut(offset) {
@@ -340,8 +423,18 @@ impl SimDisk {
                 continue;
             }
             let mut durable = file.durable.clone();
-            settle(file.pending.clone(), &mut durable, &mut rng, state.sector_size);
-            files.insert(*id, SimFile { visible: durable.clone(), durable, ..SimFile::default() });
+            let mut blocks = file.durable_blocks.clone();
+            settle(file.pending.clone(), &mut durable, &mut blocks, &mut rng, state.sector_size);
+            files.insert(
+                *id,
+                SimFile {
+                    visible: durable.clone(),
+                    durable,
+                    visible_blocks: blocks.clone(),
+                    durable_blocks: blocks,
+                    ..SimFile::default()
+                },
+            );
         }
         let handles = state
             .handles
@@ -414,11 +507,8 @@ impl Io for SimDisk {
             .checked_add(data.len())
             .ok_or_else(|| io_error(ErrorKind::InvalidInput, "write offset overflow"))?;
         let mut state = lock(&self.state)?;
-        let len = state.file(file)?.visible.len();
-        let free = state.available() / ALLOCATION_UNIT * ALLOCATION_UNIT;
-        let limit =
-            usize::try_from(allocated_bytes(len).saturating_add(free)).unwrap_or(usize::MAX);
-        let capacity_count = limit.saturating_sub(offset).min(data.len());
+        let free = state.available();
+        let capacity_count = state.file(file)?.visible_blocks.writable(offset, data.len(), free);
         let count = state.space.map_or(capacity_count, |left| left.min(capacity_count));
         if let Some(left) = &mut state.space {
             *left -= count;
@@ -448,17 +538,18 @@ impl Io for SimDisk {
     }
 
     fn set_len(&self, file: FileId, n: u64) -> Result<()> {
-        self.allocate(file, n)
+        lock(&self.state)?.file(file)?.write(Write::Resize(position(n)?));
+        Ok(())
     }
 
     fn allocate(&self, file: FileId, len: u64) -> Result<()> {
         let len = position(len)?;
         let mut state = lock(&self.state)?;
-        let old = state.file(file)?.visible.len();
-        if allocated_bytes(len).saturating_sub(allocated_bytes(old)) > state.available() {
+        let required = state.file(file)?.visible_blocks.required(0, len);
+        if required > state.available() {
             return Err(io_error(ErrorKind::StorageFull, "allocation exceeds capacity"));
         }
-        state.file(file)?.write(Write::Resize(len));
+        state.file(file)?.write(Write::Allocate(len));
         Ok(())
     }
 
@@ -480,16 +571,24 @@ impl Io for SimDisk {
             for write in &file.pending {
                 file.failed_cache.push(match write {
                     Write::Bytes(offset, data) => *offset..offset + data.len(),
-                    Write::Resize(_) => 0..file.visible.len().max(file.durable.len()),
+                    Write::Resize(_) | Write::Allocate(_) => {
+                        0..file.visible.len().max(file.durable.len())
+                    }
                 });
             }
-            settle(std::mem::take(&mut file.pending), &mut file.durable, &mut rng, sector_size);
+            settle(
+                std::mem::take(&mut file.pending),
+                &mut file.durable,
+                &mut file.durable_blocks,
+                &mut rng,
+                sector_size,
+            );
             state.rng = rng;
             return Err(error);
         }
         let file = state.file(file)?;
         for write in std::mem::take(&mut file.pending) {
-            write.apply(&mut file.durable);
+            write.apply(&mut file.durable, &mut file.durable_blocks);
         }
         Ok(())
     }

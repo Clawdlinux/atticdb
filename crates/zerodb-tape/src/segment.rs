@@ -159,6 +159,56 @@ impl SegmentWriter {
     pub(crate) fn discard_partial(&mut self) -> Result<()> {
         let file = self.files.get(&self.active).ok_or(Error::Poisoned)?;
         self.dir.io.set_len(file.id, self.offset)?;
-        self.dir.io.set_len(file.id, self.size)
+        self.dir.io.allocate(file.id, self.size)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use crate::{Io, SimDisk};
+    use std::path::Path;
+    use std::sync::Arc;
+
+    #[test]
+    fn discard_reserves_freed_tail_or_reports_a_second_storage_full() {
+        for lost_space in [false, true] {
+            let disk = Arc::new(SimDisk::new(18));
+            let dir = DataDir::open(disk.clone(), "db", None, 4096).unwrap();
+            let mut writer = SegmentWriter::new(dir, 4096, 0).unwrap();
+            writer.write_batch(&[1; 512]).unwrap();
+            let used = disk.total_bytes(Path::new("db")).unwrap()
+                - disk.available_bytes(Path::new("db")).unwrap();
+            disk.set_capacity(used).unwrap();
+            disk.enospc_after_bytes(100).unwrap();
+            assert!(matches!(
+                writer.write_batch(&[2; 512]),
+                Err(Error::Io(std::io::ErrorKind::StorageFull, _))
+            ));
+            if lost_space {
+                disk.set_capacity(used - 512).unwrap();
+            }
+            let result = writer.discard_partial();
+            let file = writer.files[&writer.active].id;
+            disk.enospc_after_bytes(usize::MAX).unwrap();
+            if lost_space {
+                assert!(matches!(result, Err(Error::Io(std::io::ErrorKind::StorageFull, _))));
+                assert_eq!(disk.len(file).unwrap(), 512);
+                disk.set_len(file, 4096).unwrap();
+                assert_eq!(disk.available_bytes(Path::new("db")).unwrap(), 3072);
+                disk.write_at(file, 512, &[3; 3072]).unwrap();
+                assert!(matches!(
+                    disk.write_at(file, 3584, b"x"),
+                    Err(Error::Io(std::io::ErrorKind::StorageFull, _))
+                ));
+                disk.write_at(file, 0, b"retained").unwrap();
+            } else {
+                result.unwrap();
+                assert_eq!(disk.available_bytes(Path::new("db")).unwrap(), 0);
+                writer.write_batch(&[3; 512]).unwrap();
+                assert_eq!(disk.available_bytes(Path::new("db")).unwrap(), 0);
+            }
+        }
     }
 }

@@ -31,6 +31,39 @@ fn bytes(io: &dyn Io, file: FileId) -> Vec<u8> {
     data
 }
 
+#[test]
+fn sparse_extension_charges_only_written_blocks_and_survives_crash() {
+    let disk = SimDisk::new(17);
+    disk.set_capacity(1024).unwrap();
+    let file = disk.create(Path::new("db/sparse")).unwrap();
+    disk.set_len(file, 4096).unwrap();
+    assert_eq!(disk.len(file).unwrap(), 4096);
+    assert_eq!(disk.available_bytes(Path::new("db")).unwrap(), 1024);
+    disk.write_at(file, 3584, b"last block").unwrap();
+    assert_eq!(disk.available_bytes(Path::new("db")).unwrap(), 512);
+    disk.write_at(file, 0, b"first block").unwrap();
+    assert_eq!(disk.available_bytes(Path::new("db")).unwrap(), 0);
+    disk.write_at(file, 3590, b"still reserved").unwrap();
+    assert!(matches!(
+        disk.write_at(file, 512, b"new block"),
+        Err(Error::Io(ErrorKind::StorageFull, _))
+    ));
+    disk.sync_data(file).unwrap();
+    disk.sync_dir(Path::new("db")).unwrap();
+    let image = disk.crash().unwrap();
+    assert_eq!(image.available_bytes(Path::new("db")).unwrap(), 0);
+    assert_eq!(image.len(file).unwrap(), 4096);
+    disk.set_len(file, 512).unwrap();
+    assert_eq!(disk.available_bytes(Path::new("db")).unwrap(), 512);
+    disk.set_len(file, 4096).unwrap();
+    assert_eq!(disk.available_bytes(Path::new("db")).unwrap(), 512);
+    assert!(matches!(disk.allocate(file, 4096), Err(Error::Io(ErrorKind::StorageFull, _))));
+    disk.set_capacity(4096).unwrap();
+    disk.allocate(file, 4096).unwrap();
+    assert_eq!(disk.available_bytes(Path::new("db")).unwrap(), 0);
+    disk.write_at(file, 2048, b"reserved hole").unwrap();
+}
+
 fn durable_file(disk: &SimDisk, name: &str, data: &[u8]) -> FileId {
     let file = disk.create(Path::new(name)).unwrap();
     disk.write_at(file, 0, data).unwrap();

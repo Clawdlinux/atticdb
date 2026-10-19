@@ -79,18 +79,39 @@ fn allocation_sets_length_and_reserves_real_blocks() {
     let io = StdIo::new();
     let path = dir.0.join("allocated");
     let file = io.create(&path).unwrap();
-    for len in [0, 1024 * 1024, 2 * 1024 * 1024, 0] {
+    let len = 1024 * 1024;
+    io.allocate(file, len).unwrap();
+    io.sync_data(file).unwrap();
+    assert_eq!(io.len(file).unwrap(), len);
+    let metadata = std::fs::metadata(&path).unwrap();
+    assert_eq!(metadata.len(), len);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert!(metadata.blocks() * 512 >= len);
+    }
+    io.close(file).unwrap();
+}
+
+#[test]
+fn allocation_sets_length_for_growth_repeats_and_shrink() {
+    let dir = TestDir::new();
+    let io = StdIo::new();
+    let path = dir.0.join("resized");
+    let file = io.create(&path).unwrap();
+    for len in [0, 1024 * 1024, 1024 * 1024, 512 * 1024, 2 * 1024 * 1024, 2 * 1024 * 1024, 0] {
+        #[cfg(target_os = "macos")]
+        let before = std::fs::metadata(&path).unwrap();
         io.allocate(file, len).unwrap();
         assert_eq!(io.len(file).unwrap(), len);
         let metadata = std::fs::metadata(&path).unwrap();
         assert_eq!(metadata.len(), len);
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        {
+        #[cfg(target_os = "macos")]
+        if len <= before.len() {
             use std::os::unix::fs::MetadataExt;
             assert!(
-                metadata.blocks() * 512 >= len,
-                "allocated {} bytes of blocks for {len} bytes",
-                metadata.blocks() * 512
+                metadata.blocks() <= before.blocks(),
+                "equal or smaller lengths must not reserve more blocks"
             );
         }
     }
