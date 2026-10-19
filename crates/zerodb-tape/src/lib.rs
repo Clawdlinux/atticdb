@@ -19,6 +19,7 @@ pub(crate) mod dir;
 mod error;
 pub(crate) mod frame;
 pub(crate) mod io;
+mod lsn_index;
 pub(crate) mod recovery;
 pub(crate) mod segment;
 #[cfg(any(test, feature = "sim"))]
@@ -30,6 +31,7 @@ pub(crate) mod writer;
 pub use error::{Error, Result};
 pub use frame::{Digest, Frame, Header, Kind};
 pub use io::{Clock, FileId, Io, LockGuard, StdIo, SystemClock};
+pub use lsn_index::LsnIndexStats;
 pub use recovery::RecoveryReport;
 pub use simdisk::SimDisk;
 pub use state_machine::{CommittedRecord, NoopStateMachine, Prepare, StateMachine};

@@ -2,8 +2,8 @@
 
 use crate::dir::{corruption, read_exact, DataDir, Handle};
 use crate::frame::{self, Footer, Frame, Kind};
+use crate::lsn_index::LsnIndex;
 use crate::{Error, Result};
-use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
 
 /// Results of opening and repairing an unsynced tail.
@@ -28,7 +28,7 @@ pub struct RecoveryReport {
 pub struct Recovered {
     /// Recovery results exposed by the deterministic driver.
     pub report: RecoveryReport,
-    pub(crate) index: BTreeMap<u64, (u64, u64)>,
+    pub(crate) index: Option<LsnIndex>,
     pub(crate) txn: u64,
     pub(crate) commit_time_ns: u64,
     pub(crate) synced_lsn: u64,
@@ -397,10 +397,22 @@ pub(crate) fn truncate_at(dir: &mut DataDir, size: u64, lsn: u64) -> Result<Reco
 }
 
 /// Scans prepared segments and syncs repaired tails before returning.
+#[cfg(any(test, feature = "sim"))]
 pub fn recover(dir: &mut DataDir, size: u64) -> Result<Recovered> {
+    recover_with_budget(dir, size, crate::lsn_index::DEFAULT_BUDGET)
+}
+
+pub(crate) fn recover_with_budget(
+    dir: &mut DataDir,
+    size: u64,
+    budget: usize,
+) -> Result<Recovered> {
     dir.check_segment_size(size)?;
     let resumed = resume_truncate(dir, size)?;
-    let mut state = Recovered::default();
+    let mut state = Recovered {
+        index: Some(LsnIndex::new(dir.io.clone(), &dir.path, budget)?),
+        ..Recovered::default()
+    };
     let segments = dir.segments().to_vec();
     let mut retained = Vec::new();
     let mut trimming = false;
@@ -503,6 +515,7 @@ pub fn recover(dir: &mut DataDir, size: u64) -> Result<Recovered> {
             } else {
                 state.report.durable_lsn.saturating_add(pending.len() as u64).saturating_add(1)
             };
+            let mut index_error = None;
             let result = decoded.and_then(|(record, used)| {
                 if record.header.kind == Kind::Footer {
                     verify(&pending, &record, &state, segment).map_err(|e| e.to_string())?;
@@ -515,7 +528,15 @@ pub fn recover(dir: &mut DataDir, size: u64) -> Result<Recovered> {
                     }
                     for (record, off) in pending.drain(..) {
                         let h = &record.header;
-                        state.index.insert(h.lsn, (segment, off));
+                        if let Err(error) = state
+                            .index
+                            .as_mut()
+                            .ok_or(Error::Poisoned)
+                            .and_then(|index| index.insert(h.lsn, segment, off))
+                        {
+                            index_error = Some(error);
+                            return Err("LSN index update failed".into());
+                        }
                         state.report.durable_lsn = h.lsn;
                         state.report.records += 1;
                     }
@@ -549,6 +570,9 @@ pub fn recover(dir: &mut DataDir, size: u64) -> Result<Recovered> {
                 offset += used;
                 Ok(())
             });
+            if let Some(error) = index_error {
+                return Err(error);
+            }
             if let Err(reason) = result {
                 let start = pending.first().map_or(offset as u64, |(_, off)| *off);
                 let next = state.report.durable_lsn.saturating_add(1);

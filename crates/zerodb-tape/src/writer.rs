@@ -5,10 +5,11 @@ use crate::frame::{
     self, Digest, Footer, Frame, Header, Kind, HEADER_LEN, MAX_FRAME_SIZE, VERSION,
 };
 use crate::io::{lock, Clock, Io};
-use crate::recovery::{recover, RecoveryReport};
+use crate::lsn_index::{LsnIndex, LsnIndexStats, DEFAULT_BUDGET};
+use crate::recovery::{recover_with_budget, RecoveryReport};
 use crate::segment::{SegmentWriter, DEFAULT_SEGMENT_SIZE};
 use crate::{CommittedRecord, Error, NoopStateMachine, Prepare, Result, StateMachine};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -100,6 +101,8 @@ pub struct TapeOptions {
     pub superblock_interval: Duration,
     /// Published tape bytes between superblock requests, including roll padding. Must be nonzero.
     pub superblock_bytes: u64,
+    /// Resident LSN-index budget, including page bookkeeping. Minimum 4224 bytes.
+    pub lsn_index_bytes: usize,
     /// Runs the writer inline. Only for deterministic simulations.
     #[cfg(feature = "sim")]
     pub inline_sim: bool,
@@ -114,6 +117,7 @@ impl Default for TapeOptions {
             coalescing_window: Duration::from_micros(200),
             superblock_interval: Duration::from_secs(30),
             superblock_bytes: 256 * 1024 * 1024,
+            lsn_index_bytes: DEFAULT_BUDGET,
             #[cfg(feature = "sim")]
             inline_sim: false,
         }
@@ -217,7 +221,7 @@ impl WriteRequest {
 struct ReadState {
     io: Arc<dyn Io>,
     path: PathBuf,
-    index: Mutex<BTreeMap<u64, (u64, u64)>>,
+    index: Mutex<LsnIndex>,
     durable_lsn: AtomicU64,
     poisoned: AtomicBool,
     groups: AtomicU64,
@@ -231,13 +235,10 @@ impl ReadState {
         let mut next = Some(from_lsn);
         std::iter::from_fn(move || {
             let start = next.filter(|&start| start <= end)?;
-            let lsn = match lock(&self.index) {
-                Ok(index) => index.range(start..=end).next().map(|(&lsn, _)| lsn),
-                Err(error) => {
-                    next = None;
-                    return Some(Err(error));
-                }
-            }?;
+            let lsn = start.max(1);
+            if lsn > end {
+                return None;
+            }
             next = lsn.checked_add(1);
             match self.read(lsn) {
                 Ok(Some(frame)) => {
@@ -264,7 +265,7 @@ impl ReadState {
         if lsn > self.durable_lsn.load(Ordering::Acquire) {
             return Ok(None);
         }
-        let Some((segment, offset)) = lock(&self.index)?.get(&lsn).copied() else {
+        let Some((segment, offset)) = lock(&self.index)?.get(lsn)? else {
             return Ok(None);
         };
         let file =
@@ -285,6 +286,14 @@ impl ReadState {
         )?;
         let (frame, _) = frame::decode(&bytes, segment, offset)
             .map_err(|e| crate::dir::corruption(lsn, segment, offset, e))?;
+        if frame.header.lsn != lsn || frame.header.kind == Kind::Footer {
+            return Err(crate::dir::corruption(
+                lsn,
+                segment,
+                offset,
+                "LSN index points to another record",
+            ));
+        }
         Ok(Some(frame))
     }
 }
@@ -295,7 +304,7 @@ pub struct WriterCore<S: StateMachine = NoopStateMachine> {
     clock: Arc<dyn Clock>,
     reads: Arc<ReadState>,
     queue: VecDeque<WriteRequest>,
-    pending: BTreeMap<u64, (u64, u64)>,
+    pending: Vec<(u64, u64, u64)>,
     unpublished: Vec<CommittedRecord>,
     unpublished_bytes: u64,
     state_machine: S,
@@ -352,14 +361,14 @@ impl<S: StateMachine> WriterCore<S> {
         }
         let mut dir =
             DataDir::open(io.clone(), path, opts.server_address.as_deref(), opts.segment_size)?;
-        let recovered = recover(&mut dir, opts.segment_size)?;
+        let mut recovered = recover_with_budget(&mut dir, opts.segment_size, opts.lsn_index_bytes)?;
         if recovered.report.durable_lsn > dir.superblock() {
             dir.install_superblock(recovered.report.durable_lsn)?;
         }
         let reads = Arc::new(ReadState {
             io,
             path: dir.path.clone(),
-            index: Mutex::new(recovered.index),
+            index: Mutex::new(recovered.index.take().ok_or(Error::Poisoned)?),
             durable_lsn: AtomicU64::new(recovered.report.durable_lsn),
             poisoned: AtomicBool::new(false),
             groups: AtomicU64::new(0),
@@ -384,7 +393,7 @@ impl<S: StateMachine> WriterCore<S> {
             clock,
             reads,
             queue: VecDeque::new(),
-            pending: BTreeMap::new(),
+            pending: Vec::new(),
             unpublished: Vec::new(),
             unpublished_bytes: 0,
             state_machine,
@@ -408,6 +417,12 @@ impl<S: StateMachine> WriterCore<S> {
     /// Reports whether a storage failure requires reopening.
     pub fn is_poisoned(&self) -> bool {
         self.reads.poisoned.load(Ordering::Acquire)
+    }
+
+    /// Returns charged index memory and backing-page reads.
+    #[cfg(any(test, feature = "sim"))]
+    pub fn index_stats(&self) -> Result<LsnIndexStats> {
+        Ok(lock(&self.reads.index)?.stats())
     }
 
     /// Reads a published record through the deterministic driver.
@@ -495,7 +510,7 @@ impl<S: StateMachine> WriterCore<S> {
         )?);
         self.segments.write_batch(&bytes)?;
         for (lsn, off) in offsets {
-            self.pending.insert(lsn, (segment, offset + off));
+            self.pending.push((lsn, segment, offset + off));
         }
         self.unpublished.extend(committed);
         self.unpublished_bytes = self.unpublished_bytes.saturating_add(bytes.len() as u64);
@@ -506,7 +521,11 @@ impl<S: StateMachine> WriterCore<S> {
     }
 
     fn publish(&mut self) -> Result<()> {
-        lock(&self.reads.index)?.append(&mut self.pending);
+        let mut index = lock(&self.reads.index)?;
+        for (lsn, segment, offset) in self.pending.drain(..) {
+            index.insert(lsn, segment, offset)?;
+        }
+        drop(index);
         self.synced_position = self.segments.position();
         if !self.unpublished.is_empty() {
             self.state_machine.publish(&self.unpublished);
@@ -929,6 +948,11 @@ impl<S: StateMachine> Tape<S> {
     /// Successful runtime superblock installs, excluding initialization and recovery before open returns.
     pub fn superblock_installs(&self) -> u64 {
         self.reads.superblock_installs.load(Ordering::Relaxed)
+    }
+
+    /// Returns charged LSN-index memory and backing-page reads.
+    pub fn index_stats(&self) -> Result<LsnIndexStats> {
+        Ok(lock(&self.reads.index)?.stats())
     }
 
     /// Returns the highest record LSN available to durable readers.
