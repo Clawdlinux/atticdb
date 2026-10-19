@@ -12,7 +12,7 @@ const PAGE_CHARGE: usize = PAGE_BYTES + 128;
 pub(crate) const DEFAULT_BUDGET: usize = 8 * 1024 * 1024;
 type PageKey = (bool, u64);
 
-/// Resident tape-index memory and backing-page reads.
+/// Resident tape-index memory and backing-page activity.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct LsnIndexStats {
     /// Charged resident bytes, including page bookkeeping.
@@ -21,6 +21,10 @@ pub struct LsnIndexStats {
     pub budget_bytes: usize,
     /// Pages reloaded from derived backing files.
     pub page_reloads: u64,
+    /// Pages successfully removed from the resident cache.
+    pub page_evictions: u64,
+    /// Evicted dirty pages written to derived backing files.
+    pub dirty_page_evictions: u64,
 }
 
 struct Page {
@@ -38,6 +42,8 @@ pub(crate) struct LsnIndex {
     len: u64,
     active: Option<(u64, u64)>,
     reloads: u64,
+    evictions: u64,
+    dirty_evictions: u64,
 }
 
 impl std::fmt::Debug for LsnIndex {
@@ -75,6 +81,8 @@ impl LsnIndex {
             len: 0,
             active: None,
             reloads: 0,
+            evictions: 0,
+            dirty_evictions: 0,
         })
     }
 
@@ -83,6 +91,8 @@ impl LsnIndex {
             resident_bytes: self.pages.len() * PAGE_CHARGE,
             budget_bytes: self.budget,
             page_reloads: self.reloads,
+            page_evictions: self.evictions,
+            dirty_page_evictions: self.dirty_evictions,
         }
     }
 
@@ -102,7 +112,9 @@ impl LsnIndex {
                         self.fifo.push_front(oldest);
                         return Err(error);
                     }
+                    self.dirty_evictions += 1;
                 }
+                self.evictions += 1;
             }
             let mut page = Page { bytes: Box::new([0; PAGE_BYTES]), dirty: false };
             let file = if key.0 { &self.routes } else { &self.offsets };

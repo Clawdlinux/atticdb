@@ -69,6 +69,19 @@ struct Reopen {
     records: u64,
     tail_bytes: u64,
 }
+
+fn index_report(label: &str, stats: zerodb_tape::LsnIndexStats, turns: usize) {
+    println!(
+        "{label}/lsn_index: resident_bytes={} budget_bytes={} page_evictions={} dirty_page_evictions={} page_reloads={}",
+        stats.resident_bytes, stats.budget_bytes, stats.page_evictions,
+        stats.dirty_page_evictions, stats.page_reloads,
+    );
+    assert!(stats.resident_bytes <= stats.budget_bytes);
+    if turns >= 1_000_000 {
+        assert!(stats.page_evictions > 0, "1M G1 must exercise index eviction");
+    }
+}
+
 fn report(label: &str, elapsed: Duration, n: usize, mut samples: Vec<Duration>) -> Stats {
     println!(
         "{label}: turns={n} seconds={:.3} turns_per_sec={:.1} batches_per_sec={:.1}",
@@ -218,6 +231,7 @@ fn tape(iterations: usize, batch: usize, n: usize) -> Stats {
         requests as f64 / groups as f64,
         tape.superblock_installs()
     );
+    index_report("tape", tape.index_stats().unwrap(), n);
     report("tape", elapsed, n, samples)
 }
 
@@ -260,6 +274,7 @@ fn engine(iterations: usize, batch: usize, n: usize, checkpoint_bytes: u64) -> S
     latency("engine/window", &mut reads);
     let mut stats = report("engine", elapsed, n, samples);
     let metrics = engine.metrics().unwrap();
+    index_report("engine", metrics.tape_index, n);
     println!(
         "engine: writer_groups={} mean_requests_per_group={:.3}",
         metrics.writer_groups - warmup.writer_groups,

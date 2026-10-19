@@ -27,8 +27,12 @@ fn paged_offsets_cross_segments_recover_and_reload_within_budget() {
         reply.recv().unwrap().unwrap();
         assert!(core.index_stats().unwrap().resident_bytes <= opts.lsn_index_bytes);
     }
+    let evictions = core.index_stats().unwrap().page_evictions;
+    assert!(evictions > 0);
+    assert!(core.index_stats().unwrap().dirty_page_evictions > 0);
     disk.enospc_after_bytes(0).unwrap();
     assert!(core.read(1).is_err());
+    assert_eq!(core.index_stats().unwrap().page_evictions, evictions);
     disk.enospc_after_bytes(usize::MAX).unwrap();
     assert_eq!(core.read(1920).unwrap().unwrap().payload, expected[1919]);
     let reads_before = core.index_stats().unwrap().page_reloads;

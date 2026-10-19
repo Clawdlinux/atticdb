@@ -66,6 +66,8 @@ pub enum WindowQuery {
 pub struct Metrics {
     /// Highest readable tape LSN.
     pub durable_lsn: u64,
+    /// Tape-index resident memory, reloads and eviction counters.
+    pub tape_index: zerodb_tape::LsnIndexStats,
     /// Resident session-slot capacity.
     pub hot_page_bytes: usize,
     /// Retained published retry keys.
@@ -480,9 +482,11 @@ impl Engine {
 
     /// Returns published memory, checkpoint, and query counters.
     pub fn metrics(&self) -> Result<Metrics> {
+        let tape_index = self.tape.index_stats()?;
         let state = lock(&self.state)?;
         Ok(Metrics {
             durable_lsn: self.tape.durable_lsn(),
+            tape_index,
             hot_page_bytes: state.index.hot_bytes,
             dedup_entries: state.dedup.entries.len(),
             dedup_window_effective: state.dedup.effective_window(),

@@ -78,6 +78,8 @@ Page capacities are 16, 64, 256, 1024, then repeated 4096-slot pages.
 Arithmetic maps sequences to page slots. Slots store LSNs, not segment offsets.
 
 `EngineOptions` bounds resident slots, sessions, page metadata, tenants, and retry tables.
+`Metrics::tape_index` reports the tape's separate resident budget, reloads, evictions and dirty writebacks.
+G1 prints those counters after timing. The 1M-turn trace checks that eviction happened at the default 8 MiB budget.
 Defaults allow 256 MiB of hot slots and 10,000 tenants.
 Directory defaults allow 1M sessions and 8M pages, including cold pages.
 Retry tables retain at most 1M keys per tenant and 8M globally.
