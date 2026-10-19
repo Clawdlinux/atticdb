@@ -1,6 +1,6 @@
 //! One writer state machine with threaded and deterministic drivers.
 
-use crate::dir::{read_exact, DataDir, Handle};
+use crate::dir::{read_exact, DataDir, Handle, SegmentPrepareError};
 use crate::frame::{
     self, Digest, Footer, Frame, Header, Kind, HEADER_LEN, MAX_FRAME_SIZE, VERSION,
 };
@@ -579,21 +579,25 @@ impl<S: StateMachine> WriterCore<S> {
                             .is_none_or(|left| left < self.free_space_floor) =>
                     {
                         self.reads.read_only.store(true, Ordering::Release);
-                        for request in self.queue.drain(..) {
-                            let _ = request.reply.send(Err(rejected(Error::DiskFull)));
-                        }
+                        self.reject_group(Error::DiskFull);
                         return;
                     }
                     Ok(_) => self.reads.read_only.store(false, Ordering::Release),
                     Err(error) => {
-                        self.reject_storage_group(error);
+                        self.reject_group(error);
                         return;
                     }
                 }
                 if let Err(error) =
                     self.segments.prepare_group(self.queue.iter().map(|r| r.batch.size as u64))
                 {
-                    self.reject_storage_group(error);
+                    match error {
+                        SegmentPrepareError::NoSpace(_) => {
+                            self.reads.read_only.store(true, Ordering::Release);
+                            self.reject_group(Error::DiskFull);
+                        }
+                        SegmentPrepareError::Storage(error) => self.reject_storage_group(error),
+                    }
                     return;
                 }
                 // Activate the first placement before application preparation.
@@ -682,6 +686,10 @@ impl<S: StateMachine> WriterCore<S> {
             Error::Io(std::io::ErrorKind::StorageFull, _) => Error::DiskFull,
             error => error,
         };
+        self.reject_group(error);
+    }
+
+    fn reject_group(&mut self, error: Error) {
         for request in self.queue.drain(..) {
             let _ = request.reply.send(Err(rejected(error.clone())));
         }

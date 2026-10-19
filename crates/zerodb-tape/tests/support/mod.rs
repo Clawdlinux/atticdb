@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use zerodb_tape::Result;
-use zerodb_tape::{FileId, Io, LockGuard, SimDisk};
+use zerodb_tape::{Error, FileId, Io, LockGuard, SimDisk};
 
 #[derive(Debug)]
 pub struct ObservedIo {
@@ -19,6 +19,11 @@ pub struct ObservedIo {
     pub images: Mutex<Vec<SimDisk>>,
     pub handles: Mutex<BTreeMap<FileId, PathBuf>>,
     pub events: Mutex<Vec<String>>,
+    pub space_error: AtomicBool,
+    pub capacity_after_space_check: Mutex<Option<u64>>,
+    pub full_next_create: AtomicBool,
+    pub full_manifest_write: AtomicBool,
+    pub fail_directory_sync: AtomicBool,
 }
 
 impl ObservedIo {
@@ -34,6 +39,11 @@ impl ObservedIo {
             images: Mutex::new(Vec::new()),
             handles: Mutex::new(BTreeMap::new()),
             events: Mutex::new(Vec::new()),
+            space_error: AtomicBool::new(false),
+            capacity_after_space_check: Mutex::new(None),
+            full_next_create: AtomicBool::new(false),
+            full_manifest_write: AtomicBool::new(false),
+            fail_directory_sync: AtomicBool::new(false),
         }
     }
 
@@ -51,6 +61,12 @@ impl ObservedIo {
 
 impl Io for ObservedIo {
     fn create(&self, path: &Path) -> Result<FileId> {
+        if self.full_next_create.swap(false, Ordering::SeqCst) {
+            return Err(Error::Io(
+                std::io::ErrorKind::StorageFull,
+                "injected create failure".into(),
+            ));
+        }
         let file = self.disk.create(path)?;
         self.handles.lock().unwrap().insert(file, path.to_owned());
         self.event(format!("create {}", path.display()));
@@ -67,6 +83,14 @@ impl Io for ObservedIo {
         Ok(())
     }
     fn write_at(&self, file: FileId, off: u64, bytes: &[u8]) -> Result<()> {
+        if self.name(file).file_name().unwrap() == "MANIFEST.tmp"
+            && self.full_manifest_write.swap(false, Ordering::SeqCst)
+        {
+            return Err(Error::Io(
+                std::io::ErrorKind::StorageFull,
+                "injected manifest failure".into(),
+            ));
+        }
         if self.name(file).file_name().unwrap().to_string_lossy().starts_with("seg-") {
             self.segment_bytes.fetch_add(bytes.len() as u64, Ordering::SeqCst);
         }
@@ -91,7 +115,14 @@ impl Io for ObservedIo {
         result
     }
     fn available_bytes(&self, dir: &Path) -> Result<u64> {
-        self.disk.available_bytes(dir)
+        if self.space_error.swap(false, Ordering::SeqCst) {
+            return Err(Error::Io(std::io::ErrorKind::Other, "injected statvfs failure".into()));
+        }
+        let available = self.disk.available_bytes(dir)?;
+        if let Some(capacity) = self.capacity_after_space_check.lock().unwrap().take() {
+            self.disk.set_capacity(capacity)?;
+        }
+        Ok(available)
     }
     fn total_bytes(&self, dir: &Path) -> Result<u64> {
         self.disk.total_bytes(dir)
@@ -110,6 +141,9 @@ impl Io for ObservedIo {
         result
     }
     fn sync_dir(&self, dir: &Path) -> Result<()> {
+        if self.fail_directory_sync.swap(false, Ordering::SeqCst) {
+            self.disk.fail_next_sync()?;
+        }
         let result = self.disk.sync_dir(dir);
         self.event(format!("dir-sync {}", dir.display()));
         result

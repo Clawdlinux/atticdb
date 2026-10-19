@@ -1,6 +1,6 @@
 //! Inline segment preparation and whole-transaction placement.
 
-use crate::dir::{DataDir, Handle};
+use crate::dir::{DataDir, Handle, SegmentPrepareError};
 use crate::{Error, Result};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -55,7 +55,10 @@ impl SegmentWriter {
             .saturating_add(rolls.saturating_sub(self.ready.len() as u64).saturating_mul(self.size))
     }
 
-    pub(crate) fn prepare_group(&mut self, sizes: impl Iterator<Item = u64>) -> Result<()> {
+    pub(crate) fn prepare_group(
+        &mut self,
+        sizes: impl Iterator<Item = u64>,
+    ) -> std::result::Result<(), SegmentPrepareError> {
         let mut remaining = self.size - self.offset;
         let mut rolls = 0;
         for size in sizes {
@@ -66,7 +69,7 @@ impl SegmentWriter {
             remaining -= size;
         }
         while self.ready.len() < rolls {
-            let id = self.dir.prepare_next_segment(self.size)?;
+            let id = self.dir.prepare_segment(self.size)?;
             let file = Handle::open(self.dir.io.clone(), &self.dir.segment_path(id))?;
             self.files.insert(id, file);
             self.ready.push_back(id);

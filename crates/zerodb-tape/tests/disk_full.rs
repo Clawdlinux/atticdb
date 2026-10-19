@@ -1,5 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
+mod support;
+
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -24,8 +26,15 @@ impl StateMachine for Machine {
 }
 
 fn queue(core: &mut WriterCore<Machine>) -> std::sync::mpsc::Receiver<zerodb_tape::WriteResult> {
+    queue_size(core, 8)
+}
+
+fn queue_size(
+    core: &mut WriterCore<Machine>,
+    content_len: usize,
+) -> std::sync::mpsc::Receiver<zerodb_tape::WriteResult> {
     let batch = PreparedBatch::new(
-        vec![RecordInput { kind: Kind::Turn, tenant_id: 1, content: vec![7; 8] }],
+        vec![RecordInput { kind: Kind::Turn, tenant_id: 1, content: vec![7; content_len] }],
         Durability::Durable,
     )
     .unwrap();
@@ -277,4 +286,174 @@ fn simulated_capacity_charges_blocks_not_metadata_length_changes() {
     assert_eq!(disk.len(file).unwrap(), 513);
     disk.set_len(file, 512).unwrap();
     assert_eq!(disk.available_bytes(Path::new("db")).unwrap(), 512);
+}
+
+fn primed_writer() -> (Arc<support::ObservedIo>, WriterCore<Machine>, Arc<AtomicUsize>) {
+    let io = Arc::new(support::ObservedIo::new(8));
+    let prepares = Arc::new(AtomicUsize::new(0));
+    let opts =
+        TapeOptions { segment_size: 4096, free_space_floor: Some(100), ..TapeOptions::default() };
+    let (mut core, _) = WriterCore::open_with(
+        Machine(prepares.clone()),
+        io.clone(),
+        Arc::new(SimClock::default()),
+        "db",
+        opts,
+    )
+    .unwrap();
+    let first = queue_size(&mut core, 3800);
+    core.step();
+    first.recv().unwrap().unwrap();
+    (io, core, prepares)
+}
+
+fn manifest(disk: &SimDisk) -> Vec<u8> {
+    let file = disk.open(Path::new("db/MANIFEST")).unwrap();
+    let mut bytes = vec![0; disk.len(file).unwrap() as usize];
+    assert_eq!(disk.read_at(file, 0, &mut bytes).unwrap(), bytes.len());
+    disk.close(file).unwrap();
+    bytes
+}
+
+#[test]
+fn pre_roll_create_or_allocation_full_is_clean_and_leaves_no_orphan() {
+    for create_failure in [false, true] {
+        let (io, mut core, prepares) = primed_writer();
+        let before_manifest = manifest(&io.disk);
+        let before_files = io.disk.list(Path::new("db")).unwrap();
+        let before_bytes = io.segment_bytes.load(Ordering::SeqCst);
+        if create_failure {
+            io.full_next_create.store(true, Ordering::SeqCst);
+        } else {
+            let used = io.disk.total_bytes(Path::new("db")).unwrap()
+                - io.disk.available_bytes(Path::new("db")).unwrap();
+            *io.capacity_after_space_check.lock().unwrap() = Some(used + 4095);
+        }
+        let replies = [queue(&mut core), queue(&mut core)];
+        core.step();
+        for reply in replies {
+            let error = reply.recv().unwrap().unwrap_err();
+            assert!(matches!(error.kind, Error::DiskFull));
+            assert_eq!(error.outcome, Outcome::NotCommitted);
+        }
+        assert!(!core.is_poisoned());
+        assert!(core.read_only());
+        assert_eq!(core.durable_lsn(), 1);
+        assert_eq!(prepares.load(Ordering::SeqCst), 1);
+        assert_eq!(io.segment_bytes.load(Ordering::SeqCst), before_bytes);
+        assert_eq!(manifest(&io.disk), before_manifest);
+        assert_eq!(io.disk.list(Path::new("db")).unwrap(), before_files);
+        assert!(!io.disk.exists(Path::new("db/seg-0000000000000002.zdb")).unwrap());
+        io.disk.set_capacity(1 << 30).unwrap();
+        let retry = queue_size(&mut core, 3800);
+        core.step();
+        let Committed::Durable { txn, last_lsn, .. } = retry.recv().unwrap().unwrap();
+        assert_eq!((txn, last_lsn), (2, 2));
+        assert!(!core.read_only());
+        assert!(!core.is_poisoned());
+        assert!(io.disk.exists(Path::new("db/seg-0000000000000002.zdb")).unwrap());
+        assert!(!io.disk.exists(Path::new("db/seg-0000000000000003.zdb")).unwrap());
+    }
+}
+
+#[test]
+fn a_successful_pre_roll_stays_ready_after_later_allocation_full() {
+    let (io, mut core, prepares) = primed_writer();
+    let used = io.disk.total_bytes(Path::new("db")).unwrap()
+        - io.disk.available_bytes(Path::new("db")).unwrap();
+    *io.capacity_after_space_check.lock().unwrap() = Some(used + 8191);
+    let replies = [queue_size(&mut core, 3800), queue_size(&mut core, 3800)];
+    core.step();
+    for reply in replies {
+        let error = reply.recv().unwrap().unwrap_err();
+        assert!(matches!(error.kind, Error::DiskFull));
+        assert_eq!(error.outcome, Outcome::NotCommitted);
+    }
+    assert!(!core.is_poisoned());
+    assert!(core.read_only());
+    assert_eq!(prepares.load(Ordering::SeqCst), 1);
+    assert!(io.disk.exists(Path::new("db/seg-0000000000000002.zdb")).unwrap());
+    assert!(!io.disk.exists(Path::new("db/seg-0000000000000003.zdb")).unwrap());
+    io.disk.set_capacity(1 << 30).unwrap();
+    let retry = queue_size(&mut core, 3800);
+    core.step();
+    retry.recv().unwrap().unwrap();
+    assert!(!core.read_only());
+    assert!(!core.is_poisoned());
+    assert_eq!(core.durable_lsn(), 2);
+    assert!(!io.disk.exists(Path::new("db/seg-0000000000000003.zdb")).unwrap());
+}
+
+#[test]
+fn statvfs_error_rejects_without_poisoning_or_preparing() {
+    let (io, mut core, prepares) = primed_writer();
+    let before_manifest = manifest(&io.disk);
+    let before_bytes = io.segment_bytes.load(Ordering::SeqCst);
+    io.space_error.store(true, Ordering::SeqCst);
+    let replies = [queue(&mut core), queue(&mut core)];
+    core.step();
+    for reply in replies {
+        let error = reply.recv().unwrap().unwrap_err();
+        assert!(matches!(error.kind, Error::Io(std::io::ErrorKind::Other, _)));
+        assert_eq!(error.outcome, Outcome::NotCommitted);
+    }
+    assert!(!core.is_poisoned());
+    assert!(!core.read_only());
+    assert_eq!(prepares.load(Ordering::SeqCst), 1);
+    assert_eq!(core.durable_lsn(), 1);
+    assert_eq!(io.segment_bytes.load(Ordering::SeqCst), before_bytes);
+    assert_eq!(manifest(&io.disk), before_manifest);
+    let retry = queue(&mut core);
+    core.step();
+    retry.recv().unwrap().unwrap();
+    assert_eq!(core.durable_lsn(), 2);
+    assert!(!core.is_poisoned());
+}
+
+#[test]
+fn mixed_group_is_rejected_before_its_fitting_first_batch_is_prepared() {
+    let (io, mut core, prepares) = primed_writer();
+    let used = io.disk.total_bytes(Path::new("db")).unwrap()
+        - io.disk.available_bytes(Path::new("db")).unwrap();
+    // The first 120-byte batch fits. The second needs a 4096-byte segment.
+    io.disk.set_capacity(used + 100 + 240 + 4096 - 1).unwrap();
+    let before_manifest = manifest(&io.disk);
+    let before_bytes = io.segment_bytes.load(Ordering::SeqCst);
+    let before_events = io.events.lock().unwrap().clone();
+    let replies = [queue(&mut core), queue(&mut core)];
+    core.step();
+    for reply in replies {
+        let error = reply.recv().unwrap().unwrap_err();
+        assert!(matches!(error.kind, Error::DiskFull));
+        assert_eq!(error.outcome, Outcome::NotCommitted);
+    }
+    assert!(core.read_only());
+    assert!(!core.is_poisoned());
+    assert_eq!(prepares.load(Ordering::SeqCst), 1);
+    assert_eq!(core.durable_lsn(), 1);
+    assert_eq!(io.segment_bytes.load(Ordering::SeqCst), before_bytes);
+    assert_eq!(manifest(&io.disk), before_manifest);
+    assert_eq!(*io.events.lock().unwrap(), before_events);
+}
+
+#[test]
+fn ambiguous_pre_roll_sync_and_manifest_failures_still_poison() {
+    for fault in 0..3 {
+        let (io, mut core, prepares) = primed_writer();
+        match fault {
+            0 => io.fail_at.store(io.syncs.load(Ordering::SeqCst) + 1, Ordering::SeqCst),
+            1 => io.fail_directory_sync.store(true, Ordering::SeqCst),
+            _ => io.full_manifest_write.store(true, Ordering::SeqCst),
+        }
+        let replies = [queue(&mut core), queue(&mut core)];
+        core.step();
+        for reply in replies {
+            let error = reply.recv().unwrap().unwrap_err();
+            assert_eq!(error.outcome, Outcome::NotCommitted);
+            assert!(matches!(error.kind, Error::SyncFailed(_) | Error::DiskFull));
+        }
+        assert!(core.is_poisoned());
+        assert_eq!(prepares.load(Ordering::SeqCst), 1);
+        assert_eq!(core.durable_lsn(), 1);
+    }
 }

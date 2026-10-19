@@ -100,6 +100,34 @@ pub(crate) fn read_exact(
     Ok(())
 }
 
+#[derive(Debug)]
+pub(crate) enum SegmentPrepareError {
+    NoSpace(Error),
+    Storage(Error),
+}
+
+impl SegmentPrepareError {
+    fn before_manifest(error: Error) -> Self {
+        if matches!(error, Error::Io(std::io::ErrorKind::StorageFull, _)) {
+            Self::NoSpace(error)
+        } else {
+            Self::Storage(error)
+        }
+    }
+
+    fn into_error(self) -> Error {
+        match self {
+            Self::NoSpace(error) | Self::Storage(error) => error,
+        }
+    }
+}
+
+impl From<Error> for SegmentPrepareError {
+    fn from(error: Error) -> Self {
+        Self::Storage(error)
+    }
+}
+
 /// Metadata protected by the directory's exclusive lock.
 pub struct DataDir {
     pub(crate) io: Arc<dyn Io>,
@@ -263,6 +291,13 @@ impl DataDir {
 
     /// Preallocates a segment and persists its name before installing the manifest.
     pub fn prepare_next_segment(&mut self, size: u64) -> Result<u64> {
+        self.prepare_segment(size).map_err(SegmentPrepareError::into_error)
+    }
+
+    pub(crate) fn prepare_segment(
+        &mut self,
+        size: u64,
+    ) -> std::result::Result<u64, SegmentPrepareError> {
         self.check_segment_size(size)?;
         let mut id = self.segments.last().copied().unwrap_or(0);
         loop {
@@ -271,8 +306,14 @@ impl DataDir {
                 break;
             }
         }
-        let file = Handle::create(self.io.clone(), &self.segment_path(id))?;
-        self.io.allocate(file.id, size)?;
+        let path = self.segment_path(id);
+        let file =
+            Handle::create(self.io.clone(), &path).map_err(SegmentPrepareError::before_manifest)?;
+        if let Err(error) = self.io.allocate(file.id, size) {
+            drop(file);
+            self.io.remove(&path)?;
+            return Err(SegmentPrepareError::before_manifest(error));
+        }
         self.io.sync_data(file.id).map_err(|e| Error::SyncFailed(e.to_string()))?;
         self.io.sync_dir(&self.path).map_err(|e| Error::SyncFailed(e.to_string()))?;
         let mut segments = self.segments.clone();
