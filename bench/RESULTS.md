@@ -1119,3 +1119,31 @@ Validation completed before committing the fix:
 | `ZERODB_SIM_SEEDS=2000 cargo test -p zerodb-tape --release --features sim --test sim` | Passed. 18.37 seconds. |
 | `ZERODB_SIM_SEEDS=2000 cargo test -p zerodb-core --release --features sim --test engine_sim` | Passed. All 7 tests, 122.45 seconds. |
 | `cargo clippy -p zerodb-core --lib --no-default-features -- -D warnings` | Passed |
+
+## S1 index eviction A/B (macOS)
+
+Review round 2 asked whether dirty index-page writeback on the publish path explains the 1M spread.
+`G1_LSN_INDEX_MIB` overrides the tape index budget. The default stays 8 MiB.
+At 64 MiB the 1M trace never evicts, so the eviction assert only runs at the default budget.
+
+Order: 8 MiB, 64 MiB, 8 MiB, 64 MiB. Same build, same machine, back to back.
+
+```sh
+G1_LSN_INDEX_MIB=<8|64> G1_TURNS=1000000 G1_REPS=3 G1_HISTORY=1 G1_REPLAY_PROBE=0 G1_CHECKPOINT_MIB=64 ./bench/g1.sh
+```
+
+| Run | Budget | Evictions per rep | Engine/bare p99, per rep | Tape/bare p99, per rep | Bare p99 median, ms | Tape p99 median, ms | Engine p99 median, ms |
+|---|---|---:|---|---|---:|---:|---:|
+| 1 | 8 MiB | 3,876 tape, 3,882 engine | 1.666, 1.550, 1.045 | 1.298, 0.932, 1.032 | 6.464 | 7.838 | 10.018 |
+| 1 | 64 MiB | 0 | 1.513, 1.667, 0.957 | 1.331, 1.406, 0.961 | 7.982 | 9.974 | 10.798 |
+| 2 | 8 MiB | 3,876 tape, 3,882 engine | 1.338, 0.866, 1.071 | 1.170, 0.873, 1.040 | 9.385 | 9.120 | 9.042 |
+| 2 | 64 MiB | 0 | 0.935, 1.553, 1.016 | 0.864, 1.783, 1.006 | 8.460 | 9.848 | 9.535 |
+
+Findings:
+- No eviction does not help. Tape p99 medians are higher at 64 MiB in both runs.
+- Repetitions above 1.5x happen with and without eviction. The worst single tape ratio (1.783) had zero evictions.
+- Tape throughput overlaps across budgets (12.2K to 23.1K turns/s at 8 MiB, 12.2K to 20.9K at 64 MiB).
+- Bare p99 alone moves between 6.0 and 10.4 ms on this machine.
+
+Decision: index writeback stays on the publish path. The spread is macOS `F_FULLFSYNC` variance on this machine.
+The 1.5x G1 gate is not judged on macOS. It needs a Linux NVMe run before any G1 claim.

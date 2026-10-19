@@ -77,7 +77,7 @@ fn index_report(label: &str, stats: zerodb_tape::LsnIndexStats, turns: usize) {
         stats.dirty_page_evictions, stats.page_reloads,
     );
     assert!(stats.resident_bytes <= stats.budget_bytes);
-    if turns >= 1_000_000 {
+    if turns >= 1_000_000 && env_number("G1_LSN_INDEX_MIB", 0) == 0 {
         assert!(stats.page_evictions > 0, "1M G1 must exercise index eviction");
     }
 }
@@ -212,8 +212,7 @@ fn bare(iterations: usize, batch: usize, n: usize) -> Stats {
 fn tape(iterations: usize, batch: usize, n: usize) -> Stats {
     let dir = BenchDir::new();
     let (tape, _) =
-        Tape::open(Arc::new(StdIo::new()), Arc::new(SystemClock), &dir.0, TapeOptions::default())
-            .unwrap();
+        Tape::open(Arc::new(StdIo::new()), Arc::new(SystemClock), &dir.0, tape_options()).unwrap();
     let templates = (0..SIZES.len()).map(|i| records(&scope(0, 0), i, batch)).collect::<Vec<_>>();
     let (elapsed, samples, _, _) = writers(
         iterations,
@@ -237,7 +236,7 @@ fn tape(iterations: usize, batch: usize, n: usize) -> Stats {
 
 fn engine(iterations: usize, batch: usize, n: usize, checkpoint_bytes: u64) -> Stats {
     let dir = BenchDir::new();
-    let opts = EngineOptions { checkpoint_bytes, ..EngineOptions::default() };
+    let opts = EngineOptions { checkpoint_bytes, tape: tape_options(), ..EngineOptions::default() };
     let engine = Engine::open(&dir.0, opts.clone()).unwrap();
     // Register every tenant and session before timing, so timed bytes match the bare trace.
     std::thread::scope(|threads| {
@@ -359,6 +358,17 @@ fn history_windows() {
             );
             latency(&format!("window/{name}/{target}"), &mut samples);
         }
+    }
+}
+
+/// `G1_LSN_INDEX_MIB` overrides the tape LSN index budget for eviction A/B runs.
+fn tape_options() -> TapeOptions {
+    let default = TapeOptions::default();
+    let mib = env_number("G1_LSN_INDEX_MIB", 0);
+    if mib == 0 {
+        default
+    } else {
+        TapeOptions { lsn_index_bytes: mib * 1024 * 1024, ..default }
     }
 }
 
