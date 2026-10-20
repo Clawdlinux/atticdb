@@ -36,6 +36,7 @@ pub(crate) struct LsnIndex {
     io: Arc<dyn Io>,
     offsets: Handle,
     routes: Handle,
+    reserved: [u64; 2],
     pages: HashMap<PageKey, Page>,
     fifo: VecDeque<PageKey>,
     budget: usize,
@@ -71,10 +72,11 @@ impl LsnIndex {
         };
         let offsets = create("LSN-OFFSETS")?;
         let routes = create("LSN-ROUTES")?;
-        Ok(Self {
+        let mut index = Self {
             io,
             offsets,
             routes,
+            reserved: [0; 2],
             pages: HashMap::new(),
             fifo: VecDeque::new(),
             budget,
@@ -83,7 +85,41 @@ impl LsnIndex {
             reloads: 0,
             evictions: 0,
             dirty_evictions: 0,
-        })
+        };
+        // Reserve initial pages at open, like the active segment.
+        index.reserve(1)?;
+        Ok(index)
+    }
+
+    fn backing_sizes(lsn: u64) -> Result<[u64; 2]> {
+        if lsn == 0 {
+            return Ok([0; 2]);
+        }
+        let size = |width| {
+            let (page, _) = Self::address(lsn, width)?;
+            page.checked_add(1)
+                .and_then(|pages| pages.checked_mul(PAGE_BYTES as u64))
+                .ok_or(Error::Rejected("lsn_index"))
+        };
+        Ok([size(8)?, size(16)?])
+    }
+
+    pub(crate) fn reservation_bytes(&self, lsn: u64) -> Result<u64> {
+        let sizes = Self::backing_sizes(lsn)?;
+        Ok(sizes[0]
+            .saturating_sub(self.reserved[0])
+            .saturating_add(sizes[1].saturating_sub(self.reserved[1])))
+    }
+
+    pub(crate) fn reserve(&mut self, lsn: u64) -> Result<()> {
+        for (slot, size) in Self::backing_sizes(lsn)?.into_iter().enumerate() {
+            if size > self.reserved[slot] {
+                let file = if slot == 0 { &self.offsets } else { &self.routes };
+                self.io.allocate(file.id, size)?;
+                self.reserved[slot] = size;
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn stats(&self) -> LsnIndexStats {
@@ -119,7 +155,9 @@ impl LsnIndex {
             let mut page = Page { bytes: Box::new([0; PAGE_BYTES]), dirty: false };
             let file = if key.0 { &self.routes } else { &self.offsets };
             let offset = key.1 * PAGE_BYTES as u64;
-            if offset < self.io.len(file.id)? {
+            // Newly reserved pages are zeroed. Reload only pages containing earlier records.
+            let width = if key.0 { 16 } else { 8 };
+            if self.len > 0 && key.1 <= Self::address(self.len, width)?.0 {
                 read_exact(self.io.as_ref(), file.id, offset, page.bytes.as_mut_slice())?;
                 self.reloads += 1;
             }
@@ -145,6 +183,8 @@ impl LsnIndex {
             }
             _ => lsn,
         };
+        // Recovery rebuilds these files. Live groups reserve before preparation.
+        self.reserve(lsn)?;
         let (page, at) = Self::address(lsn, 16)?;
         let route = self.page((true, page))?;
         route.bytes[at..at + 8].copy_from_slice(&segment.to_le_bytes());

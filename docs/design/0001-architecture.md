@@ -191,8 +191,13 @@ An unreadable frame can hide its LSN. The reported range includes every decodabl
 ### Disk space
 
 The free-space floor defaults to `min(1 GiB, 5% of total volume bytes)`.
-Before preparing each group, the writer budgets encoded bytes and new segment reservations against available space.
+Before preparing each group, the writer budgets encoded bytes, segment reservations and index backing growth against available space.
 A clean floor hit returns `DiskFull` with `NotCommitted` and sets read-only. Reads keep serving acknowledged data.
+The writer reserves segment and LSN-index backing space before `prepare`, including both in the floor budget.
+`LSN-OFFSETS` and `LSN-ROUTES` grow in whole pages through the highest LSN the queued group can assign.
+Dirty-page eviction during cold reads writes only within reserved backing space, preserving the bounded cache.
+Recovery recreates both derived index files and reserves pages while rebuilding them. The on-disk format is unchanged.
+Sparse fallback relies on the floor; APFS and btrfs retain the same allocation caveat as segments.
 `Engine::health()` reports this observed state without blocking or querying space.
 Only a later write's passing space check clears read-only.
 Data-write, sync, and manifest failures still poison the writer. Poisoning requires reopening.
@@ -299,6 +304,7 @@ Allowed crates, each with a reason:
 - `proptest`, `criterion`: tests and benches.
 
 S2 replaces the original no-libc rule with rustix for free-space queries and preallocation. D71 records the choice.
+Segments and LSN-index backing files are allocated on the write path before application preparation.
 Linux and macOS reserve blocks before setting the file length. Unsupported operations fall back to sparse `set_len`.
 Other platforms also use sparse `set_len`. Preallocation isn't a guarantee on APFS or btrfs.
 Rust std `sync_data` already issues `F_FULLFSYNC` on macOS.

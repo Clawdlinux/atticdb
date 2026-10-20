@@ -14,6 +14,10 @@ fn space_faults_set_group_outcome() {
     #[derive(Clone, Copy)]
     enum Fault {
         Floor,
+        IndexFloor,
+        IndexOffsets,
+        IndexRoutes,
+        IndexStat,
         DefaultFloor(u64),
         Create,
         Allocate,
@@ -26,7 +30,11 @@ fn space_faults_set_group_outcome() {
     use Fault::*;
     for (case, fault, expect_read_only, expect_poisoned) in [
         ("whole group floor", Floor, true, false),
-        ("five percent floor", DefaultFloor(10_000), true, false),
+        ("five percent floor", DefaultFloor(100_000), true, false),
+        ("index growth floor", IndexFloor, true, false),
+        ("index offsets allocation full", IndexOffsets, true, false),
+        ("index routes allocation full", IndexRoutes, true, false),
+        ("index growth space query error", IndexStat, true, false),
         ("capped default floor", DefaultFloor(1 << 40), true, false),
         ("create full", Create, true, false),
         ("allocate full", Allocate, true, false),
@@ -39,24 +47,33 @@ fn space_faults_set_group_outcome() {
         eprintln!("case: {case}");
         let capacity = if let DefaultFloor(capacity) = fault { capacity } else { 1 << 30 };
         let floor = if matches!(fault, DefaultFloor(_)) { None } else { Some(100) };
-        let (io, mut core, prepares) = primed_writer(floor, capacity);
+        let indexed = matches!(fault, IndexFloor | IndexOffsets | IndexRoutes | IndexStat);
+        let boundary = if indexed { 512 } else { 1 };
+        let (io, mut core, prepares) = primed_writer(floor, capacity, boundary);
+        let before_prepares = prepares.load(Ordering::SeqCst);
         let before_manifest = manifest(&io.disk);
         let before_files = io.disk.list(Path::new("db")).unwrap();
+        let next_segment = before_files
+            .iter()
+            .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with("seg-"))
+            .count() as u64
+            + 1;
         let before_events = io.events.lock().unwrap().clone();
         let before_bytes = io.segment_bytes.load(Ordering::SeqCst);
         let used = capacity - io.disk.available_bytes(Path::new("db")).unwrap();
-        let reserve = 240 + 4096;
+        let reserve = 240 + 4096 + if indexed { 8192 } else { 0 };
         let floor_bytes = floor.unwrap_or((capacity / 20).min(1 << 30));
         match fault {
-            Floor | DefaultFloor(_) => {
+            Floor | IndexFloor | DefaultFloor(_) => {
                 io.disk.set_capacity(used + floor_bytes + reserve - 1).unwrap()
             }
             Create => io.full_next_create.store(true, Ordering::SeqCst),
-            Allocate | LaterAllocate => {
-                *io.capacity_after_space_check.lock().unwrap() =
-                    Some(used + if matches!(fault, LaterAllocate) { 8191 } else { 4095 })
+            Allocate | LaterAllocate | IndexOffsets | IndexRoutes => {
+                *io.capacity_after_space_check.lock().unwrap() = Some(
+                    used + if matches!(fault, LaterAllocate | IndexRoutes) { 8191 } else { 4095 },
+                )
             }
-            Stat => io.space_error.store(true, Ordering::SeqCst),
+            Stat | IndexStat => io.space_error.store(true, Ordering::SeqCst),
             Sync => io.fail_at.store(io.syncs.load(Ordering::SeqCst) + 1, Ordering::SeqCst),
             DirSync => io.fail_directory_sync.store(true, Ordering::SeqCst),
             Manifest => io.full_manifest_write.store(true, Ordering::SeqCst),
@@ -72,7 +89,8 @@ fn space_faults_set_group_outcome() {
             assert_eq!(error.outcome, Outcome::NotCommitted, "{case}");
             assert!(
                 match fault {
-                    Stat => matches!(error.kind, Error::Io(std::io::ErrorKind::Other, _)),
+                    Stat | IndexStat =>
+                        matches!(error.kind, Error::Io(std::io::ErrorKind::Other, _)),
                     Sync | DirSync => matches!(error.kind, Error::SyncFailed(_)),
                     _ => matches!(error.kind, Error::DiskFull),
                 },
@@ -81,8 +99,8 @@ fn space_faults_set_group_outcome() {
         }
         assert_eq!(core.read_only(), expect_read_only, "{case}");
         assert_eq!(core.is_poisoned(), expect_poisoned, "{case}");
-        assert_eq!(prepares.load(Ordering::SeqCst), 1, "{case}");
-        assert_eq!(core.durable_lsn(), 1, "{case}");
+        assert_eq!(prepares.load(Ordering::SeqCst), before_prepares, "{case}");
+        assert_eq!(core.durable_lsn(), boundary, "{case}");
         assert!(core.read(1).unwrap().is_some(), "{case}");
         assert_eq!(io.segment_bytes.load(Ordering::SeqCst), before_bytes, "{case}");
         if matches!(fault, LaterAllocate) {
@@ -91,15 +109,20 @@ fn space_faults_set_group_outcome() {
             assert_eq!(manifest(&io.disk), before_manifest, "{case}");
         }
         assert_eq!(
-            io.disk.exists(Path::new("db/seg-0000000000000002.zdb")).unwrap(),
+            io.disk.exists(&Path::new("db").join(format!("seg-{next_segment:016}.zdb"))).unwrap(),
             matches!(fault, LaterAllocate | Sync | DirSync | Manifest),
             "{case}"
         );
-        assert!(!io.disk.exists(Path::new("db/seg-0000000000000003.zdb")).unwrap(), "{case}");
+        assert!(
+            !io.disk
+                .exists(&Path::new("db").join(format!("seg-{:016}.zdb", next_segment + 1)))
+                .unwrap(),
+            "{case}"
+        );
         if !matches!(fault, LaterAllocate | Sync | DirSync | Manifest) {
             assert_eq!(io.disk.list(Path::new("db")).unwrap(), before_files, "{case}");
         }
-        if matches!(fault, Floor | DefaultFloor(_) | Stat) {
+        if matches!(fault, Floor | IndexFloor | DefaultFloor(_) | Stat | IndexStat) {
             assert_eq!(*io.events.lock().unwrap(), before_events, "{case}");
         }
         let retry_size = if matches!(fault, DefaultFloor(_)) {
@@ -137,9 +160,9 @@ fn space_faults_set_group_outcome() {
         );
         core.step();
         let Committed::Durable { txn, last_lsn, .. } = retry.recv().unwrap().unwrap();
-        assert_eq!((txn, last_lsn), (2, 2), "{case}");
+        assert_eq!((txn, last_lsn), (boundary + 1, boundary + 1), "{case}");
         assert!(!core.read_only() && !core.is_poisoned(), "{case}");
-        assert_eq!(prepares.load(Ordering::SeqCst), 2, "{case}");
+        assert_eq!(prepares.load(Ordering::SeqCst), before_prepares + 1, "{case}");
         drop(core);
         let image = Arc::new(io.disk.crash().unwrap());
         image.set_capacity(1 << 42).unwrap();
@@ -153,8 +176,8 @@ fn space_faults_set_group_outcome() {
             opts,
         )
         .unwrap();
-        assert_eq!(report.durable_lsn, 2, "{case}");
-        for lsn in 1..=2 {
+        assert_eq!(report.durable_lsn, boundary + 1, "{case}");
+        for lsn in 1..=boundary + 1 {
             assert!(core.read(lsn).unwrap().is_some(), "{case}, lsn={lsn}");
         }
     }
@@ -536,7 +559,11 @@ fn rewrites_cannot_exceed_the_submitted_space_budget() {
         }
         drop(core);
         let (reopened, report) = WriterCore::open(
-            Arc::new(io.disk.crash().unwrap()),
+            Arc::new(ObservedIo {
+                disk: io.disk.crash().unwrap(),
+                sparse_allocation: sparse,
+                ..ObservedIo::new(6)
+            }),
             Arc::new(SimClock::default()),
             "db",
             opts,

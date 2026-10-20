@@ -347,6 +347,7 @@ pub(crate) fn superblock(io: &ObservedIo, size: u64) -> u64 {
 pub(crate) fn primed_writer(
     floor: Option<u64>,
     capacity: u64,
+    lsns: u64,
 ) -> (Arc<ObservedIo>, WriterCore<Machine>, Arc<AtomicUsize>) {
     let io = Arc::new(ObservedIo::new(8));
     io.disk.set_capacity(capacity).unwrap();
@@ -365,6 +366,11 @@ pub(crate) fn primed_writer(
     let first = submit(&mut core, vec![record(Kind::Turn, 1, vec![7; 3800])], Durability::Durable);
     core.step();
     first.recv().unwrap().unwrap();
+    while core.durable_lsn() < lsns {
+        let reply = submit(&mut core, vec![record(Kind::Turn, 1, [7; 8])], Durability::Durable);
+        core.step();
+        reply.recv().unwrap().unwrap();
+    }
     io.disk.set_capacity(capacity).unwrap();
     (io, core, prepares)
 }

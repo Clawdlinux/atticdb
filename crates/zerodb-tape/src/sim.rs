@@ -846,6 +846,25 @@ fn capacity_faults(
     }
     assert!(!core.is_poisoned(), "a floor hit must not poison");
     assert!(core.read_only(), "a floor hit must set read-only");
+    let (oldest, expected) = oracle.durable.first_key_value().unwrap();
+    let capacity = io.disk.total_bytes(Path::new("db")).unwrap();
+    let free = io.disk.available_bytes(Path::new("db")).unwrap();
+    io.disk.set_capacity(capacity - free).unwrap();
+    let reloads = core.index_stats().unwrap().page_reloads;
+    assert_eq!(
+        core.read(*oldest)
+            .unwrap_or_else(|error| panic!("read-only cold read must not allocate: {error:?}"))
+            .unwrap()
+            .payload,
+        *expected,
+        "acknowledged record must remain readable with no free space"
+    );
+    if boundary > 256 && opts.lsn_index_bytes == 12 * 1024 {
+        assert!(core.index_stats().unwrap().page_reloads > reloads, "sampled a cold index page");
+    }
+    assert_eq!(io.disk.available_bytes(Path::new("db")).unwrap(), 0);
+    assert!(core.read_only(), "cold reads must not clear read-only");
+    io.disk.set_capacity(capacity).unwrap();
     assert_eq!(core.durable_lsn(), boundary);
     assert_eq!(core.read(boundary).unwrap().map_or(0, |r| r.header.txn), last_txn);
     assert!(core.scan(boundary + 1).next().is_none(), "a rejected group published records");

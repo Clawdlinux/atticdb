@@ -100,9 +100,14 @@ Reads retain the published view.
 At open, the free-space floor defaults to `min(1 GiB, 5% of total volume bytes)`.
 Set `TapeOptions::free_space_floor` to `Some(bytes)` to override it.
 The writer checks space once per group, before application preparation.
-It budgets the group's encoded bytes and any new segment reservations before comparing the remainder with the floor.
+It budgets encoded bytes, new segments, and LSN-index backing growth before comparing the remainder with the floor.
 A floor hit rejects the whole group with `DiskFull` and `NotCommitted`, without preparing application state.
-Required segments are preallocated before application preparation too.
+Required segments and LSN-index backing pages are reserved with `Io::allocate` before application preparation.
+The highest possible group LSN bounds growth of `LSN-OFFSETS` and `LSN-ROUTES`, rounded to 4096-byte pages.
+Initial index pages are reserved at open, like the initial segment.
+Preallocated index backing lets cold reads evict dirty pages without new blocks or an increased cache budget.
+Recovery deletes and rebuilds these derived files, reserving pages again as it indexes retained records.
+Sparse fallback relies on the floor; APFS and btrfs retain the same allocation caveat as segments.
 Clean full-disk failures during segment creation or allocation return the same error and outcome.
 These rejections set `read_only()` without poisoning. A later write's passing space check clears it.
 Idle time and health probes never clear read-only, even after space returns.

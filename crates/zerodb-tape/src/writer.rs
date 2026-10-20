@@ -591,8 +591,25 @@ impl<S: StateMachine> WriterCore<S> {
                 }
             });
             if !self.queue.is_empty() {
-                let needed =
-                    self.segments.group_space(self.queue.iter().map(|r| r.batch.size as u64));
+                let Some(highest_lsn) = self.queue.iter().try_fold(self.durable_lsn(), |lsn, r| {
+                    lsn.checked_add(r.batch.records.len() as u64)
+                }) else {
+                    self.reject_group(Error::Rejected("lsn_index"));
+                    return;
+                };
+                let index_space =
+                    lock(&self.reads.index).and_then(|index| index.reservation_bytes(highest_lsn));
+                let index_space = match index_space {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        self.reject_storage_group(error);
+                        return;
+                    }
+                };
+                let needed = self
+                    .segments
+                    .group_space(self.queue.iter().map(|r| r.batch.size as u64))
+                    .saturating_add(index_space);
                 let available = self.reads.io.available_bytes(&self.reads.path);
                 match available {
                     Ok(free)
@@ -610,6 +627,20 @@ impl<S: StateMachine> WriterCore<S> {
                         self.reject_group(error);
                         return;
                     }
+                }
+                let reserved =
+                    lock(&self.reads.index).and_then(|mut index| index.reserve(highest_lsn));
+                if let Err(error) = reserved {
+                    if matches!(
+                        error,
+                        Error::DiskFull | Error::Io(std::io::ErrorKind::StorageFull, _)
+                    ) {
+                        self.reads.read_only.store(true, Ordering::Release);
+                        self.reject_group(Error::DiskFull);
+                    } else {
+                        self.reject_storage_group(error);
+                    }
+                    return;
                 }
                 if let Err(error) =
                     self.segments.prepare_group(self.queue.iter().map(|r| r.batch.size as u64))

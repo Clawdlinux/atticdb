@@ -621,6 +621,33 @@ fn capacity_faults(
         assert_eq!(error.outcome, Outcome::NotCommitted);
     }
     assert_eq!(engine.health(), Health::ReadOnly, "a clean floor hit must not poison");
+    let (scope, oldest) = oracle
+        .history
+        .iter()
+        .enumerate()
+        .filter_map(|(scope, turns)| turns.first().map(|turn| (scope, turn)))
+        .min_by_key(|(_, turn)| turn.lsn)
+        .unwrap();
+    let capacity = io.disk.total_bytes(Path::new("db")).unwrap();
+    let free = io.disk.available_bytes(Path::new("db")).unwrap();
+    io.disk.set_capacity(capacity - free).unwrap();
+    let reloads = engine.metrics().unwrap().tape_index.page_reloads;
+    assert_eq!(
+        engine
+            .window(&oracle.scopes[scope], WindowQuery::Since { seq: oldest.seq, limit: 1 })
+            .unwrap_or_else(|error| panic!("read-only cold read must not allocate: {error:?}")),
+        vec![oldest.clone()],
+        "acknowledged turn must remain readable with no free space"
+    );
+    if opts.tape.lsn_index_bytes == 4224 {
+        assert!(
+            engine.metrics().unwrap().tape_index.page_reloads > reloads,
+            "sampled a cold index page"
+        );
+    }
+    assert_eq!(io.disk.available_bytes(Path::new("db")).unwrap(), 0);
+    assert_eq!(engine.health(), Health::ReadOnly, "cold reads must not clear read-only");
+    io.disk.set_capacity(capacity).unwrap();
     if let Some(index) =
         oracle.batches.iter().position(|batch| batch.receipt.is_some() && batch.key.is_some())
     {
@@ -721,6 +748,7 @@ fn grouped_seed(seed: u64, plan: &CapacityPlan) -> Vec<Vec<Turn>> {
             segment_size: 64 * 1024,
             inline_sim: true,
             free_space_floor: Some(plan.floor),
+            lsn_index_bytes: if seed.is_multiple_of(3) { 4224 } else { 8 * 1024 * 1024 },
             ..TapeOptions::default()
         },
         checkpoint_bytes: 8192,

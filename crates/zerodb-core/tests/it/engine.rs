@@ -250,11 +250,13 @@ fn write_outages_report_health_preserve_reads_and_retry_keys() {
     #[derive(Clone, Copy)]
     enum Fault {
         Floor,
+        ColdFloor,
         SpaceQuery,
         Sync,
     }
     for (case, fault, health) in [
         ("disk floor", Fault::Floor, Health::ReadOnly),
+        ("cold reads with no free space", Fault::ColdFloor, Health::ReadOnly),
         ("space query outage", Fault::SpaceQuery, Health::ReadOnly),
         ("ambiguous sync", Fault::Sync, Health::Poisoned),
     ] {
@@ -264,18 +266,23 @@ fn write_outages_report_health_preserve_reads_and_retry_keys() {
             let io = Arc::new(support::ProbeIo::new(seed));
             let mut opts = options();
             opts.tape.free_space_floor = Some(4096);
+            let history = if matches!(fault, Fault::ColdFloor) { 512 } else { 1 };
+            if matches!(fault, Fault::ColdFloor) {
+                opts.tape.lsn_index_bytes = 4224;
+            }
             let mut engine =
                 Engine::open_with(io.clone(), Arc::new(SimClock::default()), "db", opts.clone())
                     .unwrap();
             assert_eq!(engine.health(), Health::Ok, "{case}");
             let s = scope("s");
-            let original = engine.append(&s, vec![turn(1)], Some("original")).unwrap();
+            let original = engine.append(&s, vec![turn(1); history], Some("original")).unwrap();
             let before = engine.metrics().unwrap();
             match fault {
-                Fault::Floor => {
+                Fault::Floor | Fault::ColdFloor => {
                     let capacity = io.disk.total_bytes(std::path::Path::new("db")).unwrap();
                     let free = io.disk.available_bytes(std::path::Path::new("db")).unwrap();
-                    io.disk.set_capacity(capacity - free + 4095).unwrap();
+                    let remaining = if matches!(fault, Fault::ColdFloor) { 0 } else { 4095 };
+                    io.disk.set_capacity(capacity - free + remaining).unwrap();
                 }
                 Fault::SpaceQuery => io.space_error.store(true, Ordering::SeqCst),
                 Fault::Sync => io.disk.fail_next_sync().unwrap(),
@@ -290,7 +297,7 @@ fn write_outages_report_health_preserve_reads_and_retry_keys() {
                 assert_eq!(error.outcome, expected, "{case}, attempt={attempt}");
                 assert!(
                     match fault {
-                        Fault::Floor =>
+                        Fault::Floor | Fault::ColdFloor =>
                             matches!(error.kind, ErrorKind::Storage(zerodb_tape::Error::DiskFull)),
                         Fault::SpaceQuery => matches!(
                             error.kind,
@@ -310,7 +317,7 @@ fn write_outages_report_health_preserve_reads_and_retry_keys() {
                 assert_eq!(engine.health(), health, "{case}");
                 if !matches!(fault, Fault::Sync) {
                     assert_eq!(
-                        engine.append(&s, vec![turn(1)], Some("original")).unwrap(),
+                        engine.append(&s, vec![turn(1); history], Some("original")).unwrap(),
                         original,
                         "{case}: committed retries keep their durable receipt"
                     );
@@ -319,10 +326,38 @@ fn write_outages_report_health_preserve_reads_and_retry_keys() {
                     assert_eq!(conflict.outcome, Outcome::NotCommitted, "{case}");
                     assert_eq!(engine.health(), health, "{case}: retries do not recheck space");
                 }
+                if matches!(fault, Fault::ColdFloor) {
+                    assert!(
+                        before.tape_index.dirty_page_evictions > 0,
+                        "{case}: multiple dirty pages"
+                    );
+                    let cold = engine.window(&s, WindowQuery::Since { seq: 1, limit: 3 }).unwrap();
+                    assert_eq!(
+                        cold.iter().map(|turn| turn.seq).collect::<Vec<_>>(),
+                        vec![1, 2, 3],
+                        "{case}"
+                    );
+                    assert!(cold.iter().all(|value| value.content == turn(1).content), "{case}");
+                    assert!(
+                        engine.metrics().unwrap().tape_index.page_reloads
+                            > before.tape_index.page_reloads,
+                        "{case}: cold index read"
+                    );
+                    assert_eq!(
+                        io.disk.available_bytes(std::path::Path::new("db")).unwrap(),
+                        0,
+                        "{case}"
+                    );
+                    assert_eq!(
+                        engine.health(),
+                        Health::ReadOnly,
+                        "{case}: cold read kept read-only"
+                    );
+                }
                 let window = engine.window(&s, WindowQuery::Last(10)).unwrap();
-                assert_eq!(window.len(), 1, "{case}");
-                assert_eq!(window[0].content, turn(1).content, "{case}");
-                assert_eq!(window[0].lsn, original.last_lsn, "{case}");
+                assert_eq!(window.len(), history.min(10), "{case}");
+                assert!(window.iter().all(|value| value.content == turn(1).content), "{case}");
+                assert_eq!(window.last().unwrap().lsn, original.last_lsn, "{case}");
                 let after = engine.metrics().unwrap();
                 assert_eq!(after.durable_lsn, before.durable_lsn, "{case}");
                 assert_eq!(after.dedup_entries, before.dedup_entries, "{case}");
@@ -338,7 +373,7 @@ fn write_outages_report_health_preserve_reads_and_retry_keys() {
             }
             let retried = engine.append(&s, vec![turn(2)], Some("retry")).unwrap();
             assert_eq!(engine.health(), Health::Ok, "{case}");
-            assert_eq!(retried.seqs, vec![2], "{case}");
+            assert_eq!(retried.seqs, vec![history as u64 + 1], "{case}");
             assert_eq!(retried.txn, original.txn + 1, "{case}");
             assert_eq!(retried.first_lsn, original.last_lsn + 1, "{case}");
             assert_eq!(retried.last_lsn, retried.first_lsn, "{case}");
@@ -348,13 +383,17 @@ fn write_outages_report_health_preserve_reads_and_retry_keys() {
             let window = engine.window(&s, WindowQuery::Last(10)).unwrap();
             assert_eq!(
                 window.iter().map(|turn| turn.seq).collect::<Vec<_>>(),
-                vec![1, 2],
+                (history as u64 + 1 - history.min(9) as u64..=history as u64 + 1)
+                    .collect::<Vec<_>>(),
                 "{case}"
             );
-            assert_eq!(window[0].content, turn(1).content, "{case}");
-            assert_eq!(window[1].content, turn(2).content, "{case}");
+            assert!(
+                window[..window.len() - 1].iter().all(|value| value.content == turn(1).content),
+                "{case}"
+            );
+            assert_eq!(window.last().unwrap().content, turn(2).content, "{case}");
             assert_eq!(
-                engine.append(&s, vec![turn(1)], Some("original")).unwrap(),
+                engine.append(&s, vec![turn(1); history], Some("original")).unwrap(),
                 original,
                 "{case}"
             );
@@ -363,7 +402,7 @@ fn write_outages_report_health_preserve_reads_and_retry_keys() {
                 let engine = open(Arc::new(io.disk.crash().unwrap()), opts);
                 assert_eq!(engine.health(), Health::Ok, "{case}");
                 assert_eq!(
-                    engine.append(&s, vec![turn(1)], Some("original")).unwrap(),
+                    engine.append(&s, vec![turn(1); history], Some("original")).unwrap(),
                     original,
                     "{case}"
                 );
