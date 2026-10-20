@@ -3,7 +3,7 @@
 Latest S2 macOS 192k repeat: Engine/bare p99 median **1.662945x**, Tape/bare **1.211374x**.
 Absolute p99 increases fit S1's repetition spread after the required unchanged repeat.
 The Engine/bare increase exceeds S1's unchanged-repeat ratio spread. Keep that warning alongside the noise verdict.
-See [S2 disk-full overhead](#s2-disk-full-overhead-macos-192k) for both runs and the matched S1 baseline.
+See [S2 disk-full overhead](#s2-disk-full-overhead-macos-192k) for historical runs and the corrected preallocation baseline.
 
 Latest S1 macOS 1M run: Engine/bare p99 **1.189216x** [1.085449x, 1.675773x].
 Tape/bare median is **1.021696x** [0.996803x, 1.310008x].
@@ -1156,7 +1156,7 @@ The 1.5x G1 gate is not judged on macOS. It needs a Linux NVMe run before any G1
 
 # S2 disk-full overhead (macOS, 192k)
 
-Measured on 2026-10-20 at `4ec356e4ea07af05100dfeb73343d78aba552487`.
+Historical measurements before the baseline fix ran on 2026-10-20 at `4ec356e4ea07af05100dfeb73343d78aba552487`.
 This commit includes S2 T1 through T4. T5 changes documentation only.
 Machine: Apple M4, arm64, macOS 27.0.1 build 26A434, internal APFS volume.
 Compiler: `rustc 1.99.1 (58cf8f9c3 2026-10-13)`.
@@ -1181,7 +1181,42 @@ All 1024 session tails verified after every Engine reopen in both executions.
 Each Engine repetition completed 8 checkpoints and 8 periodic superblock installs.
 No run was discarded. Nothing was tuned.
 
-## S1 versus S2
+## After baseline fix
+
+Measured on 2026-10-20 after `ea30942`, with the bare allocator change in this commit.
+Bare now calls `StdIo::allocate`, matching Tape and Engine, including unsupported-filesystem fallback.
+Every segment uses the same allocation implementation. No benchmark parameters changed.
+Machine and compiler match the historical run above. Available space was about 29 GiB.
+Scratch files stayed under `target/review-work` through `TMPDIR`.
+No tests or simulations from this task overlapped this timed execution.
+
+The exact matched command above completed 3 interleaved repetitions with status 0.
+All 1024 session tails verified after every Engine reopen.
+Each Engine repetition completed 8 checkpoints and 8 periodic superblock installs.
+No run was discarded. Nothing was tuned.
+
+| Repetition | Bare p99, ms | Tape p99, ms | Engine p99, ms | Engine/bare | Tape/bare |
+|---|---:|---:|---:|---:|---:|
+| 1 | 13.873750 | 14.091334 | 10.107500 | 0.728534 | 1.015683 |
+| 2 | 8.916750 | 13.642166 | 12.424125 | 1.393347 | 1.529948 |
+| 3 | 11.348292 | 14.453208 | 13.058625 | 1.150713 | 1.273602 |
+| Median | **11.348292** | **14.091334** | **12.424125** | **1.150713** | **1.273602** |
+
+Ratios pair paths within each repetition. Their medians are not ratios of absolute medians.
+The macOS local 1.5x verdict is **PASS**, with median Engine/bare at 1.150713x.
+This is not a Linux NVMe gate result. Linux and nightly LazyFS remain pending.
+Historical S1 and S2 ratios below used a sparse bare baseline and are not matched to this corrected run.
+The corrected trace establishes a fair local comparison, not an isolated floor-check cost.
+Shared-machine storage variance remains visible in bare's 8.916750-13.873750 ms p99 range.
+No production tuning follows from this result.
+
+## Before baseline fix
+
+Bare used sparse `set_len`; Tape and Engine reserved blocks.
+These historical comparisons do not satisfy G1's same-preallocation contract.
+They cannot isolate disk-floor overhead.
+
+### S1 versus S2
 
 Absolute p99 values are milliseconds per durable batch acknowledgement.
 Ratios pair each path with bare within the same repetition.
@@ -1207,7 +1242,7 @@ The 2 historical S1 executions remain separate.
 | S2 repeat | 3 | 6.776750 | 12.091208 | 12.768125 | 1.884107 | 1.784219 |
 | S2 repeat | Median | **6.080250** | **7.269000** | **9.978708** | **1.662945** | **1.211374** |
 
-## Repeat trigger and verdict
+### Historical repeat trigger and verdict (before baseline fix)
 
 The comparison baseline is S1's final unchanged 192k repeat, not its later 1M trace.
 Its Tape p99 spread is 2.182749 ms. Its Engine spread is 3.120791 ms.
@@ -1230,7 +1265,7 @@ Both S2 executions printed local `FAIL` against 1.5x. This is not a macOS gate f
 The 1.5x G1 gate is judged on Linux NVMe only. Linux and nightly LazyFS remain pending.
 No production change follows from these noisy measurements.
 
-## Validation
+### Historical validation (before baseline fix)
 
 These commands ran after both timed executions.
 

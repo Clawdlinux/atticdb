@@ -3,7 +3,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use zerodb_tape::sim::frame::{self, Footer, Frame, Header, Kind, VERSION};
 use zerodb_tape::sim::DEFAULT_SEGMENT_SIZE;
-use zerodb_tape::RecordInput;
+use zerodb_tape::{Io, RecordInput, StdIo};
 
 mod fs {
     const ROOT: &str = env!("CARGO_TARGET_TMPDIR");
@@ -81,15 +81,14 @@ impl Bare {
     }
     #[track_caller]
     fn segment(dir: &Path, id: u64) -> File {
-        let file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(dir.join(format!("bare-{id}")))
-            .unwrap();
-        file.set_len(DEFAULT_SEGMENT_SIZE).unwrap();
-        file.sync_data().unwrap();
-        File::open(dir).unwrap().sync_all().unwrap();
-        file
+        let path = dir.join(format!("bare-{id}"));
+        let io = StdIo::new();
+        let file = io.create(&path).unwrap();
+        io.allocate(file, DEFAULT_SEGMENT_SIZE).unwrap();
+        io.sync_data(file).unwrap();
+        io.close(file).unwrap();
+        io.sync_dir(dir).unwrap();
+        OpenOptions::new().write(true).open(path).unwrap()
     }
     #[track_caller]
     pub fn write(&mut self, bytes: &[u8]) {
