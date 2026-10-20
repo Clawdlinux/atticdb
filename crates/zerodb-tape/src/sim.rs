@@ -18,6 +18,35 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 
+/// Pauses one publication after application state changes, before the tape watermark advances.
+#[cfg(feature = "sim")]
+#[derive(Debug, Default)]
+pub struct PublishPause {
+    gate: Mutex<Option<(mpsc::SyncSender<()>, mpsc::Receiver<()>)>>,
+}
+
+#[cfg(feature = "sim")]
+impl PublishPause {
+    /// Arms one pause. Receive arrival, then send or drop the release sender to resume.
+    pub fn arm(&self) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+        let (arrived, arrival) = mpsc::sync_channel(0);
+        let (release, resume) = mpsc::channel();
+        let mut gate = self.gate.lock().unwrap();
+        assert!(gate.is_none(), "publication pause is already armed");
+        *gate = Some((arrived, resume));
+        (arrival, release)
+    }
+
+    pub(crate) fn pause(&self) {
+        let gate = self.gate.lock().unwrap().take();
+        if let Some((arrived, resume)) = gate {
+            if arrived.send(()).is_ok() {
+                let _ = resume.recv();
+            }
+        }
+    }
+}
+
 /// Frame codecs and format constants for simulation and storage-format tests.
 pub mod frame {
     pub use crate::frame::*;

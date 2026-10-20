@@ -108,6 +108,9 @@ pub struct TapeOptions {
     /// Runs the writer inline. Only for deterministic simulations.
     #[cfg(feature = "sim")]
     pub inline_sim: bool,
+    /// Optional pause between application publication and tape publication. Simulations only.
+    #[cfg(feature = "sim")]
+    pub publish_pause: Option<Arc<crate::sim::PublishPause>>,
 }
 
 impl Default for TapeOptions {
@@ -123,6 +126,8 @@ impl Default for TapeOptions {
             free_space_floor: None,
             #[cfg(feature = "sim")]
             inline_sim: false,
+            #[cfg(feature = "sim")]
+            publish_pause: None,
         }
     }
 }
@@ -321,6 +326,8 @@ pub struct WriterCore<S: StateMachine = NoopStateMachine> {
     superblock_position: (u64, u64),
     synced_position: (u64, u64),
     free_space_floor: u64,
+    #[cfg(feature = "sim")]
+    publish_pause: Option<Arc<crate::sim::PublishPause>>,
 }
 
 impl<S: StateMachine> std::fmt::Debug for WriterCore<S> {
@@ -401,6 +408,8 @@ impl<S: StateMachine> WriterCore<S> {
             superblock_position: position,
             synced_position: position,
             free_space_floor,
+            #[cfg(feature = "sim")]
+            publish_pause: opts.publish_pause,
             clock,
             reads,
             queue: VecDeque::new(),
@@ -545,6 +554,10 @@ impl<S: StateMachine> WriterCore<S> {
         self.synced_position = self.segments.position();
         if !self.unpublished.is_empty() {
             self.state_machine.publish(&self.unpublished);
+            #[cfg(feature = "sim")]
+            if let Some(pause) = &self.publish_pause {
+                pause.pause();
+            }
             self.unpublished.clear();
         }
         self.reads.durable_lsn.store(self.lsn, Ordering::Release);

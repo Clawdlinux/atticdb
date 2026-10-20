@@ -4,12 +4,12 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use zerodb_core::{
     turn::decode, Appended, Engine, EngineOptions, ErrorKind, Health, NewTurn, Outcome, Role,
     Scope, SimAppend, Turn, WindowQuery,
 };
-use zerodb_tape::sim::{CapacityError, CapacityPlan, SimClock, StorageFullFault};
+use zerodb_tape::sim::{CapacityError, CapacityPlan, PublishPause, SimClock, StorageFullFault};
 use zerodb_tape::{Clock, Error, FileId, Io, Kind, LockGuard, Result, SimDisk, Tape, TapeOptions};
 
 struct Rng(u64);
@@ -985,8 +985,13 @@ fn grouped_seed(seed: u64, plan: &CapacityPlan) -> Vec<Vec<Turn>> {
 #[test]
 fn inline_group_publishes_once_and_replies_with_original_sequences() {
     let io = Arc::new(FaultIo::new(SimDisk::new(19)));
+    let pause = Arc::new(PublishPause::default());
     let opts = EngineOptions {
-        tape: TapeOptions { inline_sim: true, ..TapeOptions::default() },
+        tape: TapeOptions {
+            inline_sim: true,
+            publish_pause: Some(pause.clone()),
+            ..TapeOptions::default()
+        },
         ..EngineOptions::default()
     };
     let engine = open(io.clone(), Arc::new(SimClock::default()), &opts);
@@ -997,39 +1002,51 @@ fn inline_group_publishes_once_and_replies_with_original_sequences() {
     let syncs = io.syncs.load(Ordering::SeqCst);
     let first = engine.enqueue_sim(&scope, vec![turn.clone()], Some("same-group")).unwrap();
     let duplicate = engine.enqueue_sim(&scope, vec![turn.clone()], Some("same-group")).unwrap();
-    let keyless = engine.enqueue_sim(&scope, vec![turn], None).unwrap();
+    let keyless = engine.enqueue_sim(&scope, vec![turn.clone()], None).unwrap();
     assert_eq!(engine.metrics().unwrap().durable_lsn, before.durable_lsn);
-    std::thread::scope(|threads| {
-        let publishing = threads.spawn(|| engine.step_sim().unwrap());
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while engine.metrics().unwrap().dedup_entries == before.dedup_entries {
-            assert!(std::time::Instant::now() < deadline, "group did not publish its dedup entry");
-            std::thread::yield_now();
-        }
-        let retried = engine
-            .append(
-                &scope,
-                vec![NewTurn { role: Role::User, content: vec![1], meta: vec![] }],
-                Some("same-group"),
-            )
-            .unwrap();
-        assert_eq!(retried.seqs, vec![2]);
-        let visible = engine.window(&scope, WindowQuery::Since { seq: 2, limit: 1 }).unwrap();
+    let retried = std::thread::scope(|threads| {
+        let (engine, scope, turn) = (&engine, &scope, &turn);
+        let (arrived, release) = pause.arm();
+        let publishing = threads.spawn(move || engine.step_sim().unwrap());
+        arrived.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        let parked = engine.metrics().unwrap();
+        assert_eq!(parked.dedup_entries, before.dedup_entries + 1);
+        assert_eq!(parked.durable_lsn, before.durable_lsn);
+        assert!(engine.window(scope, WindowQuery::Since { seq: 2, limit: 1 }).unwrap().is_empty());
+
+        let (started, starting) = mpsc::sync_channel(0);
+        let (replied, reply) = mpsc::channel();
+        let retrying = threads.spawn(move || {
+            started.send(()).unwrap();
+            replied.send(engine.append(scope, vec![turn.clone()], Some("same-group"))).unwrap();
+        });
+        starting.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        assert!(
+            matches!(
+                reply.recv_timeout(std::time::Duration::from_secs(1)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ),
+            "retry returned before the tape watermark covered its receipt"
+        );
+        release.send(()).unwrap();
+        publishing.join().unwrap();
+        let retried = reply.recv_timeout(std::time::Duration::from_secs(10)).unwrap().unwrap();
+        retrying.join().unwrap();
+        let visible = engine.window(scope, WindowQuery::Since { seq: 2, limit: 1 }).unwrap();
         assert_eq!(visible.len(), 1, "an acknowledged concurrent retry must be readable");
         assert_eq!(visible[0].lsn, retried.last_lsn);
-        assert_eq!(visible[0].content, vec![1]);
-        publishing.join().unwrap();
+        assert_eq!(visible[0].content, turn.content);
+        retried
     });
     let first = first.finish().unwrap();
     assert_eq!(first.seqs, vec![2]);
+    assert_eq!(retried, first);
     assert_eq!(duplicate.finish().unwrap(), first);
     assert_eq!(keyless.finish().unwrap().seqs, vec![3]);
     assert_eq!(io.syncs.load(Ordering::SeqCst) - syncs, 1);
     let after = engine.metrics().unwrap();
-    let groups = after.writer_groups - before.writer_groups;
-    // The concurrent retry either bypasses the writer or forms a reply-only group.
-    assert!((1..=2).contains(&groups));
-    assert_eq!(after.writer_group_requests - before.writer_group_requests, groups + 2);
+    assert_eq!(after.writer_groups - before.writer_groups, 2);
+    assert_eq!(after.writer_group_requests - before.writer_group_requests, 4);
     assert_eq!(engine.window(&scope, WindowQuery::Last(10)).unwrap().len(), 3);
 }
 
