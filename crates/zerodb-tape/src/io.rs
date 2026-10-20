@@ -165,7 +165,8 @@ impl Io for StdIo {
     /// Linux and macOS reserve blocks with rustix `fallocate`. Other platforms use `set_len`.
     ///
     /// On macOS, rustix tries contiguous `F_PREALLOCATE`, then noncontiguous allocation, then calls `ftruncate`.
-    /// macOS skips preallocation for equal or smaller lengths to avoid reserving past the physical end.
+    /// rustix asks macOS for the whole target length past the physical end of file.
+    /// So macOS preallocates only when an empty file grows. Growing a non-empty file uses `set_len`.
     /// Zero lengths and unsupported preallocation use `set_len`.
     /// APFS and btrfs can need extra space after preallocation. The writer's floor remains the guard.
     fn allocate(&self, file: FileId, len: u64) -> Result<()> {
@@ -174,14 +175,16 @@ impl Io for StdIo {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             #[cfg(target_os = "linux")]
-            let current_len = 0;
+            let preallocate = len > 0;
             #[cfg(target_os = "macos")]
-            let current_len = file.metadata()?.len();
-            #[cfg(target_os = "macos")]
-            if len == current_len {
-                return Ok(());
-            }
-            if len > current_len {
+            let preallocate = {
+                let current_len = file.metadata()?.len();
+                if len == current_len {
+                    return Ok(());
+                }
+                current_len == 0
+            };
+            if preallocate {
                 match rustix::fs::fallocate(&*file, rustix::fs::FallocateFlags::empty(), 0, len) {
                     Ok(()) => {
                         #[cfg(target_os = "macos")]

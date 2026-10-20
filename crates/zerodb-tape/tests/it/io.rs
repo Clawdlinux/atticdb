@@ -61,6 +61,7 @@ fn allocation_sets_length_for_growth_repeats_and_shrink() {
         ("shrink", 512 * 1024, false),
         ("growth", 2 * 1024 * 1024, false),
         ("repeated growth", 2 * 1024 * 1024, false),
+        ("second growth", 3 * 1024 * 1024, false),
         ("truncate", 0, false),
     ] {
         eprintln!("case: {case}");
@@ -83,11 +84,19 @@ fn allocation_sets_length_for_growth_repeats_and_shrink() {
             assert!(metadata.blocks() * 512 >= len, "{case}: length={len}");
         }
         #[cfg(target_os = "macos")]
-        if len != 0 && len <= before.len() {
+        {
             use std::os::unix::fs::MetadataExt;
+            let used = metadata.blocks() * 512;
+            if len != 0 && len <= before.len() {
+                assert!(
+                    used < before.len() + len / 2,
+                    "{case}: length={len} must not reserve a whole extra length"
+                );
+            }
+            // Growth must not reserve the target length again past the physical end.
             assert!(
-                metadata.blocks() * 512 < before.len() + len / 2,
-                "{case}: length={len} must not reserve a whole extra length"
+                used <= len.max(before.blocks() * 512) + len / 8,
+                "{case}: length={len} used={used} over-reserves"
             );
         }
     }
