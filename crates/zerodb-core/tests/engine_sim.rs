@@ -325,6 +325,12 @@ fn retry(engine: &Engine, oracle: &mut Oracle, index: usize) {
     } else {
         oracle.apply(index, receipt);
     }
+    let scope = oracle.batches[index].scope;
+    assert_eq!(
+        engine.window(&oracle.scopes[scope], WindowQuery::Last(usize::MAX)).unwrap(),
+        oracle.history[scope],
+        "an acknowledged retry must be immediately readable"
+    );
 }
 
 fn random_batch(rng: &mut Rng, index: usize, scope: usize, time: u64) -> Batch {
@@ -993,14 +999,37 @@ fn inline_group_publishes_once_and_replies_with_original_sequences() {
     let duplicate = engine.enqueue_sim(&scope, vec![turn.clone()], Some("same-group")).unwrap();
     let keyless = engine.enqueue_sim(&scope, vec![turn], None).unwrap();
     assert_eq!(engine.metrics().unwrap().durable_lsn, before.durable_lsn);
-    engine.step_sim().unwrap();
+    std::thread::scope(|threads| {
+        let publishing = threads.spawn(|| engine.step_sim().unwrap());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while engine.metrics().unwrap().dedup_entries == before.dedup_entries {
+            assert!(std::time::Instant::now() < deadline, "group did not publish its dedup entry");
+            std::thread::yield_now();
+        }
+        let retried = engine
+            .append(
+                &scope,
+                vec![NewTurn { role: Role::User, content: vec![1], meta: vec![] }],
+                Some("same-group"),
+            )
+            .unwrap();
+        assert_eq!(retried.seqs, vec![2]);
+        let visible = engine.window(&scope, WindowQuery::Since { seq: 2, limit: 1 }).unwrap();
+        assert_eq!(visible.len(), 1, "an acknowledged concurrent retry must be readable");
+        assert_eq!(visible[0].lsn, retried.last_lsn);
+        assert_eq!(visible[0].content, vec![1]);
+        publishing.join().unwrap();
+    });
     let first = first.finish().unwrap();
     assert_eq!(first.seqs, vec![2]);
     assert_eq!(duplicate.finish().unwrap(), first);
     assert_eq!(keyless.finish().unwrap().seqs, vec![3]);
     assert_eq!(io.syncs.load(Ordering::SeqCst) - syncs, 1);
-    assert_eq!(engine.metrics().unwrap().writer_groups - before.writer_groups, 1);
-    assert_eq!(engine.metrics().unwrap().writer_group_requests - before.writer_group_requests, 3);
+    let after = engine.metrics().unwrap();
+    let groups = after.writer_groups - before.writer_groups;
+    // The concurrent retry either bypasses the writer or forms a reply-only group.
+    assert!((1..=2).contains(&groups));
+    assert_eq!(after.writer_group_requests - before.writer_group_requests, groups + 2);
     assert_eq!(engine.window(&scope, WindowQuery::Last(10)).unwrap().len(), 3);
 }
 

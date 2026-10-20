@@ -257,14 +257,18 @@ impl Engine {
             let tenant = state.tenants.get(&scope.tenant);
             if let (Some(tenant), Some(idem_key), Some(digest)) = (tenant, idem_key, digest) {
                 let key = DedupKey(tenant, scope.session.clone(), idem_key.to_owned());
-                // Only published entries bypass the writer. Prepare still resolves in-flight duplicates.
                 if let Some(entry) = state.dedup.get(&key) {
                     if let Some(error) = &state.failure {
                         return Err(error.clone());
                     }
                     let Committed::Durable { txn, last_lsn, reply, .. } = entry.resolve(digest)?;
-                    drop(state);
-                    return self.receipt(turns.len() as u64, txn, last_lsn, &reply);
+                    // Read the tape watermark after taking the state lock, like window_snapshot.
+                    // Machine publication releases this lock before the tape advances its watermark.
+                    // Only covered receipts bypass the writer, so the next read cannot lag this ack.
+                    if last_lsn <= self.tape.durable_lsn() {
+                        drop(state);
+                        return self.receipt(turns.len() as u64, txn, last_lsn, &reply);
+                    }
                 }
             }
             tenant
