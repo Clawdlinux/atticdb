@@ -1158,7 +1158,7 @@ fn seeded_engine_recovery() {
     for offset in 0..count {
         let seed = first.wrapping_add(offset);
         if let Err(error) = std::panic::catch_unwind(|| run_seed(seed)) {
-            eprintln!("engine simulation seed={seed}\nrepro: ZERODB_SIM_SEED={seed} cargo test -p zerodb-core --release --features sim --test engine_sim -- --nocapture");
+            eprintln!("engine simulation seed={seed}\nrepro: ZERODB_SIM_SEED={seed} cargo test -p zerodb-core --release --features sim --test engine_sim");
             std::panic::resume_unwind(error);
         }
     }

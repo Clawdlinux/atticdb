@@ -97,7 +97,7 @@ The following review validation completed on 2026-10-18.
 | `cargo check --lib --no-default-features` | Passed. Production builds without simulation access. |
 | `cargo test --workspace` | Passed. 500 seeds. Stress ignored in debug. |
 | `cargo test --workspace --release` | Passed. 500 seeds and 20,000 appends across 16 threads. |
-| `ZERODB_SIM_SEEDS=10000 cargo test --release --features sim --test sim -- --nocapture` | Passed. Seeds 0 through 9,999. |
+| `ZERODB_SIM_SEEDS=10000 cargo test -p zerodb-tape --release --features sim --test sim -- --nocapture` | Passed. Seeds 0 through 9,999. |
 | `cargo test --doc` | Passed. Private implementation import paths fail to compile as expected. |
 | `cargo bench --bench append --no-run` | Passed. Benchmark compiles against the narrowed API. |
 | `cargo bench -p zerodb-tape --bench append -- --noplot` | Passed before review at `822cf91`. All 6 cases recorded above. |
@@ -118,8 +118,8 @@ These tests reject partial uncertain transactions and changed uncertain content.
 Replay commands:
 
 ```sh
-ZERODB_SIM_SEED=42 cargo test --features sim --test sim -- --nocapture
-ZERODB_SIM_SEEDS=10000 cargo test --release --features sim --test sim
+ZERODB_SIM_SEED=42 cargo test -p zerodb-tape --release --features sim --test sim
+ZERODB_SIM_SEEDS=10000 cargo test -p zerodb-tape --release --features sim --test sim
 cargo test --release --test stress
 ```
 

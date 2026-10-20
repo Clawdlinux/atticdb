@@ -17,7 +17,7 @@ fn seeded_crash_recovery() {
         let seed = first.wrapping_add(offset);
         if let Err(error) = std::panic::catch_unwind(|| sim::run_seed(seed)) {
             eprintln!(
-                "simulation seed={seed}\nrepro: ZERODB_SIM_SEED={seed} cargo test --features sim --test sim -- --nocapture"
+                "simulation seed={seed}\nrepro: ZERODB_SIM_SEED={seed} cargo test -p zerodb-tape --release --features sim --test sim"
             );
             std::panic::resume_unwind(error);
         }

@@ -209,7 +209,7 @@ The `sim` feature enables the engine fault harness:
 ```sh
 cargo test -p zerodb-core --release --features sim --test engine_sim
 ZERODB_SIM_SEEDS=10000 cargo test -p zerodb-core --release --features sim --test engine_sim
-ZERODB_SIM_SEED=19 cargo test -p zerodb-core --release --features sim --test engine_sim -- --nocapture
+ZERODB_SIM_SEED=19 cargo test -p zerodb-core --release --features sim --test engine_sim
 ```
 
 The default is 500 seeds. `ZERODB_SIM_SEED` selects 1 seed unless `ZERODB_SIM_SEEDS` also sets a count.
