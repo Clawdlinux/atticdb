@@ -17,7 +17,6 @@ fn windows_are_dense_and_read_cost_depends_only_on_returned_turns() {
     let mut written = 0;
     for boundary in [1, 16, 17, 5000] {
         eprintln!("case: boundary={boundary:?}");
-
         while written < boundary {
             let count = (boundary - written).min(128);
             let receipt = engine
@@ -27,8 +26,6 @@ fn windows_are_dense_and_read_cost_depends_only_on_returned_turns() {
             written += count;
         }
         for n in [0, 1, 7, 32] {
-            eprintln!("case: n={n:?}");
-
             let before = engine.metrics().unwrap().window_reads;
             let window = engine.window(&scope, WindowQuery::Last(n)).unwrap();
             assert_eq!(window.len(), n.min(boundary as usize));
@@ -86,7 +83,6 @@ fn retries_conflicts_scope_isolation_and_replay() {
 fn tenant_ids_survive_reopen_and_limit_is_typed() {
     for (case, limit) in [("configured tenant limit", 2)] {
         eprintln!("case: {case}");
-
         let disk = Arc::new(SimDisk::new(3));
         let opts = EngineOptions { max_tenants: limit, ..options() };
         let engine = open(disk.clone(), opts.clone());
@@ -155,7 +151,6 @@ fn dedup_scope_bounds_and_oldest_eviction_survive_the_public_api() {
         ("oldest session key was evicted", "first", "other", "k", 2, 3, Some(1), Write::New),
     ] {
         eprintln!("case: {case}");
-
         let mut scope = scope(session);
         scope.tenant = tenant.into();
         let before = engine.metrics().unwrap().durable_lsn;
@@ -521,7 +516,6 @@ fn failed_sync_with_a_full_dedup_window_cannot_checkpoint_tentative_eviction() {
 fn cold_window_and_pin_io_do_not_hold_the_writer_state_lock() {
     for append in [false, true] {
         eprintln!("case: append={append:?}");
-
         let io = Arc::new(support::ProbeIo::new(18));
         let opts = EngineOptions { hot_page_bytes: 256, ..options() };
         let engine =
@@ -569,8 +563,6 @@ fn open_sweeps_orphan_checkpoints_only_after_taking_the_tape_lock() {
     engine.append(&scope("s"), vec![turn(1)], None).unwrap();
     engine.checkpoint().unwrap();
     for path in ["db/ckpt-orphan.zdb", "db/CHECKPOINT.next"] {
-        eprintln!("case: path={path:?}");
-
         let id = disk.create(std::path::Path::new(path)).unwrap();
         disk.write_at(id, 0, b"partial").unwrap();
         disk.sync_data(id).unwrap();

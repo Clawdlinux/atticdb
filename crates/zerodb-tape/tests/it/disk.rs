@@ -37,7 +37,6 @@ fn space_faults_set_group_outcome() {
         ("manifest write full", Manifest, false, true),
     ] {
         eprintln!("case: {case}");
-
         let capacity = if let DefaultFloor(capacity) = fault { capacity } else { 1 << 30 };
         let floor = if matches!(fault, DefaultFloor(_)) { None } else { Some(100) };
         let (io, mut core, prepares) = primed_writer(floor, capacity);
@@ -175,7 +174,6 @@ fn simulated_disk_lifecycle_tracks_capacity_locks_and_unlink() {
         [("first block", 0, 512), ("overwrite", 511, 512), ("last block", 3584, 0)]
     {
         eprintln!("case: {case}");
-
         disk.write_at(file, offset, b"x").unwrap();
         assert_eq!(disk.available_bytes(dir).unwrap(), free, "{case}");
     }
@@ -471,7 +469,6 @@ mod segments {
             assert_eq!(dir.segments(), &[1, 2]);
             for (id, byte) in [(1, 7), (2, 8)] {
                 eprintln!("case: id={id:?}, byte={byte:?}");
-
                 let file = crash.open(&dir.segment_path(id)).unwrap();
                 assert_eq!(crash.len(file).unwrap(), 512);
                 let mut bytes = [0; 512];

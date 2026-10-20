@@ -179,7 +179,6 @@ fn replay_is_ordered_exclusive_of_watermark_and_finishes_before_writes() {
     drop(tape);
     for watermark in [0, 3, 6, u64::MAX] {
         eprintln!("case: watermark={watermark:?}");
-
         let machine = Machine { seq: watermark.min(6), ..Machine::new(Behavior::Sequence) };
         let log = machine.log.clone();
         let opts = TapeOptions { replay_from_lsn: watermark, ..opts(512) };
@@ -266,7 +265,6 @@ fn rewritten_batches_are_revalidated_without_exposing_reserved_state() {
         [(&b"footer"[..], Durability::Durable), (&b"too large"[..], Durability::Durable)]
     {
         eprintln!("case: content={content:?}, mode={mode:?}");
-
         let (tape, _) = Tape::open_with(
             Machine::new(Behavior::InvalidRewrite),
             Arc::new(SimDisk::new(9)),
@@ -353,7 +351,6 @@ mod retries {
             ("partial tail sync failure", true, true),
         ] {
             eprintln!("case: {case}");
-
             let disk = Arc::new(SimDisk::new(1));
             let machine = Machine::new(Behavior::Dedup);
             let replies = machine.replies.clone();

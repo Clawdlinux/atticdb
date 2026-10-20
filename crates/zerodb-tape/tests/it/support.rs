@@ -468,7 +468,7 @@ pub(crate) mod wire {
         Flip(u64),
         ZeroFooter(u64),
         GarbageFooter,
-        MisdirectedFooter,
+        MisdirectedFooter(u64, u64),
         InvalidProof(usize),
     }
 
@@ -480,8 +480,7 @@ pub(crate) mod wire {
             Damage::Flip(offset) => disk.flip_bit(first, offset).unwrap(),
             Damage::ZeroFooter(offset) => disk.write_at(first, offset, &[0; 72]).unwrap(),
             Damage::GarbageFooter => disk.write_at(first, 48, &[0xff; 72]).unwrap(),
-            Damage::MisdirectedFooter => {
-                let (segment, offset) = if size == 128 { (2, 0) } else { (1, 120) };
+            Damage::MisdirectedFooter(segment, offset) => {
                 let file = disk.open(Path::new(&format!("db/seg-{segment:016}.zdb"))).unwrap();
                 let mut bytes = [0; 48];
                 assert_eq!(disk.read_at(file, offset, &mut bytes).unwrap(), 48, "{case}");

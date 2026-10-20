@@ -36,7 +36,6 @@ fn paged_offsets_cross_segments_recover_and_reload_within_budget() {
     let reads_before = core.index_stats().unwrap().page_reloads;
     for lsn in [1, 1920, 256, 1025, 512, 1919, 1] {
         eprintln!("case: lsn={lsn:?}");
-
         assert_eq!(core.read(lsn).unwrap().unwrap().payload, expected[lsn as usize - 1]);
         assert!(core.index_stats().unwrap().resident_bytes <= opts.lsn_index_bytes);
     }

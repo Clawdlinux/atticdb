@@ -62,7 +62,6 @@ fn allocation_sets_length_for_growth_repeats_and_shrink() {
         ("truncate", 0, false),
     ] {
         eprintln!("case: {case}");
-
         #[cfg(target_os = "macos")]
         let before = {
             metadata_file.sync_all().unwrap();
@@ -149,8 +148,6 @@ fn directory_exists_and_list_match_across_backends() {
         let direct = dir.0.join("direct");
         let leaf = deeper.join("leaf");
         for path in [&direct, &leaf] {
-            eprintln!("case: path={path:?}");
-
             let file = io.create(path).unwrap();
             io.close(file).unwrap();
         }

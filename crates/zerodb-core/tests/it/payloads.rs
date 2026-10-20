@@ -133,7 +133,6 @@ fn forget_limits_apply_to_every_selector_and_retry_key() {
         forget::Selector::Lsns(vec![1; 1025]),
     ] {
         eprintln!("case: selector={selector:?}");
-
         assert!(
             forget::encode(&forget::Forget { selector, idem_key: None, up_to_lsn: None }).is_err()
         );
@@ -151,7 +150,6 @@ fn forget_limits_apply_to_every_selector_and_retry_key() {
         vec![1, 3, 0xff, 0xff, 0xff, 0xff],
     ] {
         eprintln!("case: data={data:?}");
-
         assert!(forget::decode(&data).is_err());
     }
 }

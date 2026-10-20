@@ -115,10 +115,10 @@ fn superblock_sync_failures_preserve_acknowledgements_and_poison_writes() {
 #[test]
 fn open_and_shutdown_install_superblocks_with_bounded_rewrites() {
     use zerodb_tape::Io;
-    for (case, payload_len, sessions) in [("preallocated tails", 5, 8), ("full segments", 912, 16)]
+    for (case, payload_len, sessions, bounded_rewrites) in
+        [("preallocated tails", 5, 8, false), ("full segments", 912, 16, true)]
     {
         eprintln!("case: {case}");
-
         let io = Arc::new(ObservedIo::new(0));
         let clock = Arc::new(SimClock::default());
         let opts = Options { segment_size: 1024, ..Options::default() };
@@ -130,10 +130,10 @@ fn open_and_shutdown_install_superblocks_with_bounded_rewrites() {
             let (tape, report) = Tape::open(io.clone(), clock.clone(), "db", opts.clone()).unwrap();
             assert_eq!(report.durable_lsn, session, "{label}");
             let rewritten = io.segment_bytes.swap(0, Ordering::SeqCst);
-            if payload_len == 912 {
+            if bounded_rewrites {
                 assert!(rewritten <= previous_writes, "{label}, rewritten={rewritten}");
             }
-            if payload_len == 912 && session > 0 {
+            if bounded_rewrites && session > 0 {
                 assert_eq!(io.segment_syncs.load(Ordering::SeqCst), 0, "{label}");
             }
             let content = vec![session as u8; payload_len];
@@ -203,7 +203,6 @@ fn live_restart_after_failed_sync_redirties_survivors_before_acknowledging() {
     for seed in 0..200 {
         for advance_superblock in [false, true] {
             eprintln!("case: advance_superblock={advance_superblock:?}");
-
             let disk = Arc::new(SimDisk::new(seed));
             let clock = Arc::new(SimClock::default());
             let opts = Options { segment_size: 1024, ..Options::default() };
@@ -308,7 +307,6 @@ fn live_retry_of_failed_tail_repair_persists_roll_padding() {
     for seed in 0..32 {
         for advance_superblock in [false, true] {
             eprintln!("case: advance_superblock={advance_superblock:?}");
-
             let io = Arc::new(ObservedIo::new(seed));
             let clock = Arc::new(SimClock::default());
             let opts = Options { segment_size: 1024, ..Options::default() };
@@ -404,7 +402,6 @@ fn invalid_batches_never_enter_the_writer() {
         ("empty batch", vec![], false),
     ] {
         eprintln!("case: {case}");
-
         let error = PreparedBatch::new(batch, Durability::Durable).unwrap_err();
         assert_eq!(error.outcome, Outcome::NotCommitted, "{case}");
         if oversized {
@@ -600,7 +597,6 @@ fn prefix_commits_when_tail_reservation_fails_unless_sparse_resize_also_fails() 
 
     for fallback_fails in [false, true] {
         eprintln!("case: fallback_fails={fallback_fails:?}");
-
         let io = Arc::new(ObservedIo::new(19));
         let opts = Options { segment_size: 4096, free_space_floor: Some(0), ..Options::default() };
         let clock = Arc::new(SimClock::default());
@@ -682,7 +678,6 @@ fn segment_size_mismatch_is_rejected_without_mutation() {
     use zerodb_tape::Io;
     for wrong_size in [512, 2048] {
         eprintln!("case: wrong_size={wrong_size:?}");
-
         let io = Arc::new(ObservedIo::new(0));
         let clock = Arc::new(SimClock::new(0));
         let opts = Options { segment_size: 1024, ..Options::default() };
@@ -733,7 +728,6 @@ fn commit_time_survives_a_restart_with_a_backwards_clock() {
     let mut previous = 0;
     for clock in [1000, 1, 0] {
         eprintln!("case: clock={clock:?}");
-
         let (mut core, _) =
             WriterCore::open(disk.clone(), Arc::new(SimClock::new(clock)), "db", opts.clone())
                 .unwrap();
@@ -888,7 +882,6 @@ fn concurrent_callers_share_syncs_and_observe_dense_commits() {
         [("dense reads", 0, 8, 20), ("slow group sync", 20, 16, 1)]
     {
         eprintln!("case: {case}");
-
         let disk = Arc::new(ObservedIo::new(0));
         disk.slow_ms.store(delay, Ordering::SeqCst);
         let (tape, _) = Tape::open(

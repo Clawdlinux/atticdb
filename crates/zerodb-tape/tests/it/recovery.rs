@@ -17,7 +17,6 @@ use crate::support;
 fn oversized_padding_respects_the_durable_boundary() {
     for (case, floor, expect_corruption) in [("proved gap", 2, true), ("unproved tail", 0, false)] {
         eprintln!("case: {case}");
-
         let io = Arc::new(SimDisk::new(0));
         let size = (frame::MAX_FRAME_SIZE + frame::HEADER_LEN + 44 + 1024) as u64;
         let mut dir = DataDir::open(io.clone(), "db", None, size).unwrap();
@@ -68,7 +67,6 @@ fn lsn_gaps_cannot_bypass_dense_recovery() {
         [("unproved gap", 0, false), ("proved gap", u64::MAX, true)]
     {
         eprintln!("case: {case}");
-
         let (io, mut dir) = setup();
         let second = dir.prepare_next_segment(1024).unwrap();
         let (valid, _) = transaction(u64::MAX, 1, (1, 0));
@@ -145,7 +143,6 @@ fn bad_footer_binding_is_not_replayed() {
         ("records checksum", 28),
     ] {
         eprintln!("case: {case}");
-
         let (io, mut dir) = setup();
         let (bytes, _) = transaction(1, 1, (1, 0));
         let (record, used) = frame::decode(&bytes, 1, 0).unwrap();
@@ -168,7 +165,6 @@ fn nonincreasing_lsn_is_truncated_above_and_corruption_below_boundary() {
         [("unproved duplicate", 0, false), ("proved duplicate", 2, true)]
     {
         eprintln!("case: {case}");
-
         let (io, mut dir) = setup();
         let (first, head) = transaction(1, 1, (1, 0));
         let (second, _) = transaction(1, 2, head);
@@ -203,13 +199,10 @@ fn truncation_resumes_at_the_cut_and_reopens_twice_after_new_ack() {
     use zerodb_tape::{Committed, Durability, RecordInput, TapeOptions as Options};
     for count in [3, 5] {
         eprintln!("case: count={count:?}");
-
         for empty in [false, true] {
             eprintln!("case: empty={empty:?}");
-
             for offset_zero in [false, true] {
                 eprintln!("case: offset_zero={offset_zero:?}");
-
                 if empty && !offset_zero {
                     continue;
                 }
@@ -285,7 +278,6 @@ fn manifest_is_durable_before_tail_files_are_removed() {
     use std::sync::atomic::Ordering;
     for fail_manifest in [false, true] {
         eprintln!("case: fail_manifest={fail_manifest:?}");
-
         let io = Arc::new(support::ObservedIo::new(1));
         let mut dir = DataDir::open(io.clone(), "db", None, 1024).unwrap();
         for _ in 0..3 {
@@ -423,12 +415,8 @@ fn footer_lookahead_separates_proved_corruption_from_tail_damage() {
             Corruption { lsn: 3 },
         ),
     ];
-    for size in [128, 1024] {
-        eprintln!("case: size={size:?}");
-
+    for (size, segment, offset) in [(128, 2, 0), (1024, 1, 120)] {
         for offset in [0, 4, 40, 76] {
-            eprintln!("case: offset={offset:?}");
-
             cases.push((
                 format!("proved damage: size={size}, offset={offset}"),
                 size,
@@ -437,9 +425,7 @@ fn footer_lookahead_separates_proved_corruption_from_tail_damage() {
                 Corruption { lsn: 1 },
             ));
         }
-        for fault in [GarbageFooter, MisdirectedFooter] {
-            eprintln!("case: fault={fault:?}");
-
+        for fault in [GarbageFooter, MisdirectedFooter(segment, offset)] {
             cases.push((
                 format!("replaced footer: size={size}, fault={fault:?}"),
                 size,
@@ -450,8 +436,6 @@ fn footer_lookahead_separates_proved_corruption_from_tail_damage() {
         }
     }
     for field in [8, 20, 48, 56, 64, 68] {
-        eprintln!("case: field={field:?}");
-
         cases.push((
             format!("last pending LSN: field={field}"),
             1024,
@@ -461,8 +445,6 @@ fn footer_lookahead_separates_proved_corruption_from_tail_damage() {
         ));
     }
     for field in [0, 8, 16, 24, 28] {
-        eprintln!("case: field={field:?}");
-
         cases.push((
             format!("CRC-valid but invalid proof: field={field}"),
             1024,
@@ -473,7 +455,6 @@ fn footer_lookahead_separates_proved_corruption_from_tail_damage() {
     }
     for (case, segment_size, txns, corrupt, expected) in cases {
         eprintln!("case: {case}");
-
         let disk = Arc::new(SimDisk::new(73));
         let (mut core, _) =
             WriterCore::open(disk.clone(), Arc::new(SimClock::default()), "db", opts(segment_size))
@@ -586,7 +567,6 @@ fn operator_cut_rejects_invalid_targets_and_corrupt_prefixes() {
 fn operator_cut_discards_oversized_tail_and_bounds_the_superblock() {
     for floor in [0, 1, 5] {
         eprintln!("case: floor={floor:?}");
-
         for (cut, kept_bytes, commit_time) in [(0, 0, 1), (1, 120, 101), (4, 256 + 216, 102)] {
             let case = format!("floor={floor}, cut={cut}");
             eprintln!("case: {case}");
@@ -595,8 +575,6 @@ fn operator_cut_discards_oversized_tail_and_bounds_the_superblock() {
                 WriterCore::open(disk.clone(), Arc::new(SimClock::new(100)), "db", opts(256))
                     .unwrap();
             for count in [1, 3, 1] {
-                eprintln!("case: count={count:?}");
-
                 let reply = submit(
                     &mut core,
                     vec![record(Kind::Turn, 1, [7; 8]); count],
