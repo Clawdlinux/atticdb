@@ -110,6 +110,11 @@ Run a behavior module with `cargo test -p zerodb-tape --test it recovery::`.
 Debug builds skip slow filesystem tests and seeded tape schedules.
 The existing release CI step runs the filesystem checks.
 The named simulation commands run 2,000 seeds.
+Both sims vary disk headroom around the free-space floor and release space before retrying.
+They inject partial-write and sync `StorageFull` errors alongside crash cuts.
+The oracles check rejection state, read-only recovery, and acknowledged durability after reopening.
+The engine sim also checks dedup state and verifies rejected-key retries commit exactly once.
+Failures print the seed, capacity plan, and the existing repro command.
 To run the ignored checks in debug:
 
 ```sh

@@ -235,7 +235,7 @@ struct State {
     pending_entries: Vec<DirOp>,
     locked: BTreeSet<FileId>,
     next: u64,
-    fail_sync: bool,
+    fail_sync: Option<ErrorKind>,
     space: Option<usize>,
     capacity: u64,
     sector_size: usize,
@@ -284,8 +284,8 @@ impl State {
     }
 
     fn sync_check(&mut self) -> Result<()> {
-        if std::mem::take(&mut self.fail_sync) {
-            return Err(io_error(ErrorKind::Other, "injected sync failure"));
+        if let Some(kind) = self.fail_sync.take() {
+            return Err(io_error(kind, "injected sync failure"));
         }
         Ok(())
     }
@@ -331,7 +331,7 @@ impl SimDisk {
                 pending_entries: Vec::new(),
                 locked: BTreeSet::new(),
                 next: 0,
-                fail_sync: false,
+                fail_sync: None,
                 space: None,
                 capacity: 1 << 40,
                 sector_size: 512,
@@ -343,7 +343,13 @@ impl SimDisk {
     ///
     /// Failed file syncs settle pending writes once. Cached bytes remain visible without later writeback.
     pub fn fail_next_sync(&self) -> Result<()> {
-        lock(&self.state)?.fail_sync = true;
+        lock(&self.state)?.fail_sync = Some(ErrorKind::Other);
+        Ok(())
+    }
+
+    /// Fails the next sync with `StorageFull`, retaining the usual failed-sync crash behavior.
+    pub fn storage_full_next_sync(&self) -> Result<()> {
+        lock(&self.state)?.fail_sync = Some(ErrorKind::StorageFull);
         Ok(())
     }
 
@@ -453,7 +459,7 @@ impl SimDisk {
                 pending_entries: Vec::new(),
                 locked: BTreeSet::new(),
                 next: state.next,
-                fail_sync: false,
+                fail_sync: None,
                 space: None,
                 capacity: state.capacity,
                 sector_size: state.sector_size,
