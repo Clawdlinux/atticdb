@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 use std::time::Duration;
-use zerodb_core::{Engine, EngineOptions, ErrorKind, Outcome, WindowQuery};
+use zerodb_core::{Engine, EngineOptions, ErrorKind, Health, Outcome, WindowQuery};
 use zerodb_tape::sim::SimClock;
 use zerodb_tape::{Io, Kind, SimDisk, Tape};
 
@@ -246,27 +246,124 @@ fn hot_page_budget_evicts_and_reloads_cold_sessions() {
 }
 
 #[test]
-fn unknown_sync_outcome_poison_hides_reservations_and_keeps_reads() {
-    for seed in 0..32 {
-        let disk = Arc::new(SimDisk::new(seed));
-        let engine = open(disk.clone(), options());
-        let original = engine.append(&scope("s"), vec![turn(1)], Some("original")).unwrap();
-        disk.fail_next_sync().unwrap();
-        let error = engine.append(&scope("s"), vec![turn(2)], Some("unknown")).unwrap_err();
-        assert_eq!(error.outcome, Outcome::Unknown);
-        assert_eq!(engine.window(&scope("s"), WindowQuery::Last(10)).unwrap().len(), 1);
-        assert_eq!(
-            engine.append(&scope("s"), vec![turn(2)], Some("unknown")).unwrap_err().outcome,
-            Outcome::NotCommitted
-        );
-        assert_eq!(engine.metrics().unwrap().durable_lsn, original.last_lsn);
-        drop(engine);
-        let reboot = Arc::new(disk.crash().unwrap());
-        let engine = open(reboot, options());
-        assert_eq!(engine.append(&scope("s"), vec![turn(1)], Some("original")).unwrap(), original);
-        let retried = engine.append(&scope("s"), vec![turn(2)], Some("unknown")).unwrap();
-        assert_eq!(retried.seqs, vec![2]);
-        assert_eq!(engine.window(&scope("s"), WindowQuery::Last(10)).unwrap().len(), 2);
+fn write_outages_report_health_preserve_reads_and_retry_keys() {
+    #[derive(Clone, Copy)]
+    enum Fault {
+        Floor,
+        SpaceQuery,
+        Sync,
+    }
+    for (case, fault, health) in [
+        ("disk floor", Fault::Floor, Health::ReadOnly),
+        ("space query outage", Fault::SpaceQuery, Health::ReadOnly),
+        ("ambiguous sync", Fault::Sync, Health::Poisoned),
+    ] {
+        let seeds = if matches!(fault, Fault::Sync) { 32 } else { 1 };
+        for seed in 0..seeds {
+            eprintln!("case: {case}, seed={seed}");
+            let io = Arc::new(support::ProbeIo::new(seed));
+            let mut opts = options();
+            opts.tape.free_space_floor = Some(4096);
+            let mut engine =
+                Engine::open_with(io.clone(), Arc::new(SimClock::default()), "db", opts.clone())
+                    .unwrap();
+            assert_eq!(engine.health(), Health::Ok, "{case}");
+            let s = scope("s");
+            let original = engine.append(&s, vec![turn(1)], Some("original")).unwrap();
+            let before = engine.metrics().unwrap();
+            match fault {
+                Fault::Floor => {
+                    let capacity = io.disk.total_bytes(std::path::Path::new("db")).unwrap();
+                    let free = io.disk.available_bytes(std::path::Path::new("db")).unwrap();
+                    io.disk.set_capacity(capacity - free + 4095).unwrap();
+                }
+                Fault::SpaceQuery => io.space_error.store(true, Ordering::SeqCst),
+                Fault::Sync => io.disk.fail_next_sync().unwrap(),
+            }
+            for attempt in 0..2 {
+                let error = engine.append(&s, vec![turn(2)], Some("retry")).unwrap_err();
+                let expected = if matches!(fault, Fault::Sync) && attempt == 0 {
+                    Outcome::Unknown
+                } else {
+                    Outcome::NotCommitted
+                };
+                assert_eq!(error.outcome, expected, "{case}, attempt={attempt}");
+                assert!(
+                    match fault {
+                        Fault::Floor =>
+                            matches!(error.kind, ErrorKind::Storage(zerodb_tape::Error::DiskFull)),
+                        Fault::SpaceQuery => matches!(
+                            error.kind,
+                            ErrorKind::Storage(zerodb_tape::Error::Io(
+                                std::io::ErrorKind::Other,
+                                ref message
+                            )) if message == "injected space query failure"
+                        ),
+                        Fault::Sync if attempt == 0 => matches!(
+                            error.kind,
+                            ErrorKind::Storage(zerodb_tape::Error::SyncFailed(_))
+                        ),
+                        Fault::Sync => matches!(error.kind, ErrorKind::Poisoned),
+                    },
+                    "{case}, attempt={attempt}: {error:?}"
+                );
+                assert_eq!(engine.health(), health, "{case}");
+                let window = engine.window(&s, WindowQuery::Last(10)).unwrap();
+                assert_eq!(window.len(), 1, "{case}");
+                assert_eq!(window[0].content, turn(1).content, "{case}");
+                assert_eq!(window[0].lsn, original.last_lsn, "{case}");
+                let after = engine.metrics().unwrap();
+                assert_eq!(after.durable_lsn, before.durable_lsn, "{case}");
+                assert_eq!(after.dedup_entries, before.dedup_entries, "{case}");
+                assert_eq!(after.tenants, before.tenants, "{case}");
+            }
+            io.disk.set_capacity(1 << 40).unwrap();
+            io.space_error.store(false, Ordering::SeqCst);
+            assert_eq!(engine.health(), health, "{case}: no write has rechecked space");
+            if matches!(fault, Fault::Sync) {
+                drop(engine);
+                engine = open(Arc::new(io.disk.crash().unwrap()), opts.clone());
+                assert_eq!(engine.health(), Health::Ok, "{case}");
+            }
+            let retried = engine.append(&s, vec![turn(2)], Some("retry")).unwrap();
+            assert_eq!(engine.health(), Health::Ok, "{case}");
+            assert_eq!(retried.seqs, vec![2], "{case}");
+            assert_eq!(retried.txn, original.txn + 1, "{case}");
+            assert_eq!(retried.first_lsn, original.last_lsn + 1, "{case}");
+            assert_eq!(retried.last_lsn, retried.first_lsn, "{case}");
+            assert_eq!(engine.append(&s, vec![turn(2)], Some("retry")).unwrap(), retried, "{case}");
+            assert_eq!(engine.metrics().unwrap().durable_lsn, retried.last_lsn, "{case}");
+            assert_eq!(engine.metrics().unwrap().dedup_entries, before.dedup_entries + 1, "{case}");
+            let window = engine.window(&s, WindowQuery::Last(10)).unwrap();
+            assert_eq!(
+                window.iter().map(|turn| turn.seq).collect::<Vec<_>>(),
+                vec![1, 2],
+                "{case}"
+            );
+            assert_eq!(window[0].content, turn(1).content, "{case}");
+            assert_eq!(window[1].content, turn(2).content, "{case}");
+            assert_eq!(
+                engine.append(&s, vec![turn(1)], Some("original")).unwrap(),
+                original,
+                "{case}"
+            );
+            if !matches!(fault, Fault::Sync) {
+                drop(engine);
+                let engine = open(Arc::new(io.disk.crash().unwrap()), opts);
+                assert_eq!(engine.health(), Health::Ok, "{case}");
+                assert_eq!(
+                    engine.append(&s, vec![turn(1)], Some("original")).unwrap(),
+                    original,
+                    "{case}"
+                );
+                assert_eq!(
+                    engine.append(&s, vec![turn(2)], Some("retry")).unwrap(),
+                    retried,
+                    "{case}"
+                );
+                assert_eq!(engine.window(&s, WindowQuery::Last(10)).unwrap(), window, "{case}");
+            }
+        }
     }
 }
 
@@ -336,7 +433,9 @@ fn automatic_worker_checkpoint_and_checkpoint_failure_do_not_poison_tape() {
     engine.append(&scope("s"), vec![turn(1)], None).unwrap();
     disk.fail_next_sync().unwrap();
     assert!(engine.checkpoint().is_err());
+    assert_eq!(engine.health(), Health::Ok);
     engine.append(&scope("s"), vec![turn(2)], None).unwrap();
+    assert_eq!(engine.health(), Health::Ok);
     engine.checkpoint().unwrap();
     drop(engine);
     let engine = open(disk, options());

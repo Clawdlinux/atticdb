@@ -104,6 +104,18 @@ pub struct Metrics {
     /// Registered tenants.
     pub tenants: usize,
 }
+
+/// Writer availability. Reads retain the last durable view.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Health {
+    /// No write-blocking failure has been observed.
+    Ok,
+    /// A space check failed or preallocation ran out of space. A later write retries.
+    ReadOnly,
+    /// Storage or shared state failed. Reopen before writing again.
+    Poisoned,
+}
+
 /// Durable session storage. Drop joins the checkpoint worker before closing the tape.
 pub struct Engine {
     worker: Worker,
@@ -124,6 +136,19 @@ impl std::fmt::Debug for Engine {
 }
 
 impl Engine {
+    /// Returns writer health. Poisoning takes precedence over read-only mode.
+    pub fn health(&self) -> Health {
+        if self.tape.is_poisoned()
+            || self.state.lock().map_or(true, |state| state.failure.is_some())
+        {
+            Health::Poisoned
+        } else if self.tape.read_only() {
+            Health::ReadOnly
+        } else {
+            Health::Ok
+        }
+    }
+
     /// Creates the directory, recovers its tape, and starts background workers using real filesystem I/O.
     pub fn open(path: impl AsRef<Path>, opts: EngineOptions) -> Result<Self> {
         std::fs::create_dir_all(path.as_ref()).map_err(zerodb_tape::Error::from)?;

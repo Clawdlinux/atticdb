@@ -54,6 +54,23 @@ The first tenant transaction allows 1023 turns. Later transactions allow 1024.
 The tape's 4 MiB encoded batch limit includes headers and the footer.
 That limit can reject content below the codec's independent 4 MiB field limit.
 
+## Health
+
+`Engine::health()` returns `Health::Ok`, `Health::ReadOnly`, or `Health::Poisoned`.
+Health reflects observed failures. It doesn't query disk space.
+`Ok` means no write-blocking failure has been observed.
+The tape checks free space before preparing each write group.
+Below the floor, appends return `ErrorKind::Storage(zerodb_tape::Error::DiskFull)` with `Outcome::NotCommitted`.
+Preallocation failures caused by a full disk return the same error and outcome.
+These rejections set health to `ReadOnly`. Reads keep serving acknowledged turns.
+A failed space query also sets `ReadOnly`. Its original storage error and `NotCommitted` outcome pass through.
+Later appends retry the space check. A passing check clears read-only mode.
+Space-check rejections don't add retry keys. Retry the same `idem_key` after space returns to commit normally.
+Further retries return that durable receipt without writing again.
+`Poisoned` takes precedence over `ReadOnly` and requires reopening before writing.
+It reports tape poisoning, shared-state failures, or a poisoned state lock.
+Health describes writer availability. It doesn't guarantee every read will succeed after storage corruption.
+
 ## Payload format
 
 Version 1 uses little-endian integers. Every length prefix is a u32 byte count.

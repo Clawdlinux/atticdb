@@ -430,7 +430,7 @@ impl<S: StateMachine> WriterCore<S> {
         self.reads.poisoned.load(Ordering::Acquire)
     }
 
-    /// True when the last group failed its free-space check. A passing check clears it.
+    /// True after a failed space check or full-disk preallocation. A passing space check clears it.
     pub fn read_only(&self) -> bool {
         self.reads.read_only.load(Ordering::Acquire)
     }
@@ -584,6 +584,7 @@ impl<S: StateMachine> WriterCore<S> {
                     }
                     Ok(_) => self.reads.read_only.store(false, Ordering::Release),
                     Err(error) => {
+                        self.reads.read_only.store(true, Ordering::Release);
                         self.reject_group(error);
                         return;
                     }
@@ -1043,7 +1044,7 @@ impl<S: StateMachine> Tape<S> {
         self.reads.durable_lsn.load(Ordering::Acquire)
     }
 
-    /// True while the last free-space check failed. Reads remain available.
+    /// True after a failed space check or full-disk preallocation. Reads remain available.
     pub fn read_only(&self) -> bool {
         self.reads.read_only.load(Ordering::Acquire)
     }

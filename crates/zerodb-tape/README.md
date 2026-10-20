@@ -98,7 +98,8 @@ Space checks and preallocation run before application preparation.
 A full disk during segment creation or allocation rejects the group with `DiskFull` and `NotCommitted`.
 The writer reports `read_only()` without poisoning. A later passing space check clears it.
 Failed allocations remove their segment files. Successfully prepared segments remain available for a later group.
-A failed space query rejects the group without poisoning.
+A failed space query also sets `read_only()` and rejects the group without poisoning.
+The original storage error and `NotCommitted` outcome pass through unchanged.
 Segment sync, directory sync, and manifest failures still poison the writer.
 
 Commit timestamps use `max(previous + 1 ns, clock)`.

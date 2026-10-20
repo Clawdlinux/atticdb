@@ -31,7 +31,7 @@ fn space_faults_set_group_outcome() {
         ("create full", Create, true, false),
         ("allocate full", Allocate, true, false),
         ("later allocation full", LaterAllocate, true, false),
-        ("space query error", Stat, false, false),
+        ("space query error", Stat, true, false),
         ("segment sync error", Sync, false, true),
         ("directory sync error", DirSync, false, true),
         ("manifest write full", Manifest, false, true),
