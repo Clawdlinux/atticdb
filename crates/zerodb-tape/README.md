@@ -103,7 +103,11 @@ Required segments are preallocated before application preparation too.
 Clean full-disk failures during segment creation or allocation return the same error and outcome.
 These rejections set `read_only()` without poisoning. A later write's passing space check clears it.
 Idle time and health probes never clear read-only, even after space returns.
-Failed allocations remove their segment files. Successfully prepared segments remain available for a later group.
+Failed allocations remove their segment files.
+Unused prepared segments can serve later groups before shutdown.
+Recovery accepts fully zero, full-sized trailing reservations as unused, regardless of their size or count.
+It drops surplus reservations without a torn-tail warning and may keep one empty segment as the append target.
+Nonzero fragments and gaps before later data retain corruption checks.
 A failed space query also sets `read_only()` and rejects the group without poisoning.
 The original storage error and `NotCommitted` outcome pass through unchanged.
 Segment sync, directory sync, manifest failures, and ambiguous cleanup failures still poison the writer.

@@ -15,7 +15,12 @@ use crate::support;
 
 #[test]
 fn oversized_padding_respects_the_durable_boundary() {
-    for (case, floor, expect_corruption) in [("proved gap", 2, true), ("unproved tail", 0, false)] {
+    for (case, floor, partial_header, expect_corruption) in [
+        ("proved gap", 2, false, true),
+        ("unproved tail", 0, false, false),
+        ("proved partial length", 2, true, true),
+        ("unproved partial length", 0, true, false),
+    ] {
         eprintln!("case: {case}");
         let io = Arc::new(SimDisk::new(0));
         let size = (frame::MAX_FRAME_SIZE + frame::HEADER_LEN + 44 + 1024) as u64;
@@ -24,7 +29,11 @@ fn oversized_padding_respects_the_durable_boundary() {
             dir.prepare_next_segment(size).unwrap();
         }
         let (first, _) = transaction(1, 1, (1, 0));
-        let (last, _) = transaction(2, 2, (2, 0));
+        let (mut last, _) = transaction(2, 2, (2, 0));
+        if partial_header {
+            last[..4].fill(0);
+            last.truncate(8);
+        }
         write(&io, &dir, 1, 0, &first);
         write(&io, &dir, 2, 0, &last);
         dir.install_superblock(floor).unwrap();
@@ -32,7 +41,9 @@ fn oversized_padding_respects_the_durable_boundary() {
         if expect_corruption {
             assert!(matches!(result, Err(Error::CorruptionDetected { .. })), "{case}");
         } else {
-            assert_eq!(result.unwrap().report.records, 1, "{case}");
+            let report = result.unwrap().report;
+            assert_eq!(report.records, 1, "{case}");
+            assert!(report.truncated.is_some(), "{case}: nonzero tails are never unused");
             assert_eq!(dir.segments(), &[1], "{case}");
             dir.install_superblock(1).unwrap();
             drop(dir);

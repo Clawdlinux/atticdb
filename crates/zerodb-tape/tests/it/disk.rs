@@ -364,36 +364,65 @@ fn seeded_disk_crashes_preserve_sync_fidelity() {
 
 #[test]
 fn a_group_spanning_segments_is_reserved_before_any_prepare() {
-    let disk = Arc::new(SimDisk::new(5));
-    let opts =
-        TapeOptions { segment_size: 200, free_space_floor: Some(0), ..TapeOptions::default() };
-    let (mut core, _) = WriterCore::open_with(
-        Machine { expected_segments: Some((disk.clone(), 3)), ..Machine::default() },
-        disk.clone(),
-        Arc::new(SimClock::default()),
-        "db",
-        opts.clone(),
-    )
-    .unwrap();
-    let replies: Vec<_> = (0..3)
-        .map(|_| {
-            submit(
-                &mut core,
-                vec![RecordInput { kind: Kind::Turn, tenant_id: 1, content: vec![7; 8] }],
-                Durability::Durable,
+    for (case, size, count, bytes, segments, behavior, durable_lsn) in [
+        ("written rolls", 200, 3, 8, 3, Behavior::Pass, 3),
+        ("unused small rolls", 200, 3, 8, 3, Behavior::Dedup, 1),
+        ("unused large roll", 8 * 1024 * 1024, 3, 3 * 1024 * 1024, 2, Behavior::Dedup, 1),
+        ("unused large rolls", 8 * 1024 * 1024, 7, 3 * 1024 * 1024, 4, Behavior::Dedup, 1),
+    ] {
+        let disk = Arc::new(SimDisk::new(5));
+        let opts =
+            TapeOptions { segment_size: size, free_space_floor: Some(0), ..TapeOptions::default() };
+        let (mut core, _) = WriterCore::open_with(
+            Machine {
+                expected_segments: Some((disk.clone(), segments)),
+                behavior,
+                ..Machine::default()
+            },
+            disk.clone(),
+            Arc::new(SimClock::default()),
+            "db",
+            opts.clone(),
+        )
+        .unwrap();
+        let replies: Vec<_> = (0..count)
+            .map(|_| {
+                submit(&mut core, vec![record(Kind::Turn, 1, vec![7; bytes])], Durability::Durable)
+            })
+            .collect();
+        core.step();
+        for reply in replies {
+            reply.recv().unwrap().unwrap();
+        }
+        assert_eq!(core.durable_lsn(), durable_lsn, "{case}");
+        core.shutdown().unwrap();
+        drop(core);
+        for reopen in 0..3 {
+            let (mut core, report) = WriterCore::open_with(
+                Machine::default(),
+                disk.clone(),
+                Arc::new(SimClock::default()),
+                "db",
+                opts.clone(),
             )
-        })
-        .collect();
-    core.step();
-    for reply in replies {
-        reply.recv().unwrap().unwrap();
-    }
-    assert_eq!(core.durable_lsn(), 3);
-    drop(core);
-    let (_, report) =
-        WriterCore::open_with(Machine::default(), disk, Arc::new(SimClock::default()), "db", opts)
             .unwrap();
-    assert_eq!(report.durable_lsn, 3);
+            let expected_lsn = durable_lsn + u64::from(reopen == 2);
+            assert_eq!(report.durable_lsn, expected_lsn, "{case}, reopen={reopen}");
+            assert_eq!(report.truncated, None, "{case}, reopen={reopen}");
+            assert_eq!(report.dropped_bytes, 0, "{case}, reopen={reopen}");
+            for lsn in 1..=expected_lsn {
+                assert!(core.read(lsn).unwrap().is_some(), "{case}, reopen={reopen}, lsn={lsn}");
+            }
+            if reopen == 1 {
+                let reply =
+                    submit(&mut core, vec![record(Kind::Turn, 1, [9; 8])], Durability::Durable);
+                core.step();
+                let Committed::Durable { last_lsn, .. } = reply.recv().unwrap().unwrap();
+                assert_eq!(last_lsn, durable_lsn + 1, "{case}: reservations consumed no LSNs");
+            }
+            core.shutdown().unwrap();
+        }
+    }
 }
 
 #[test]

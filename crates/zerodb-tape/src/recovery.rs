@@ -190,6 +190,31 @@ fn lookahead(
     }
     Ok(false)
 }
+
+fn unused_prepared_tail(dir: &DataDir, size: u64, position: usize) -> Result<bool> {
+    let mut bytes = [0; 64 * 1024];
+    for &segment in &dir.segments()[position..] {
+        let file = match Handle::open(dir.io.clone(), &dir.segment_path(segment)) {
+            Ok(file) => file,
+            Err(Error::Io(std::io::ErrorKind::NotFound, _)) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        if dir.io.len(file.id)? != size {
+            return Ok(false);
+        }
+        let mut offset = 0;
+        while offset < size {
+            let count = (size - offset).min(bytes.len() as u64) as usize;
+            read_exact(dir.io.as_ref(), file.id, offset, &mut bytes[..count])?;
+            if bytes[..count].iter().any(|&byte| byte != 0) {
+                return Ok(false);
+            }
+            offset += count as u64;
+        }
+    }
+    Ok(true)
+}
+
 fn reported_bad_lsn(state: &Recovered, pending: &[(Frame, u64)], tail: &[u8]) -> u64 {
     let next = state.report.durable_lsn.saturating_add(pending.len() as u64).saturating_add(1);
     if let Some((last, _)) = pending.last() {
@@ -460,6 +485,7 @@ pub(crate) fn recover_with_budget(
     let mut first_lost = 0;
     let mut last_lost = 0;
     let mut cleared = 0;
+    let mut unused_tail = false;
     for (position, &segment) in segments.iter().enumerate() {
         let file = match Handle::open(dir.io.clone(), &dir.segment_path(segment)) {
             Ok(file) => file,
@@ -536,6 +562,17 @@ pub(crate) fn recover_with_budget(
                 let oversized = tail.len() > frame::MAX_FRAME_SIZE + frame::HEADER_LEN + 32;
                 if len == size && !((offset == 0 || oversized) && position + 1 < segments.len()) {
                     break;
+                }
+                if len == size && state.report.durable_lsn >= dir.superblock() {
+                    // CRC bytes may be zero, but a frame's length at bytes 4..8 is at least HEADER_LEN.
+                    // Kind and version are nonzero too. Any surviving nonzero fragment fails this zero-only path.
+                    // A tear persisting only zeros contains no frame and is indistinguishable from unused space.
+                    // Require the whole manifest suffix to be zero, beyond the durable floor and outside a transaction.
+                    // Gaps before later frames must still pass the existing corruption checks.
+                    if unused_prepared_tail(dir, size, position + 1)? {
+                        unused_tail = true;
+                        break;
+                    }
                 }
                 Err("end of tape or short segment".to_owned())
             } else {
@@ -638,6 +675,9 @@ pub(crate) fn recover_with_budget(
         }
         if touched {
             dir.io.sync_data(file.id)?;
+        }
+        if unused_tail {
+            break;
         }
     }
     if state.report.durable_lsn < dir.superblock() {
