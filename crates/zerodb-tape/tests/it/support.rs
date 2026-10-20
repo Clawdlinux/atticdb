@@ -572,16 +572,21 @@ pub fn preallocation_supported(dir: &Path) -> bool {
     let path = dir.join("preallocation-probe");
     let file =
         std::fs::OpenOptions::new().create_new(true).read(true).write(true).open(&path).unwrap();
-    let supported =
-        match rustix::fs::fallocate(&file, rustix::fs::FallocateFlags::empty(), 0, 1024 * 1024) {
-            Ok(()) => true,
-            Err(error)
-                if error == Errno::OPNOTSUPP || error == Errno::NOTSUP || error == Errno::NOSYS =>
-            {
-                false
-            }
-            Err(error) => panic!("preallocation probe failed: {error}"),
-        };
+    let allocation =
+        rustix::fs::fallocate(&file, rustix::fs::FallocateFlags::empty(), 0, 1024 * 1024);
+    let supported = match allocation {
+        Ok(()) => true,
+        Err(error)
+            if error == Errno::OPNOTSUPP || error == Errno::NOTSUP || error == Errno::NOSYS =>
+        {
+            eprintln!(
+                "skipping allocation block check: preallocation unsupported (errno={}): {error}",
+                error.raw_os_error()
+            );
+            false
+        }
+        Err(error) => panic!("preallocation probe failed: {error}"),
+    };
     drop(file);
     std::fs::remove_file(path).unwrap();
     supported
