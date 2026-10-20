@@ -85,7 +85,10 @@ Unknown versions, malformed lengths and invalid structures are rejected.
 
 Caller-side preparation checks sizes. The writer assigns LSNs and reserves the final disk location before calculating CRCs.
 `StateMachine::prepare` may rewrite a batch, reject it, or return a cached reply.
-Rewrites are validated before framing.
+`prepare` must not grow a batch past its submitted encoded size. Shrinking and equal-size rewrites are allowed.
+Rewrites are validated before framing against the size budgeted by the free-space check and segment reservations.
+Growth fails before writing and poisons the writer, even when it fits a reserved segment.
+Preparation may already have reserved application state, so reopening is required after an invalid rewrite.
 Preparation reservations must stay private until publication.
 
 The writer syncs every dirty segment in the group before calling `publish`.

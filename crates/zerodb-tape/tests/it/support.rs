@@ -23,6 +23,7 @@ pub struct ObservedIo {
     pub full_manifest_write: AtomicBool,
     pub fail_directory_sync: AtomicBool,
     pub fail_extension: AtomicBool,
+    pub sparse_allocation: bool,
 }
 
 impl ObservedIo {
@@ -45,6 +46,7 @@ impl ObservedIo {
             full_manifest_write: AtomicBool::new(false),
             fail_directory_sync: AtomicBool::new(false),
             fail_extension: AtomicBool::new(false),
+            sparse_allocation: false,
         }
     }
 
@@ -116,7 +118,11 @@ impl Io for ObservedIo {
         result
     }
     fn allocate(&self, file: FileId, len: u64) -> Result<()> {
-        let result = self.disk.allocate(file, len);
+        let result = if self.sparse_allocation {
+            self.disk.set_len(file, len)
+        } else {
+            self.disk.allocate(file, len)
+        };
         self.event(format!("resize {} {len}", self.name(file).display()));
         result
     }
@@ -218,7 +224,7 @@ pub(crate) enum Behavior {
     Pass,
     Sequence,
     Dedup,
-    Grow(usize),
+    Resize(usize),
     InvalidRewrite,
 }
 
@@ -258,7 +264,7 @@ impl StateMachine for Machine {
         }
         match self.behavior {
             Behavior::Pass => {}
-            Behavior::Grow(len) => {
+            Behavior::Resize(len) => {
                 for record in batch.records_mut() {
                     record.content.resize(len, 7);
                 }

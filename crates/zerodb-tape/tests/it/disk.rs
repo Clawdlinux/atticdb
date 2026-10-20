@@ -1,12 +1,12 @@
 use crate::support::storage::{bytes, durable_file};
 use crate::support::Behavior;
-use crate::support::{manifest, primed_writer, record, submit, Machine};
+use crate::support::{manifest, primed_writer, record, submit, Machine, ObservedIo};
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use zerodb_tape::sim::DataDir;
-use zerodb_tape::sim::{SimClock, WriterCore};
-use zerodb_tape::{Committed, Durability, Kind, Outcome, RecordInput, TapeOptions};
+use zerodb_tape::sim::{frame::HEADER_LEN, SimClock, WriterCore};
+use zerodb_tape::{Committed, Durability, Kind, Outcome, TapeOptions};
 use zerodb_tape::{Error, Io, SimDisk};
 
 #[test]
@@ -426,32 +426,88 @@ fn a_group_spanning_segments_is_reserved_before_any_prepare() {
 }
 
 #[test]
-fn growing_hooks_cannot_allocate_after_prepare() {
-    let disk = Arc::new(SimDisk::new(6));
-    let opts =
-        TapeOptions { segment_size: 256, free_space_floor: Some(0), ..TapeOptions::default() };
-    let (mut core, _) = WriterCore::open_with(
-        Machine::new(Behavior::Grow(80)),
-        disk.clone(),
-        Arc::new(SimClock::default()),
-        "db",
-        opts,
-    )
-    .unwrap();
-    let replies: Vec<_> = (0..3)
-        .map(|_| {
-            submit(
-                &mut core,
-                vec![RecordInput { kind: Kind::Turn, tenant_id: 1, content: vec![7; 8] }],
-                Durability::Durable,
-            )
-        })
-        .collect();
-    core.step();
-    let results: Vec<_> = replies.into_iter().map(|r| r.recv().unwrap()).collect();
-    assert!(results[2].is_err(), "rewrites must not allocate beyond the preflight reservation");
-    assert!(core.is_poisoned());
-    assert!(!disk.exists(Path::new("db/seg-0000000000000003.zdb")).unwrap());
+fn rewrites_cannot_exceed_the_submitted_space_budget() {
+    for (case, segment_size, free, floor, submitted, rewritten, count, sparse) in [
+        ("sparse floor growth", 8192, 8192, 4096, 120, 6112, 1, true),
+        ("one byte growth", 8192, 8192, 4096, 120, 121, 1, true),
+        ("growth across reserved segments", 256, 8192, 0, 120, 192, 3, false),
+        ("same size", 256, 8192, 0, 120, 120, 3, false),
+        ("shrinking", 256, 8192, 0, 192, 120, 3, false),
+    ] {
+        eprintln!("case: {case}");
+        let io = Arc::new(ObservedIo { sparse_allocation: sparse, ..ObservedIo::new(6) });
+        let opts =
+            TapeOptions { segment_size, free_space_floor: Some(floor), ..TapeOptions::default() };
+        let overhead = 2 * HEADER_LEN + 32;
+        let machine = Machine::new(Behavior::Resize(rewritten - overhead));
+        let log = machine.log.clone();
+        let (mut core, _) =
+            WriterCore::open_with(machine, io.clone(), Arc::new(SimClock::default()), "db", opts)
+                .unwrap();
+        let dir = Path::new("db");
+        let used = io.disk.total_bytes(dir).unwrap() - io.disk.available_bytes(dir).unwrap();
+        io.disk.set_capacity(used + free).unwrap();
+        assert_eq!(io.disk.available_bytes(dir).unwrap(), free, "{case}: free before prepare");
+        let bytes_before = io.segment_bytes.load(Ordering::SeqCst);
+        let replies: Vec<_> = (0..count)
+            .map(|_| {
+                submit(
+                    &mut core,
+                    vec![record(Kind::Turn, 1, vec![7; submitted - overhead])],
+                    Durability::Durable,
+                )
+            })
+            .collect();
+        core.step();
+        let available = io.disk.available_bytes(dir).unwrap();
+        assert!(available >= floor, "{case}: free={available} consumed protected floor={floor}");
+        let results: Vec<_> = replies.into_iter().map(|r| r.recv().unwrap()).collect();
+        if rewritten > submitted {
+            assert!(core.is_poisoned(), "{case}: preparation may have reserved application state");
+            assert_eq!(core.durable_lsn(), 0, "{case}");
+            assert_eq!(core.scan(0).count(), 0, "{case}");
+            assert!(log.lock().unwrap().published.is_empty(), "{case}");
+            assert_eq!(log.lock().unwrap().prepares, 1, "{case}: no prepare after poisoning");
+            assert_eq!(io.segment_bytes.load(Ordering::SeqCst), bytes_before, "{case}: no write");
+            if sparse {
+                assert_eq!(available, free, "{case}: invalid growth consumed sparse blocks");
+            }
+            for (index, result) in results.into_iter().enumerate() {
+                let error = result.unwrap_err();
+                assert_eq!(error.outcome, Outcome::NotCommitted, "{case}: request={index}");
+                if index == 0 {
+                    assert!(matches!(error.kind, Error::InvalidFrame(_)), "{case}: {error:?}");
+                } else {
+                    assert!(matches!(error.kind, Error::Poisoned), "{case}: {error:?}");
+                }
+            }
+            assert!(
+                !io.disk.exists(Path::new("db/seg-0000000000000003.zdb")).unwrap(),
+                "{case}: no allocation beyond the preflight reservation"
+            );
+            let next = submit(&mut core, vec![record(Kind::Turn, 1, [7; 8])], Durability::Durable);
+            core.step();
+            assert!(matches!(next.recv().unwrap().unwrap_err().kind, Error::Poisoned), "{case}");
+            assert_eq!(log.lock().unwrap().prepares, 1, "{case}: later append did not prepare");
+            assert_eq!(
+                io.segment_bytes.load(Ordering::SeqCst),
+                bytes_before,
+                "{case}: still no write"
+            );
+        } else {
+            for result in results {
+                result.unwrap();
+            }
+            assert!(!core.is_poisoned(), "{case}");
+            assert_eq!(core.durable_lsn(), count as u64, "{case}");
+            let records = core.scan(0).collect::<zerodb_tape::Result<Vec<_>>>().unwrap();
+            assert_eq!(records.len(), count, "{case}");
+            assert!(
+                records.iter().all(|r| r.payload.as_ref() == vec![7; rewritten - overhead]),
+                "{case}: rewritten content"
+            );
+        }
+    }
 }
 
 #[test]

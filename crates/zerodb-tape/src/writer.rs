@@ -158,7 +158,7 @@ impl PreparedBatch {
 
     /// Rewrites records before framing. The writer validates changes.
     ///
-    /// Rewritten records must still satisfy the batch size and durability constraints.
+    /// Rewrites may shrink or preserve the submitted encoded size, but must not grow it.
     /// Invalid rewrites poison the writer because preparation may have reserved application state.
     pub fn records_mut(&mut self) -> impl ExactSizeIterator<Item = &mut RecordInput> {
         self.changed = true;
@@ -189,10 +189,15 @@ impl PreparedBatch {
         Ok(size)
     }
 
+    /// Revalidates rewrites against the size budgeted before preparation.
     fn refresh(&mut self) -> Result<()> {
         if self.changed {
-            self.size =
+            let size =
                 Self::validate(self.records(), Durability::Durable).map_err(|error| error.kind)?;
+            if size > self.size {
+                return Err(Error::InvalidFrame("prepared batch exceeds submitted size".into()));
+            }
+            self.size = size;
             self.changed = false;
         }
         Ok(())
