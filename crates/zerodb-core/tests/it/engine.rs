@@ -251,12 +251,18 @@ fn write_outages_report_health_preserve_reads_and_retry_keys() {
     enum Fault {
         Floor,
         ColdFloor,
+        ReopenFull,
+        ReopenAllocation,
+        ReopenStat,
         SpaceQuery,
         Sync,
     }
     for (case, fault, health) in [
         ("disk floor", Fault::Floor, Health::ReadOnly),
         ("cold reads with no free space", Fault::ColdFloor, Health::ReadOnly),
+        ("reopen while full", Fault::ReopenFull, Health::ReadOnly),
+        ("reopen allocation race", Fault::ReopenAllocation, Health::ReadOnly),
+        ("reopen with space query failure", Fault::ReopenStat, Health::ReadOnly),
         ("space query outage", Fault::SpaceQuery, Health::ReadOnly),
         ("ambiguous sync", Fault::Sync, Health::Poisoned),
     ] {
@@ -266,7 +272,14 @@ fn write_outages_report_health_preserve_reads_and_retry_keys() {
             let io = Arc::new(support::ProbeIo::new(seed));
             let mut opts = options();
             opts.tape.free_space_floor = Some(4096);
-            let history = if matches!(fault, Fault::ColdFloor) { 512 } else { 1 };
+            let history = if matches!(
+                fault,
+                Fault::ColdFloor | Fault::ReopenFull | Fault::ReopenAllocation | Fault::ReopenStat
+            ) {
+                512
+            } else {
+                1
+            };
             if matches!(fault, Fault::ColdFloor) {
                 opts.tape.lsn_index_bytes = 4224;
             }
@@ -284,6 +297,58 @@ fn write_outages_report_health_preserve_reads_and_retry_keys() {
                     let remaining = if matches!(fault, Fault::ColdFloor) { 0 } else { 4095 };
                     io.disk.set_capacity(capacity - free + remaining).unwrap();
                 }
+                Fault::ReopenFull | Fault::ReopenAllocation | Fault::ReopenStat => {
+                    drop(engine);
+                    for name in ["LSN-OFFSETS", "LSN-ROUTES"] {
+                        let file = io.disk.open(&std::path::Path::new("db").join(name)).unwrap();
+                        io.disk.set_len(file, 0).unwrap();
+                        io.disk.set_len(file, 4096).unwrap();
+                        io.disk.sync_data(file).unwrap();
+                        io.disk.close(file).unwrap();
+                    }
+                    if matches!(fault, Fault::ReopenFull) {
+                        let capacity = io.disk.total_bytes(std::path::Path::new("db")).unwrap();
+                        let free = io.disk.available_bytes(std::path::Path::new("db")).unwrap();
+                        io.disk.set_capacity(capacity - free).unwrap();
+                    } else if matches!(fault, Fault::ReopenAllocation) {
+                        io.allocation_full.store(true, Ordering::SeqCst);
+                    } else {
+                        opts.tape.free_space_floor = None;
+                        io.space_error.store(true, Ordering::SeqCst);
+                    }
+                    engine = Engine::open_with(
+                        io.clone(),
+                        Arc::new(SimClock::default()),
+                        "db",
+                        opts.clone(),
+                    )
+                    .unwrap();
+                    assert_eq!(engine.health(), Health::ReadOnly, "{case}: open did not poison");
+                    if matches!(fault, Fault::ReopenAllocation) {
+                        assert!(
+                            !io.allocation_full.load(Ordering::SeqCst),
+                            "{case}: reservation was attempted"
+                        );
+                        let capacity = io.disk.total_bytes(std::path::Path::new("db")).unwrap();
+                        let free = io.disk.available_bytes(std::path::Path::new("db")).unwrap();
+                        io.disk.set_capacity(capacity - free).unwrap();
+                    }
+                    let oldest =
+                        engine.window(&s, WindowQuery::Since { seq: 1, limit: 1 }).unwrap();
+                    assert_eq!(
+                        oldest[0].content,
+                        turn(1).content,
+                        "{case}: acknowledged turn survived reopen"
+                    );
+                    assert_eq!(oldest[0].lsn, original.first_lsn, "{case}");
+                    if matches!(fault, Fault::ReopenFull | Fault::ReopenAllocation) {
+                        assert_eq!(
+                            io.disk.available_bytes(std::path::Path::new("db")).unwrap(),
+                            0,
+                            "{case}: zero free after reopen"
+                        );
+                    }
+                }
                 Fault::SpaceQuery => io.space_error.store(true, Ordering::SeqCst),
                 Fault::Sync => io.disk.fail_next_sync().unwrap(),
             }
@@ -297,9 +362,12 @@ fn write_outages_report_health_preserve_reads_and_retry_keys() {
                 assert_eq!(error.outcome, expected, "{case}, attempt={attempt}");
                 assert!(
                     match fault {
-                        Fault::Floor | Fault::ColdFloor =>
+                        Fault::Floor
+                        | Fault::ColdFloor
+                        | Fault::ReopenFull
+                        | Fault::ReopenAllocation =>
                             matches!(error.kind, ErrorKind::Storage(zerodb_tape::Error::DiskFull)),
-                        Fault::SpaceQuery => matches!(
+                        Fault::SpaceQuery | Fault::ReopenStat => matches!(
                             error.kind,
                             ErrorKind::Storage(zerodb_tape::Error::Io(
                                 std::io::ErrorKind::Other,
@@ -331,7 +399,15 @@ fn write_outages_report_health_preserve_reads_and_retry_keys() {
                         before.tape_index.dirty_page_evictions > 0,
                         "{case}: multiple dirty pages"
                     );
+                    let before_cold = engine.metrics().unwrap().tape_index;
                     let cold = engine.window(&s, WindowQuery::Since { seq: 1, limit: 3 }).unwrap();
+                    let after_cold = engine.metrics().unwrap().tape_index;
+                    if attempt == 0 {
+                        assert!(
+                            after_cold.dirty_page_evictions > before_cold.dirty_page_evictions,
+                            "{case}: oldest read evicted a dirty page"
+                        );
+                    }
                     assert_eq!(
                         cold.iter().map(|turn| turn.seq).collect::<Vec<_>>(),
                         vec![1, 2, 3],
@@ -339,8 +415,7 @@ fn write_outages_report_health_preserve_reads_and_retry_keys() {
                     );
                     assert!(cold.iter().all(|value| value.content == turn(1).content), "{case}");
                     assert!(
-                        engine.metrics().unwrap().tape_index.page_reloads
-                            > before.tape_index.page_reloads,
+                        after_cold.page_reloads > before_cold.page_reloads,
                         "{case}: cold index read"
                     );
                     assert_eq!(
@@ -373,6 +448,18 @@ fn write_outages_report_health_preserve_reads_and_retry_keys() {
             }
             let retried = engine.append(&s, vec![turn(2)], Some("retry")).unwrap();
             assert_eq!(engine.health(), Health::Ok, "{case}");
+            if matches!(fault, Fault::ReopenFull | Fault::ReopenAllocation | Fault::ReopenStat) {
+                for (name, width) in [("LSN-OFFSETS", 8), ("LSN-ROUTES", 16)] {
+                    let file = io.disk.open(&std::path::Path::new("db").join(name)).unwrap();
+                    let required = (retried.last_lsn * width).div_ceil(4096) * 4096;
+                    assert_eq!(
+                        io.disk.len(file).unwrap(),
+                        required,
+                        "{case}: retried {name} reservation"
+                    );
+                    io.disk.close(file).unwrap();
+                }
+            }
             assert_eq!(retried.seqs, vec![history as u64 + 1], "{case}");
             assert_eq!(retried.txn, original.txn + 1, "{case}");
             assert_eq!(retried.first_lsn, original.last_lsn + 1, "{case}");

@@ -104,9 +104,12 @@ It budgets encoded bytes, new segments, and LSN-index backing growth before comp
 A floor hit rejects the whole group with `DiskFull` and `NotCommitted`, without preparing application state.
 Required segments and LSN-index backing pages are reserved with `Io::allocate` before application preparation.
 The highest possible group LSN bounds growth of `LSN-OFFSETS` and `LSN-ROUTES`, rounded to 4096-byte pages.
-Initial index pages are reserved at open, like the initial segment.
+Open attempts index reservations after recovery, only when the space query and floor allow them.
 Preallocated index backing lets cold reads evict dirty pages without new blocks or an increased cache budget.
-Recovery deletes and rebuilds these derived files, reserving pages again as it indexes retained records.
+Recovery recreates these derived files and rebuilds resident pages before attempting optional backing reservations.
+An index fitting its cache can reopen without allocating backing blocks.
+Full-disk or space-query failures defer reservations and start read-only, without poisoning.
+The next write retries outstanding reservations and any unknown default-floor query before `prepare`.
 Sparse fallback relies on the floor; APFS and btrfs retain the same allocation caveat as segments.
 Clean full-disk failures during segment creation or allocation return the same error and outcome.
 These rejections set `read_only()` without poisoning. A later write's passing space check clears it.

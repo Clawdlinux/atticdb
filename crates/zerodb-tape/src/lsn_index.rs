@@ -72,7 +72,7 @@ impl LsnIndex {
         };
         let offsets = create("LSN-OFFSETS")?;
         let routes = create("LSN-ROUTES")?;
-        let mut index = Self {
+        Ok(Self {
             io,
             offsets,
             routes,
@@ -85,10 +85,7 @@ impl LsnIndex {
             reloads: 0,
             evictions: 0,
             dirty_evictions: 0,
-        };
-        // Reserve initial pages at open, like the active segment.
-        index.reserve(1)?;
-        Ok(index)
+        })
     }
 
     fn backing_sizes(lsn: u64) -> Result<[u64; 2]> {
@@ -183,8 +180,8 @@ impl LsnIndex {
             }
             _ => lsn,
         };
-        // Recovery rebuilds these files. Live groups reserve before preparation.
-        self.reserve(lsn)?;
+        // Recovery can rebuild resident pages without allocating backing space.
+        // Live groups reserve backing before preparation.
         let (page, at) = Self::address(lsn, 16)?;
         let route = self.page((true, page))?;
         route.bytes[at..at + 8].copy_from_slice(&segment.to_le_bytes());

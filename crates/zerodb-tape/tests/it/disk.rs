@@ -559,11 +559,7 @@ fn rewrites_cannot_exceed_the_submitted_space_budget() {
         }
         drop(core);
         let (reopened, report) = WriterCore::open(
-            Arc::new(ObservedIo {
-                disk: io.disk.crash().unwrap(),
-                sparse_allocation: sparse,
-                ..ObservedIo::new(6)
-            }),
+            Arc::new(io.disk.crash().unwrap()),
             Arc::new(SimClock::default()),
             "db",
             opts,

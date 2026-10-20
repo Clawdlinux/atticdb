@@ -196,7 +196,8 @@ A clean floor hit returns `DiskFull` with `NotCommitted` and sets read-only. Rea
 The writer reserves segment and LSN-index backing space before `prepare`, including both in the floor budget.
 `LSN-OFFSETS` and `LSN-ROUTES` grow in whole pages through the highest LSN the queued group can assign.
 Dirty-page eviction during cold reads writes only within reserved backing space, preserving the bounded cache.
-Recovery recreates both derived index files and reserves pages while rebuilding them. The on-disk format is unchanged.
+Recovery rebuilds resident index pages before optional backing reservations. Full-disk or space-query failures start read-only without poisoning.
+The next write retries outstanding reservations and any unknown default-floor query. The on-disk format is unchanged.
 Sparse fallback relies on the floor; APFS and btrfs retain the same allocation caveat as segments.
 `Engine::health()` reports this observed state without blocking or querying space.
 Only a later write's passing space check clears read-only.

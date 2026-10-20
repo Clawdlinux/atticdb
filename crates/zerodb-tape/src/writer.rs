@@ -334,7 +334,7 @@ pub struct WriterCore<S: StateMachine = NoopStateMachine> {
     superblock_bytes: u64,
     superblock_position: (u64, u64),
     synced_position: (u64, u64),
-    free_space_floor: u64,
+    free_space_floor: Option<u64>,
     #[cfg(feature = "sim")]
     publish_pause: Option<Arc<crate::sim::PublishPause>>,
 }
@@ -382,10 +382,9 @@ impl<S: StateMachine> WriterCore<S> {
         }
         let mut dir =
             DataDir::open(io.clone(), path, opts.server_address.as_deref(), opts.segment_size)?;
-        let free_space_floor = match opts.free_space_floor {
-            Some(floor) => floor,
-            None => (io.total_bytes(&dir.path)? / 20).min(1 << 30),
-        };
+        let free_space_floor = opts.free_space_floor.or_else(|| {
+            io.total_bytes(&dir.path).ok().map(|capacity| (capacity / 20).min(1 << 30))
+        });
         let mut recovered = recover_with_budget(&mut dir, opts.segment_size, opts.lsn_index_bytes)?;
         if recovered.report.durable_lsn > dir.superblock() {
             dir.install_superblock(recovered.report.durable_lsn)?;
@@ -407,6 +406,25 @@ impl<S: StateMachine> WriterCore<S> {
             }
         }
         let segments = SegmentWriter::new(dir, opts.segment_size, recovered.offset)?;
+        // Finish recovery before optional reservations consume any remaining headroom.
+        let highest_lsn = recovered.report.durable_lsn.max(1);
+        let needed = lock(&reads.index)?.reservation_bytes(highest_lsn)?;
+        let read_only = match free_space_floor {
+            Some(floor) => match reads.io.available_bytes(&reads.path) {
+                Ok(free) if free.checked_sub(needed).is_some_and(|left| left >= floor) => {
+                    match lock(&reads.index)?.reserve(highest_lsn) {
+                        Ok(()) => false,
+                        Err(Error::DiskFull | Error::Io(std::io::ErrorKind::StorageFull, _)) => {
+                            true
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                _ => true,
+            },
+            None => true,
+        };
+        reads.read_only.store(read_only, Ordering::Release);
         let position = segments.position();
         let core = Self {
             segments,
@@ -591,6 +609,21 @@ impl<S: StateMachine> WriterCore<S> {
                 }
             });
             if !self.queue.is_empty() {
+                let floor = match self.free_space_floor {
+                    Some(floor) => floor,
+                    None => match self.reads.io.total_bytes(&self.reads.path) {
+                        Ok(capacity) => {
+                            let floor = (capacity / 20).min(1 << 30);
+                            self.free_space_floor = Some(floor);
+                            floor
+                        }
+                        Err(error) => {
+                            self.reads.read_only.store(true, Ordering::Release);
+                            self.reject_group(error);
+                            return;
+                        }
+                    },
+                };
                 let Some(highest_lsn) = self.queue.iter().try_fold(self.durable_lsn(), |lsn, r| {
                     lsn.checked_add(r.batch.records.len() as u64)
                 }) else {
@@ -612,11 +645,7 @@ impl<S: StateMachine> WriterCore<S> {
                     .saturating_add(index_space);
                 let available = self.reads.io.available_bytes(&self.reads.path);
                 match available {
-                    Ok(free)
-                        if free
-                            .checked_sub(needed)
-                            .is_none_or(|left| left < self.free_space_floor) =>
-                    {
+                    Ok(free) if free.checked_sub(needed).is_none_or(|left| left < floor) => {
                         self.reads.read_only.store(true, Ordering::Release);
                         self.reject_group(Error::DiskFull);
                         return;

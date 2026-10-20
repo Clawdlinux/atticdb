@@ -10,6 +10,7 @@ pub struct ProbeIo {
     pub disk: SimDisk,
     pub fail_read: AtomicBool,
     pub space_error: AtomicBool,
+    pub allocation_full: AtomicBool,
     files: Mutex<BTreeMap<FileId, PathBuf>>,
     pub writes: Mutex<Vec<(String, PathBuf)>>,
     pub read_gate: Mutex<Option<(mpsc::SyncSender<()>, mpsc::Receiver<()>)>>,
@@ -21,6 +22,7 @@ impl ProbeIo {
             disk: SimDisk::new(seed),
             fail_read: AtomicBool::new(false),
             space_error: AtomicBool::new(false),
+            allocation_full: AtomicBool::new(false),
             files: Mutex::new(BTreeMap::new()),
             writes: Mutex::new(Vec::new()),
             read_gate: Mutex::new(None),
@@ -79,6 +81,12 @@ impl Io for ProbeIo {
         self.disk.set_len(f, n)
     }
     fn allocate(&self, f: FileId, n: u64) -> Result<()> {
+        if self.allocation_full.swap(false, Ordering::SeqCst) {
+            return Err(Error::Io(
+                std::io::ErrorKind::StorageFull,
+                "injected allocation failure".into(),
+            ));
+        }
         self.disk.allocate(f, n)
     }
     fn available_bytes(&self, dir: &Path) -> Result<u64> {
@@ -91,6 +99,12 @@ impl Io for ProbeIo {
         self.disk.available_bytes(dir)
     }
     fn total_bytes(&self, dir: &Path) -> Result<u64> {
+        if self.space_error.load(Ordering::SeqCst) {
+            return Err(Error::Io(
+                std::io::ErrorKind::Other,
+                "injected space query failure".into(),
+            ));
+        }
         self.disk.total_bytes(dir)
     }
     fn sync_data(&self, f: FileId) -> Result<()> {
