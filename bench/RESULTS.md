@@ -1,8 +1,8 @@
 # Latest result
 
-Latest S2 macOS 192k repeat: Engine/bare p99 median **1.662945x**, Tape/bare **1.211374x**.
-Absolute p99 increases fit S1's repetition spread after the required unchanged repeat.
-The Engine/bare increase exceeds S1's unchanged-repeat ratio spread. Keep that warning alongside the noise verdict.
+Latest S2 macOS 192k run uses matched preallocation: Engine/bare p99 median **1.150713x**, Tape/bare **1.273602x**.
+The earlier **1.662945x** Engine/bare and **1.211374x** Tape/bare medians used an unmatched sparse bare baseline.
+Those figures are historical, not current performance results.
 See [S2 disk-full overhead](#s2-disk-full-overhead-macos-192k) for historical runs and the corrected preallocation baseline.
 
 Latest S1 macOS 1M run: Engine/bare p99 **1.189216x** [1.085449x, 1.675773x].
