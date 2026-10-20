@@ -121,7 +121,11 @@ impl SegmentWriter {
             } else {
                 // Groups reserve every roll using submitted sizes.
                 // Rewrites cannot grow, so a group cannot exhaust its reservations.
-                debug_assert!(!self.group_reserved, "prepared group outgrew reserved segments");
+                if self.group_reserved {
+                    return Err(Error::InvalidFrame(
+                        "prepared group outgrew reserved segments".into(),
+                    ));
+                }
                 let id = self.dir.prepare_next_segment(self.size)?;
                 let file = Handle::open(self.dir.io.clone(), &self.dir.segment_path(id))?;
                 self.files.insert(id, file);
