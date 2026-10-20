@@ -136,6 +136,11 @@ impl StorageFullFault {
         self.segments.lock().unwrap().remove(&file);
     }
 
+    /// Reports whether an open handle belongs to a data segment.
+    pub fn is_segment(&self, file: FileId) -> bool {
+        self.segments.lock().unwrap().contains(&file)
+    }
+
     /// Arms a single data-write or data-sync error.
     pub fn arm(&self, plan: &CapacityPlan) {
         self.written.store(false, Ordering::SeqCst);
@@ -151,7 +156,7 @@ impl StorageFullFault {
         if !self.write.load(Ordering::SeqCst) && !self.sync.load(Ordering::SeqCst) {
             return;
         }
-        if self.segments.lock().unwrap().contains(&file) {
+        if self.is_segment(file) {
             if self.sync.load(Ordering::SeqCst) {
                 self.written.store(true, Ordering::SeqCst);
             }
@@ -170,8 +175,7 @@ impl StorageFullFault {
         if !self.written.load(Ordering::SeqCst) || !self.sync.load(Ordering::SeqCst) {
             return;
         }
-        if self.segments.lock().unwrap().contains(&file) && self.sync.swap(false, Ordering::SeqCst)
-        {
+        if self.is_segment(file) && self.sync.swap(false, Ordering::SeqCst) {
             disk.storage_full_next_sync().unwrap();
         }
     }
@@ -426,6 +430,8 @@ impl Rng {
 struct CrashIo {
     disk: SimDisk,
     storage_full: StorageFullFault,
+    watch_segment_writes: AtomicBool,
+    segment_writes: AtomicUsize,
     cut: AtomicUsize,
     fail_sync: AtomicUsize,
     image: Mutex<Option<SimDisk>>,
@@ -436,6 +442,8 @@ impl CrashIo {
         Self {
             disk,
             storage_full: StorageFullFault::default(),
+            watch_segment_writes: AtomicBool::new(false),
+            segment_writes: AtomicUsize::new(0),
             cut: AtomicUsize::new(0),
             fail_sync: AtomicUsize::new(0),
             image: Mutex::new(None),
@@ -482,6 +490,9 @@ impl Io for CrashIo {
         self.disk.close(file)
     }
     fn write_at(&self, file: FileId, off: u64, bytes: &[u8]) -> Result<()> {
+        if self.watch_segment_writes.load(Ordering::SeqCst) && self.storage_full.is_segment(file) {
+            self.segment_writes.fetch_add(1, Ordering::SeqCst);
+        }
         self.storage_full.before_write(&self.disk, file, bytes.len());
         self.after(self.disk.write_at(file, off, bytes))
     }
@@ -794,7 +805,11 @@ fn capacity_faults(
         .iter()
         .map(|records| enqueue(&mut core, records.clone(), Durability::Durable, rng))
         .collect();
+    io.segment_writes.store(0, Ordering::SeqCst);
+    io.watch_segment_writes.store(true, Ordering::SeqCst);
     core.step();
+    io.watch_segment_writes.store(false, Ordering::SeqCst);
+    assert_eq!(io.segment_writes.load(Ordering::SeqCst), 0, "a floor rejection wrote to a segment");
     for (_, reply) in pending {
         let error = reply.recv().unwrap().unwrap_err();
         assert!(matches!(error.kind, Error::DiskFull));
@@ -891,6 +906,7 @@ fn run_seed_with_capacity(seed: u64, plan: &CapacityPlan) {
     let mut rng = Rng::new(seed);
     let tenants = 1 + rng.below(8);
     let generations = 2 + rng.below(2);
+    let capacity_generation = rng.below(generations);
     let opts = Options {
         segment_size: 64 * 1024,
         free_space_floor: Some(plan.floor),
@@ -934,7 +950,7 @@ fn run_seed_with_capacity(seed: u64, plan: &CapacityPlan) {
                 core.update_superblock().unwrap();
             }
         }
-        if generation == 0 {
+        if generation == capacity_generation {
             (core, published) =
                 capacity_faults(core, &mut io, &clock, &opts, &mut oracle, &mut rng, plan);
         }

@@ -111,6 +111,8 @@ Debug builds skip slow filesystem tests and seeded tape schedules.
 The existing release CI step runs the filesystem checks.
 The named simulation commands run 2,000 seeds.
 Both sims vary disk headroom around the free-space floor and release space before retrying.
+Each seed chooses the capacity phase's generation, covering fresh and recovered writers.
+Floor rejections must issue no segment writes, including unpublished frames.
 They inject partial-write and sync `StorageFull` errors alongside crash cuts.
 The oracles check rejection state, read-only recovery, and acknowledged durability after reopening.
 The engine sim also checks dedup state and verifies rejected-key retries commit exactly once.

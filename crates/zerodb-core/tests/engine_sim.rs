@@ -33,6 +33,8 @@ impl Rng {
 struct FaultIo {
     disk: SimDisk,
     storage_full: StorageFullFault,
+    watch_segment_writes: AtomicBool,
+    segment_writes: AtomicUsize,
     cut: AtomicUsize,
     image: Mutex<Option<SimDisk>>,
     fail_before: AtomicBool,
@@ -46,6 +48,8 @@ impl FaultIo {
         Self {
             disk,
             storage_full: StorageFullFault::default(),
+            watch_segment_writes: AtomicBool::new(false),
+            segment_writes: AtomicUsize::new(0),
             cut: AtomicUsize::new(0),
             image: Mutex::new(None),
             fail_before: AtomicBool::new(false),
@@ -99,6 +103,9 @@ impl Io for FaultIo {
         self.disk.close(f)
     }
     fn write_at(&self, f: FileId, o: u64, b: &[u8]) -> Result<()> {
+        if self.watch_segment_writes.load(Ordering::SeqCst) && self.storage_full.is_segment(f) {
+            self.segment_writes.fetch_add(1, Ordering::SeqCst);
+        }
         self.storage_full.before_write(&self.disk, f, b.len());
         self.after(self.disk.write_at(f, o, b))
     }
@@ -597,7 +604,11 @@ fn capacity_faults(
         indices.push(index);
     }
     plan.limit(&io.disk);
+    io.segment_writes.store(0, Ordering::SeqCst);
+    io.watch_segment_writes.store(true, Ordering::SeqCst);
     engine.step_sim().unwrap();
+    io.watch_segment_writes.store(false, Ordering::SeqCst);
+    assert_eq!(io.segment_writes.load(Ordering::SeqCst), 0, "a floor rejection wrote to a segment");
     for reply in queued {
         let error = reply.finish().unwrap_err();
         assert!(matches!(error.kind, ErrorKind::Storage(Error::DiskFull)));
@@ -691,6 +702,8 @@ fn capacity_faults(
 
 fn grouped_seed(seed: u64, plan: &CapacityPlan) -> Vec<Vec<Turn>> {
     let mut rng = Rng(seed ^ 0x47b3_6f21_91e2_450a);
+    let generations = 3;
+    let capacity_generation = rng.below(generations);
     let opts = EngineOptions {
         tape: TapeOptions {
             segment_size: 64 * 1024,
@@ -783,10 +796,10 @@ fn grouped_seed(seed: u64, plan: &CapacityPlan) -> Vec<Vec<Turn>> {
         }
     }
     frame_faults(seed);
-    for generation in 0..3 {
+    for generation in 0..generations {
         for group in 0..8 {
             clock.advance(1 + rng.below(2_000_000_000) as u64);
-            if generation == 0 && group == plan.delay + 1 {
+            if generation == capacity_generation && group == plan.delay + 1 {
                 engine =
                     capacity_faults(engine, &mut io, &clock, &opts, &mut oracle, &mut rng, plan);
             }
