@@ -28,9 +28,12 @@ fn paged_offsets_cross_segments_recover_and_reload_within_budget() {
     let evictions = core.index_stats().unwrap().page_evictions;
     assert!(evictions > 0);
     assert!(core.index_stats().unwrap().dirty_page_evictions > 0);
+    let dirty = core.index_stats().unwrap().dirty_page_evictions;
     disk.enospc_after_bytes(0).unwrap();
-    assert!(core.read(1).is_err());
-    assert_eq!(core.index_stats().unwrap().page_evictions, evictions);
+    assert_eq!(core.read(1).unwrap().unwrap().payload, expected[0], "full disk keeps reads");
+    let stats = core.index_stats().unwrap();
+    assert_eq!(stats.dirty_page_evictions, dirty, "failed write-back keeps the page dirty");
+    assert!(stats.resident_bytes <= opts.lsn_index_bytes + 4224);
     disk.enospc_after_bytes(usize::MAX).unwrap();
     assert_eq!(core.read(1920).unwrap().unwrap().payload, expected[1919]);
     let reads_before = core.index_stats().unwrap().page_reloads;

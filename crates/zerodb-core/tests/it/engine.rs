@@ -252,6 +252,7 @@ fn write_outages_report_health_preserve_reads_and_retry_keys() {
         Floor,
         ColdFloor,
         ReopenFull,
+        ReopenDirtyFull,
         ReopenAllocation,
         ReopenStat,
         SpaceQuery,
@@ -261,6 +262,7 @@ fn write_outages_report_health_preserve_reads_and_retry_keys() {
         ("disk floor", Fault::Floor, Health::ReadOnly),
         ("cold reads with no free space", Fault::ColdFloor, Health::ReadOnly),
         ("reopen while full", Fault::ReopenFull, Health::ReadOnly),
+        ("reopen with dirty pages then full", Fault::ReopenDirtyFull, Health::ReadOnly),
         ("reopen allocation race", Fault::ReopenAllocation, Health::ReadOnly),
         ("reopen with space query failure", Fault::ReopenStat, Health::ReadOnly),
         ("space query outage", Fault::SpaceQuery, Health::ReadOnly),
@@ -274,13 +276,17 @@ fn write_outages_report_health_preserve_reads_and_retry_keys() {
             opts.tape.free_space_floor = Some(4096);
             let history = if matches!(
                 fault,
-                Fault::ColdFloor | Fault::ReopenFull | Fault::ReopenAllocation | Fault::ReopenStat
+                Fault::ColdFloor
+                    | Fault::ReopenFull
+                    | Fault::ReopenDirtyFull
+                    | Fault::ReopenAllocation
+                    | Fault::ReopenStat
             ) {
                 512
             } else {
                 1
             };
-            if matches!(fault, Fault::ColdFloor) {
+            if matches!(fault, Fault::ColdFloor | Fault::ReopenDirtyFull) {
                 opts.tape.lsn_index_bytes = 4224;
             }
             let mut engine =
@@ -297,7 +303,14 @@ fn write_outages_report_health_preserve_reads_and_retry_keys() {
                     let remaining = if matches!(fault, Fault::ColdFloor) { 0 } else { 4095 };
                     io.disk.set_capacity(capacity - free + remaining).unwrap();
                 }
-                Fault::ReopenFull | Fault::ReopenAllocation | Fault::ReopenStat => {
+                Fault::ReopenFull
+                | Fault::ReopenDirtyFull
+                | Fault::ReopenAllocation
+                | Fault::ReopenStat => {
+                    if matches!(fault, Fault::ReopenDirtyFull) {
+                        // Skip open-time replay, so recovery's last dirty page stays resident.
+                        engine.checkpoint().unwrap();
+                    }
                     drop(engine);
                     for name in ["LSN-OFFSETS", "LSN-ROUTES"] {
                         let file = io.disk.open(&std::path::Path::new("db").join(name)).unwrap();
@@ -306,10 +319,13 @@ fn write_outages_report_health_preserve_reads_and_retry_keys() {
                         io.disk.sync_data(file).unwrap();
                         io.disk.close(file).unwrap();
                     }
-                    if matches!(fault, Fault::ReopenFull) {
+                    if matches!(fault, Fault::ReopenFull | Fault::ReopenDirtyFull) {
                         let capacity = io.disk.total_bytes(std::path::Path::new("db")).unwrap();
                         let free = io.disk.available_bytes(std::path::Path::new("db")).unwrap();
-                        io.disk.set_capacity(capacity - free).unwrap();
+                        // Recovery write-backs fit in 5 pages. Reservation plus floor needs 6.
+                        let headroom =
+                            if matches!(fault, Fault::ReopenDirtyFull) { 20480 } else { 0 };
+                        io.disk.set_capacity(capacity - free + headroom).unwrap();
                     } else if matches!(fault, Fault::ReopenAllocation) {
                         io.allocation_full.store(true, Ordering::SeqCst);
                     } else {
@@ -329,10 +345,13 @@ fn write_outages_report_health_preserve_reads_and_retry_keys() {
                             !io.allocation_full.load(Ordering::SeqCst),
                             "{case}: reservation was attempted"
                         );
+                    }
+                    if matches!(fault, Fault::ReopenAllocation | Fault::ReopenDirtyFull) {
                         let capacity = io.disk.total_bytes(std::path::Path::new("db")).unwrap();
                         let free = io.disk.available_bytes(std::path::Path::new("db")).unwrap();
                         io.disk.set_capacity(capacity - free).unwrap();
                     }
+                    let full_before = io.disk.storage_full_returns().unwrap();
                     let oldest =
                         engine.window(&s, WindowQuery::Since { seq: 1, limit: 1 }).unwrap();
                     assert_eq!(
@@ -341,7 +360,21 @@ fn write_outages_report_health_preserve_reads_and_retry_keys() {
                         "{case}: acknowledged turn survived reopen"
                     );
                     assert_eq!(oldest[0].lsn, original.first_lsn, "{case}");
-                    if matches!(fault, Fault::ReopenFull | Fault::ReopenAllocation) {
+                    if matches!(fault, Fault::ReopenDirtyFull) {
+                        let index = engine.metrics().unwrap().tape_index;
+                        assert!(
+                            io.disk.storage_full_returns().unwrap() > full_before,
+                            "{case}: cold read could not write back a dirty page"
+                        );
+                        assert!(
+                            index.resident_bytes <= index.budget_bytes + 4224,
+                            "{case}: cold read overshoot is one page"
+                        );
+                    }
+                    if matches!(
+                        fault,
+                        Fault::ReopenFull | Fault::ReopenDirtyFull | Fault::ReopenAllocation
+                    ) {
                         assert_eq!(
                             io.disk.available_bytes(std::path::Path::new("db")).unwrap(),
                             0,
@@ -365,6 +398,7 @@ fn write_outages_report_health_preserve_reads_and_retry_keys() {
                         Fault::Floor
                         | Fault::ColdFloor
                         | Fault::ReopenFull
+                        | Fault::ReopenDirtyFull
                         | Fault::ReopenAllocation =>
                             matches!(error.kind, ErrorKind::Storage(zerodb_tape::Error::DiskFull)),
                         Fault::SpaceQuery | Fault::ReopenStat => matches!(
@@ -448,7 +482,13 @@ fn write_outages_report_health_preserve_reads_and_retry_keys() {
             }
             let retried = engine.append(&s, vec![turn(2)], Some("retry")).unwrap();
             assert_eq!(engine.health(), Health::Ok, "{case}");
-            if matches!(fault, Fault::ReopenFull | Fault::ReopenAllocation | Fault::ReopenStat) {
+            if matches!(
+                fault,
+                Fault::ReopenFull
+                    | Fault::ReopenDirtyFull
+                    | Fault::ReopenAllocation
+                    | Fault::ReopenStat
+            ) {
                 for (name, width) in [("LSN-OFFSETS", 8), ("LSN-ROUTES", 16)] {
                     let file = io.disk.open(&std::path::Path::new("db").join(name)).unwrap();
                     let required = (retried.last_lsn * width).div_ceil(4096) * 4096;

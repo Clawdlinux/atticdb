@@ -129,24 +129,37 @@ impl LsnIndex {
         }
     }
 
-    fn page(&mut self, key: PageKey) -> Result<&mut Page> {
+    fn page(&mut self, key: PageKey, read: bool) -> Result<&mut Page> {
         if !self.pages.contains_key(&key) {
-            if (self.pages.len() + 1) * PAGE_CHARGE > self.budget {
-                let oldest = self.fifo.pop_front().ok_or(Error::Poisoned)?;
-                let page = self.pages.remove(&oldest).ok_or(Error::Poisoned)?;
+            // Loop so a cache over budget after a full disk shrinks once write-backs succeed.
+            while (self.pages.len() + 1) * PAGE_CHARGE > self.budget {
+                let oldest = *self.fifo.front().ok_or(Error::Poisoned)?;
+                let page = self.pages.get(&oldest).ok_or(Error::Poisoned)?;
+                let mut victim = Some(0);
                 if page.dirty {
                     let file = if oldest.0 { &self.routes } else { &self.offsets };
-                    if let Err(error) = self.io.write_at(
+                    match self.io.write_at(
                         file.id,
                         oldest.1 * PAGE_BYTES as u64,
                         page.bytes.as_slice(),
                     ) {
-                        self.pages.insert(oldest, page);
-                        self.fifo.push_front(oldest);
-                        return Err(error);
+                        Ok(()) => self.dirty_evictions += 1,
+                        // A read-only open can leave dirty pages over unreserved holes. Reads then
+                        // evict a clean page or load one over budget. Only inserts create dirty pages.
+                        Err(Error::DiskFull | Error::Io(std::io::ErrorKind::StorageFull, _))
+                            if read =>
+                        {
+                            victim = self
+                                .fifo
+                                .iter()
+                                .position(|k| self.pages.get(k).is_some_and(|page| !page.dirty));
+                        }
+                        Err(error) => return Err(error),
                     }
-                    self.dirty_evictions += 1;
                 }
+                let Some(at) = victim else { break };
+                let evicted = self.fifo.remove(at).ok_or(Error::Poisoned)?;
+                self.pages.remove(&evicted).ok_or(Error::Poisoned)?;
                 self.evictions += 1;
             }
             let mut page = Page { bytes: Box::new([0; PAGE_BYTES]), dirty: false };
@@ -183,12 +196,12 @@ impl LsnIndex {
         // Recovery can rebuild resident pages without allocating backing space.
         // Live groups reserve backing before preparation.
         let (page, at) = Self::address(lsn, 16)?;
-        let route = self.page((true, page))?;
+        let route = self.page((true, page), false)?;
         route.bytes[at..at + 8].copy_from_slice(&segment.to_le_bytes());
         route.bytes[at + 8..at + 16].copy_from_slice(&first.to_le_bytes());
         route.dirty = true;
         let (page, at) = Self::address(lsn, 8)?;
-        let offsets = self.page((false, page))?;
+        let offsets = self.page((false, page), false)?;
         offsets.bytes[at..at + 8].copy_from_slice(&offset.to_le_bytes());
         offsets.dirty = true;
         self.active = Some((segment, first));
@@ -201,7 +214,7 @@ impl LsnIndex {
             return Ok(None);
         }
         let (page, at) = Self::address(lsn, 16)?;
-        let route = self.page((true, page))?;
+        let route = self.page((true, page), true)?;
         let segment =
             u64::from_le_bytes(route.bytes[at..at + 8].try_into().map_err(|_| Error::Poisoned)?);
         let first = u64::from_le_bytes(
@@ -213,7 +226,7 @@ impl LsnIndex {
         // Segment arrays occupy adjacent ranges. Routing is paged too, so segment count cannot grow the resident directory.
         let index = lsn - first;
         let (page, at) = Self::address(first + index, 8)?;
-        let offsets = self.page((false, page))?;
+        let offsets = self.page((false, page), true)?;
         let offset =
             u64::from_le_bytes(offsets.bytes[at..at + 8].try_into().map_err(|_| Error::Poisoned)?);
         Ok(Some((segment, offset)))

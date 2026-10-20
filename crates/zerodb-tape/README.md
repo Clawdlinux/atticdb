@@ -106,6 +106,7 @@ Required segments and LSN-index backing pages are reserved with `Io::allocate` b
 The highest possible group LSN bounds growth of `LSN-OFFSETS` and `LSN-ROUTES`, rounded to 4096-byte pages.
 Open attempts index reservations after recovery, only when the space query and floor allow them.
 Preallocated index backing lets cold reads evict dirty pages without new blocks or an increased cache budget.
+Without it, a full disk keeps dirty pages resident. Cold reads evict a clean page or exceed the budget by one page.
 Recovery recreates these derived files and rebuilds resident pages before attempting optional backing reservations.
 An index fitting its cache can reopen without allocating backing blocks.
 Full-disk or space-query failures defer reservations and start read-only, without poisoning.
