@@ -48,6 +48,8 @@ fn filesystem_operations_through_trait_object() {
 #[test]
 fn allocation_sets_length_for_growth_repeats_and_shrink() {
     let dir = TestDir::new();
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let preallocation_supported = crate::support::preallocation_supported(&dir.0);
     let io = StdIo::new();
     let path = dir.0.join("resized");
     let file = io.create(&path).unwrap();
@@ -76,7 +78,7 @@ fn allocation_sets_length_for_growth_repeats_and_shrink() {
         let metadata = metadata_file.metadata().unwrap();
         assert_eq!(metadata.len(), len, "{case}: length={len}");
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        if expect_reserved {
+        if expect_reserved && preallocation_supported {
             use std::os::unix::fs::MetadataExt;
             assert!(metadata.blocks() * 512 >= len, "{case}: length={len}");
         }

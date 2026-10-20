@@ -565,3 +565,24 @@ pub(crate) fn superblock_installs(io: &ObservedIo) -> usize {
         .filter(|event| event.as_str() == "rename db/SUPERBLOCK.tmp db/SUPERBLOCK")
         .count()
 }
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn preallocation_supported(dir: &Path) -> bool {
+    use rustix::io::Errno;
+    let path = dir.join("preallocation-probe");
+    let file =
+        std::fs::OpenOptions::new().create_new(true).read(true).write(true).open(&path).unwrap();
+    let supported =
+        match rustix::fs::fallocate(&file, rustix::fs::FallocateFlags::empty(), 0, 1024 * 1024) {
+            Ok(()) => true,
+            Err(error)
+                if error == Errno::OPNOTSUPP || error == Errno::NOTSUP || error == Errno::NOSYS =>
+            {
+                false
+            }
+            Err(error) => panic!("preallocation probe failed: {error}"),
+        };
+    drop(file);
+    std::fs::remove_file(path).unwrap();
+    supported
+}
