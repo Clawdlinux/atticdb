@@ -306,6 +306,11 @@ impl Clock for SimClock {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
+    mod fs {
+        // Cargo doesn't define CARGO_TARGET_TMPDIR for unit tests.
+        const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/tmp");
+        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/support.rs"));
+    }
 
     use super::*;
 
@@ -326,14 +331,10 @@ mod tests {
     #[test]
     #[cfg_attr(debug_assertions, ignore = "slow in debug")]
     fn ten_thousand_atomic_installs_release_open_handles() {
-        let dir = std::env::current_dir()
-            .unwrap()
-            .join("target")
-            .join(format!("install-handles-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = fs::TestDir::new();
         let io = StdIo::new();
-        let temporary = dir.join("MANIFEST.tmp");
-        let target = dir.join("MANIFEST");
+        let temporary = dir.0.join("MANIFEST.tmp");
+        let target = dir.0.join("MANIFEST");
         for _ in 0..10_000 {
             let file = io.create(&temporary).unwrap();
             io.write_at(file, 0, b"manifest").unwrap();
@@ -342,6 +343,5 @@ mod tests {
             assert!(lock(&io.files).unwrap().is_empty());
         }
         io.remove(&target).unwrap();
-        std::fs::remove_dir(&dir).unwrap();
     }
 }

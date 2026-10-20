@@ -1,4 +1,4 @@
-use crate::support::io_fixtures::*;
+use crate::support::TestDir;
 use std::sync::Arc;
 use zerodb_tape::sim::SimClock;
 use zerodb_tape::Error;
@@ -52,15 +52,17 @@ fn allocation_sets_length_for_growth_repeats_and_shrink() {
     let path = dir.0.join("resized");
     let file = io.create(&path).unwrap();
     let metadata_file = std::fs::OpenOptions::new().read(true).write(true).open(&path).unwrap();
-    for (case, len) in [
-        ("empty file", 0),
-        ("initial reservation", 1024 * 1024),
-        ("repeated reservation", 1024 * 1024),
-        ("shrink", 512 * 1024),
-        ("growth", 2 * 1024 * 1024),
-        ("repeated growth", 2 * 1024 * 1024),
-        ("truncate", 0),
+    for (case, len, expect_reserved) in [
+        ("empty file", 0, false),
+        ("initial reservation", 1024 * 1024, true),
+        ("repeated reservation", 1024 * 1024, false),
+        ("shrink", 512 * 1024, false),
+        ("growth", 2 * 1024 * 1024, false),
+        ("repeated growth", 2 * 1024 * 1024, false),
+        ("truncate", 0, false),
     ] {
+        eprintln!("case: {case}");
+
         #[cfg(target_os = "macos")]
         let before = {
             metadata_file.sync_all().unwrap();
@@ -68,14 +70,14 @@ fn allocation_sets_length_for_growth_repeats_and_shrink() {
         };
         io.allocate(file, len).unwrap();
         assert_eq!(io.len(file).unwrap(), len, "{case}: length={len}");
-        if case == "initial reservation" {
+        if expect_reserved {
             io.sync_data(file).unwrap();
         }
         metadata_file.sync_all().unwrap();
         let metadata = metadata_file.metadata().unwrap();
         assert_eq!(metadata.len(), len, "{case}: length={len}");
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        if case == "initial reservation" {
+        if expect_reserved {
             use std::os::unix::fs::MetadataExt;
             assert!(metadata.blocks() * 512 >= len, "{case}: length={len}");
         }
@@ -109,7 +111,11 @@ fn clocks_are_shared_and_monotonic() {
 #[test]
 fn closed_handles_fail_without_invalidating_other_opens() {
     let dir = TestDir::new();
-    for io in [Box::new(StdIo::new()) as Box<dyn Io>, Box::new(SimDisk::new(0))] {
+    for (case, io) in [
+        ("filesystem", Box::new(StdIo::new()) as Box<dyn Io>),
+        ("simulated", Box::new(SimDisk::new(0)) as Box<dyn Io>),
+    ] {
+        eprintln!("case: {case}");
         let path = dir.0.join("closed");
         let file = io.create(&path).unwrap();
         io.write_at(file, 0, b"data").unwrap();
@@ -135,10 +141,16 @@ fn directory_exists_and_list_match_across_backends() {
     let branch = dir.0.join("branch");
     let deeper = branch.join("deeper");
     std::fs::create_dir_all(&deeper).unwrap();
-    for io in [Box::new(StdIo::new()) as Box<dyn Io>, Box::new(SimDisk::new(0))] {
+    for (case, io) in [
+        ("filesystem", Box::new(StdIo::new()) as Box<dyn Io>),
+        ("simulated", Box::new(SimDisk::new(0)) as Box<dyn Io>),
+    ] {
+        eprintln!("case: {case}");
         let direct = dir.0.join("direct");
         let leaf = deeper.join("leaf");
         for path in [&direct, &leaf] {
+            eprintln!("case: path={path:?}");
+
             let file = io.create(path).unwrap();
             io.close(file).unwrap();
         }
@@ -212,14 +224,12 @@ mod directory {
 
     #[test]
     fn lock_is_first_and_reports_the_holder() {
-        let path = std::env::current_dir()
-            .unwrap()
-            .join(format!("target/dir-test-{}", std::process::id()));
-        std::fs::create_dir_all(&path).unwrap();
+        let dir = crate::support::TestDir::new();
+        let path = &dir.0;
         let io = Arc::new(StdIo::new());
-        let dir = DataDir::open(io.clone(), &path, Some("localhost:77"), 1024).unwrap();
+        let dir = DataDir::open(io.clone(), path, Some("localhost:77"), 1024).unwrap();
         std::fs::write(path.join("MANIFEST"), b"invalid").unwrap();
-        match DataDir::open(io, &path, None, 1024) {
+        match DataDir::open(io, path, None, 1024) {
             Err(Error::DataDirLocked { holder }) => {
                 assert!(holder.contains(&std::process::id().to_string()));
                 assert!(holder.contains("localhost:77"));
@@ -228,7 +238,6 @@ mod directory {
             other => panic!("{other:?}"),
         }
         drop(dir);
-        std::fs::remove_dir_all(path).unwrap();
     }
 
     #[test]

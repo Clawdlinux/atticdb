@@ -1,4 +1,4 @@
-use crate::support::payloads_fixtures::*;
+use crate::support::facts::*;
 use proptest::prelude::*;
 use zerodb_core::{fact, forget};
 
@@ -40,22 +40,28 @@ proptest! {
 
 #[test]
 fn payloads_reject_versions_truncation_tags_and_trailing_bytes() {
+    #[derive(Clone, Copy, Debug)]
+    enum Codec {
+        Fact,
+        Forget,
+    }
     let values = [
-        fact::encode(&fact()).unwrap(),
-        forget::encode(&forget::Forget {
-            selector: forget::Selector::FactKey("key".into()),
-            idem_key: Some("retry".into()),
-            up_to_lsn: Some(1),
-        })
-        .unwrap(),
+        (Codec::Fact, fact::encode(&fact()).unwrap()),
+        (
+            Codec::Forget,
+            forget::encode(&forget::Forget {
+                selector: forget::Selector::FactKey("key".into()),
+                idem_key: Some("retry".into()),
+                up_to_lsn: Some(1),
+            })
+            .unwrap(),
+        ),
     ];
-    for (index, mut data) in values.into_iter().enumerate() {
-        let decode = |bytes: &[u8]| {
-            if index == 0 {
-                fact::decode(bytes).map(|_| ())
-            } else {
-                forget::decode(bytes).map(|_| ())
-            }
+    for (codec, mut data) in values {
+        eprintln!("case: {codec:?}");
+        let decode = |bytes: &[u8]| match codec {
+            Codec::Fact => fact::decode(bytes).map(|_| ()),
+            Codec::Forget => forget::decode(bytes).map(|_| ()),
         };
         for n in 0..data.len() {
             assert!(decode(&data[..n]).is_err());
@@ -75,30 +81,46 @@ fn payloads_reject_versions_truncation_tags_and_trailing_bytes() {
 
 #[test]
 fn fact_limits_apply_to_every_field_in_both_directions() {
-    for field in 0..6 {
+    #[derive(Clone, Copy, Debug)]
+    enum Field {
+        Key,
+        Content,
+        Meta,
+        Agent,
+        SourceRefs,
+        IdemKey,
+    }
+    for (field, length_offset) in [
+        (Field::Key, 1),
+        (Field::Content, 5),
+        (Field::Meta, 9),
+        (Field::Agent, 13),
+        (Field::SourceRefs, 17),
+        (Field::IdemKey, 22),
+    ] {
+        eprintln!("case: {field:?}");
         let mut value = fact();
         match field {
-            0 => value.key = "k".repeat(1024),
-            1 => value.content = vec![0; 4 * 1024 * 1024],
-            2 => value.meta = vec![0; 65536],
-            3 => value.agent = "a".repeat(255),
-            4 => value.source_refs = vec![1; 1024],
-            _ => value.idem_key = Some("i".repeat(128)),
+            Field::Key => value.key = "k".repeat(1024),
+            Field::Content => value.content = vec![0; 4 * 1024 * 1024],
+            Field::Meta => value.meta = vec![0; 65536],
+            Field::Agent => value.agent = "a".repeat(255),
+            Field::SourceRefs => value.source_refs = vec![1; 1024],
+            Field::IdemKey => value.idem_key = Some("i".repeat(128)),
         }
         let mut encoded = fact::encode(&value).unwrap();
-        assert_eq!(fact::decode(&encoded).unwrap(), value);
+        assert_eq!(fact::decode(&encoded).unwrap(), value, "{field:?}");
         match field {
-            0 => value.key.push('k'),
-            1 => value.content.push(0),
-            2 => value.meta.push(0),
-            3 => value.agent.push('a'),
-            4 => value.source_refs.push(1),
-            _ => value.idem_key.as_mut().unwrap().push('i'),
+            Field::Key => value.key.push('k'),
+            Field::Content => value.content.push(0),
+            Field::Meta => value.meta.push(0),
+            Field::Agent => value.agent.push('a'),
+            Field::SourceRefs => value.source_refs.push(1),
+            Field::IdemKey => value.idem_key.as_mut().unwrap().push('i'),
         }
-        assert!(fact::encode(&value).is_err());
-        let length_offset = [1, 5, 9, 13, 17, 22][field];
+        assert!(fact::encode(&value).is_err(), "{field:?}");
         encoded[length_offset..length_offset + 4].copy_from_slice(&u32::MAX.to_le_bytes());
-        assert!(fact::decode(&encoded).is_err());
+        assert!(fact::decode(&encoded).is_err(), "{field:?}");
     }
 }
 
@@ -110,6 +132,8 @@ fn forget_limits_apply_to_every_selector_and_retry_key() {
         forget::Selector::FactKey("k".repeat(1025)),
         forget::Selector::Lsns(vec![1; 1025]),
     ] {
+        eprintln!("case: selector={selector:?}");
+
         assert!(
             forget::encode(&forget::Forget { selector, idem_key: None, up_to_lsn: None }).is_err()
         );
@@ -126,12 +150,14 @@ fn forget_limits_apply_to_every_selector_and_retry_key() {
         vec![1, 2, 0xff, 0xff, 0xff, 0xff],
         vec![1, 3, 0xff, 0xff, 0xff, 0xff],
     ] {
+        eprintln!("case: data={data:?}");
+
         assert!(forget::decode(&data).is_err());
     }
 }
 
 mod turns {
-    use crate::support::turn_fixtures::*;
+    use crate::support::turns::*;
     use proptest::prelude::*;
     use zerodb_core::turn::{decode, encode, NewTurn, Role};
 

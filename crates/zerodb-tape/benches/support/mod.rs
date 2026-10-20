@@ -1,32 +1,18 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use zerodb_tape::sim::frame::{self, Footer, Frame, Header, Kind, VERSION};
 use zerodb_tape::sim::DEFAULT_SEGMENT_SIZE;
 use zerodb_tape::RecordInput;
 
-#[derive(Debug)]
-pub struct BenchDir(pub PathBuf);
-impl BenchDir {
-    pub fn new() -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let path = std::env::current_dir().unwrap().join(format!(
-            "target/append-bench-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&path).unwrap();
-        Self(path)
-    }
+mod fs {
+    const ROOT: &str = env!("CARGO_TARGET_TMPDIR");
+    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/support.rs"));
 }
-impl Drop for BenchDir {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0).unwrap();
-    }
-}
+pub(crate) use fs::TestDir as BenchDir;
 
 // Preframe fixed metadata, as in M1. Match headers, payloads, and transaction footers.
+#[track_caller]
 pub fn encoded_batch(inputs: &[RecordInput]) -> Vec<u8> {
     assert!(!inputs.is_empty());
     let mut bytes = Vec::new();
@@ -83,6 +69,7 @@ pub struct Bare {
     dirty: bool,
 }
 impl Bare {
+    #[track_caller]
     pub fn new(dir: &Path) -> Self {
         Self {
             file: Self::segment(dir, 0),
@@ -92,6 +79,7 @@ impl Bare {
             dirty: false,
         }
     }
+    #[track_caller]
     fn segment(dir: &Path, id: u64) -> File {
         let file = OpenOptions::new()
             .create_new(true)
@@ -103,6 +91,7 @@ impl Bare {
         File::open(dir).unwrap().sync_all().unwrap();
         file
     }
+    #[track_caller]
     pub fn write(&mut self, bytes: &[u8]) {
         assert!(bytes.len() as u64 <= DEFAULT_SEGMENT_SIZE);
         if self.offset + bytes.len() as u64 > DEFAULT_SEGMENT_SIZE {
@@ -116,6 +105,7 @@ impl Bare {
         self.offset += bytes.len() as u64;
         self.dirty = true;
     }
+    #[track_caller]
     pub fn sync(&mut self) {
         if self.dirty {
             self.file.sync_data().unwrap();

@@ -1,5 +1,5 @@
 use crate::support;
-use crate::support::engine_fixtures::*;
+use crate::support::sessions::*;
 use crate::support::TestDir;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -16,6 +16,8 @@ fn windows_are_dense_and_read_cost_depends_only_on_returned_turns() {
     let scope = scope("s");
     let mut written = 0;
     for boundary in [1, 16, 17, 5000] {
+        eprintln!("case: boundary={boundary:?}");
+
         while written < boundary {
             let count = (boundary - written).min(128);
             let receipt = engine
@@ -25,6 +27,8 @@ fn windows_are_dense_and_read_cost_depends_only_on_returned_turns() {
             written += count;
         }
         for n in [0, 1, 7, 32] {
+            eprintln!("case: n={n:?}");
+
             let before = engine.metrics().unwrap().window_reads;
             let window = engine.window(&scope, WindowQuery::Last(n)).unwrap();
             assert_eq!(window.len(), n.min(boundary as usize));
@@ -81,6 +85,8 @@ fn retries_conflicts_scope_isolation_and_replay() {
 #[test]
 fn tenant_ids_survive_reopen_and_limit_is_typed() {
     for (case, limit) in [("configured tenant limit", 2)] {
+        eprintln!("case: {case}");
+
         let disk = Arc::new(SimDisk::new(3));
         let opts = EngineOptions { max_tenants: limit, ..options() };
         let engine = open(disk.clone(), opts.clone());
@@ -134,30 +140,37 @@ fn dedup_scope_bounds_and_oldest_eviction_survive_the_public_api() {
     let disk = Arc::new(SimDisk::new(40));
     let opts = EngineOptions { dedup_per_tenant: 2, dedup_global: 3, ..options() };
     let engine = open(disk.clone(), opts.clone());
-    for (case, tenant, session, key, expected_seq, expected_entries) in [
-        ("first tenant", "first", "s", "k", 1, 1),
-        ("session scope", "first", "other", "k", 1, 2),
-        ("tenant scope", "second", "s", "k", 1, 3),
-        ("per-tenant oldest eviction", "first", "s", "new", 2, 3),
-        ("global oldest eviction", "third", "s", "k", 1, 3),
-        ("other tenant key survives", "second", "s", "k", 1, 3),
-        ("oldest session key was evicted", "first", "other", "k", 2, 3),
+    enum Write {
+        New,
+        Cached,
+        ProbeEviction,
+    }
+    for (case, tenant, session, key, expected_seq, expected_entries, window, write) in [
+        ("first tenant", "first", "s", "k", 1, 1, None, Write::New),
+        ("session scope", "first", "other", "k", 1, 2, None, Write::New),
+        ("tenant scope", "second", "s", "k", 1, 3, Some(1), Write::New),
+        ("per-tenant oldest eviction", "first", "s", "new", 2, 3, Some(1), Write::ProbeEviction),
+        ("global oldest eviction", "third", "s", "k", 1, 3, Some(1), Write::New),
+        ("other tenant key survives", "second", "s", "k", 1, 3, Some(1), Write::Cached),
+        ("oldest session key was evicted", "first", "other", "k", 2, 3, Some(1), Write::New),
     ] {
+        eprintln!("case: {case}");
+
         let mut scope = scope(session);
         scope.tenant = tenant.into();
         let before = engine.metrics().unwrap().durable_lsn;
         let receipt = engine.append(&scope, vec![turn(1)], Some(key)).unwrap();
         assert_eq!(receipt.seqs, vec![expected_seq], "{case}");
         assert_eq!(engine.metrics().unwrap().dedup_entries, expected_entries, "{case}");
-        if case == "other tenant key survives" {
+        if matches!(write, Write::Cached) {
             assert_eq!(engine.metrics().unwrap().durable_lsn, before, "{case}");
         } else {
             assert!(engine.metrics().unwrap().durable_lsn > before, "{case}");
         }
-        if expected_entries == 3 {
-            assert_eq!(engine.metrics().unwrap().dedup_window_effective, 1, "{case}");
+        if let Some(window) = window {
+            assert_eq!(engine.metrics().unwrap().dedup_window_effective, window, "{case}");
         }
-        if case == "per-tenant oldest eviction" {
+        if matches!(write, Write::ProbeEviction) {
             engine.checkpoint().unwrap();
             let image = Arc::new(disk.crash().unwrap());
             let fork = open(image, opts.clone());
@@ -166,28 +179,24 @@ fn dedup_scope_bounds_and_oldest_eviction_survive_the_public_api() {
             assert!(fork.metrics().unwrap().durable_lsn > receipt.last_lsn, "{case}");
         }
     }
-}
 
-#[test]
-fn dedup_eviction_is_bounded_and_checkpointed() {
-    let disk = Arc::new(SimDisk::new(4));
-    let opts = EngineOptions { dedup_per_tenant: 2, dedup_global: 3, ..options() };
-    let engine = open(disk.clone(), opts.clone());
-    for i in 0..3 {
-        engine.append(&scope("s"), vec![turn(i)], Some(&i.to_string())).unwrap();
+    let mut checkpoint_scope = scope("checkpoint");
+    checkpoint_scope.tenant = "first".into();
+    for (case, range) in [("first checkpoint", 0..3), ("second checkpoint", 3..6)] {
+        eprintln!("case: {case}");
+        for i in range {
+            engine.append(&checkpoint_scope, vec![turn(i)], Some(&i.to_string())).unwrap();
+        }
+        assert_eq!(engine.metrics().unwrap().dedup_entries, 3, "{case}");
+        engine.checkpoint().unwrap();
     }
-    assert_eq!(engine.metrics().unwrap().dedup_entries, 2);
-    engine.checkpoint().unwrap();
-    for i in 3..6 {
-        engine.append(&scope("s"), vec![turn(i)], Some(&i.to_string())).unwrap();
-    }
-    engine.checkpoint().unwrap();
     drop(engine);
     let engine = open(disk, opts);
-    assert_eq!(engine.metrics().unwrap().dedup_entries, 2);
-    assert_eq!(engine.metrics().unwrap().dedup_window_effective, 2);
-    assert_eq!(engine.append(&scope("s"), vec![turn(5)], Some("5")).unwrap().seqs, vec![6]);
-    assert_eq!(engine.append(&scope("s"), vec![turn(0)], Some("0")).unwrap().seqs, vec![7]);
+    assert_eq!(engine.metrics().unwrap().replayed_records, 0);
+    assert_eq!(engine.metrics().unwrap().dedup_entries, 3);
+    assert_eq!(engine.metrics().unwrap().dedup_window_effective, 1);
+    assert_eq!(engine.append(&checkpoint_scope, vec![turn(5)], Some("5")).unwrap().seqs, vec![6]);
+    assert_eq!(engine.append(&checkpoint_scope, vec![turn(0)], Some("0")).unwrap().seqs, vec![7]);
 }
 
 #[test]
@@ -511,6 +520,8 @@ fn failed_sync_with_a_full_dedup_window_cannot_checkpoint_tentative_eviction() {
 #[test]
 fn cold_window_and_pin_io_do_not_hold_the_writer_state_lock() {
     for append in [false, true] {
+        eprintln!("case: append={append:?}");
+
         let io = Arc::new(support::ProbeIo::new(18));
         let opts = EngineOptions { hot_page_bytes: 256, ..options() };
         let engine =
@@ -558,6 +569,8 @@ fn open_sweeps_orphan_checkpoints_only_after_taking_the_tape_lock() {
     engine.append(&scope("s"), vec![turn(1)], None).unwrap();
     engine.checkpoint().unwrap();
     for path in ["db/ckpt-orphan.zdb", "db/CHECKPOINT.next"] {
+        eprintln!("case: path={path:?}");
+
         let id = disk.create(std::path::Path::new(path)).unwrap();
         disk.write_at(id, 0, b"partial").unwrap();
         disk.sync_data(id).unwrap();
@@ -679,7 +692,7 @@ fn stdio_eight_threads_sixty_four_sessions_reopen_equals_oracle() {
 }
 
 mod metrics {
-    use crate::support::engine_fixtures::*;
+    use crate::support::sessions::*;
     use std::sync::Arc;
     use zerodb_core::EngineOptions;
     use zerodb_tape::{SimDisk, TapeOptions};

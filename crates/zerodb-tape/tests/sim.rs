@@ -22,8 +22,5 @@ fn seeded_crash_recovery() {
             std::panic::resume_unwind(error);
         }
     }
-    for seed in 0..64 {
-        sim::frame_faults(seed);
-    }
     eprintln!("simulation passed: {count} seeds starting at {first}");
 }

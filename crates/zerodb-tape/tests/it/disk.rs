@@ -1,14 +1,12 @@
-use crate::support::disk_full_fixtures::*;
-use crate::support::simdisk_fixtures::{bytes, durable_file};
+use crate::support::storage::{bytes, durable_file};
+use crate::support::Behavior;
+use crate::support::{manifest, primed_writer, record, submit, Machine};
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use zerodb_tape::sim::DataDir;
-use zerodb_tape::sim::{SimClock, WriteRequest, WriterCore};
-use zerodb_tape::{
-    Committed, CommittedRecord, Durability, Kind, Outcome, Prepare, PreparedBatch, RecordInput,
-    Result, StateMachine, TapeOptions,
-};
+use zerodb_tape::sim::{SimClock, WriterCore};
+use zerodb_tape::{Committed, Durability, Kind, Outcome, RecordInput, TapeOptions};
 use zerodb_tape::{Error, Io, SimDisk};
 
 #[test]
@@ -38,6 +36,8 @@ fn space_faults_set_group_outcome() {
         ("directory sync error", DirSync, false, true),
         ("manifest write full", Manifest, false, true),
     ] {
+        eprintln!("case: {case}");
+
         let capacity = if let DefaultFloor(capacity) = fault { capacity } else { 1 << 30 };
         let floor = if matches!(fault, DefaultFloor(_)) { None } else { Some(100) };
         let (io, mut core, prepares) = primed_writer(floor, capacity);
@@ -63,7 +63,10 @@ fn space_faults_set_group_outcome() {
             Manifest => io.full_manifest_write.store(true, Ordering::SeqCst),
         }
         let size = if matches!(fault, LaterAllocate) { 3800 } else { 8 };
-        let replies = [queue_size(&mut core, size), queue_size(&mut core, size)];
+        let replies = [
+            submit(&mut core, vec![record(Kind::Turn, 1, vec![7; size])], Durability::Durable),
+            submit(&mut core, vec![record(Kind::Turn, 1, vec![7; size])], Durability::Durable),
+        ];
         core.step();
         for reply in replies {
             let error = reply.recv().unwrap().unwrap_err();
@@ -108,7 +111,7 @@ fn space_faults_set_group_outcome() {
             3800
         };
         if expect_poisoned {
-            let retry = queue(&mut core);
+            let retry = submit(&mut core, vec![record(Kind::Turn, 1, [7; 8])], Durability::Durable);
             core.step();
             assert!(matches!(retry.recv().unwrap().unwrap_err().kind, Error::Poisoned), "{case}");
             drop(core);
@@ -118,7 +121,7 @@ fn space_faults_set_group_outcome() {
                 ..TapeOptions::default()
             };
             core = WriterCore::open_with(
-                Machine(prepares.clone()),
+                Machine { prepares: prepares.clone(), ..Machine::default() },
                 io.clone(),
                 Arc::new(SimClock::default()),
                 "db",
@@ -128,7 +131,11 @@ fn space_faults_set_group_outcome() {
             .0;
             assert!(!io.disk.exists(Path::new("db/seg-0000000000000002.zdb")).unwrap(), "{case}");
         }
-        let retry = queue_size(&mut core, retry_size);
+        let retry = submit(
+            &mut core,
+            vec![record(Kind::Turn, 1, vec![7; retry_size])],
+            Durability::Durable,
+        );
         core.step();
         let Committed::Durable { txn, last_lsn, .. } = retry.recv().unwrap().unwrap();
         assert_eq!((txn, last_lsn), (2, 2), "{case}");
@@ -140,7 +147,7 @@ fn space_faults_set_group_outcome() {
         let opts =
             TapeOptions { segment_size: 4096, free_space_floor: floor, ..TapeOptions::default() };
         let (core, report) = WriterCore::open_with(
-            Machine(Arc::new(AtomicUsize::new(0))),
+            Machine::default(),
             image,
             Arc::new(SimClock::default()),
             "db",
@@ -167,6 +174,8 @@ fn simulated_disk_lifecycle_tracks_capacity_locks_and_unlink() {
     for (case, offset, free) in
         [("first block", 0, 512), ("overwrite", 511, 512), ("last block", 3584, 0)]
     {
+        eprintln!("case: {case}");
+
         disk.write_at(file, offset, b"x").unwrap();
         assert_eq!(disk.available_bytes(dir).unwrap(), free, "{case}");
     }
@@ -245,6 +254,7 @@ fn seeded_disk_crashes_preserve_sync_fidelity() {
     for seed in 0..1000 {
         for sector in [4, 512] {
             let case = format!("seed={seed}, sector={sector}");
+            eprintln!("case: {case}");
             let disk = SimDisk::new(seed);
             disk.set_sector_size(sector).unwrap();
             let len = sector * 3;
@@ -356,29 +366,11 @@ fn seeded_disk_crashes_preserve_sync_fidelity() {
 
 #[test]
 fn a_group_spanning_segments_is_reserved_before_any_prepare() {
-    struct CheckAllocation(Arc<SimDisk>, usize);
-    impl StateMachine for CheckAllocation {
-        fn prepare(&mut self, _: &mut PreparedBatch) -> Prepare {
-            let segments = self
-                .0
-                .list(Path::new("db"))
-                .unwrap()
-                .into_iter()
-                .filter(|path| path.file_name().unwrap().to_string_lossy().starts_with("seg-"))
-                .count();
-            assert_eq!(segments, self.1);
-            Prepare::Write
-        }
-        fn publish(&mut self, _: &[CommittedRecord]) {}
-        fn replay(&mut self, _: &CommittedRecord) -> Result<()> {
-            Ok(())
-        }
-    }
     let disk = Arc::new(SimDisk::new(5));
     let opts =
         TapeOptions { segment_size: 200, free_space_floor: Some(0), ..TapeOptions::default() };
     let (mut core, _) = WriterCore::open_with(
-        CheckAllocation(disk.clone(), 3),
+        Machine { expected_segments: Some((disk.clone(), 3)), ..Machine::default() },
         disk.clone(),
         Arc::new(SimClock::default()),
         "db",
@@ -387,14 +379,11 @@ fn a_group_spanning_segments_is_reserved_before_any_prepare() {
     .unwrap();
     let replies: Vec<_> = (0..3)
         .map(|_| {
-            let batch = PreparedBatch::new(
+            submit(
+                &mut core,
                 vec![RecordInput { kind: Kind::Turn, tenant_id: 1, content: vec![7; 8] }],
                 Durability::Durable,
             )
-            .unwrap();
-            let (request, reply) = WriteRequest::new(batch);
-            core.enqueue(request);
-            reply
         })
         .collect();
     core.step();
@@ -403,48 +392,32 @@ fn a_group_spanning_segments_is_reserved_before_any_prepare() {
     }
     assert_eq!(core.durable_lsn(), 3);
     drop(core);
-    let (_, report) = WriterCore::open_with(
-        Machine(Arc::new(AtomicUsize::new(0))),
-        disk,
-        Arc::new(SimClock::default()),
-        "db",
-        opts,
-    )
-    .unwrap();
+    let (_, report) =
+        WriterCore::open_with(Machine::default(), disk, Arc::new(SimClock::default()), "db", opts)
+            .unwrap();
     assert_eq!(report.durable_lsn, 3);
 }
 
 #[test]
 fn growing_hooks_cannot_allocate_after_prepare() {
-    struct Grow;
-    impl StateMachine for Grow {
-        fn prepare(&mut self, batch: &mut PreparedBatch) -> Prepare {
-            for record in batch.records_mut() {
-                record.content.resize(80, 7);
-            }
-            Prepare::Write
-        }
-        fn publish(&mut self, _: &[CommittedRecord]) {}
-        fn replay(&mut self, _: &CommittedRecord) -> Result<()> {
-            Ok(())
-        }
-    }
     let disk = Arc::new(SimDisk::new(6));
     let opts =
         TapeOptions { segment_size: 256, free_space_floor: Some(0), ..TapeOptions::default() };
-    let (mut core, _) =
-        WriterCore::open_with(Grow, disk.clone(), Arc::new(SimClock::default()), "db", opts)
-            .unwrap();
+    let (mut core, _) = WriterCore::open_with(
+        Machine::new(Behavior::Grow(80)),
+        disk.clone(),
+        Arc::new(SimClock::default()),
+        "db",
+        opts,
+    )
+    .unwrap();
     let replies: Vec<_> = (0..3)
         .map(|_| {
-            let batch = PreparedBatch::new(
+            submit(
+                &mut core,
                 vec![RecordInput { kind: Kind::Turn, tenant_id: 1, content: vec![7; 8] }],
                 Durability::Durable,
             )
-            .unwrap();
-            let (request, reply) = WriteRequest::new(batch);
-            core.enqueue(request);
-            reply
         })
         .collect();
     core.step();
@@ -497,6 +470,8 @@ mod segments {
             let dir = DataDir::open(Arc::new(crash.clone()), "db", None, 512).unwrap();
             assert_eq!(dir.segments(), &[1, 2]);
             for (id, byte) in [(1, 7), (2, 8)] {
+                eprintln!("case: id={id:?}, byte={byte:?}");
+
                 let file = crash.open(&dir.segment_path(id)).unwrap();
                 assert_eq!(crash.len(file).unwrap(), 512);
                 let mut bytes = [0; 512];

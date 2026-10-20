@@ -26,6 +26,7 @@ pub struct ObservedIo {
 }
 
 impl ObservedIo {
+    #[track_caller]
     pub fn new(seed: u64) -> Self {
         Self {
             disk: SimDisk::new(seed),
@@ -47,6 +48,7 @@ impl ObservedIo {
         }
     }
 
+    #[track_caller]
     fn event(&self, label: String) {
         self.events.lock().unwrap().push(label);
         if self.capture.load(Ordering::SeqCst) {
@@ -54,6 +56,7 @@ impl ObservedIo {
         }
     }
 
+    #[track_caller]
     fn name(&self, file: FileId) -> PathBuf {
         self.handles.lock().unwrap()[&file].clone()
     }
@@ -172,36 +175,207 @@ impl Io for ObservedIo {
     }
 }
 
-pub(crate) mod writer_fixtures {
+use std::sync::{mpsc, Arc};
+use zerodb_tape::sim::{PreparedBatch, SimClock, WriteRequest, WriterCore};
+use zerodb_tape::{
+    CommittedRecord, Durability, Kind, Prepare, RecordInput, StateMachine, TapeOptions, WriteResult,
+};
+mod fs {
+    const ROOT: &str = env!("CARGO_TARGET_TMPDIR");
+    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/support.rs"));
+}
+pub(crate) use fs::TestDir;
 
-    use zerodb_tape::sim::PreparedBatch;
+#[track_caller]
+pub(crate) fn record(kind: Kind, tenant_id: u32, content: impl AsRef<[u8]>) -> RecordInput {
+    RecordInput { kind, tenant_id, content: content.as_ref().to_vec() }
+}
+#[track_caller]
+pub(crate) fn submit<S: StateMachine>(
+    core: &mut WriterCore<S>,
+    records: Vec<RecordInput>,
+    mode: Durability,
+) -> mpsc::Receiver<WriteResult> {
+    let (request, reply) = WriteRequest::new(PreparedBatch::new(records, mode).unwrap());
+    core.enqueue(request);
+    reply
+}
+#[track_caller]
+pub(crate) fn opts(size: u64) -> TapeOptions {
+    TapeOptions { segment_size: size, ..TapeOptions::default() }
+}
+#[derive(Debug, Default)]
+pub(crate) struct Log {
+    pub published: Vec<CommittedRecord>,
+    pub replayed: Vec<CommittedRecord>,
+    pub prepares: usize,
+    pub threads: Vec<std::thread::ThreadId>,
+}
 
-    use zerodb_tape::{Durability, Kind, RecordInput};
+#[derive(Default)]
+pub(crate) enum Behavior {
+    #[default]
+    Pass,
+    Sequence,
+    Dedup,
+    Grow(usize),
+    InvalidRewrite,
+}
 
-    pub(crate) fn record(kind: Kind) -> RecordInput {
-        RecordInput { kind, tenant_id: 1, content: b"hello".to_vec() }
-    }
+#[derive(Default)]
+pub(crate) struct Machine {
+    pub prepares: Arc<AtomicUsize>,
+    pub expected_segments: Option<(Arc<SimDisk>, usize)>,
+    pub behavior: Behavior,
+    pub log: Arc<Mutex<Log>>,
+    pub replies: Arc<Mutex<Vec<mpsc::Receiver<WriteResult>>>>,
+    pub fail_replay: bool,
+    pub seq: u64,
+    pub cached: bool,
+}
 
-    pub(crate) fn prepared(mode: Durability) -> PreparedBatch {
-        PreparedBatch::new(vec![record(Kind::Turn)], mode).unwrap()
-    }
-
-    pub(crate) fn superblock(io: &super::ObservedIo, size: u64) -> u64 {
-        zerodb_tape::sim::DataDir::open(
-            std::sync::Arc::new(io.disk.crash().unwrap()),
-            "db",
-            None,
-            size,
-        )
-        .unwrap()
-        .superblock()
+impl Machine {
+    #[track_caller]
+    pub(crate) fn new(behavior: Behavior) -> Self {
+        Self { behavior, ..Self::default() }
     }
 }
 
-pub(crate) mod frame_fixtures {
+impl StateMachine for Machine {
+    fn prepare(&mut self, batch: &mut PreparedBatch) -> Prepare {
+        self.prepares.fetch_add(1, Ordering::SeqCst);
+        let mut log = self.log.lock().unwrap();
+        log.prepares += 1;
+        log.threads.push(std::thread::current().id());
+        if let Some((disk, expected)) = &self.expected_segments {
+            let count = disk
+                .list(Path::new("db"))
+                .unwrap()
+                .iter()
+                .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with("seg-"))
+                .count();
+            assert_eq!(count, *expected, "segments must be reserved before prepare");
+        }
+        match self.behavior {
+            Behavior::Pass => {}
+            Behavior::Grow(len) => {
+                for record in batch.records_mut() {
+                    record.content.resize(len, 7);
+                }
+            }
+            Behavior::InvalidRewrite => {
+                let record = batch.records_mut().next().unwrap();
+                match record.content.as_slice() {
+                    b"footer" => record.kind = Kind::Footer,
+                    b"durable" => record.kind = Kind::Turn,
+                    _ => record.content = vec![0; 4 * 1024 * 1024],
+                }
+            }
+            Behavior::Sequence => {
+                match batch.records().next().unwrap().content.as_slice() {
+                    b"reject" => {
+                        return Prepare::Reject(zerodb_tape::WriteError {
+                            kind: Error::InvalidFrame("rejected".into()),
+                            outcome: zerodb_tape::Outcome::NotCommitted,
+                        })
+                    }
+                    b"reply" => return Prepare::Reply(receipt(77, 88)),
+                    _ => {}
+                }
+                for record in batch.records_mut() {
+                    self.seq += 1;
+                    record.content = self.seq.to_le_bytes().to_vec();
+                }
+            }
+            Behavior::Dedup => {
+                if batch.records().next().unwrap().content != b"trailing" {
+                    if self.cached {
+                        return Prepare::Reply(receipt(1, 1));
+                    }
+                    self.cached = true;
+                }
+            }
+        }
+        Prepare::Write
+    }
+    fn publish(&mut self, records: &[CommittedRecord]) {
+        assert!(
+            !matches!(self.behavior, Behavior::InvalidRewrite),
+            "invalid rewrite must not publish"
+        );
+        for reply in self.replies.lock().unwrap().iter() {
+            assert!(matches!(reply.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        }
+        self.log.lock().unwrap().published.extend_from_slice(records);
+    }
+    fn replay(&mut self, record: &CommittedRecord) -> Result<()> {
+        if self.fail_replay {
+            return Err(Error::Configuration("replay failed".into()));
+        }
+        if matches!(self.behavior, Behavior::Sequence) {
+            self.seq = u64::from_le_bytes(record.payload.as_ref().try_into().unwrap());
+        }
+        self.log.lock().unwrap().replayed.push(record.clone());
+        Ok(())
+    }
+}
 
-    use zerodb_tape::sim::frame::{self, DecodeError, Frame, Header, Kind, VERSION};
+#[track_caller]
+pub(crate) fn receipt(txn: u64, lsn: u64) -> zerodb_tape::Committed {
+    zerodb_tape::Committed::Durable { txn, first_lsn: lsn, last_lsn: lsn, reply: Vec::new() }
+}
 
+#[track_caller]
+pub(crate) fn superblock(io: &ObservedIo, size: u64) -> u64 {
+    zerodb_tape::sim::DataDir::open(std::sync::Arc::new(io.disk.crash().unwrap()), "db", None, size)
+        .unwrap()
+        .superblock()
+}
+
+#[track_caller]
+pub(crate) fn primed_writer(
+    floor: Option<u64>,
+    capacity: u64,
+) -> (Arc<ObservedIo>, WriterCore<Machine>, Arc<AtomicUsize>) {
+    let io = Arc::new(ObservedIo::new(8));
+    io.disk.set_capacity(capacity).unwrap();
+    let prepares = Arc::new(AtomicUsize::new(0));
+    let opts =
+        TapeOptions { segment_size: 4096, free_space_floor: floor, ..TapeOptions::default() };
+    let (mut core, _) = WriterCore::open_with(
+        Machine { prepares: prepares.clone(), ..Machine::default() },
+        io.clone(),
+        Arc::new(SimClock::default()),
+        "db",
+        opts,
+    )
+    .unwrap();
+    io.disk.set_capacity(capacity.max(16384)).unwrap();
+    let first = submit(&mut core, vec![record(Kind::Turn, 1, vec![7; 3800])], Durability::Durable);
+    core.step();
+    first.recv().unwrap().unwrap();
+    io.disk.set_capacity(capacity).unwrap();
+    (io, core, prepares)
+}
+
+#[track_caller]
+pub(crate) fn manifest(disk: &SimDisk) -> Vec<u8> {
+    let file = disk.open(Path::new("db/MANIFEST")).unwrap();
+    let mut bytes = vec![0; disk.len(file).unwrap() as usize];
+    assert_eq!(disk.read_at(file, 0, &mut bytes).unwrap(), bytes.len());
+    disk.close(file).unwrap();
+    bytes
+}
+
+pub(crate) mod wire {
+    use std::path::Path;
+    use std::sync::Arc;
+    use zerodb_tape::sim::DataDir;
+    use zerodb_tape::{Io, SimDisk};
+
+    use zerodb_tape::sim::frame::{self, DecodeError, Footer, Frame, Header, Kind, VERSION};
+
+    #[track_caller]
     pub(crate) fn frame(kind: Kind, content: &[u8]) -> Frame {
         Frame {
             header: Header {
@@ -217,241 +391,23 @@ pub(crate) mod frame_fixtures {
         }
     }
 
+    #[track_caller]
     pub(crate) fn encode(frame: &Frame) -> zerodb_tape::Result<Vec<u8>> {
         frame::encode(frame, 7, 128)
     }
 
+    #[track_caller]
     pub(crate) fn decode(bytes: &[u8]) -> Result<(Frame, usize), DecodeError> {
         frame::decode(bytes, 7, 128)
     }
 
+    #[track_caller]
     pub(crate) fn refresh_crc(bytes: &mut [u8]) {
         let crc = frame::checksum(7, 128, &bytes[4..]);
         bytes[..4].copy_from_slice(&crc.to_le_bytes());
     }
-}
 
-pub(crate) mod hooks_fixtures {
-    use std::sync::{Arc, Mutex};
-    use zerodb_tape::sim::{WriteRequest, WriterCore};
-    use zerodb_tape::{
-        Committed, CommittedRecord, Durability, Error, Kind, Outcome, Prepare, PreparedBatch,
-        RecordInput, Result, StateMachine, TapeOptions, WriteError,
-    };
-
-    #[derive(Debug, Default)]
-    pub(crate) struct Log {
-        pub(crate) published: Vec<CommittedRecord>,
-        pub(crate) replayed: Vec<CommittedRecord>,
-        pub(crate) prepares: usize,
-        pub(crate) threads: Vec<std::thread::ThreadId>,
-    }
-
-    #[derive(Debug, Default)]
-    pub(crate) struct Machine {
-        pub(crate) log: Arc<Mutex<Log>>,
-        pub(crate) seq: u64,
-        pub(crate) fail_replay: bool,
-    }
-
-    pub(crate) fn cached() -> Committed {
-        Committed::Durable { txn: 77, first_lsn: 88, last_lsn: 88, reply: Vec::new() }
-    }
-
-    impl StateMachine for Machine {
-        fn prepare(&mut self, batch: &mut PreparedBatch) -> Prepare {
-            let mut log = self.log.lock().unwrap();
-            log.prepares += 1;
-            log.threads.push(std::thread::current().id());
-            match batch.records().next().unwrap().content.as_slice() {
-                b"reject" => {
-                    return Prepare::Reject(WriteError {
-                        kind: Error::InvalidFrame("rejected".into()),
-                        outcome: Outcome::NotCommitted,
-                    });
-                }
-                b"reply" => return Prepare::Reply(cached()),
-                _ => {}
-            }
-            for record in batch.records_mut() {
-                self.seq += 1;
-                record.content = self.seq.to_le_bytes().to_vec();
-            }
-            Prepare::Write
-        }
-
-        fn publish(&mut self, committed: &[CommittedRecord]) {
-            self.log.lock().unwrap().published.extend_from_slice(committed);
-        }
-
-        fn replay(&mut self, record: &CommittedRecord) -> Result<()> {
-            if self.fail_replay {
-                return Err(Error::Configuration("replay failed".into()));
-            }
-            self.seq = u64::from_le_bytes(record.payload.as_ref().try_into().unwrap());
-            self.log.lock().unwrap().replayed.push(record.clone());
-            Ok(())
-        }
-    }
-
-    pub(crate) fn input(kind: Kind, content: &[u8]) -> RecordInput {
-        RecordInput { kind, tenant_id: 7, content: content.to_vec() }
-    }
-
-    pub(crate) fn options() -> TapeOptions {
-        TapeOptions { segment_size: 512, ..TapeOptions::default() }
-    }
-
-    pub(crate) fn enqueue<S: StateMachine>(
-        core: &mut WriterCore<S>,
-        kind: Kind,
-        mode: Durability,
-    ) -> std::sync::mpsc::Receiver<zerodb_tape::WriteResult> {
-        let batch = PreparedBatch::new(vec![input(kind, &[0; 8])], mode).unwrap();
-        let (request, reply) = WriteRequest::new(batch);
-        core.enqueue(request);
-        reply
-    }
-}
-
-pub(crate) mod retry_fixtures {
-    use std::sync::{mpsc, Arc, Mutex};
-    use zerodb_tape::sim::WriteRequest;
-    use zerodb_tape::{
-        Committed, CommittedRecord, Durability, Kind, Prepare, PreparedBatch, RecordInput, Result,
-        StateMachine, WriteResult,
-    };
-
-    #[derive(Debug, Default)]
-    pub(crate) struct Dedup {
-        pub(crate) cached: bool,
-        pub(crate) replies: Arc<Mutex<Vec<mpsc::Receiver<WriteResult>>>>,
-        pub(crate) published: Arc<Mutex<Vec<u64>>>,
-    }
-
-    pub(crate) fn original() -> Committed {
-        Committed::Durable { txn: 1, first_lsn: 1, last_lsn: 1, reply: Vec::new() }
-    }
-
-    impl StateMachine for Dedup {
-        fn prepare(&mut self, batch: &mut PreparedBatch) -> Prepare {
-            if batch.records().next().unwrap().content == b"trailing" {
-                return Prepare::Write;
-            }
-            if self.cached {
-                Prepare::Reply(original())
-            } else {
-                self.cached = true;
-                Prepare::Write
-            }
-        }
-        fn publish(&mut self, records: &[CommittedRecord]) {
-            for reply in self.replies.lock().unwrap().iter() {
-                assert!(matches!(reply.try_recv(), Err(mpsc::TryRecvError::Empty)));
-            }
-            self.published.lock().unwrap().extend(records.iter().map(|record| record.lsn));
-        }
-        fn replay(&mut self, _: &CommittedRecord) -> Result<()> {
-            Ok(())
-        }
-    }
-
-    pub(crate) fn request(content: &[u8]) -> (WriteRequest, mpsc::Receiver<WriteResult>) {
-        WriteRequest::new(
-            PreparedBatch::new(
-                vec![RecordInput { kind: Kind::Turn, tenant_id: 1, content: content.to_vec() }],
-                Durability::Durable,
-            )
-            .unwrap(),
-        )
-    }
-}
-
-pub(crate) mod disk_full_fixtures {
-    use crate::support;
-    use std::path::Path;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
-
-    use zerodb_tape::sim::{SimClock, WriteRequest, WriterCore};
-    use zerodb_tape::{
-        CommittedRecord, Durability, Kind, Prepare, PreparedBatch, RecordInput, Result,
-        StateMachine, TapeOptions,
-    };
-    use zerodb_tape::{Io, SimDisk};
-
-    pub(crate) fn queue(
-        core: &mut WriterCore<Machine>,
-    ) -> std::sync::mpsc::Receiver<zerodb_tape::WriteResult> {
-        queue_size(core, 8)
-    }
-
-    pub(crate) fn queue_size(
-        core: &mut WriterCore<Machine>,
-        content_len: usize,
-    ) -> std::sync::mpsc::Receiver<zerodb_tape::WriteResult> {
-        let batch = PreparedBatch::new(
-            vec![RecordInput { kind: Kind::Turn, tenant_id: 1, content: vec![7; content_len] }],
-            Durability::Durable,
-        )
-        .unwrap();
-        let (request, reply) = WriteRequest::new(batch);
-        core.enqueue(request);
-        reply
-    }
-
-    pub(crate) fn primed_writer(
-        floor: Option<u64>,
-        capacity: u64,
-    ) -> (Arc<support::ObservedIo>, WriterCore<Machine>, Arc<AtomicUsize>) {
-        let io = Arc::new(support::ObservedIo::new(8));
-        io.disk.set_capacity(capacity).unwrap();
-        let prepares = Arc::new(AtomicUsize::new(0));
-        let opts =
-            TapeOptions { segment_size: 4096, free_space_floor: floor, ..TapeOptions::default() };
-        let (mut core, _) = WriterCore::open_with(
-            Machine(prepares.clone()),
-            io.clone(),
-            Arc::new(SimClock::default()),
-            "db",
-            opts,
-        )
-        .unwrap();
-        io.disk.set_capacity(capacity.max(16384)).unwrap();
-        let first = queue_size(&mut core, 3800);
-        core.step();
-        first.recv().unwrap().unwrap();
-        io.disk.set_capacity(capacity).unwrap();
-        (io, core, prepares)
-    }
-
-    pub(crate) fn manifest(disk: &SimDisk) -> Vec<u8> {
-        let file = disk.open(Path::new("db/MANIFEST")).unwrap();
-        let mut bytes = vec![0; disk.len(file).unwrap() as usize];
-        assert_eq!(disk.read_at(file, 0, &mut bytes).unwrap(), bytes.len());
-        disk.close(file).unwrap();
-        bytes
-    }
-    pub(crate) struct Machine(pub(crate) Arc<AtomicUsize>);
-    impl StateMachine for Machine {
-        fn prepare(&mut self, _: &mut PreparedBatch) -> Prepare {
-            self.0.fetch_add(1, Ordering::SeqCst);
-            Prepare::Write
-        }
-        fn publish(&mut self, _: &[CommittedRecord]) {}
-        fn replay(&mut self, _: &CommittedRecord) -> Result<()> {
-            Ok(())
-        }
-    }
-}
-
-pub(crate) mod recovery_fixtures {
-    use std::sync::Arc;
-    use zerodb_tape::sim::frame::{self, Footer, Frame, Header, Kind, VERSION};
-    use zerodb_tape::sim::DataDir;
-
-    use zerodb_tape::{Io, SimDisk};
-
+    #[track_caller]
     pub(crate) fn transaction(lsn: u64, txn: u64, location: (u64, u64)) -> (Vec<u8>, (u64, u64)) {
         let header = Header {
             kind: Kind::Turn,
@@ -491,6 +447,7 @@ pub(crate) mod recovery_fixtures {
         (bytes, next)
     }
 
+    #[track_caller]
     pub(crate) fn setup() -> (Arc<SimDisk>, DataDir) {
         let io = Arc::new(SimDisk::new(1));
         let mut dir = DataDir::open(io.clone(), "db", None, 1024).unwrap();
@@ -498,34 +455,12 @@ pub(crate) mod recovery_fixtures {
         (io, dir)
     }
 
+    #[track_caller]
     pub(crate) fn write(io: &SimDisk, dir: &DataDir, id: u64, offset: u64, bytes: &[u8]) {
         let file = io.open(&dir.segment_path(id)).unwrap();
         io.write_at(file, offset, bytes).unwrap();
         io.sync_data(file).unwrap();
         io.close(file).unwrap();
-    }
-}
-
-pub(crate) mod boundary_fixtures {
-    use std::path::Path;
-
-    use zerodb_tape::sim::{PreparedBatch, WriteRequest, WriterCore};
-    use zerodb_tape::{Durability, Io, Kind, RecordInput, SimDisk, TapeOptions};
-
-    pub(crate) fn opts(size: u64) -> TapeOptions {
-        TapeOptions { segment_size: size, ..TapeOptions::default() }
-    }
-
-    pub(crate) fn append(core: &mut WriterCore, count: usize) {
-        let batch = PreparedBatch::new(
-            vec![RecordInput { kind: Kind::Turn, tenant_id: 1, content: vec![7; 8] }; count],
-            Durability::Durable,
-        )
-        .unwrap();
-        let (request, reply) = WriteRequest::new(batch);
-        core.enqueue(request);
-        core.step();
-        reply.recv().unwrap().unwrap();
     }
 
     #[derive(Clone, Copy, Debug)]
@@ -537,6 +472,7 @@ pub(crate) mod boundary_fixtures {
         InvalidProof(usize),
     }
 
+    #[track_caller]
     pub(crate) fn damage(disk: &SimDisk, size: u64, fault: Damage, case: &str) {
         use zerodb_tape::sim::frame;
         let first = disk.open(Path::new("db/seg-0000000000000001.zdb")).unwrap();
@@ -567,6 +503,7 @@ pub(crate) mod boundary_fixtures {
         disk.close(first).unwrap();
     }
 
+    #[track_caller]
     pub(crate) fn empty_footer(disk: &SimDisk) {
         use zerodb_tape::sim::frame::{self, Footer, Frame, Header, VERSION};
         let footer = Frame {
@@ -597,12 +534,12 @@ pub(crate) mod boundary_fixtures {
     }
 }
 
-pub(crate) mod simdisk_fixtures {
-
+pub(crate) mod storage {
     use std::path::Path;
 
     use zerodb_tape::{FileId, Io, SimDisk};
 
+    #[track_caller]
     pub(crate) fn bytes(io: &dyn Io, file: FileId) -> Vec<u8> {
         let mut data = vec![0; io.len(file).unwrap() as usize];
         let count = io.read_at(file, 0, &mut data).unwrap();
@@ -610,6 +547,7 @@ pub(crate) mod simdisk_fixtures {
         data
     }
 
+    #[track_caller]
     pub(crate) fn durable_file(disk: &SimDisk, name: &str, data: &[u8]) -> FileId {
         let file = disk.create(Path::new(name)).unwrap();
         disk.write_at(file, 0, data).unwrap();
@@ -619,28 +557,12 @@ pub(crate) mod simdisk_fixtures {
     }
 }
 
-pub(crate) mod io_fixtures {
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    pub(crate) struct TestDir(pub(crate) PathBuf);
-
-    impl TestDir {
-        pub(crate) fn new() -> Self {
-            static NEXT: AtomicU64 = AtomicU64::new(0);
-            let path = std::env::current_dir().unwrap().join("target").join(format!(
-                "io-test-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ));
-            std::fs::create_dir_all(&path).unwrap();
-            Self(path)
-        }
-    }
-
-    impl Drop for TestDir {
-        fn drop(&mut self) {
-            std::fs::remove_dir_all(&self.0).unwrap();
-        }
-    }
+#[track_caller]
+pub(crate) fn superblock_installs(io: &ObservedIo) -> usize {
+    io.events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|event| event.as_str() == "rename db/SUPERBLOCK.tmp db/SUPERBLOCK")
+        .count()
 }

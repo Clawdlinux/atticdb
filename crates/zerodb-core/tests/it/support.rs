@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Mutex;
 use zerodb_tape::{Error, FileId, Io, LockGuard, Result, SimDisk};
@@ -14,6 +14,7 @@ pub struct ProbeIo {
     pub read_gate: Mutex<Option<(mpsc::SyncSender<()>, mpsc::Receiver<()>)>>,
 }
 impl ProbeIo {
+    #[track_caller]
     pub fn new(seed: u64) -> Self {
         Self {
             disk: SimDisk::new(seed),
@@ -23,6 +24,7 @@ impl ProbeIo {
             read_gate: Mutex::new(None),
         }
     }
+    #[track_caller]
     fn register(&self, path: &Path, file: Result<FileId>) -> Result<FileId> {
         let id = file?;
         self.files.lock().unwrap().insert(id, path.to_owned());
@@ -106,7 +108,7 @@ impl Io for ProbeIo {
     }
 }
 
-pub(crate) mod engine_fixtures {
+pub(crate) mod sessions {
 
     use std::sync::Arc;
     use std::time::Duration;
@@ -114,14 +116,17 @@ pub(crate) mod engine_fixtures {
     use zerodb_tape::sim::SimClock;
     use zerodb_tape::{SimDisk, TapeOptions};
 
+    #[track_caller]
     pub(crate) fn scope(session: &str) -> Scope {
         Scope { tenant: "tenant".into(), agent: "agent".into(), session: session.into() }
     }
 
+    #[track_caller]
     pub(crate) fn turn(value: u64) -> NewTurn {
         NewTurn { role: Role::User, content: value.to_le_bytes().to_vec(), meta: vec![] }
     }
 
+    #[track_caller]
     pub(crate) fn options() -> EngineOptions {
         EngineOptions {
             tape: TapeOptions { segment_size: 64 * 1024, ..TapeOptions::default() },
@@ -131,15 +136,17 @@ pub(crate) mod engine_fixtures {
         }
     }
 
+    #[track_caller]
     pub(crate) fn open(disk: Arc<SimDisk>, opts: EngineOptions) -> Engine {
         Engine::open_with(disk, Arc::new(SimClock::default()), "db", opts).unwrap()
     }
 }
 
-pub(crate) mod payloads_fixtures {
+pub(crate) mod facts {
 
     use zerodb_core::fact;
 
+    #[track_caller]
     pub(crate) fn fact() -> fact::Fact {
         fact::Fact {
             key: String::new(),
@@ -153,30 +160,18 @@ pub(crate) mod payloads_fixtures {
     }
 }
 
-pub(crate) mod turn_fixtures {
+pub(crate) mod turns {
 
     use zerodb_core::turn::{NewTurn, Role};
 
+    #[track_caller]
     pub(crate) fn turn() -> NewTurn {
         NewTurn { role: Role::User, content: b"hello".to_vec(), meta: vec![] }
     }
 }
 
-pub(crate) struct TestDir(pub(crate) PathBuf);
-impl TestDir {
-    pub(crate) fn new() -> Self {
-        static ID: AtomicU64 = AtomicU64::new(0);
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target").join(format!(
-            "core-e2e-{}-{}",
-            std::process::id(),
-            ID.fetch_add(1, Ordering::SeqCst)
-        ));
-        std::fs::create_dir_all(&path).unwrap();
-        Self(path)
-    }
+mod fs {
+    const ROOT: &str = env!("CARGO_TARGET_TMPDIR");
+    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/support.rs"));
 }
-impl Drop for TestDir {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0).unwrap();
-    }
-}
+pub(crate) use fs::TestDir;

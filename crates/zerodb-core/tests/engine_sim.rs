@@ -891,6 +891,7 @@ fn missing_checkpoint_filename_after_crash_replays_the_tape() {
     let turn = NewTurn { role: Role::User, content: vec![9], meta: vec![] };
     let mut observed = false;
     for seed in 0..128 {
+        eprintln!("case: seed={seed}");
         let io = Arc::new(FaultIo::new(SimDisk::new(seed)));
         let clock = Arc::new(SimClock::default());
         let engine = open(io.clone(), clock.clone(), &opts);
@@ -906,14 +907,18 @@ fn missing_checkpoint_filename_after_crash_replays_the_tape() {
                 .unwrap()
         {
             let engine = Engine::open_with(Arc::new(image), clock, "db", opts.clone()).unwrap();
-            assert_eq!(engine.metrics().unwrap().checkpoint_warnings, 1);
-            assert_eq!(engine.metrics().unwrap().replayed_records, 3);
-            assert_eq!(engine.window(&scope, WindowQuery::Last(10)).unwrap().len(), 2);
+            assert_eq!(engine.metrics().unwrap().checkpoint_warnings, 1, "seed={seed}");
+            assert_eq!(engine.metrics().unwrap().replayed_records, 3, "seed={seed}");
+            assert_eq!(
+                engine.window(&scope, WindowQuery::Last(10)).unwrap().len(),
+                2,
+                "seed={seed}"
+            );
             observed = true;
             break;
         }
     }
-    assert!(observed, "no missing-reference crash image was exercised");
+    assert!(observed, "seeds=0..128: no missing-reference crash image was exercised");
 }
 
 #[test]
