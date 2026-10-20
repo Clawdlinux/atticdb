@@ -190,7 +190,13 @@ An unreadable frame can hide its LSN. The reported range includes every decodabl
 
 ### Disk space
 
-A reserve (default 1 GiB or 5% of the volume, whichever is smaller) is kept free. Writes fail with `DiskFull` (`not_committed`) before the reserve is touched. Compaction may use the reserve. Forget and compaction never run on the writer thread.
+The free-space floor defaults to `min(1 GiB, 5% of total volume bytes)`.
+Before preparing each group, the writer budgets encoded bytes and new segment reservations against available space.
+A clean floor hit returns `DiskFull` with `NotCommitted` and sets read-only. Reads keep serving acknowledged data.
+`Engine::health()` reports this observed state without blocking or querying space.
+Only a later write's passing space check clears read-only.
+Data-write, sync, and manifest failures still poison the writer. Poisoning requires reopening.
+Future compaction may use the reserve. Forget and compaction won't run on the writer thread.
 
 ## Compaction and forget
 
@@ -292,7 +298,10 @@ Allowed crates, each with a reason:
 - `tokio`, `axum`: HTTP server only. The engine core does not use async.
 - `proptest`, `criterion`: tests and benches.
 
-No `libc` in v0.1. Preallocation uses `set_len`. Rust std `sync_data` already issues `F_FULLFSYNC` on macOS.
+S2 replaces the original no-libc rule with rustix for free-space queries and preallocation. D71 records the choice.
+Linux and macOS reserve blocks before setting the file length. Unsupported operations fall back to sparse `set_len`.
+Other platforms also use sparse `set_len`. Preallocation isn't a guarantee on APFS or btrfs.
+Rust std `sync_data` already issues `F_FULLFSYNC` on macOS.
 
 ## Milestones and size budgets
 

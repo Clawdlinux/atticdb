@@ -2,7 +2,7 @@
 
 Agent memory database written in Rust. Durable writes and fast recent-history reads.
 
-Status: early. The tape, session engine and S1 storage changes are implemented. This isn't ready for production.
+Status: early. The tape, session engine and S2 disk-full handling are implemented. This isn't ready for production.
 
 ## Why
 
@@ -76,10 +76,14 @@ Retry keys return original receipts within bounded tenant and global windows.
 Session pages use a resident-memory budget. Cold pages reload from checkpoints.
 A bad checkpoint triggers full replay with a warning.
 
+`Engine::health()` reports `Ok`, `ReadOnly`, or `Poisoned` without checking disk space or blocking.
+A clean floor hit rejects the group before preparation. Reads keep serving acknowledged turns.
+Only a later write's passing space check clears `ReadOnly`. Poisoning requires reopening.
+
 See [the core API notes](crates/zerodb-core/README.md) for formats and limits.
 See [benchmark results](bench/RESULTS.md) for the measured macOS workload and its limits.
 
-## Next steps
+## Steps
 
 | Step | Scope |
 |---|---|

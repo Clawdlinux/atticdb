@@ -1,5 +1,10 @@
 # Latest result
 
+Latest S2 macOS 192k repeat: Engine/bare p99 median **1.662945x**, Tape/bare **1.211374x**.
+Absolute p99 increases fit S1's repetition spread after the required unchanged repeat.
+The Engine/bare increase exceeds S1's unchanged-repeat ratio spread. Keep that warning alongside the noise verdict.
+See [S2 disk-full overhead](#s2-disk-full-overhead-macos-192k) for both runs and the matched S1 baseline.
+
 Latest S1 macOS 1M run: Engine/bare p99 **1.189216x** [1.085449x, 1.675773x].
 Tape/bare median is **1.021696x** [0.996803x, 1.310008x].
 Both paired-ratio medians beat M2. Absolute p99 medians are higher, and Engine repetition 1 misses 1.5x.
@@ -1148,3 +1153,94 @@ Findings:
 
 Decision: index writeback stays on the publish path. The spread is macOS `F_FULLFSYNC` variance on this machine.
 The 1.5x G1 gate is not judged on macOS. It needs a Linux NVMe run before any G1 claim.
+
+# S2 disk-full overhead (macOS, 192k)
+
+Measured on 2026-10-20 at `4ec356e4ea07af05100dfeb73343d78aba552487`.
+This commit includes S2 T1 through T4. T5 changes documentation only.
+Machine: Apple M4, arm64, macOS 27.0.1 build 26A434, internal APFS volume.
+Compiler: `rustc 1.99.1 (58cf8f9c3 2026-10-13)`.
+Available volume space was about 28 GiB before the first run.
+This is a shared development machine. No tests or simulations from this task overlapped either timed run.
+
+## Matched command
+
+The command matches [S1's 192k trace](#s1-frame-v2-macos), including its default 4-turn batches and 8 MiB index budget.
+Each execution runs 3 interleaved repetitions: bare, Tape, then Engine.
+Each path writes 192,000 timed turns per repetition, with 16 writers and 48,000 durable-ack samples.
+Engine also runs 2 window readers across 1024 sessions.
+The 64 MiB checkpoint threshold, payload sizes, and sync settings are unchanged.
+Scratch files stayed under `target/t5-work` through `TMPDIR`.
+
+```sh
+G1_TURNS=192000 G1_REPS=3 G1_HISTORY=0 G1_REPLAY_PROBE=0 G1_CHECKPOINT_MIB=64 ./bench/g1.sh
+```
+
+Both executions returned status 0. No code, benchmark, or configuration changed between runs.
+All 1024 session tails verified after every Engine reopen in both executions.
+Each Engine repetition completed 8 checkpoints and 8 periodic superblock installs.
+No run was discarded. Nothing was tuned.
+
+## S1 versus S2
+
+Absolute p99 values are milliseconds per durable batch acknowledgement.
+Ratios pair each path with bare within the same repetition.
+Median ratios are medians of those paired ratios, not ratios of absolute medians.
+The 2 historical S1 executions remain separate.
+
+| Run | Repetition | Bare p99, ms | Tape p99, ms | Engine p99, ms | Engine/bare | Tape/bare |
+|---|---:|---:|---:|---:|---:|---:|
+| S1 first | 1 | 6.055417 | 7.022292 | 8.020084 | 1.324448 | 1.159671 |
+| S1 first | 2 | 5.175958 | 7.073500 | 12.563459 | 2.427272 | 1.366607 |
+| S1 first | 3 | 6.473458 | 7.968041 | 11.004625 | 1.699961 | 1.230879 |
+| S1 first | Median | **6.055417** | **7.073500** | **11.004625** | **1.699961** | **1.230879** |
+| S1 repeat | 1 | 6.839791 | 6.869625 | 9.054833 | 1.323846 | 1.004362 |
+| S1 repeat | 2 | 5.452459 | 5.854584 | 5.934042 | 1.088324 | 1.073751 |
+| S1 repeat | 3 | 6.252833 | 8.037333 | 8.677084 | 1.387704 | 1.285391 |
+| S1 repeat | Median | **6.252833** | **6.869625** | **8.677084** | **1.323846** | **1.073751** |
+| S2 first | 1 | 6.063208 | 9.120875 | 9.456291 | 1.559618 | 1.504299 |
+| S2 first | 2 | 6.616042 | 7.733500 | 12.381375 | 1.871417 | 1.168901 |
+| S2 first | 3 | 11.779875 | 9.770250 | 11.184666 | 0.949472 | 0.829402 |
+| S2 first | Median | **6.616042** | **9.120875** | **11.184666** | **1.559618** | **1.168901** |
+| S2 repeat | 1 | 6.000625 | 7.269000 | 9.978708 | 1.662945 | 1.211374 |
+| S2 repeat | 2 | 6.080250 | 6.812708 | 9.049500 | 1.488343 | 1.120465 |
+| S2 repeat | 3 | 6.776750 | 12.091208 | 12.768125 | 1.884107 | 1.784219 |
+| S2 repeat | Median | **6.080250** | **7.269000** | **9.978708** | **1.662945** | **1.211374** |
+
+## Repeat trigger and verdict
+
+The comparison baseline is S1's final unchanged 192k repeat, not its later 1M trace.
+Its Tape p99 spread is 2.182749 ms. Its Engine spread is 3.120791 ms.
+Spread means maximum minus minimum across that execution's 3 repetitions.
+S2's first Tape median rose 2.251250 ms, exceeding its S1 spread by 0.068501 ms.
+That triggered 1 full unchanged repeat. The first Engine median rose 2.507582 ms, within its S1 spread.
+
+After repeating, Tape's median increase is 0.399375 ms, or 5.81%.
+Engine's median increase is 1.301624 ms, or 15.00%.
+Both absolute increases fit S1's repetition spreads and macOS's observed 6-10 ms fsync swings.
+S2's first bare p99 ranged from 6.063208 to 11.779875 ms, showing even wider baseline noise.
+The repeat's absolute p99 differences are consistent with noise. They don't establish a stable floor-check regression.
+This trace doesn't isolate the floor check's cost from preallocation or unrelated storage variance.
+
+The paired ratios still deserve caution.
+Engine/bare rose 0.339099x from S1's unchanged-repeat median, exceeding its 0.299380x ratio spread.
+Tape/bare rose 0.137623x, within its 0.281029x ratio spread.
+S1's first Engine/bare median was already 1.699961x, above either S2 median.
+Both S2 executions printed local `FAIL` against 1.5x. This is not a macOS gate failure.
+The 1.5x G1 gate is judged on Linux NVMe only. Linux and nightly LazyFS remain pending.
+No production change follows from these noisy measurements.
+
+## Validation
+
+These commands ran after both timed executions.
+
+| Command | Result |
+|---|---|
+| `cargo fmt --all --check` | Passed |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | Passed |
+| `cargo test --workspace` | Passed. 145 tests passed; 3 slow debug checks ignored. |
+| `G1_TURNS=192000 G1_REPS=3 G1_HISTORY=0 G1_REPLAY_PROBE=0 G1_CHECKPOINT_MIB=64 ./bench/g1.sh` | Passed twice. All 18 timed phases and 6 Engine reopen checks completed. Local performance verdict: FAIL twice. |
+
+The workspace command doesn't enable the core simulation feature. The tape seeded schedule stays ignored in debug.
+Both disk-full integration scenarios and the core health test passed.
+The seeded release simulations weren't rerun for this documentation-only task.
