@@ -130,7 +130,8 @@ The append measurements above don't measure startup latency.
 
 Production source measures 2,471 lines, including blank lines and comments.
 The count excludes `src/sim.rs` and trailing `#[cfg(test)]` modules.
-It includes the always-exported SimDisk implementation.
+At measurement time, it included the always-exported SimDisk implementation.
+Current builds gate SimDisk behind the `sim` feature outside unit tests.
 The raw count includes every `src/*.rs` line: 3,198.
 That includes 536 simulation-only helper lines and 191 embedded unit-test lines.
 Production remains below the M1 budget of 3,000.

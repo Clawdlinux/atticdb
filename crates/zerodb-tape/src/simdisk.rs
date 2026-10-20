@@ -238,6 +238,7 @@ struct State {
     fail_sync: Option<ErrorKind>,
     space: Option<usize>,
     capacity: u64,
+    storage_full_returns: u64,
     sector_size: usize,
 }
 
@@ -285,6 +286,9 @@ impl State {
 
     fn sync_check(&mut self) -> Result<()> {
         if let Some(kind) = self.fail_sync.take() {
+            if kind == ErrorKind::StorageFull {
+                self.storage_full_returns += 1;
+            }
             return Err(io_error(kind, "injected sync failure"));
         }
         Ok(())
@@ -318,6 +322,9 @@ pub struct SimDisk {
 }
 
 impl SimDisk {
+    /// Default disk capacity in bytes.
+    pub const DEFAULT_CAPACITY: u64 = 1 << 40;
+
     /// Creates an empty disk with a SplitMix64 seed.
     pub fn new(seed: u64) -> Self {
         Self {
@@ -333,7 +340,8 @@ impl SimDisk {
                 next: 0,
                 fail_sync: None,
                 space: None,
-                capacity: 1 << 40,
+                capacity: Self::DEFAULT_CAPACITY,
+                storage_full_returns: 0,
                 sector_size: 512,
             })),
         }
@@ -363,6 +371,11 @@ impl SimDisk {
     pub fn set_capacity(&self, bytes: u64) -> Result<()> {
         lock(&self.state)?.capacity = bytes;
         Ok(())
+    }
+
+    /// Counts write, allocation, and sync `StorageFull` returns since this image was created.
+    pub fn storage_full_returns(&self) -> Result<u64> {
+        Ok(lock(&self.state)?.storage_full_returns)
     }
 
     /// Sets the sector size used for crash tearing. The default is 512 bytes.
@@ -462,6 +475,7 @@ impl SimDisk {
                 fail_sync: None,
                 space: None,
                 capacity: state.capacity,
+                storage_full_returns: 0,
                 sector_size: state.sector_size,
             })),
         })
@@ -523,6 +537,7 @@ impl Io for SimDisk {
             state.file(file)?.write(Write::Bytes(offset, data[..count].to_vec()));
         }
         if count != data.len() {
+            state.storage_full_returns += 1;
             return Err(io_error(ErrorKind::StorageFull, "injected partial write"));
         }
         Ok(())
@@ -553,6 +568,7 @@ impl Io for SimDisk {
         let mut state = lock(&self.state)?;
         let required = state.file(file)?.visible_blocks.required(0, len);
         if required > state.available() {
+            state.storage_full_returns += 1;
             return Err(io_error(ErrorKind::StorageFull, "allocation exceeds capacity"));
         }
         state.file(file)?.write(Write::Allocate(len));

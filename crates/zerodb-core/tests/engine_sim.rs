@@ -7,9 +7,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use zerodb_core::{
     turn::decode, Appended, Engine, EngineOptions, ErrorKind, Health, NewTurn, Outcome, Role,
-    Scope, Turn, WindowQuery,
+    Scope, SimAppend, Turn, WindowQuery,
 };
-use zerodb_tape::sim::{CapacityPlan, SimClock, StorageFullFault};
+use zerodb_tape::sim::{CapacityError, CapacityPlan, SimClock, StorageFullFault};
 use zerodb_tape::{Clock, Error, FileId, Io, Kind, LockGuard, Result, SimDisk, Tape, TapeOptions};
 
 struct Rng(u64);
@@ -99,7 +99,7 @@ impl Io for FaultIo {
         self.disk.close(f)
     }
     fn write_at(&self, f: FileId, o: u64, b: &[u8]) -> Result<()> {
-        self.storage_full.before_write(&self.disk, f);
+        self.storage_full.before_write(&self.disk, f, b.len());
         self.after(self.disk.write_at(f, o, b))
     }
     fn read_at(&self, f: FileId, o: u64, b: &mut [u8]) -> Result<usize> {
@@ -258,7 +258,10 @@ impl Oracle {
             let batch = u64::from_le_bytes(decoded.turn.meta[..8].try_into().unwrap()) as usize;
             assert_eq!(self.batches[batch].scope, scope);
             assert_eq!(self.batches[batch].key, decoded.idem_key);
-            assert!(self.batches[batch].receipt.is_some() || pending.contains(&batch));
+            assert!(
+                self.batches[batch].receipt.is_some() || pending.contains(&batch),
+                "NotCommitted or unwritten batch recovered: batch={batch}"
+            );
             let turns = transactions.entry(record.txn).or_default();
             let input = &self.batches[batch].turns[turns.len()];
             assert_eq!(*input, decoded.turn);
@@ -540,6 +543,26 @@ fn run_seed_with_capacity(seed: u64, plan: &CapacityPlan) -> Vec<Vec<Turn>> {
     history
 }
 
+fn enqueue_keyed_batch<'a>(
+    engine: &'a Engine,
+    oracle: &mut Oracle,
+    rng: &mut Rng,
+    clock: &SimClock,
+) -> (usize, SimAppend<'a>) {
+    let index = oracle.batches.len();
+    let scope = rng.below(4);
+    let mut batch = random_batch(rng, index, scope, clock.now_ns());
+    batch.turns.truncate(1);
+    let len = 512 + rng.below(2048);
+    batch.turns[0].content = rng.bytes(len);
+    batch.key = Some(format!("key-{index}"));
+    let reply = engine
+        .enqueue_sim(&oracle.scopes[scope], batch.turns.clone(), batch.key.as_deref())
+        .unwrap();
+    oracle.batches.push(batch);
+    (index, reply)
+}
+
 fn capacity_faults(
     engine: Arc<Engine>,
     io: &mut Arc<FaultIo>,
@@ -549,10 +572,9 @@ fn capacity_faults(
     rng: &mut Rng,
     plan: &CapacityPlan,
 ) -> Arc<Engine> {
-    let snapshot = |engine: &Engine| {
+    let snapshot = |engine: &Engine, scopes: &[Scope]| {
         let metrics = engine.metrics().unwrap();
-        let turns = oracle
-            .scopes
+        let turns = scopes
             .iter()
             .map(|scope| engine.window(scope, WindowQuery::Last(usize::MAX)).unwrap())
             .collect::<Vec<_>>();
@@ -564,25 +586,15 @@ fn capacity_faults(
             turns,
         )
     };
-    let before = snapshot(&engine);
+    let before = snapshot(&engine, &oracle.scopes);
     let mut txn =
         oracle.batches.iter().filter_map(|b| b.receipt.as_ref().map(|r| r.txn)).max().unwrap();
     let mut indices = Vec::new();
     let mut queued = Vec::new();
     for _ in 0..2 + rng.below(3) {
-        let index = oracle.batches.len();
-        let scope = rng.below(4);
-        let mut batch = random_batch(rng, index, scope, clock.now_ns());
-        batch.turns.truncate(1);
-        batch.turns[0].content.truncate(128);
-        batch.key = Some(format!("key-{index}"));
-        queued.push(
-            engine
-                .enqueue_sim(&oracle.scopes[scope], batch.turns.clone(), batch.key.as_deref())
-                .unwrap(),
-        );
+        let (index, reply) = enqueue_keyed_batch(&engine, oracle, rng, clock);
+        queued.push(reply);
         indices.push(index);
-        oracle.batches.push(batch);
     }
     plan.limit(&io.disk);
     engine.step_sim().unwrap();
@@ -592,7 +604,11 @@ fn capacity_faults(
         assert_eq!(error.outcome, Outcome::NotCommitted);
     }
     assert_eq!(engine.health(), Health::ReadOnly, "a clean floor hit must not poison");
-    assert_eq!(snapshot(&engine), before, "a floor hit changed engine state or dedup");
+    assert_eq!(
+        snapshot(&engine, &oracle.scopes),
+        before,
+        "a floor hit changed engine state or dedup"
+    );
 
     plan.free(&io.disk);
     let mut lsn = before.0;
@@ -620,40 +636,31 @@ fn capacity_faults(
 
     let mut queued = Vec::new();
     for _ in 0..2 + rng.below(3) {
-        let index = oracle.batches.len();
-        let scope = rng.below(4);
-        let mut batch = random_batch(rng, index, scope, clock.now_ns());
-        batch.turns.truncate(1);
-        batch.turns[0].content.truncate(128);
-        batch.key = Some(format!("key-{index}"));
-        queued.push((
-            index,
-            engine
-                .enqueue_sim(&oracle.scopes[scope], batch.turns.clone(), batch.key.as_deref())
-                .unwrap(),
-        ));
-        oracle.batches.push(batch);
+        queued.push(enqueue_keyed_batch(&engine, oracle, rng, clock));
     }
     io.storage_full.arm(plan);
     io.cut.store(plan.cut, Ordering::SeqCst);
+    let full_before = io.disk.storage_full_returns().unwrap();
     engine.step_sim().unwrap();
-    assert_eq!(io.storage_full.hits(), 1);
     assert_eq!(engine.health(), Health::Poisoned, "post-prepare StorageFull must poison");
+    assert_eq!(io.disk.storage_full_returns().unwrap() - full_before, 1);
     let image = io.image.lock().unwrap().take();
     let mut pending = Vec::new();
+    let mut post_return_pending = Vec::new();
     for (position, (index, reply)) in queued.into_iter().enumerate() {
         let error = reply.finish().unwrap_err();
-        if plan.write_after.is_some() {
-            if position == 0 {
-                assert!(matches!(error.kind, ErrorKind::Storage(Error::DiskFull)));
-                assert!(matches!(error.outcome, Outcome::NotCommitted | Outcome::Unknown));
-            } else {
-                assert!(matches!(error.kind, ErrorKind::Poisoned));
-                assert_eq!(error.outcome, Outcome::NotCommitted);
-            }
-        } else {
-            assert!(matches!(error.kind, ErrorKind::Storage(Error::SyncFailed(_))));
-            assert_eq!(error.outcome, Outcome::Unknown);
+        let (class, outcomes) = plan.expected(position);
+        assert!(
+            match &error.kind {
+                ErrorKind::Storage(error) => class.matches(error),
+                ErrorKind::Poisoned => class == CapacityError::Poisoned,
+                _ => false,
+            },
+            "{error:?}"
+        );
+        assert!(outcomes.contains(&error.outcome), "{error:?}");
+        if error.outcome == Outcome::Unknown {
+            post_return_pending.push(index);
         }
         if image.is_some() || error.outcome == Outcome::Unknown {
             pending.push(index);
@@ -662,10 +669,12 @@ fn capacity_faults(
     io.cut.store(0, Ordering::SeqCst);
     let crashed = io.disk.crash().unwrap();
     drop(engine);
-    oracle.clone().recover(&crashed, clock.clone(), opts, &pending);
+    if image.is_some() {
+        oracle.clone().recover(&crashed, clock.clone(), opts, &post_return_pending);
+    }
     let next = image.unwrap_or(crashed);
     oracle.recover(&next, clock.clone(), opts, &pending);
-    next.set_capacity(1 << 40).unwrap();
+    next.set_capacity(SimDisk::DEFAULT_CAPACITY).unwrap();
     *io = Arc::new(FaultIo::new(next));
     let engine = Arc::new(open(io.clone(), clock.clone(), opts));
     assert_eq!(engine.health(), Health::Ok);

@@ -175,6 +175,7 @@ Reads still verify the requested LSN and location-bound frame CRC.
 Handles survive rename and removal until closed. Exclusive locks follow file identity.
 Both backends return sorted full paths from directory listings.
 `StdIo` uses real files. `SimDisk` uses logical paths.
+`SimDisk` requires the `sim` feature outside unit tests. Production builds omit it.
 `SimClock` advances manually. `SystemClock` can move backwards.
 
 `StdIo::allocate` reserves blocks through rustix on Linux and macOS for empty or shorter files.
@@ -199,9 +200,11 @@ The default sector size is 512 bytes.
 Renames are atomic. Unsynced directory operations can disappear.
 
 `fail_next_sync()` settles pending writes once through the tearing model, then reports failure.
+`storage_full_next_sync()` uses the same model with a typed `StorageFull` error.
 Clean cache bytes can remain readable without later writeback. Retrying sync does not heal them.
 New writes can still persist independently.
 `enospc_after_bytes()` allows partial writes before reporting a full disk.
+`storage_full_returns()` counts actual write, allocation, and sync `StorageFull` errors per crash generation.
 Bit-flip helpers damage durable bytes.
 Crash images reset fault controls and release locks.
 
