@@ -195,7 +195,11 @@ impl PreparedBatch {
             let size =
                 Self::validate(self.records(), Durability::Durable).map_err(|error| error.kind)?;
             if size > self.size {
-                return Err(Error::InvalidFrame("prepared batch exceeds submitted size".into()));
+                return Err(Error::InvalidFrame(format!(
+                    "prepared batch grew from {} to {size} bytes ({} records)",
+                    self.size,
+                    self.records.len()
+                )));
             }
             self.size = size;
             self.changed = false;

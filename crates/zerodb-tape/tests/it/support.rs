@@ -224,7 +224,10 @@ pub(crate) enum Behavior {
     Pass,
     Sequence,
     Dedup,
-    Resize(usize),
+    Resize {
+        len: usize,
+        on_prepare: Option<usize>,
+    },
     InvalidRewrite,
 }
 
@@ -264,9 +267,11 @@ impl StateMachine for Machine {
         }
         match self.behavior {
             Behavior::Pass => {}
-            Behavior::Resize(len) => {
-                for record in batch.records_mut() {
-                    record.content.resize(len, 7);
+            Behavior::Resize { len, on_prepare } => {
+                if on_prepare.is_none_or(|prepare| log.prepares == prepare) {
+                    for record in batch.records_mut() {
+                        record.content.resize(len, 7);
+                    }
                 }
             }
             Behavior::InvalidRewrite => {
