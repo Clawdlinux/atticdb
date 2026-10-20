@@ -274,7 +274,7 @@ impl StateMachine for Machine {
         for record in records {
             if let Err(mut error) = self.install(&mut state, record, false) {
                 error.outcome = Outcome::Committed;
-                state.failure = Some(error);
+                state.fail(error);
                 break;
             }
         }
@@ -432,7 +432,7 @@ mod tests {
             let mut initial = State::new(&opts);
             initial.tenants.insert("t", 1, 1, 10_000).unwrap();
             let content = if corrupt {
-                initial.failure = Some(EngineError::rejected(ErrorKind::CorruptIndex));
+                initial.fail(EngineError::rejected(ErrorKind::CorruptIndex));
                 crate::turn::encode(
                     "a",
                     "s",

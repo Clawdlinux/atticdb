@@ -58,13 +58,16 @@ That limit can reject content below the codec's independent 4 MiB field limit.
 
 `Engine::health()` returns `Health::Ok`, `Health::ReadOnly`, or `Health::Poisoned`.
 Health reflects observed failures. It doesn't query disk space.
+Health probes never wait for the shared-state mutex.
 `Ok` means no write-blocking failure has been observed.
 The tape checks free space before preparing each write group.
 Below the floor, appends return `ErrorKind::Storage(zerodb_tape::Error::DiskFull)` with `Outcome::NotCommitted`.
 Preallocation failures caused by a full disk return the same error and outcome.
 These rejections set health to `ReadOnly`. Reads keep serving acknowledged turns.
 A failed space query also sets `ReadOnly`. Its original storage error and `NotCommitted` outcome pass through.
-Later appends retry the space check. A passing check clears read-only mode.
+Only a later write that passes the space check clears `ReadOnly`.
+Idle instances stay `ReadOnly`, even after space returns.
+Callers and orchestrators must keep sending writes or retries to a `ReadOnly` instance. Don't drain it.
 Space-check rejections don't add retry keys. Retry the same `idem_key` after space returns to commit normally.
 Further retries return that durable receipt without writing again.
 `Poisoned` takes precedence over `ReadOnly` and requires reopening before writing.

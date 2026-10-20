@@ -6,8 +6,8 @@ use crate::state::State;
 use crate::turn::{decode, encode};
 use crate::{EngineError, EngineOptions, ErrorKind, NewTurn, Role};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, TryLockError};
 use zerodb_tape::{Clock, Committed, Durability, Io, Kind, RecordInput, StdIo, SystemClock, Tape};
 
 /// A session's isolation boundary.
@@ -121,6 +121,7 @@ pub struct Engine {
     worker: Worker,
     tape: Tape<Machine>,
     state: Arc<Mutex<State>>,
+    failed: Arc<AtomicBool>,
     io: Arc<dyn Io>,
     dir: PathBuf,
     tenant_creation: Mutex<()>,
@@ -136,10 +137,15 @@ impl std::fmt::Debug for Engine {
 }
 
 impl Engine {
-    /// Returns writer health. Poisoning takes precedence over read-only mode.
+    /// Returns writer health without blocking or performing I/O.
+    /// Poisoning takes precedence over read-only mode.
+    ///
+    /// Only a later write that passes its space check clears `Health::ReadOnly`.
+    /// Keep sending writes or retries to read-only instances. Don't drain them.
     pub fn health(&self) -> Health {
         if self.tape.is_poisoned()
-            || self.state.lock().map_or(true, |state| state.failure.is_some())
+            || self.failed.load(Ordering::Acquire)
+            || matches!(self.state.try_lock(), Err(TryLockError::Poisoned(_)))
         {
             Health::Poisoned
         } else if self.tape.read_only() {
@@ -208,10 +214,12 @@ impl Engine {
         checkpoint::sweep(io.as_ref(), &dir, &chain)?;
         let worker = Worker::start(io.clone(), dir.clone(), state.clone(), &opts)?;
         lock(&state)?.notify = worker.sender.clone();
+        let failed = lock(&state)?.failed.clone();
         Ok(Self {
             worker,
             tape,
             state,
+            failed,
             io,
             dir,
             tenant_creation: Mutex::new(()),
@@ -580,6 +588,97 @@ impl Drop for Pin<'_> {
         if let Ok(mut state) = self.engine.state.lock() {
             if let Some(entry) = state.index.sessions.get_mut(&self.key) {
                 entry.pins = entry.pins.saturating_sub(1);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+    use zerodb_tape::sim::SimClock;
+    use zerodb_tape::{CommittedRecord, SimDisk, StateMachine, TapeOptions};
+
+    #[test]
+    fn health_never_waits_and_failures_override_read_only() {
+        enum Failure {
+            None,
+            Publication,
+            Lock,
+        }
+        for (case, read_only, failure, expected) in [
+            ("healthy", false, Failure::None, Health::Ok),
+            ("read-only", true, Failure::None, Health::ReadOnly),
+            ("publication failure beats read-only", true, Failure::Publication, Health::Poisoned),
+            ("poisoned lock beats read-only", true, Failure::Lock, Health::Poisoned),
+        ] {
+            let io = Arc::new(SimDisk::new(0));
+            let opts = EngineOptions {
+                tape: TapeOptions {
+                    segment_size: 64 * 1024,
+                    free_space_floor: Some(4096),
+                    ..TapeOptions::default()
+                },
+                checkpoint_interval: Duration::from_secs(3600),
+                checkpoint_bytes: u64::MAX,
+                ..EngineOptions::default()
+            };
+            let engine =
+                Engine::open_with(io.clone(), Arc::new(SimClock::default()), "db", opts.clone())
+                    .unwrap();
+            if read_only {
+                io.set_capacity(0).unwrap();
+                let error = engine
+                    .append(
+                        &Scope { tenant: "t".into(), agent: "a".into(), session: "s".into() },
+                        vec![NewTurn { role: Role::User, content: vec![1], meta: vec![] }],
+                        None,
+                    )
+                    .unwrap_err();
+                assert_eq!(error.outcome, zerodb_tape::Outcome::NotCommitted, "{case}");
+            }
+            match failure {
+                Failure::None => {}
+                Failure::Publication => {
+                    let mut machine =
+                        Machine::new(engine.state.clone(), io, "db".into(), opts).unwrap();
+                    machine.publish(&[CommittedRecord {
+                        lsn: 1,
+                        txn: 1,
+                        kind: Kind::Fact,
+                        tenant_id: 1,
+                        commit_time_ns: 1,
+                        payload: Arc::from([]),
+                    }]);
+                    assert!(engine.state.lock().unwrap().failure.is_some(), "{case}");
+                }
+                Failure::Lock => {
+                    assert!(
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            let _state = engine.state.lock().unwrap();
+                            panic!("injected state lock failure");
+                        }))
+                        .is_err(),
+                        "{case}"
+                    );
+                }
+            }
+            assert_eq!(engine.tape.read_only(), read_only, "{case}");
+            assert!(!engine.tape.is_poisoned(), "{case}");
+            assert_eq!(engine.health(), expected, "{case}");
+            if !matches!(failure, Failure::Lock) {
+                std::thread::scope(|threads| {
+                    let state = engine.state.lock().unwrap();
+                    let (sender, receiver) = mpsc::sync_channel(1);
+                    let engine = &engine;
+                    threads.spawn(move || sender.send(engine.health()).unwrap());
+                    let observed = receiver.recv_timeout(Duration::from_secs(5));
+                    drop(state);
+                    assert_eq!(observed, Ok(expected), "{case}: state lock held");
+                });
             }
         }
     }

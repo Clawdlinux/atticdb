@@ -3,6 +3,8 @@ use crate::session::{Index, Key};
 use crate::tenant::Registry;
 use crate::{EngineError, EngineOptions};
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 #[derive(Debug)]
 pub(crate) struct State {
@@ -26,6 +28,7 @@ pub(crate) struct State {
     pub(crate) snapshot_lock_ns: u64,
     pub(crate) checkpoint_lock_ns: u64,
     pub(crate) failure: Option<EngineError>,
+    pub(crate) failed: Arc<AtomicBool>,
     pub(crate) notify: Option<std::sync::mpsc::SyncSender<crate::checkpoint::Command>>,
 }
 impl State {
@@ -51,7 +54,13 @@ impl State {
             snapshot_lock_ns: 0,
             checkpoint_lock_ns: 0,
             failure: None,
+            failed: Arc::new(AtomicBool::new(false)),
             notify: None,
         }
+    }
+
+    pub(crate) fn fail(&mut self, error: EngineError) {
+        self.failure = Some(error);
+        self.failed.store(true, Ordering::Release);
     }
 }
