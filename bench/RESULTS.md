@@ -1203,8 +1203,10 @@ No run was discarded. Nothing was tuned.
 | Median | **11.348292** | **14.091334** | **12.424125** | **1.150713** | **1.273602** |
 
 Ratios pair paths within each repetition. Their medians are not ratios of absolute medians.
-The macOS local 1.5x verdict is **PASS**, with median Engine/bare at 1.150713x.
-This is not a Linux NVMe gate result. Linux and nightly LazyFS remain pending.
+The macOS result is noise-dominated and shows no measurable overhead signal.
+Engine beats bare in repetition 1 at 0.728534x, exposing the storage variance in these ratios.
+The 1.5x G1 gate is judged only on Linux NVMe, not macOS.
+Linux NVMe and nightly LazyFS remain pending.
 Historical S1 and S2 ratios below used a sparse bare baseline and are not matched to this corrected run.
 The corrected trace establishes a fair local comparison, not an isolated floor-check cost.
 Shared-machine storage variance remains visible in bare's 8.916750-13.873750 ms p99 range.
