@@ -1,4 +1,5 @@
 use crate::checkpoint::{self, Worker};
+use crate::dedup::DedupKey;
 use crate::error::{lock, Result};
 use crate::machine::Machine;
 use crate::session::{address, Key};
@@ -251,7 +252,23 @@ impl Engine {
             }
             *hash.finalize().as_bytes()
         });
-        let mut tenant = lock(&self.state)?.tenants.get(&scope.tenant);
+        let mut tenant = {
+            let state = lock(&self.state)?;
+            let tenant = state.tenants.get(&scope.tenant);
+            if let (Some(tenant), Some(idem_key), Some(digest)) = (tenant, idem_key, digest) {
+                let key = DedupKey(tenant, scope.session.clone(), idem_key.to_owned());
+                // Only published entries bypass the writer. Prepare still resolves in-flight duplicates.
+                if let Some(entry) = state.dedup.get(&key) {
+                    if let Some(error) = &state.failure {
+                        return Err(error.clone());
+                    }
+                    let Committed::Durable { txn, last_lsn, reply, .. } = entry.resolve(digest)?;
+                    drop(state);
+                    return self.receipt(turns.len() as u64, txn, last_lsn, &reply);
+                }
+            }
+            tenant
+        };
         let _creation = if tenant.is_none() {
             let guard = lock(&self.tenant_creation)?;
             tenant = lock(&self.state)?.tenants.get(&scope.tenant);

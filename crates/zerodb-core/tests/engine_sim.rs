@@ -615,6 +615,12 @@ fn capacity_faults(
         assert_eq!(error.outcome, Outcome::NotCommitted);
     }
     assert_eq!(engine.health(), Health::ReadOnly, "a clean floor hit must not poison");
+    if let Some(index) =
+        oracle.batches.iter().position(|batch| batch.receipt.is_some() && batch.key.is_some())
+    {
+        retry(&engine, oracle, index);
+        assert_eq!(engine.health(), Health::ReadOnly, "a committed retry does not recheck space");
+    }
     assert_eq!(
         snapshot(&engine, &oracle.scopes),
         before,

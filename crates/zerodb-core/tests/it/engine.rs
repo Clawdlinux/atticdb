@@ -308,6 +308,17 @@ fn write_outages_report_health_preserve_reads_and_retry_keys() {
                     "{case}, attempt={attempt}: {error:?}"
                 );
                 assert_eq!(engine.health(), health, "{case}");
+                if !matches!(fault, Fault::Sync) {
+                    assert_eq!(
+                        engine.append(&s, vec![turn(1)], Some("original")).unwrap(),
+                        original,
+                        "{case}: committed retries keep their durable receipt"
+                    );
+                    let conflict = engine.append(&s, vec![turn(2)], Some("original")).unwrap_err();
+                    assert!(matches!(conflict.kind, ErrorKind::IdempotencyConflict), "{case}");
+                    assert_eq!(conflict.outcome, Outcome::NotCommitted, "{case}");
+                    assert_eq!(engine.health(), health, "{case}: retries do not recheck space");
+                }
                 let window = engine.window(&s, WindowQuery::Last(10)).unwrap();
                 assert_eq!(window.len(), 1, "{case}");
                 assert_eq!(window[0].content, turn(1).content, "{case}");

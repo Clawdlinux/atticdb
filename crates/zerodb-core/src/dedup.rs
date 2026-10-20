@@ -2,6 +2,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use zerodb_tape::{Committed, Digest};
 
+use crate::error::Result;
+use crate::{EngineError, ErrorKind};
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct DedupKey(pub(crate) u32, pub(crate) String, pub(crate) String);
 
@@ -13,6 +16,14 @@ pub(crate) struct Entry {
 }
 
 impl Entry {
+    pub(crate) fn resolve(&self, digest: Digest) -> Result<Committed> {
+        if self.digest == digest {
+            Ok(self.committed.clone())
+        } else {
+            Err(EngineError::rejected(ErrorKind::IdempotencyConflict))
+        }
+    }
+
     pub(crate) fn age(&self) -> u64 {
         match self.committed {
             Committed::Durable { first_lsn, .. } => first_lsn,
