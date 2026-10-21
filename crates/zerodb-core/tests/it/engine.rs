@@ -86,7 +86,7 @@ fn retries_conflicts_scope_isolation_and_replay() {
     let durable = engine.metrics().unwrap().durable_lsn;
     let retried = |engine: &Engine, case: &str| {
         let receipt = engine.append(&s, vec![turn(1), turn(2)], Some("key")).unwrap();
-        assert_deduplicated(receipt, &first, case);
+        assert_deduplicated(&first, receipt, case);
     };
     retried(&engine, "fast-path retry");
     assert_eq!(engine.metrics().unwrap().durable_lsn, durable);
@@ -453,8 +453,8 @@ fn write_outages_report_health_preserve_reads_and_retry_keys() {
                 assert_eq!(engine.health(), health, "{case}");
                 if !matches!(fault, Fault::Sync) {
                     assert_deduplicated(
-                        engine.append(&s, vec![turn(1); history], Some("original")).unwrap(),
                         &original,
+                        engine.append(&s, vec![turn(1); history], Some("original")).unwrap(),
                         &format!("{case}: committed retries keep their durable receipt"),
                     );
                     let conflict = engine.append(&s, vec![turn(2)], Some("original")).unwrap_err();
@@ -514,7 +514,11 @@ fn write_outages_report_health_preserve_reads_and_retry_keys() {
                 engine = open(Arc::new(io.disk.crash().unwrap()), opts.clone());
                 assert_eq!(engine.health(), Health::Ok, "{case}");
             }
+            // Only an ambiguous sync can leave the first attempt durable across the crash.
+            let survived = engine.metrics().unwrap().durable_lsn > original.last_lsn;
+            assert!(!survived || matches!(fault, Fault::Sync), "{case}: a rejection wrote nothing");
             let retried = engine.append(&s, vec![turn(2)], Some("retry")).unwrap();
+            assert_eq!(retried.deduplicated, survived, "{case}: retry after restart");
             assert_eq!(engine.health(), Health::Ok, "{case}");
             if matches!(
                 fault,
@@ -539,14 +543,10 @@ fn write_outages_report_health_preserve_reads_and_retry_keys() {
             assert_eq!(retried.txn, original.txn + 1, "{case}");
             assert_eq!(retried.first_lsn, original.last_lsn + 1, "{case}");
             assert_eq!(retried.last_lsn, retried.first_lsn, "{case}");
-            // An ambiguous first attempt may already be durable, so only rejections must be fresh.
-            if !matches!(fault, Fault::Sync) {
-                assert!(!retried.deduplicated, "{case}: a rejected key writes on retry");
-            }
             let retried = Appended { deduplicated: false, ..retried };
             assert_deduplicated(
-                engine.append(&s, vec![turn(2)], Some("retry")).unwrap(),
                 &retried,
+                engine.append(&s, vec![turn(2)], Some("retry")).unwrap(),
                 case,
             );
             assert_eq!(engine.metrics().unwrap().durable_lsn, retried.last_lsn, "{case}");
@@ -564,8 +564,8 @@ fn write_outages_report_health_preserve_reads_and_retry_keys() {
             );
             assert_eq!(window.last().unwrap().content, turn(2).content, "{case}");
             assert_deduplicated(
-                engine.append(&s, vec![turn(1); history], Some("original")).unwrap(),
                 &original,
+                engine.append(&s, vec![turn(1); history], Some("original")).unwrap(),
                 case,
             );
             if !matches!(fault, Fault::Sync) {
@@ -573,13 +573,13 @@ fn write_outages_report_health_preserve_reads_and_retry_keys() {
                 let engine = open(Arc::new(io.disk.crash().unwrap()), opts);
                 assert_eq!(engine.health(), Health::Ok, "{case}");
                 assert_deduplicated(
-                    engine.append(&s, vec![turn(1); history], Some("original")).unwrap(),
                     &original,
+                    engine.append(&s, vec![turn(1); history], Some("original")).unwrap(),
                     case,
                 );
                 assert_deduplicated(
-                    engine.append(&s, vec![turn(2)], Some("retry")).unwrap(),
                     &retried,
+                    engine.append(&s, vec![turn(2)], Some("retry")).unwrap(),
                     case,
                 );
                 assert_eq!(engine.window(&s, WindowQuery::Last(10)).unwrap(), window, "{case}");
@@ -732,8 +732,8 @@ fn receipts_need_no_reads_and_checkpoint_io_uses_worker() {
     let receipt = engine.append(&scope("s"), vec![turn(1)], Some("key")).unwrap();
     assert_eq!(receipt.seqs, vec![1]);
     assert_deduplicated(
-        engine.append(&scope("s"), vec![turn(1)], Some("key")).unwrap(),
         &receipt,
+        engine.append(&scope("s"), vec![turn(1)], Some("key")).unwrap(),
         "retry",
     );
     assert!(io.fail_read.swap(false, Ordering::SeqCst), "append and retry must not read");
@@ -844,8 +844,8 @@ fn failed_sync_with_a_full_dedup_window_cannot_checkpoint_tentative_eviction() {
     let window = engine.window(&scope("s"), WindowQuery::Last(10)).unwrap();
     if window.len() == 1 {
         assert_deduplicated(
-            engine.append(&scope("s"), vec![turn(1)], Some("original")).unwrap(),
             &receipt,
+            engine.append(&scope("s"), vec![turn(1)], Some("original")).unwrap(),
             "retry",
         );
     } else {

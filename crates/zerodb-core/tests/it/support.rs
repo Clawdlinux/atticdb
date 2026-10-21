@@ -160,7 +160,7 @@ pub(crate) mod sessions {
 
     /// Asserts a retry returned the original receipt and reported that it wrote nothing.
     #[track_caller]
-    pub(crate) fn assert_deduplicated(retried: Appended, original: &Appended, case: &str) {
+    pub(crate) fn assert_deduplicated(original: &Appended, retried: Appended, case: &str) {
         assert!(retried.deduplicated, "{case}: a retry must report deduplicated");
         assert!(!original.deduplicated, "{case}: the original must be a fresh commit");
         assert_eq!(Appended { deduplicated: false, ..retried }, *original, "{case}");
