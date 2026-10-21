@@ -1,7 +1,7 @@
 use crate::checkpoint::{self, Worker};
 use crate::dedup::DedupKey;
 use crate::error::{lock, Result};
-use crate::machine::Machine;
+use crate::machine::{Machine, REPLY_DEDUPLICATED};
 use crate::session::{address, Key};
 use crate::state::State;
 use crate::turn::{decode, encode};
@@ -32,6 +32,8 @@ pub struct Appended {
     pub last_lsn: u64,
     /// Dense session sequences, starting at 1.
     pub seqs: Vec<u64>,
+    /// True when a retry key returned an earlier receipt and nothing new was written.
+    pub deduplicated: bool,
 }
 /// A durable turn returned in sequence order.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -61,6 +63,14 @@ pub enum WindowQuery {
         /// Maximum number of turns.
         limit: usize,
     },
+}
+/// A session window cut by a byte budget.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Window {
+    /// Whole turns in sequence order.
+    pub turns: Vec<Turn>,
+    /// True when the budget stopped the window before the query's own bound.
+    pub truncated: bool,
 }
 /// Observable bounds and recovery counters.
 #[derive(Clone, Debug)]
@@ -100,7 +110,8 @@ pub struct Metrics {
     /// Maximum State hold across checkpoint snapshot, install chunks, and watermark publication.
     /// Excludes lock acquisition and includes all work inside each critical section.
     pub checkpoint_state_lock_ns: u64,
-    /// Tape::read calls issued by window, excluding append receipts.
+    /// Tape::read calls issued by windows, excluding append receipts.
+    /// A budget-cut window adds 1 read for the turn it left out.
     pub window_reads: u64,
     /// Registered tenants.
     pub tenants: usize,
@@ -270,7 +281,7 @@ impl Engine {
                     // Only covered receipts bypass the writer, so the next read cannot lag this ack.
                     if last_lsn <= self.tape.durable_lsn() {
                         drop(state);
-                        return self.receipt(turns.len() as u64, txn, last_lsn, &reply);
+                        return self.receipt(turns.len() as u64, txn, last_lsn, &reply, true);
                     }
                 }
             }
@@ -332,20 +343,33 @@ impl Engine {
                 }
                 Err(error) => return Err(error),
                 Ok(Committed::Durable { txn, last_lsn, reply, .. }) => {
-                    return self.receipt(turns.len() as u64, txn, last_lsn, &reply);
+                    return self.receipt(turns.len() as u64, txn, last_lsn, &reply, false);
                 }
             }
         }
         Err(EngineError::rejected(ErrorKind::ResourceExhausted("hot_pages")))
     }
 
-    fn receipt(&self, count: u64, txn: u64, last_lsn: u64, reply: &[u8]) -> Result<Appended> {
+    /// Builds a receipt from a writer reply: the 8-byte first sequence, plus the
+    /// cached-reply marker when preparation answered from the dedup table.
+    fn receipt(
+        &self,
+        count: u64,
+        txn: u64,
+        last_lsn: u64,
+        reply: &[u8],
+        cached: bool,
+    ) -> Result<Appended> {
         (|| {
             if let Some(error) = &lock(&self.state)?.failure {
                 return Err(error.clone());
             }
+            let (seq, marked) = match reply {
+                [seq @ .., REPLY_DEDUPLICATED] if seq.len() == 8 => (seq, true),
+                seq => (seq, false),
+            };
             let seq = u64::from_le_bytes(
-                reply.try_into().map_err(|_| EngineError::rejected(ErrorKind::CorruptIndex))?,
+                seq.try_into().map_err(|_| EngineError::rejected(ErrorKind::CorruptIndex))?,
             );
             let end = seq
                 .checked_add(count)
@@ -358,6 +382,7 @@ impl Engine {
                 first_lsn: last_lsn - count + 1,
                 last_lsn,
                 seqs: (seq..end).collect(),
+                deduplicated: cached || marked,
             })
         })()
         .map_err(|mut error: EngineError| {
@@ -469,23 +494,42 @@ impl Engine {
 
     /// Reads an ordered window at a pinned durable boundary, with one tape read per returned turn.
     pub fn window(&self, scope: &Scope, query: WindowQuery) -> Result<Vec<Turn>> {
-        match self.window_snapshot(scope, query) {
+        self.window_budget(scope, query, usize::MAX).map(|window| window.turns)
+    }
+
+    /// Reads a window whose turns' `content` and `meta` bytes total at most `max_bytes`.
+    ///
+    /// `Last` keeps the newest turns and `Since` the oldest. Turns are never cut, so a first
+    /// turn over budget returns no turns. Tape reads are at most returned turns plus 1.
+    pub fn window_budget(
+        &self,
+        scope: &Scope,
+        query: WindowQuery,
+        max_bytes: usize,
+    ) -> Result<Window> {
+        match self.window_snapshot(scope, query, max_bytes) {
             Err(EngineError { kind: ErrorKind::ResourceExhausted("hot_pages"), .. }) => {
                 self.worker.flush()?;
-                self.window_snapshot(scope, query)
+                self.window_snapshot(scope, query, max_bytes)
             }
             result => result,
         }
     }
-    fn window_snapshot(&self, scope: &Scope, query: WindowQuery) -> Result<Vec<Turn>> {
+    fn window_snapshot(
+        &self,
+        scope: &Scope,
+        query: WindowQuery,
+        max_bytes: usize,
+    ) -> Result<Window> {
+        let empty = Window { turns: Vec::new(), truncated: false };
         let state = lock(&self.state)?;
         let snapshot = self.tape.durable_lsn();
         let Some(tenant) = state.tenants.get(&scope.tenant) else {
-            return Ok(Vec::new());
+            return Ok(empty);
         };
         let key = Key(tenant, scope.agent.clone(), scope.session.clone());
         let Some(entry) = state.index.sessions.get(&key) else {
-            return Ok(Vec::new());
+            return Ok(empty);
         };
         let end = entry.len.saturating_add(1);
         let (start, end) = match query {
@@ -495,26 +539,30 @@ impl Engine {
             }
         };
         drop(state);
-        let mut slots = Vec::new();
-        let mut seq = start;
-        while seq < end {
+        // Lazy, in query order: a budget stop loads no further pages and reads no more turns.
+        let seqs: Box<dyn Iterator<Item = u64>> = match query {
+            WindowQuery::Last(_) => Box::new((start..end).rev()),
+            WindowQuery::Since { .. } => Box::new(start..end),
+        };
+        let mut turns = Vec::with_capacity((end - start).min(64) as usize);
+        let mut bytes = 0usize;
+        let mut truncated = false;
+        let mut current: Option<(usize, Arc<Vec<u64>>)> = None;
+        for seq in seqs {
             let (page, offset) = address(seq);
-            let loaded = self.load_page(&key, page)?;
-            let available = loaded
-                .len()
-                .checked_sub(offset)
-                .ok_or_else(|| EngineError::rejected(ErrorKind::CorruptIndex))?;
-            let count = (end - seq).min(available as u64) as usize;
-            if count == 0 {
-                return Err(EngineError::rejected(ErrorKind::CorruptIndex));
+            if current.as_ref().is_none_or(|(loaded, _)| *loaded != page) {
+                current = Some((page, self.load_page(&key, page)?));
             }
-            slots.extend_from_slice(&loaded[offset..offset + count]);
-            seq += count as u64;
-        }
-        let mut out = Vec::with_capacity(slots.len());
-        for (offset, lsn) in slots.into_iter().enumerate() {
+            let lsn = *current
+                .as_ref()
+                .and_then(|(_, slots)| slots.get(offset))
+                .ok_or_else(|| EngineError::rejected(ErrorKind::CorruptIndex))?;
+            // Session LSNs grow with seq, so turns past the snapshot form a suffix.
             if lsn > snapshot {
-                break;
+                match query {
+                    WindowQuery::Last(_) => continue,
+                    WindowQuery::Since { .. } => break,
+                }
             }
             self.reads.fetch_add(1, Ordering::Relaxed);
             let frame = self
@@ -527,11 +575,19 @@ impl Engine {
                 || frame.header.tenant_id != tenant
                 || decoded.agent_id != scope.agent
                 || decoded.session_id != scope.session
-                || decoded.seq != start + offset as u64
+                || decoded.seq != seq
             {
                 return Err(EngineError::rejected(ErrorKind::CorruptIndex));
             }
-            out.push(Turn {
+            let size = decoded.turn.content.len().saturating_add(decoded.turn.meta.len());
+            match bytes.checked_add(size).filter(|&total| total <= max_bytes) {
+                Some(total) => bytes = total,
+                None => {
+                    truncated = true;
+                    break;
+                }
+            }
+            turns.push(Turn {
                 lsn,
                 seq: decoded.seq,
                 commit_time_ns: frame.header.commit_time_ns,
@@ -540,7 +596,10 @@ impl Engine {
                 meta: decoded.turn.meta,
             });
         }
-        Ok(out)
+        if matches!(query, WindowQuery::Last(_)) {
+            turns.reverse();
+        }
+        Ok(Window { turns, truncated })
     }
     /// Waits for the checkpoint worker to install a snapshot. Never runs checkpoint I/O on the writer.
     pub fn checkpoint(&self) -> Result<u64> {
@@ -603,7 +662,7 @@ impl SimAppend<'_> {
             .map_err(EngineError::write)?;
         match reply {
             Committed::Durable { txn, last_lsn, reply, .. } => {
-                self.engine.receipt(self.count, txn, last_lsn, &reply)
+                self.engine.receipt(self.count, txn, last_lsn, &reply, false)
             }
         }
     }

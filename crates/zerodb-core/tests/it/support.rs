@@ -134,7 +134,7 @@ pub(crate) mod sessions {
 
     use std::sync::Arc;
     use std::time::Duration;
-    use zerodb_core::{Engine, EngineOptions, NewTurn, Role, Scope};
+    use zerodb_core::{Appended, Engine, EngineOptions, NewTurn, Role, Scope};
     use zerodb_tape::sim::SimClock;
     use zerodb_tape::{SimDisk, TapeOptions};
 
@@ -156,6 +156,14 @@ pub(crate) mod sessions {
             checkpoint_bytes: u64::MAX,
             ..EngineOptions::default()
         }
+    }
+
+    /// Asserts a retry returned the original receipt and reported that it wrote nothing.
+    #[track_caller]
+    pub(crate) fn assert_deduplicated(original: &Appended, retried: Appended, case: &str) {
+        assert!(retried.deduplicated, "{case}: a retry must report deduplicated");
+        assert!(!original.deduplicated, "{case}: the original must be a fresh commit");
+        assert_eq!(Appended { deduplicated: false, ..retried }, *original, "{case}");
     }
 
     #[track_caller]

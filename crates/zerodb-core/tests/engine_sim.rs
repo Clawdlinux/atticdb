@@ -183,6 +183,7 @@ impl Oracle {
         }
     }
     fn apply(&mut self, index: usize, receipt: Appended) {
+        assert!(!receipt.deduplicated, "an unacknowledged batch must be a fresh commit");
         let previous =
             self.history.iter().flatten().map(|turn| turn.commit_time_ns).max().unwrap_or(0);
         let b = &mut self.batches[index];
@@ -296,6 +297,7 @@ impl Oracle {
                     .filter(|t| t.lsn >= turns[0].1 && t.lsn <= turns.last().unwrap().1)
                     .map(|t| t.seq)
                     .collect(),
+                deduplicated: false,
             };
             if let Some(expected) = &batch.receipt {
                 assert_eq!(*expected, receipt);
@@ -309,6 +311,13 @@ impl Oracle {
     }
 }
 
+/// A retry returns the original receipt and reports that it wrote nothing.
+#[track_caller]
+fn assert_deduplicated(original: &Appended, retried: &Appended) {
+    assert!(retried.deduplicated, "a retry of an acknowledged key must report deduplicated");
+    assert_eq!(*original, Appended { deduplicated: false, ..retried.clone() });
+}
+
 fn open(io: Arc<FaultIo>, clock: Arc<SimClock>, opts: &EngineOptions) -> Engine {
     Engine::open_with(io, clock, "db", opts.clone()).unwrap()
 }
@@ -320,7 +329,7 @@ fn retry(engine: &Engine, oracle: &mut Oracle, index: usize) {
         .append(&oracle.scopes[batch.scope], batch.turns.clone(), batch.key.as_deref())
         .unwrap();
     if let Some(expected) = &batch.receipt {
-        assert_eq!(*expected, receipt);
+        assert_deduplicated(expected, &receipt);
         assert_eq!(engine.metrics().unwrap().durable_lsn, before);
     } else {
         oracle.apply(index, receipt);
@@ -947,7 +956,7 @@ fn grouped_seed(seed: u64, plan: &CapacityPlan) -> Vec<Vec<Turn>> {
                     }
                     if let Ok(receipt) = result {
                         if let Some(original) = &after_ack.batches[*index].receipt {
-                            assert_eq!(original, receipt);
+                            assert_deduplicated(original, receipt);
                         } else {
                             after_ack.apply(*index, receipt.clone());
                         }
@@ -971,7 +980,7 @@ fn grouped_seed(seed: u64, plan: &CapacityPlan) -> Vec<Vec<Turn>> {
                 match result {
                     Ok(receipt) if image.is_none() => {
                         if let Some(original) = &oracle.batches[index].receipt {
-                            assert_eq!(*original, receipt);
+                            assert_deduplicated(original, &receipt);
                         } else {
                             oracle.apply(index, receipt);
                         }
@@ -1068,8 +1077,10 @@ fn inline_group_publishes_once_and_replies_with_original_sequences() {
     });
     let first = first.finish().unwrap();
     assert_eq!(first.seqs, vec![2]);
-    assert_eq!(retried, first);
-    assert_eq!(duplicate.finish().unwrap(), first);
+    assert!(!first.deduplicated, "the first queued request commits");
+    // Writer-path cached replies: a retry parked behind publication, and one in the same group.
+    assert_deduplicated(&first, &retried);
+    assert_deduplicated(&first, &duplicate.finish().unwrap());
     assert_eq!(keyless.finish().unwrap().seqs, vec![3]);
     assert_eq!(io.syncs.load(Ordering::SeqCst) - syncs, 1);
     let after = engine.metrics().unwrap();

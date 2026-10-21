@@ -2,7 +2,36 @@
 
 Agent memory database written in Rust. Durable writes and fast recent-history reads.
 
-Status: early. The tape, session engine and S2 disk-full handling are implemented. This isn't ready for production.
+Status: early. The tape, session engine, S2 disk-full handling and the S3 server are implemented. This isn't ready for production.
+
+## Quick start
+
+```sh
+cargo build -p zerodb --release
+export PATH="$PWD/target/release:$PATH"
+TOKEN=$(zerodb init --config zerodb.json --tenant me)   # 0600 config, token printed once
+zerodb serve --config zerodb.json --data-dir ./data &    # TCP 127.0.0.1:7425 and ./data/zerodb.sock
+```
+
+Append over TCP, then read the window over the Unix socket:
+
+```sh
+curl -s -H "Authorization: Bearer $TOKEN" \
+  -d '{"agent":"planner","session":"run-1","idem_key":"k1","turns":[{"role":"user","content":"hi"}]}' \
+  http://127.0.0.1:7425/v1/append
+curl -s --unix-socket data/zerodb.sock -H "Authorization: Bearer $TOKEN" \
+  'http://localhost/v1/window?agent=planner&session=run-1&last=10'
+```
+
+Send the same `idem_key` again and you get the same receipt with `"deduplicated": true`.
+Stop the server with `kill %1`. Every acknowledged write is already synced.
+
+For an MCP client, point it at `zerodb mcp`. Use absolute paths. It starts the server if none is running:
+
+```json
+{"mcpServers": {"zerodb": {"command": "/path/to/zerodb",
+  "args": ["mcp", "--config", "/path/to/zerodb.json", "--tenant", "me", "--data-dir", "/path/to/data"]}}}
+```
 
 ## Why
 
@@ -19,6 +48,10 @@ The [decision log](docs/design/0002-decision-log.md) explains the choices.
 - `zerodb-tape`: location-bound CRC32C frames, whole-transaction footers, group commit and guarded recovery.
 - `zerodb-core`: `append`, `window`, tenant isolation, idempotent retries and incremental checkpoints.
 - `SimDisk`: seeded crashes, reordered writes, torn sectors, failed syncs, bit flips and full-disk faults.
+- `zerodb serve`: one server per data directory. HTTP/JSON on loopback TCP and a Unix socket, per-tenant tokens. See [crates/zerodb](crates/zerodb/README.md).
+- `zerodb mcp`: a stdio MCP adapter. It finds the running server or starts one, and retries with one key per call.
+- A Python client in [clients/python](clients/python/README.md), standard library only.
+- Agents in sandboxes and microVMs reach the server through its Unix socket. See [sandboxes.md](docs/deploy/sandboxes.md).
 
 Frame v2 uses a 40-byte header instead of 104 bytes. Its footer payload is 32 bytes.
 Record LSNs and transaction IDs are dense. Footers repeat the final record LSN.
@@ -67,12 +100,14 @@ An interior cut fails with both nearest valid boundaries. The retained prefix mu
 A durable intent resumes an interrupted cut before normal recovery checks the superblock.
 The report and log name the cut, dropped range and byte count.
 Dropped LSNs may be reused, including acknowledged LSNs. D73 documents this exception to I3.
-CLI wiring arrives with the server binary in S3.
+`zerodb recover --truncate-at <lsn> --data-dir <dir>` runs it from the command line.
 
 ### Session engine
 
 The writer assigns dense session sequences. Windows cost O(returned), not O(history).
 Retry keys return original receipts within bounded tenant and global windows.
+Receipts set `deduplicated` when a retry key returned an earlier commit, including after reopen.
+`Engine::window_budget` caps a window by content and meta bytes. It never cuts a turn and reports `truncated`.
 Session pages use a resident-memory budget. Cold pages reload from checkpoints.
 A bad checkpoint triggers full replay with a warning.
 

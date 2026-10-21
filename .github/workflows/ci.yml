@@ -26,3 +26,11 @@ jobs:
       - run: cargo test -p zerodb-core --release --features sim --test engine_sim
         env:
           ZERODB_SIM_SEEDS: "2000"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python3 -m pip install -r clients/python/requirements-test.txt
+      - run: cargo test -p zerodb --release --features fault-inject --test it -- --include-ignored
+      # Rebuild without test dev-dependencies, so pytest runs the binary users get, not one with zerodb-tape's sim code.
+      - run: cargo build -p zerodb --release --features fault-inject
+      - run: ZERODB_BIN=target/release/zerodb python3 -m pytest clients/python/tests
