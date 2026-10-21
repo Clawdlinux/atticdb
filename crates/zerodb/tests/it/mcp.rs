@@ -136,6 +136,22 @@ fn tool_calls_over_stdio() {
     // `response` checks ids, so a reply to either notification would fail here.
     assert_eq!(mcp.request("ping", json!({}))["result"], json!({}), "ping after initialize");
 
+    // An invalid envelope runs no tool. The default-session window below shows no turn.
+    for (case, envelope) in [
+        ("no jsonrpc", json!({})),
+        ("jsonrpc 1.0", json!({"jsonrpc": "1.0"})),
+        ("object id", json!({"jsonrpc": "2.0", "id": {"a": 1}})),
+        ("array id", json!({"jsonrpc": "2.0", "id": [1]})),
+    ] {
+        mcp.next_id += 1;
+        let params = json!({"name": "memory_append", "arguments": {"content": "bad envelope"}});
+        let mut message = json!({"id": mcp.next_id, "method": "tools/call", "params": params});
+        message.as_object_mut().unwrap().extend(envelope.as_object().unwrap().clone());
+        mcp.send(&message);
+        let reply = mcp.response();
+        let id = if envelope.get("id").is_some() { json!(null) } else { json!(mcp.next_id) };
+        assert_eq!((&reply["error"]["code"], &reply["id"]), (&json!(-32600), &id), "{case}");
+    }
     let tools = mcp.request("tools/list", json!({}))["result"]["tools"].clone();
     let names: Vec<&str> =
         tools.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();

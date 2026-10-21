@@ -116,6 +116,13 @@ impl Adapter {
             return Some(rpc_error(Value::Null, -32700, "parse error"));
         };
         let id = message.get("id").cloned();
+        // JSON-RPC 2.0: an invalid envelope runs nothing, and a bad id is answered as null.
+        let valid_id =
+            id.as_ref().is_none_or(|id| id.is_string() || id.is_number() || id.is_null());
+        if message["jsonrpc"] != "2.0" || !valid_id {
+            let id = id.filter(|_| valid_id).unwrap_or_default();
+            return Some(rpc_error(id, -32600, "invalid request"));
+        }
         let Some(method) = message.get("method").and_then(Value::as_str) else {
             let response = message.get("result").or(message.get("error")).is_some();
             return (!response)
