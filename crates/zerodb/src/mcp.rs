@@ -168,7 +168,7 @@ impl Adapter {
         let session = session.unwrap_or_else(|| self.session.clone());
         let body =
             json!({"agent": self.agent, "session": session, "idem_key": key, "turns": [turn]});
-        let mut merge = Merge::default();
+        let (mut merge, mut reasons) = (Merge::default(), Vec::new());
         self.retry("POST", "/v1/append", body.to_string().as_bytes(), |reply| {
             let (attempt, detail) = match &reply {
                 Ok(reply) => match reply["outcome"].as_str().and_then(outcome::parse) {
@@ -177,6 +177,7 @@ impl Adapter {
                 },
                 Err((attempt, error)) => (*attempt, error.clone()),
             };
+            let detail = note(&mut reasons, detail);
             match (merge.record(attempt), reply) {
                 (Some(Outcome::Committed), Ok(reply)) => Ok(committed(&reply)),
                 (Some(outcome), _) => Ok(failed(outcome, &detail)),
@@ -201,10 +202,16 @@ impl Adapter {
         let (agent, session) = (encode(&self.agent), encode(&session));
         let target =
             format!("/v1/window?agent={agent}&session={session}&last={n}&max_bytes={max_bytes}");
+        let mut reasons = Vec::new();
         self.retry("GET", &target, &[], |reply| match reply {
             Ok(reply) if reply["turns"].is_array() => Ok(turns(&reply)),
-            Ok(reply) => Ok(tool_error(format!("memory_recent failed: {}", describe(&reply)))),
-            Err((_, error)) => Err(tool_error(format!("memory_recent failed: {error}"))),
+            Ok(reply) => {
+                let detail = note(&mut reasons, describe(&reply));
+                Ok(tool_error(format!("memory_recent failed: {detail}")))
+            }
+            Err((_, error)) => {
+                Err(tool_error(format!("memory_recent failed: {}", note(&mut reasons, error))))
+            }
         })
     }
 
@@ -299,6 +306,15 @@ fn string(args: &Value, name: &str) -> Result<Option<String>, String> {
         Value::String(text) => Ok(Some(text.clone())),
         _ => Err(format!("{name} must be a string")),
     }
+}
+
+/// Adds a reason once and returns every reason so far, in order. The last alone would
+/// depend on timing.
+fn note(reasons: &mut Vec<String>, reason: String) -> String {
+    if !reasons.contains(&reason) {
+        reasons.push(reason);
+    }
+    reasons.join("; ")
 }
 
 /// The server's error kind and message, for the model.

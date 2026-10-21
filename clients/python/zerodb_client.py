@@ -126,9 +126,12 @@ class Client:
         body = {"agent": agent, "session": session, "idem_key": key, "turns": turns}
         body = json.dumps(body).encode()
         deadline = time.monotonic() + self.retry_deadline
-        state, backoff = "unknown" if resume else None, FIRST_BACKOFF
+        state, backoff, reasons = "unknown" if resume else None, FIRST_BACKOFF, []
         while True:
             sent, _, reply, detail = self._attempt("POST", "/v1/append", body, deadline)
+            # Every distinct reason, in order: the last alone depends on timing.
+            reasons += [] if detail in reasons else [detail]
+            detail = "; ".join(reasons)
             # A failed connect sent nothing. A transport error or a malformed reply is unclear.
             outcome = (reply or {}).get("outcome") if sent else "not_committed"
             if outcome == "committed":
