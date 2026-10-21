@@ -11,13 +11,13 @@ import random
 import secrets
 import socket
 import time
+import urllib.parse
 
 FIRST_BACKOFF = 0.05
 MAX_BACKOFF = 2.0
 # Time kept for the request itself: no new attempt starts with less left.
 MIN_ATTEMPT = 2.0
 RECEIPT = ("deduplicated", "txn", "first_lsn", "last_lsn", "seqs")
-SAFE = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
 
 
 class Error(Exception):
@@ -50,28 +50,24 @@ class Client:
         if not (token.isascii() and token.isprintable()):
             raise ValueError("token must be printable ASCII")
         self._url, self._token, self.retry_deadline = url, token, retry_deadline
-        if url.startswith("unix:///"):
-            self._open = lambda timeout: _Socket(socket.AF_UNIX, url[7:], timeout)
-        elif url.startswith("vsock://"):
+        parts = urllib.parse.urlsplit(url)
+        if parts.scheme == "unix" and not parts.netloc and parts.path.startswith("/"):
+            self._open = lambda timeout: _Socket(socket.AF_UNIX, parts.path, timeout)
+        elif parts.scheme == "vsock":
             if not hasattr(socket, "AF_VSOCK"):
                 raise ValueError("vsock:// needs socket.AF_VSOCK, which this platform lacks")
-            cid, _, port = url[8:].partition(":")
-            address = (int(cid), int(port))
+            address = (int(parts.hostname), parts.port)
             self._open = lambda timeout: _Socket(socket.AF_VSOCK, address, timeout)
-        else:
+        elif parts.scheme == "http" and parts.hostname in ("127.0.0.1", "localhost", "::1"):
             # The token travels in cleartext, so http takes loopback only.
-            authority = url[7:].rstrip("/").lower() if url.startswith("http://") else ""
-            host, sep, port = authority.rpartition(":")
-            if not sep or host.startswith("[") and not host.endswith("]"):
-                host, sep, port = authority, "", ""
-            port_ok = not sep or port.isascii() and port.isdigit() and len(port) <= 5
-            if host not in ("127.0.0.1", "localhost", "[::1]") or not port_ok:
-                raise ValueError(
-                    "url must be unix:///path, vsock://<cid>:<port> or "
-                    "http://<127.0.0.1, localhost or [::1]>:<port>; "
-                    "http sends the token in cleartext"
-                )
-            self._open = lambda timeout: http.client.HTTPConnection(authority, timeout=timeout)
+            host, port = parts.hostname, parts.port
+            self._open = lambda timeout: http.client.HTTPConnection(host, port, timeout)
+        else:
+            raise ValueError(
+                "url must be unix:///path, vsock://<cid>:<port> or "
+                "http://<127.0.0.1, localhost or [::1]>:<port>; "
+                "http sends the token in cleartext"
+            )
 
     def __repr__(self):
         return f"Client({self._url!r})"
@@ -109,7 +105,7 @@ class Client:
         """Reads a session window: pass `last`, or `since_seq` with an optional `limit`."""
         params = {"agent": agent, "session": session, "last": last, "since_seq": since_seq}
         params.update(limit=limit, max_bytes=max_bytes)
-        query = "&".join(f"{k}={_encode(str(v))}" for k, v in params.items() if v is not None)
+        query = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
         return self._read(f"/v1/window?{query}", (200,))
 
     def health(self):
@@ -144,7 +140,3 @@ class Client:
             return True, None, None, "malformed response"
         error = ": ".join(str(reply[k]) for k in ("error", "message") if k in reply)
         return True, status, reply, f"{status} {error}".strip()
-
-
-def _encode(text):
-    return "".join(chr(b) if b in SAFE else f"%{b:02X}" for b in text.encode())

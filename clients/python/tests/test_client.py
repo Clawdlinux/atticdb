@@ -44,19 +44,21 @@ def test_append_retry_and_window(server, listener):
 
 
 def test_retry_survives_server_restart(server):
+    # The turn is durable but the reply is never read when the server dies.
+    client = Client(server.url["unix"], TOKEN)
     body = {"agent": "a", "session": "s", "idem_key": "fixed", "turns": turns("once")}
     with send_without_reading(server.socket, body):
+        wait_for(lambda: contents(client, "s") == ["once"], "the turn in the window")
         server.kill()
     # Every connect fails, so nothing was sent: not_committed, and nothing appears later.
     with pytest.raises(NotCommitted, match="connect failed"):
         Client(server.url["unix"], TOKEN, retry_deadline=2.5).append("a", "s", turns("never"))
 
-    client = Client(server.url["unix"], TOKEN)
     with ThreadPoolExecutor(1) as pool:
         call = pool.submit(client.append, "a", "s", turns("once"), "fixed")
         server.start()
         receipt = call.result()
-    assert receipt["outcome"] == "committed" and len(receipt["seqs"]) == 1
+    assert receipt["deduplicated"] is True and len(receipt["seqs"]) == 1
     assert contents(client, "s") == ["once"]
 
 

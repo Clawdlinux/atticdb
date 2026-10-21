@@ -20,7 +20,8 @@ pub const TOKEN_ENV: &str = "ZERODB_TOKEN";
 const VERSIONS: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 const FIRST_BACKOFF: Duration = Duration::from_millis(50);
 const MAX_BACKOFF: Duration = Duration::from_secs(2);
-/// Time kept for the request itself: connecting stops this long before the deadline.
+/// Time kept for the request itself: no new attempt starts, and connecting stops, with
+/// less than this left before the deadline.
 const MIN_ATTEMPT: Duration = Duration::from_secs(2);
 /// Longest stdin line. A request body cannot be larger anyway.
 const MAX_LINE: u64 = 8 << 20;
@@ -223,7 +224,7 @@ impl Adapter {
             let reply = self.request(method, target, body, deadline);
             match judge(reply) {
                 Ok(result) => return result,
-                Err(result) if Instant::now() + backoff >= deadline => return result,
+                Err(result) if Instant::now() + backoff + MIN_ATTEMPT > deadline => return result,
                 Err(_) => std::thread::sleep(jitter(backoff)),
             }
             backoff = (backoff * 2).min(MAX_BACKOFF);

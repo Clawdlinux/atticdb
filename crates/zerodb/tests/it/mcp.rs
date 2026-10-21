@@ -547,10 +547,10 @@ fn unknown_outcome_never_downgrades() {
     let data = dir.0.join("d");
     let serve = ["serve", "--config", "c.json", "--data-dir", "d", "--listen", "none"];
     let url = format!("unix://{}", data.join(zerodb::listen::SOCKET_NAME).display());
-    for (case, restart) in [("restarted after 1 s", true), ("no restart, 500 ms deadline", false)] {
+    for (case, restart) in [("restarted after 1 s", true), ("no restart, 3 s deadline", false)] {
         let mut server = Process::spawn(&dir.0, &serve);
         server.ready();
-        let deadline = if restart { "30s" } else { "500ms" };
+        let deadline = if restart { "30s" } else { "3s" };
         let args = ["--url", &url, "--retry-deadline", deadline];
         let mut mcp = Mcp::start(&dir.0, &args, Some(&token));
         mcp.handshake();
