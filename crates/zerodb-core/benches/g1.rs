@@ -203,7 +203,10 @@ fn window_report(label: &str, queries: Queries, mut reads: Vec<Duration>) {
         queries.queries,
         queries.records as f64 / queries.queries.max(1) as f64
     );
-    latency(&format!("{label}/window"), &mut reads);
+    // Short runs can end before any read finds durable data.
+    if !reads.is_empty() {
+        latency(&format!("{label}/window"), &mut reads);
+    }
 }
 
 fn bare(iterations: usize, batch: usize, n: usize, symmetric: bool) -> Stats {
