@@ -31,4 +31,6 @@ jobs:
           python-version: "3.12"
       - run: python3 -m pip install -r clients/python/requirements-test.txt
       - run: cargo test -p zerodb --release --features fault-inject --test it -- --include-ignored
+      # Rebuild without test dev-dependencies, so pytest runs the binary users get, not one with zerodb-tape's sim code.
+      - run: cargo build -p zerodb --release --features fault-inject
       - run: ZERODB_BIN=target/release/zerodb python3 -m pytest clients/python/tests
