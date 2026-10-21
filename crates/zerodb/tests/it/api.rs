@@ -244,6 +244,8 @@ fn auth_and_host_rules() {
     let busy = json!({"outcome": "not_committed", "error": "busy"});
     assert_eq!(serde_json::from_str::<Value>(body).unwrap(), busy);
     drop(idle);
+    // Shutdown needs no connection to the socket path, which may be gone or replaced.
+    std::fs::remove_file(path).unwrap();
     running.server.shutdown();
 }
 

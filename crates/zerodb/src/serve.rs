@@ -11,9 +11,11 @@ use crate::auth::Auth;
 use crate::config::{Config, Listen};
 use crate::http::{self, Limits, Response, ServerConn, Stream};
 use crate::listen::{self, Installed};
+use rustix::event::{PollFd, PollFlags, Timespec};
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::os::fd::AsFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -35,8 +37,8 @@ pub const EXIT_POISONED: u8 = 70;
 pub struct Listeners {
     /// Loopback TCP.
     pub tcp: Option<TcpListener>,
-    /// The Unix socket and the path it is installed at. The path wakes the accept
-    /// loop on shutdown and is removed on a poison exit if it is still ours.
+    /// The Unix socket and the path it is installed at. The path is removed on a
+    /// poison exit if it is still ours.
     pub unix: Option<(UnixListener, Installed)>,
 }
 
@@ -96,19 +98,10 @@ struct Shared {
 }
 
 impl Shared {
-    /// Stops the accept loops: they see the flag after a wake-up connection.
-    /// Returns false when they were already stopping.
+    /// Stops the accept loops, which check the flag at least every 50 ms. Returns false
+    /// when they were already stopping.
     fn stop(&self) -> bool {
-        if self.stopping.swap(true, Ordering::AcqRel) {
-            return false;
-        }
-        if let Some(addr) = self.tcp {
-            let _ = TcpStream::connect(addr);
-        }
-        if let Some(unix) = &self.unix {
-            let _ = UnixStream::connect(&unix.path);
-        }
-        true
+        !self.stopping.swap(true, Ordering::AcqRel)
     }
 
     /// With `--exit-on-poison`, once the engine is poisoned: stop accepting, wait for
@@ -219,12 +212,21 @@ pub fn run(engine: Arc<Engine>, listeners: Listeners, config: ServeConfig) -> io
         config,
     });
     let mut threads = Vec::new();
+    // Accepted streams can inherit nonblocking mode from the listener, as on macOS.
     if let Some(listener) = listeners.tcp {
-        let accept = move || listener.accept().map(|(stream, _)| stream);
+        listener.set_nonblocking(true)?;
+        let accept = move || {
+            let (stream, _) = ready(&listener)?.accept()?;
+            stream.set_nonblocking(false).map(|()| stream)
+        };
         threads.push(spawn_accept(&shared, accept, TcpStream::try_clone, true)?);
     }
     if let Some(listener) = unix {
-        let accept = move || listener.accept().map(|(stream, _)| stream);
+        listener.set_nonblocking(true)?;
+        let accept = move || {
+            let (stream, _) = ready(&listener)?.accept()?;
+            stream.set_nonblocking(false).map(|()| stream)
+        };
         threads.push(spawn_accept(&shared, accept, UnixStream::try_clone, false)?);
     }
     if shared.config.exit_on_poison {
@@ -240,6 +242,16 @@ pub fn run(engine: Arc<Engine>, listeners: Listeners, config: ServeConfig) -> io
     Ok(Server { shared, threads })
 }
 
+/// Waits up to 50 ms for a connection. So the accept loop sees `stopping` without a
+/// wake-up connection, which cannot reach a socket whose path was unlinked or replaced.
+fn ready<L: AsFd>(listener: &L) -> io::Result<&L> {
+    let mut fds = [PollFd::new(listener, PollFlags::IN)];
+    match rustix::event::poll(&mut fds, Some(&Timespec { tv_sec: 0, tv_nsec: 50_000_000 }))? {
+        0 => Err(io::ErrorKind::WouldBlock.into()),
+        _ => Ok(listener),
+    }
+}
+
 fn spawn_accept<S: Stream + Send + 'static>(
     shared: &Arc<Shared>,
     accept: impl Fn() -> io::Result<S> + Send + 'static,
@@ -252,9 +264,12 @@ fn spawn_accept<S: Stream + Send + 'static>(
         if shared.stopping.load(Ordering::Acquire) {
             return;
         }
-        let Ok(stream) = accepted else {
+        let Ok(stream) = accepted.inspect_err(|error| {
             // Such as running out of file descriptors. Back off instead of spinning.
-            thread::sleep(Duration::from_millis(10));
+            if error.kind() != io::ErrorKind::WouldBlock {
+                thread::sleep(Duration::from_millis(10));
+            }
+        }) else {
             continue;
         };
         let Ok(closer) = clone(&stream) else { continue };
@@ -311,10 +326,20 @@ fn try_start(config: Config, exit_on_poison: bool) -> Result<u8, (u8, String)> {
     let socket = std::path::absolute(&socket).map_err(|error| fail(error.to_string()))?;
     let group = config.unix_socket_group.as_deref().map(listen::resolve_group).transpose();
     let group = group.map_err(fail)?;
+    let locked = |holder: String| {
+        let dir = data_dir.display();
+        (EXIT_LOCKED, format!("data directory {dir} is locked by {}", holder.trim()))
+    };
     let default = Listen::Tcp(SocketAddr::from((Ipv4Addr::LOCALHOST, listen::DEFAULT_PORT)));
     let tcp = match config.listen.unwrap_or(default) {
         Listen::None => None,
-        Listen::Tcp(addr) => Some(listen::bind_tcp(addr).map_err(fail)?),
+        // A second server on a fixed port fails here, before the lock. Say who holds it.
+        Listen::Tcp(addr) => Some(listen::bind_tcp(addr).map_err(|error| {
+            match lock_holder(&data_dir).filter(|_| error.kind() == io::ErrorKind::AddrInUse) {
+                Some(holder) => locked(holder),
+                None => fail(error.to_string()),
+            }
+        })?),
     };
     let tcp_text = match &tcp {
         Some(listener) => listener.local_addr().map_err(|e| fail(e.to_string()))?.to_string(),
@@ -326,10 +351,7 @@ fn try_start(config: Config, exit_on_poison: bool) -> Result<u8, (u8, String)> {
     let address = format!("instance={instance} unix={} tcp={tcp_text}", socket.display());
     options.tape.server_address = Some(address);
     let engine = open_engine(&data_dir, options).map_err(|error| match error.kind {
-        ErrorKind::Storage(Error::DataDirLocked { holder }) => (
-            EXIT_LOCKED,
-            format!("data directory {} is locked by {}", data_dir.display(), holder.trim()),
-        ),
+        ErrorKind::Storage(Error::DataDirLocked { holder }) => locked(holder),
         _ => fail(format!("cannot open {}: {error}", data_dir.display())),
     })?;
     let unix = listen::install_unix(&socket, group, &instance).map_err(fail)?;
@@ -347,6 +369,13 @@ fn try_start(config: Config, exit_on_poison: bool) -> Result<u8, (u8, String)> {
     server.wait();
     let _ = writeln!(io::stderr(), "zerodb: engine poisoned, exiting so a fresh start can recover");
     Ok(EXIT_POISONED)
+}
+
+/// The `LOCK` contents when another process holds the data directory lock.
+fn lock_holder(dir: &Path) -> Option<String> {
+    let file = std::fs::File::open(dir.join("LOCK")).ok()?;
+    let held = matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock));
+    held.then(|| std::fs::read_to_string(dir.join("LOCK")).ok())?
 }
 
 #[cfg(feature = "fault-inject")]

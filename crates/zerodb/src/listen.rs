@@ -22,11 +22,13 @@ pub const SUN_PATH_BYTES: usize = if cfg!(target_os = "linux") { 108 } else { 10
 const STAGING: &str = ".zs.";
 
 /// Binds a loopback TCP address. Any other address is refused.
-pub fn bind_tcp(addr: SocketAddr) -> Result<TcpListener, String> {
+pub fn bind_tcp(addr: SocketAddr) -> std::io::Result<TcpListener> {
     if !addr.ip().is_loopback() {
-        return Err(NEEDS_TLS.into());
+        return Err(std::io::Error::other(NEEDS_TLS));
     }
-    TcpListener::bind(addr).map_err(|error| format!("cannot listen on {addr}: {error}"))
+    TcpListener::bind(addr).map_err(|error| {
+        std::io::Error::new(error.kind(), format!("cannot listen on {addr}: {error}"))
+    })
 }
 
 /// Resolves `--unix-socket-group`: a numeric gid, or a name from `/etc/group`.

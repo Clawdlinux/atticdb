@@ -294,6 +294,19 @@ fn startup_checks() {
             },
             Expect::Fails(75, "is locked by pid="),
         ),
+        (
+            "second serve on the same fixed port and data dir",
+            |c| {
+                let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                let listen = free.local_addr().unwrap().to_string();
+                drop(free);
+                let mut first = c.serve(&c.data, &["--listen", &listen]);
+                let (instance, _) = first.ready();
+                c.other = Some((first, instance));
+                vec!["--listen".into(), listen]
+            },
+            Expect::Fails(75, "is locked by pid="),
+        ),
         #[cfg(feature = "fault-inject")]
         ("exit on poison", |_| vec!["--exit-on-poison".into()], Expect::ExitsOnPoison(false)),
         #[cfg(feature = "fault-inject")]
