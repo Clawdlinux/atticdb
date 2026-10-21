@@ -1,10 +1,11 @@
 use serde_json::{json, Value};
+use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -254,5 +255,140 @@ impl Drop for Process {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+/// A `zerodb mcp` process driven over stdin and stdout.
+pub struct Mcp {
+    pub process: Process,
+    stdin: Option<ChildStdin>,
+    read: usize,
+    pub next_id: u64,
+}
+
+impl Mcp {
+    /// `token` goes in `ZERODB_TOKEN`. Without it the flags name the token.
+    pub fn start(cwd: &Path, args: &[&str], token: Option<&str>) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_zerodb"));
+        command.arg("mcp").args(args).current_dir(cwd).stdin(Stdio::piped());
+        command.env_remove("ZERODB_TOKEN");
+        if let Some(token) = token {
+            command.env("ZERODB_TOKEN", token);
+        }
+        let mut process = Process::start(&mut command);
+        let stdin = process.child.stdin.take();
+        Self { process, stdin, read: 0, next_id: 0 }
+    }
+
+    pub fn send(&mut self, message: &Value) {
+        writeln!(self.stdin.as_mut().unwrap(), "{message}").unwrap();
+    }
+
+    /// Sends a request without waiting for its response.
+    pub fn post(&mut self, method: &str, params: Value) {
+        self.next_id += 1;
+        let id = self.next_id;
+        self.send(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
+    }
+
+    /// The next line on stdout: the response to the oldest unanswered request.
+    pub fn response(&mut self) -> Value {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            if let Some(line) = self.process.stdout().lines().nth(self.read) {
+                self.read += 1;
+                let response: Value = serde_json::from_str(line).unwrap();
+                if !response["id"].is_null() {
+                    assert_eq!(response["id"], self.read as u64, "responses come in order");
+                }
+                return response;
+            }
+            assert!(Instant::now() < deadline, "no response: {}", self.process.stderr());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    pub fn request(&mut self, method: &str, params: Value) -> Value {
+        self.post(method, params);
+        self.response()
+    }
+
+    pub fn handshake(&mut self) {
+        let reply = self.request("initialize", init("2025-11-25"));
+        assert_eq!(reply["result"]["protocolVersion"], "2025-11-25");
+        self.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+    }
+
+    pub fn post_call(&mut self, tool: &str, arguments: Value) {
+        self.post("tools/call", json!({"name": tool, "arguments": arguments}));
+    }
+
+    /// Calls a tool and returns its result.
+    pub fn call(&mut self, tool: &str, arguments: Value) -> Value {
+        self.post_call(tool, arguments);
+        self.response()["result"].clone()
+    }
+
+    /// Closes stdin and waits for the exit.
+    pub fn close(&mut self) -> (ExitStatus, String) {
+        self.stdin = None;
+        self.process.wait()
+    }
+}
+
+pub fn init(version: &str) -> Value {
+    json!({"protocolVersion": version, "capabilities": {},
+           "clientInfo": {"name": "test", "version": "1"}})
+}
+
+pub fn text(result: &Value) -> &str {
+    result["content"][0]["text"].as_str().unwrap()
+}
+
+/// `zerodb init` in `dir`. Returns the token.
+pub fn init_config(dir: &Dir) -> String {
+    let (status, token) =
+        Process::spawn(&dir.0, &["init", "--config", "c.json", "--tenant", "a"]).wait();
+    assert!(status.success(), "{token}");
+    token.trim().to_owned()
+}
+
+pub fn locked(data: &Path) -> bool {
+    File::open(data.join("LOCK")).is_ok_and(|file| file.try_lock().is_err())
+}
+
+/// Sends SIGKILL to the pid in `data`'s `LOCK`. Returns the pid if the signal was sent.
+pub fn kill_lock_pid(data: &Path) -> Option<i32> {
+    let lock = std::fs::read_to_string(data.join("LOCK")).ok()?;
+    let pid = lock.strip_prefix("pid=")?.split(' ').next()?.parse().ok()?;
+    let target = rustix::process::Pid::from_raw(pid)?;
+    rustix::process::kill_process(target, rustix::process::Signal::KILL).ok()?;
+    Some(pid)
+}
+
+/// Kills the server holding `data`'s lock, found through `LOCK`, and waits until the
+/// lock is free. Auto-started servers outlive their adapters, so tests stop them here.
+pub fn kill_holder(data: &Path) -> bool {
+    if locked(data) {
+        kill_lock_pid(data);
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while locked(data) {
+        if Instant::now() > deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    true
+}
+
+/// Stops the servers of these data directories, also when a test fails.
+pub struct Holders(pub Vec<PathBuf>);
+
+impl Drop for Holders {
+    fn drop(&mut self) {
+        for data in &self.0 {
+            kill_holder(data);
+        }
     }
 }

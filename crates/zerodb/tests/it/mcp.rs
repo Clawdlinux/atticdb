@@ -1,103 +1,17 @@
-use crate::support::{self, Dir, Process, TOKEN_A};
+use crate::support::{
+    self, init, init_config, kill_holder, text, Dir, Holders, Mcp, Process, TOKEN_A,
+};
 use serde_json::{json, Value};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixListener;
-use std::path::{Path, PathBuf};
-use std::process::{ChildStdin, Command, ExitStatus, Stdio};
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use zerodb_tape::SimDisk;
-
-/// A `zerodb mcp` process driven over stdin and stdout.
-struct Mcp {
-    process: Process,
-    stdin: Option<ChildStdin>,
-    read: usize,
-    next_id: u64,
-}
-
-impl Mcp {
-    /// `token` goes in `ZERODB_TOKEN`. Without it the flags name the token.
-    fn start(cwd: &Path, args: &[&str], token: Option<&str>) -> Self {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_zerodb"));
-        command.arg("mcp").args(args).current_dir(cwd).stdin(Stdio::piped());
-        command.env_remove("ZERODB_TOKEN");
-        if let Some(token) = token {
-            command.env("ZERODB_TOKEN", token);
-        }
-        let mut process = Process::start(&mut command);
-        let stdin = process.child.stdin.take();
-        Self { process, stdin, read: 0, next_id: 0 }
-    }
-
-    fn send(&mut self, message: &Value) {
-        writeln!(self.stdin.as_mut().unwrap(), "{message}").unwrap();
-    }
-
-    /// Sends a request without waiting for its response.
-    fn post(&mut self, method: &str, params: Value) {
-        self.next_id += 1;
-        let id = self.next_id;
-        self.send(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
-    }
-
-    /// The next line on stdout: the response to the oldest unanswered request.
-    fn response(&mut self) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(60);
-        loop {
-            if let Some(line) = self.process.stdout().lines().nth(self.read) {
-                self.read += 1;
-                let response: Value = serde_json::from_str(line).unwrap();
-                if !response["id"].is_null() {
-                    assert_eq!(response["id"], self.read as u64, "responses come in order");
-                }
-                return response;
-            }
-            assert!(Instant::now() < deadline, "no response: {}", self.process.stderr());
-            std::thread::sleep(Duration::from_millis(5));
-        }
-    }
-
-    fn request(&mut self, method: &str, params: Value) -> Value {
-        self.post(method, params);
-        self.response()
-    }
-
-    fn handshake(&mut self) {
-        let reply = self.request("initialize", init("2025-11-25"));
-        assert_eq!(reply["result"]["protocolVersion"], "2025-11-25");
-        self.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
-    }
-
-    fn post_call(&mut self, tool: &str, arguments: Value) {
-        self.post("tools/call", json!({"name": tool, "arguments": arguments}));
-    }
-
-    /// Calls a tool and returns its result.
-    fn call(&mut self, tool: &str, arguments: Value) -> Value {
-        self.post_call(tool, arguments);
-        self.response()["result"].clone()
-    }
-
-    /// Closes stdin and waits for the exit.
-    fn close(&mut self) -> (ExitStatus, String) {
-        self.stdin = None;
-        self.process.wait()
-    }
-}
-
-fn init(version: &str) -> Value {
-    json!({"protocolVersion": version, "capabilities": {},
-           "clientInfo": {"name": "test", "version": "1"}})
-}
-
-fn text(result: &Value) -> &str {
-    result["content"][0]["text"].as_str().unwrap()
-}
 
 fn contents(result: &Value) -> Vec<&str> {
     let turns = result["structuredContent"]["turns"].as_array().unwrap();
@@ -128,54 +42,9 @@ fn private_file(dir: &Dir, name: &str, content: &str) -> String {
     path.to_str().unwrap().to_owned()
 }
 
-/// `zerodb init` in `dir`. Returns the token.
-fn init_config(dir: &Dir) -> String {
-    let (status, token) =
-        Process::spawn(&dir.0, &["init", "--config", "c.json", "--tenant", "a"]).wait();
-    assert!(status.success(), "{token}");
-    token.trim().to_owned()
-}
-
 fn lock_field(data: &Path, name: &str) -> String {
     let lock = std::fs::read_to_string(data.join("LOCK")).unwrap();
     lock.split(' ').find_map(|field| field.strip_prefix(name)).unwrap().to_owned()
-}
-
-fn locked(data: &Path) -> bool {
-    File::open(data.join("LOCK")).is_ok_and(|file| file.try_lock().is_err())
-}
-
-/// Kills the server holding `data`'s lock, found through `LOCK`, and waits until the
-/// lock is free. Auto-started servers outlive their adapters, so tests stop them here.
-fn kill_holder(data: &Path) -> bool {
-    if locked(data) {
-        let lock = std::fs::read_to_string(data.join("LOCK")).unwrap_or_default();
-        let pid = lock.strip_prefix("pid=").and_then(|rest| rest.split(' ').next());
-        if let Some(pid) =
-            pid.and_then(|pid| pid.parse().ok()).and_then(rustix::process::Pid::from_raw)
-        {
-            let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
-        }
-    }
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while locked(data) {
-        if Instant::now() > deadline {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    true
-}
-
-/// Stops the servers of these data directories, also when a test fails.
-struct Holders(Vec<PathBuf>);
-
-impl Drop for Holders {
-    fn drop(&mut self) {
-        for data in &self.0 {
-            kill_holder(data);
-        }
-    }
 }
 
 /// What a fake listener saw.
