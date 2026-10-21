@@ -326,7 +326,7 @@ fn try_start(config: Config, exit_on_poison: bool) -> Result<u8, (u8, String)> {
         None => "none".into(),
     };
     let instance = crate::random_hex(16).map_err(|error| fail(error.to_string()))?;
-    listen::private_dir(&data_dir).map_err(fail)?;
+    listen::owned_dir(&data_dir, 0o077).map_err(fail)?;
     let mut options = EngineOptions::default();
     let address = format!("instance={instance} unix={} tcp={tcp_text}", socket.display());
     options.tape.server_address = Some(address);

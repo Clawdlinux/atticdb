@@ -257,9 +257,10 @@ fn startup_checks() {
             Expect::Fails(1, "mode 0700 or stricter, found mode 0755"),
         ),
         (
-            "two data dirs race for one socket path",
+            "two data dirs race for one socket path with a stale socket on it",
             |c| {
                 c.socket = c.dir.0.join("shared.sock");
+                drop(std::os::unix::net::UnixListener::bind(&c.socket).unwrap());
                 let socket = c.socket.to_str().unwrap().to_owned();
                 let other = c.serve(&c.dir.0.join("other"), &["--unix-socket", &socket]);
                 c.other = Some((other, String::new()));

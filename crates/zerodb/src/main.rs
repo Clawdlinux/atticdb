@@ -14,7 +14,7 @@ const USAGE: &str = "usage:
   zerodb recover --truncate-at <lsn> --data-dir <dir>
   zerodb mcp [--url unix:///path|http://127.0.0.1:<port>] [--data-dir <dir>] [--config <path>]
              [--tenant <name>] [--token-file <path>] [--agent <name>] [--session <name>]
-             [--start-timeout <n>s|<n>ms] [--retry-deadline <n>s|<n>ms]
+             [--retry-deadline <n>s|<n>ms]
   The mcp token comes from --token-file, ZERODB_TOKEN, or the config entry for --tenant.";
 
 fn main() -> ExitCode {
@@ -31,7 +31,7 @@ fn main() -> ExitCode {
             "recover" => flags(rest, &["--truncate-at", "--data-dir"], &[]).and_then(recover),
             "mcp" => {
                 let valued = ["--url", "--data-dir", "--config", "--tenant", "--token-file"];
-                let more = ["--agent", "--session", "--start-timeout", "--retry-deadline"];
+                let more = ["--agent", "--session", "--retry-deadline"];
                 flags(rest, &[&valued[..], &more].concat(), &[]).map(zerodb::mcp::start)
             }
             _ => None,

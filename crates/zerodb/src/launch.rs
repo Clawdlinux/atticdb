@@ -55,7 +55,6 @@ pub struct Launch {
     url: Option<Url>,
     data_dir: Option<PathBuf>,
     config: Option<PathBuf>,
-    start_timeout: Duration,
     child: Option<Child>,
     next_spawn: Instant,
     backoff: Duration,
@@ -64,19 +63,22 @@ pub struct Launch {
 
 impl Launch {
     /// `data_dir` is absolute. Without `url` it is required, and `config` lets it start a server.
-    pub fn new(
-        url: Option<Url>,
-        data_dir: Option<PathBuf>,
-        config: Option<PathBuf>,
-        start_timeout: Duration,
-    ) -> Self {
-        let (child, next_spawn, backoff, refused) =
-            (None, Instant::now(), FIRST_BACKOFF, "".into());
-        Self { url, data_dir, config, start_timeout, child, next_spawn, backoff, refused }
+    pub fn new(url: Option<Url>, data_dir: Option<PathBuf>, config: Option<PathBuf>) -> Self {
+        let refused = String::new();
+        Self {
+            url,
+            data_dir,
+            config,
+            child: None,
+            next_spawn: Instant::now(),
+            backoff: FIRST_BACKOFF,
+            refused,
+        }
     }
 
     /// Opens a connection and returns it with the `Host` header to send. Waits for a
-    /// server until `--start-timeout` or `deadline`, whichever comes first.
+    /// server until `deadline`. A spawned server keeps starting after that, so a later
+    /// call finds it.
     pub fn connect(&mut self, deadline: Instant) -> io::Result<(Box<dyn Stream>, String)> {
         let dir = match (&self.url, &self.data_dir) {
             (Some(Url::Unix(path)), _) => return unix(path),
@@ -86,7 +88,6 @@ impl Launch {
             (None, Some(dir)) => dir.clone(),
             (None, None) => return Err(io::Error::other("no --url and no data directory")),
         };
-        let deadline = deadline.min(Instant::now() + self.start_timeout);
         loop {
             if let Some(Ok(Some(status))) = self.child.as_mut().map(Child::try_wait) {
                 eprintln!("zerodb mcp: started server exited: {status}");
@@ -111,7 +112,9 @@ impl Launch {
                 }
             }
             if Instant::now() >= deadline {
-                return Err(io::Error::new(ErrorKind::TimedOut, "no trusted server in time"));
+                let log = dir.join("serve.log");
+                let message = format!("no trusted server in time, see {}", log.display());
+                return Err(io::Error::new(ErrorKind::TimedOut, message));
             }
             std::thread::sleep(POLL);
         }
@@ -120,7 +123,7 @@ impl Launch {
     /// `zerodb serve` on the Unix socket only, outliving this adapter. The token stays
     /// in the config, never on the command line or in the environment.
     fn spawn(&mut self, dir: &Path, config: &Path) -> io::Result<()> {
-        crate::listen::private_dir(dir).map_err(io::Error::other)?;
+        crate::listen::owned_dir(dir, 0o077).map_err(io::Error::other)?;
         let (mut log, path) = (OpenOptions::new(), dir.join("serve.log"));
         let log = log.create(true).append(true).mode(0o600).open(&path)?;
         crate::config::check_private(&log, &path, "server log").map_err(io::Error::other)?;
@@ -177,7 +180,7 @@ fn discover(dir: &Path) -> Result<UnixStream, String> {
         ));
     }
     let mut dirs = socket.ancestors().skip(1);
-    crate::listen::check_parent(dirs.next().unwrap_or(Path::new("/")))?;
+    crate::listen::owned_dir(dirs.next().unwrap_or(Path::new("/")), 0o022)?;
     // OpenSSH StrictModes: anyone who can rename a directory above the socket can swap it.
     for dir in dirs {
         let meta = std::fs::metadata(dir).map_err(|error| format!("{}: {error}", dir.display()))?;

@@ -20,6 +20,8 @@ pub const TOKEN_ENV: &str = "ZERODB_TOKEN";
 const VERSIONS: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 const FIRST_BACKOFF: Duration = Duration::from_millis(50);
 const MAX_BACKOFF: Duration = Duration::from_secs(2);
+/// Time kept for the request itself: connecting stops this long before the deadline.
+const MIN_ATTEMPT: Duration = Duration::from_secs(2);
 /// Longest stdin line. A request body cannot be larger anyway.
 const MAX_LINE: u64 = 8 << 20;
 
@@ -75,7 +77,6 @@ impl Adapter {
             }
             .ok_or(format!("{name} must be <n>s or <n>ms")),
         };
-        let start_timeout = duration("--start-timeout", 60)?;
         let retry_deadline = duration("--retry-deadline", 30)?;
         let config_path = flags.remove("--config").map(PathBuf::from);
         let config = config_path.as_deref().map(Config::load).transpose();
@@ -104,7 +105,7 @@ impl Adapter {
             session: flags.remove("--session").unwrap_or_else(|| "default".into()),
             token,
             retry_deadline,
-            launch: Launch::new(url, data_dir, config_path, start_timeout),
+            launch: Launch::new(url, data_dir, config_path),
             initialized: false,
         })
     }
@@ -174,7 +175,7 @@ impl Adapter {
                     Some(outcome) => (Attempt::Answered(outcome), describe(reply)),
                     None => (Attempt::TransportError, "malformed response".into()),
                 },
-                Err(error) => (Attempt::TransportError, error.clone()),
+                Err((attempt, error)) => (*attempt, error.clone()),
             };
             match (merge.record(attempt), reply) {
                 (Step::Return(Outcome::Committed), Ok(reply)) => Ok(committed(&reply)),
@@ -203,7 +204,7 @@ impl Adapter {
         self.retry("GET", &target, &[], |reply| match reply {
             Ok(reply) if reply["turns"].is_array() => Ok(turns(&reply)),
             Ok(reply) => Ok(tool_error(format!("memory_recent failed: {}", describe(&reply)))),
-            Err(error) => Err(tool_error(format!("memory_recent failed: {error}"))),
+            Err((_, error)) => Err(tool_error(format!("memory_recent failed: {error}"))),
         })
     }
 
@@ -214,12 +215,12 @@ impl Adapter {
         method: &str,
         target: &str,
         body: &[u8],
-        mut judge: impl FnMut(Result<Value, String>) -> Result<Value, Value>,
+        mut judge: impl FnMut(Result<Value, (Attempt, String)>) -> Result<Value, Value>,
     ) -> Value {
         let deadline = Instant::now() + self.retry_deadline;
         let mut backoff = FIRST_BACKOFF;
         loop {
-            let reply = self.request(method, target, body, deadline).map_err(|e| e.to_string());
+            let reply = self.request(method, target, body, deadline);
             match judge(reply) {
                 Ok(result) => return result,
                 Err(result) if Instant::now() + backoff >= deadline => return result,
@@ -236,15 +237,18 @@ impl Adapter {
         target: &str,
         body: &[u8],
         deadline: Instant,
-    ) -> io::Result<Value> {
-        let (mut stream, host) = self.launch.connect(deadline)?;
+    ) -> Result<Value, (Attempt, String)> {
+        let connect_by = deadline.checked_sub(MIN_ATTEMPT).unwrap_or(deadline);
+        let (mut stream, host) =
+            self.launch.connect(connect_by).map_err(|e| (Attempt::NotSent, e.to_string()))?;
         let auth = format!("Bearer {}", self.token.expose());
         let headers = [("Host", host.as_str()), ("Authorization", auth.as_str())];
         let max = crate::http::Limits::default().body_bytes;
+        let lost = |error: String| (Attempt::TransportError, error);
         let response =
-            crate::http::exchange(&mut *stream, method, target, &headers, body, deadline, max)?;
-        serde_json::from_slice(&response.body)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "response is not JSON"))
+            crate::http::exchange(&mut *stream, method, target, &headers, body, deadline, max);
+        let response = response.map_err(|error| lost(error.to_string()))?;
+        serde_json::from_slice(&response.body).map_err(|_| lost("response is not JSON".into()))
     }
 }
 

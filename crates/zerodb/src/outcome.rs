@@ -2,7 +2,8 @@
 //!
 //! Only `committed` replaces `unknown`. A later `not_committed` cannot clear an
 //! earlier unclear attempt, because the engine can reject a retry of a key whose
-//! first attempt is already durable.
+//! first attempt is already durable. An attempt whose connect failed sent nothing: it
+//! counts as `not_committed`, but the call still retries until the deadline.
 
 /// What a write call reports to its caller.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -41,8 +42,10 @@ impl Outcome {
 pub enum Attempt {
     /// The server answered with an outcome.
     Answered(Outcome),
-    /// Connect, reset, timeout, or a short or malformed response.
+    /// Reset, timeout, or a short or malformed response, after the request was sent.
     TransportError,
+    /// Connect failed, so nothing was sent.
+    NotSent,
 }
 
 /// What the caller does after recording an attempt.
@@ -65,14 +68,19 @@ impl Merge {
     pub fn record(&mut self, attempt: Attempt) -> Step {
         let next = match (self.state, attempt) {
             (_, Attempt::Answered(Outcome::Committed)) => Outcome::Committed,
-            (Some(Outcome::Unknown), Attempt::Answered(Outcome::NotCommitted)) => Outcome::Unknown,
-            (_, Attempt::Answered(Outcome::NotCommitted)) => Outcome::NotCommitted,
+            (
+                Some(Outcome::Unknown),
+                Attempt::Answered(Outcome::NotCommitted) | Attempt::NotSent,
+            ) => Outcome::Unknown,
+            (_, Attempt::Answered(Outcome::NotCommitted) | Attempt::NotSent) => {
+                Outcome::NotCommitted
+            }
             (_, Attempt::Answered(Outcome::Unknown) | Attempt::TransportError) => Outcome::Unknown,
         };
         self.state = Some(next);
-        match next {
-            Outcome::Unknown => Step::Retry,
-            done => Step::Return(done),
+        match (next, attempt) {
+            (Outcome::Unknown, _) | (_, Attempt::NotSent) => Step::Retry,
+            (done, _) => Step::Return(done),
         }
     }
 
@@ -90,6 +98,7 @@ mod tests {
     const N: Attempt = Attempt::Answered(Outcome::NotCommitted);
     const U: Attempt = Attempt::Answered(Outcome::Unknown);
     const T: Attempt = Attempt::TransportError;
+    const S: Attempt = Attempt::NotSent;
 
     struct Case {
         name: &'static str,
@@ -159,6 +168,27 @@ mod tests {
         Case {
             name: "first transport",
             previous: &[],
+            this: T,
+            step: Step::Retry,
+            finish: Outcome::Unknown,
+        },
+        Case {
+            name: "only connect failures",
+            previous: &[S],
+            this: S,
+            step: Step::Retry,
+            finish: Outcome::NotCommitted,
+        },
+        Case {
+            name: "connect failure after unknown",
+            previous: &[U],
+            this: S,
+            step: Step::Retry,
+            finish: Outcome::Unknown,
+        },
+        Case {
+            name: "transport after connect failure",
+            previous: &[S],
             this: T,
             step: Step::Retry,
             finish: Outcome::Unknown,

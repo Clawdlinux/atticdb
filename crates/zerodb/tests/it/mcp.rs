@@ -324,15 +324,23 @@ fn tool_calls_over_stdio() {
     assert!(!hex_run && !stdout.contains("idem"), "no key reaches the model: {stdout}");
     assert!(!stdout.contains(TOKEN_A) && !stdout.contains("tenant"), "{stdout}");
 
-    // No server at all: every attempt is a transport error, so the write may be saved.
+    // No server reachable and none started: no attempt sent a byte, so nothing was written.
     let gone = format!("unix://{}", dir.0.join("gone").display());
-    let mut mcp = Mcp::start(&dir.0, &["--url", &gone, "--retry-deadline", "300ms"], Some(TOKEN_A));
-    mcp.handshake();
-    let unknown = mcp.call("memory_append", json!({"content": "lost?"}));
-    assert_eq!(unknown["isError"], true);
-    let expect = "unknown: the write may be saved, and repeating the call may duplicate it";
-    assert!(text(&unknown).starts_with(expect), "{unknown}");
-    assert_eq!(mcp.close().0.code(), Some(0));
+    for args in [["--url", &gone], ["--data-dir", "empty"]] {
+        let mut mcp = Mcp::start(
+            &dir.0,
+            &[&args[..], &["--retry-deadline", "300ms"]].concat(),
+            Some(TOKEN_A),
+        );
+        mcp.handshake();
+        let result = mcp.call("memory_append", json!({"content": "lost?"}));
+        assert_eq!(result["isError"], true, "{args:?}");
+        assert!(
+            text(&result).starts_with("not_committed: nothing was written"),
+            "{args:?}: {result}"
+        );
+        assert_eq!(mcp.close().0.code(), Some(0));
+    }
 }
 
 /// Adapters find or start one server, and send the token only to a server they trust.

@@ -41,34 +41,21 @@ pub fn resolve_group(group: &str) -> Result<u32, String> {
         .ok_or_else(|| format!("group {group:?} is not in /etc/group; pass its numeric gid"))
 }
 
-/// Checks a socket's directory: owned by the effective uid, not writable by group or others.
-pub fn check_parent(parent: &Path) -> Result<(), String> {
-    let euid = rustix::process::geteuid().as_raw();
-    let meta = fs::metadata(parent)
-        .map_err(|error| format!("socket directory {}: {error}", parent.display()))?;
-    if !meta.is_dir() || meta.uid() != euid || meta.mode() & 0o022 != 0 {
-        return Err(format!(
-            "socket directory {} must be a directory owned by uid {euid} and not writable by group or others, \
-             found mode {:04o} owned by uid {}",
-            parent.display(),
-            meta.mode() & 0o7777,
-            meta.uid()
-        ));
+/// Checks that `dir` is a directory owned by the effective uid with none of the `mask`
+/// mode bits: 0o022 for a socket's directory, 0o077 for a data directory, which is
+/// first created with mode 0700 if missing.
+pub fn owned_dir(dir: &Path, mask: u32) -> Result<(), String> {
+    let fail = |error: std::io::Error| format!("{}: {error}", dir.display());
+    if mask == 0o077 {
+        DirBuilder::new().recursive(true).mode(0o700).create(dir).map_err(fail)?;
     }
-    Ok(())
-}
-
-/// Creates a data directory with mode 0700, or checks that an existing one is ours with
-/// no group or other bits.
-pub fn private_dir(dir: &Path) -> Result<(), String> {
-    let fail = |error: std::io::Error| format!("data directory {}: {error}", dir.display());
-    DirBuilder::new().recursive(true).mode(0o700).create(dir).map_err(fail)?;
     let meta = fs::metadata(dir).map_err(fail)?;
     let euid = rustix::process::geteuid().as_raw();
-    if !meta.is_dir() || meta.uid() != euid || meta.mode() & 0o077 != 0 {
+    if !meta.is_dir() || meta.uid() != euid || meta.mode() & mask != 0 {
+        let rule =
+            if mask == 0o077 { "mode 0700 or stricter" } else { "not writable by group or others" };
         return Err(format!(
-            "data directory {} must be owned by uid {euid} with mode 0700 or stricter, \
-             found mode {:04o} owned by uid {}",
+            "{} must be a directory owned by uid {euid}, {rule}, found mode {:04o} owned by uid {}",
             dir.display(),
             meta.mode() & 0o7777,
             meta.uid()
@@ -102,7 +89,7 @@ pub fn install_unix(
             ));
         }
     }
-    check_parent(parent)?;
+    owned_dir(parent, 0o022)?;
     match fs::symlink_metadata(path) {
         Err(error) if error.kind() == ErrorKind::NotFound => {}
         Err(error) => return Err(format!("socket {}: {error}", path.display())),
@@ -111,10 +98,9 @@ pub fn install_unix(
         }
         Ok(_) => match UnixStream::connect(path) {
             Ok(_) => return Err(live(path)),
-            Err(error) if error.kind() == ErrorKind::ConnectionRefused => fs::remove_file(path)
-                .map_err(|error| {
-                    format!("cannot remove stale socket {}: {error}", path.display())
-                })?,
+            // Stale. It stays until the link below fails on it: a server on another data
+            // directory may be linking this same path right now.
+            Err(error) if error.kind() == ErrorKind::ConnectionRefused => {}
             Err(error) => return Err(format!("cannot probe socket {}: {error}", path.display())),
         },
     }
@@ -131,7 +117,16 @@ pub fn install_unix(
             &staged,
             Permissions::from_mode(if group.is_some() { 0o660 } else { 0o600 }),
         )?;
-        fs::hard_link(&staged, path)?;
+        if let Err(error) = fs::hard_link(&staged, path) {
+            let refused = |e: std::io::Error| e.kind() == ErrorKind::ConnectionRefused;
+            if error.kind() != ErrorKind::AlreadyExists
+                || !UnixStream::connect(path).is_err_and(refused)
+            {
+                return Err(error);
+            }
+            fs::remove_file(path)?;
+            fs::hard_link(&staged, path)?;
+        }
         Ok(listener)
     })();
     let _ = fs::remove_file(&staged);
