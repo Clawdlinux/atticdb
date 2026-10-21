@@ -109,8 +109,8 @@ impl Head {
     }
 
     /// The first value of a header. `name` must be lowercase.
-    pub fn header(&self, name: &str) -> Option<&[u8]> {
-        self.headers.iter().find(|(key, _)| key.as_str() == name).map(|(_, value)| &value[..])
+    pub fn header<'a>(&'a self, name: &'a str) -> Option<&'a [u8]> {
+        self.headers(name).next()
     }
 }
 
@@ -150,24 +150,22 @@ pub struct Response {
     pub status: u16,
     /// JSON body bytes.
     pub body: Vec<u8>,
-    /// Close the connection after this response.
-    pub close: bool,
 }
 
 impl Response {
     /// A response with a JSON body.
     pub fn json(status: u16, body: &Value) -> Self {
-        Self { status, body: body.to_string().into_bytes(), close: false }
+        Self { status, body: body.to_string().into_bytes() }
     }
 
-    /// `{"outcome": "not_committed", "error": <error>}`. Nothing reached the engine.
-    pub fn error(status: u16, error: &str) -> Self {
-        Self::json(status, &json!({"outcome": "not_committed", "error": error}))
-    }
-
-    fn framing(status: u16, error: &str, message: &str) -> Self {
-        let body = json!({"outcome": "not_committed", "error": error, "message": message});
-        Self { close: true, ..Self::json(status, &body) }
+    /// `{"outcome": "not_committed", "error": <error>, "message"?: <message>}`. Nothing
+    /// reached the engine.
+    pub fn error(status: u16, error: &str, message: Option<&str>) -> Self {
+        let mut body = json!({"outcome": "not_committed", "error": error});
+        if let Some(message) = message {
+            body["message"] = json!(message);
+        }
+        Self::json(status, &body)
     }
 }
 
@@ -176,7 +174,6 @@ impl fmt::Debug for Response {
         f.debug_struct("Response")
             .field("status", &self.status)
             .field("body_len", &self.body.len())
-            .field("close", &self.close)
             .finish()
     }
 }
@@ -241,7 +238,7 @@ impl<S: Stream> ServerConn<S> {
             Err(response) => return self.reject(&response),
         };
         if head.content_length > self.limits.body_bytes {
-            return self.reject(&Response::error(413, "too_large"));
+            return self.reject(&Response::error(413, "too_large", None));
         }
         if head.expect_continue && head.content_length > 0 && head.minor_version == 1 {
             let deadline = Instant::now() + self.limits.write_timeout;
@@ -265,7 +262,7 @@ impl<S: Stream> ServerConn<S> {
         if !self.open {
             return Err(io::Error::new(ErrorKind::NotConnected, "connection closed"));
         }
-        let close = !self.keep_alive || response.close;
+        let close = !self.keep_alive;
         let result = self.write_response(response, close);
         if close || result.is_err() {
             self.close();
@@ -340,16 +337,8 @@ impl<S: Stream> ServerConn<S> {
     }
 
     fn write_response(&mut self, response: &Response, close: bool) -> io::Result<()> {
-        let mut bytes = format!(
-            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: {}\r\n\r\n",
-            response.status,
-            reason(response.status),
-            response.body.len(),
-            if close { "close" } else { "keep-alive" },
-        )
-        .into_bytes();
-        bytes.extend_from_slice(&response.body);
-        write_until(&mut self.stream, &bytes, Instant::now() + self.limits.write_timeout)
+        let deadline = Instant::now() + self.limits.write_timeout;
+        write_response(&mut self.stream, response, close, deadline)
     }
 
     /// Closes our half, then discards input until EOF or the linger deadline.
@@ -392,16 +381,16 @@ fn ends_head(bytes: &[u8]) -> bool {
 
 /// Parses a complete head, or returns `None` when more bytes are needed.
 fn parse_head(buf: &[u8], limits: &Limits) -> Result<Option<(Head, usize)>, Response> {
-    let too_large = || Response::framing(431, "headers_too_large", "request head too large");
+    let too_large = || Response::error(431, "headers_too_large", Some("request head too large"));
     let mut headers = vec![httparse::EMPTY_HEADER; limits.header_lines];
     let mut request = httparse::Request::new(&mut headers);
     let used = match request.parse(buf) {
         Ok(httparse::Status::Complete(used)) if used <= limits.head_bytes => used,
         Ok(httparse::Status::Partial) if buf.len() < limits.head_bytes => return Ok(None),
         Ok(_) | Err(httparse::Error::TooManyHeaders) => return Err(too_large()),
-        Err(_) => return Err(Response::framing(400, "bad_request", "malformed request head")),
+        Err(_) => return Err(Response::error(400, "bad_request", Some("malformed request head"))),
     };
-    let bad = |message: &str| Response::framing(400, "bad_request", message);
+    let bad = |message: &str| Response::error(400, "bad_request", Some(message));
     let headers: Vec<(String, Vec<u8>)> = request
         .headers
         .iter()
@@ -409,10 +398,10 @@ fn parse_head(buf: &[u8], limits: &Limits) -> Result<Option<(Head, usize)>, Resp
         .collect();
     let values = |name: &'static str| headers.iter().filter(move |(key, _)| key.as_str() == name);
     if values("transfer-encoding").next().is_some() {
-        return Err(Response::framing(
+        return Err(Response::error(
             501,
             "not_implemented",
-            "Transfer-Encoding is not supported",
+            Some("Transfer-Encoding is not supported"),
         ));
     }
     if values("content-length").count() > 1 {
@@ -434,7 +423,7 @@ fn parse_head(buf: &[u8], limits: &Limits) -> Result<Option<(Head, usize)>, Resp
     let mut expect_continue = false;
     for (_, value) in values("expect") {
         if !value.eq_ignore_ascii_case(b"100-continue") {
-            return Err(Response::framing(417, "expectation_failed", "only 100-continue"));
+            return Err(Response::error(417, "expectation_failed", Some("only 100-continue")));
         }
         expect_continue = true;
     }
@@ -466,26 +455,22 @@ fn parse_length(value: &[u8]) -> Option<u64> {
         .try_fold(0u64, |total, digit| total.checked_mul(10)?.checked_add(u64::from(digit - b'0')))
 }
 
-fn reason(status: u16) -> &'static str {
-    match status {
-        100 => "Continue",
-        200 => "OK",
-        400 => "Bad Request",
-        401 => "Unauthorized",
-        403 => "Forbidden",
-        404 => "Not Found",
-        405 => "Method Not Allowed",
-        409 => "Conflict",
-        413 => "Content Too Large",
-        417 => "Expectation Failed",
-        429 => "Too Many Requests",
-        431 => "Request Header Fields Too Large",
-        500 => "Internal Server Error",
-        501 => "Not Implemented",
-        503 => "Service Unavailable",
-        507 => "Insufficient Storage",
-        _ => "",
-    }
+/// Writes one response by `deadline`. The reason phrase is empty, which RFC 9112
+/// allows: clients must ignore it.
+pub fn write_response<S: Stream + ?Sized>(
+    stream: &mut S,
+    response: &Response,
+    close: bool,
+    deadline: Instant,
+) -> io::Result<()> {
+    let (status, length) = (response.status, response.body.len());
+    let connection = if close { "close" } else { "keep-alive" };
+    let mut bytes = format!(
+        "HTTP/1.1 {status} \r\nContent-Type: application/json\r\nContent-Length: {length}\r\nConnection: {connection}\r\n\r\n"
+    )
+    .into_bytes();
+    bytes.extend_from_slice(&response.body);
+    write_until(stream, &bytes, deadline)
 }
 
 fn remaining(deadline: Instant) -> io::Result<Duration> {
@@ -659,7 +644,7 @@ mod tests {
     }
 
     fn deny(_: &Head) -> Result<(), Response> {
-        Err(Response::error(401, "unauthorized"))
+        Err(Response::error(401, "unauthorized", None))
     }
 
     fn accept(_: &Head) -> Result<(), Response> {
@@ -702,7 +687,7 @@ mod tests {
         while let Some((request, ())) = conn.next_request(check) {
             assert_eq!(request.body.len() as u64, request.head.content_length);
             bodies.push(request.body);
-            let reply = Response { status: 200, body: vec![b'x'; reply_bytes], close: false };
+            let reply = Response { status: 200, body: vec![b'x'; reply_bytes] };
             if conn.respond(&reply).is_err() {
                 write_errors += 1;
             }

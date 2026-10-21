@@ -90,23 +90,11 @@ pub struct Config {
     pub tenants: Vec<Tenant>,
 }
 
-/// A configuration or token file failed to load. The message never holds file content.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Error(String);
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for Error {}
-
 impl Config {
     /// Opens, checks and parses a configuration file.
-    pub fn load(path: &Path) -> Result<Self, Error> {
+    pub fn load(path: &Path) -> Result<Self, String> {
         let text = read_private(path, "config")?;
-        parse(&text).map_err(|message| Error(format!("config {}: {message}", path.display())))
+        parse(&text).map_err(|message| format!("config {}: {message}", path.display()))
     }
 
     /// Finds a tenant by name.
@@ -117,16 +105,16 @@ impl Config {
 
 /// Reads a token file with the same checks as the configuration file.
 /// Surrounding whitespace, such as a trailing newline, is ignored.
-pub fn read_token_file(path: &Path) -> Result<Token, Error> {
+pub fn read_token_file(path: &Path) -> Result<Token, String> {
     let text = read_private(path, "token file")?;
     Token::new(text.trim().to_owned())
-        .map_err(|message| Error(format!("token file {}: {message}", path.display())))
+        .map_err(|message| format!("token file {}: {message}", path.display()))
 }
 
 /// Writes a new mode 0600 configuration with one tenant and a random token.
 /// Never overwrites an existing file. Returns the token so the caller can print it once.
-pub fn init(path: &Path, tenant: &str) -> Result<Token, Error> {
-    let fail = |message: String| Error(format!("config {}: {message}", path.display()));
+pub fn init(path: &Path, tenant: &str) -> Result<Token, String> {
+    let fail = |message: String| format!("config {}: {message}", path.display());
     check_tenant_name(tenant).map_err(|message| fail(message.into()))?;
     let token = crate::random_hex(MIN_TOKEN_BYTES)
         .map_err(|error| fail(format!("cannot read /dev/urandom: {error}")))
@@ -151,8 +139,8 @@ pub fn init(path: &Path, tenant: &str) -> Result<Token, Error> {
 
 /// Opens once, checks the open handle with `fstat`, then reads from the same handle.
 /// `O_NONBLOCK` keeps a FIFO from blocking the open. It is then refused as not regular.
-fn read_private(path: &Path, what: &str) -> Result<String, Error> {
-    let fail = |message: String| Error(format!("{what} {}: {message}", path.display()));
+fn read_private(path: &Path, what: &str) -> Result<String, String> {
+    let fail = |message: String| format!("{what} {}: {message}", path.display());
     let nonblock = rustix::fs::OFlags::NONBLOCK.bits() as i32;
     let file = OpenOptions::new()
         .read(true)
@@ -172,8 +160,8 @@ fn read_private(path: &Path, what: &str) -> Result<String, Error> {
 
 /// Checks an open file with `fstat`: a regular file owned by the effective uid, with no
 /// group or other bits. The error names the path and the mode, never content.
-pub fn check_private(file: &File, path: &Path, what: &str) -> Result<(), Error> {
-    let fail = |message: String| Error(format!("{what} {}: {message}", path.display()));
+pub fn check_private(file: &File, path: &Path, what: &str) -> Result<(), String> {
+    let fail = |message: String| format!("{what} {}: {message}", path.display());
     let meta = file.metadata().map_err(|error| fail(format!("cannot stat: {error}")))?;
     let euid = rustix::process::geteuid().as_raw();
     let mode = meta.mode() & 0o7777;

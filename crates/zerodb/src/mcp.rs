@@ -7,7 +7,7 @@
 
 use crate::config::{read_token_file, Config, Token};
 use crate::launch::{Launch, Url};
-use crate::outcome::{Attempt, Merge, Outcome, Step};
+use crate::outcome::{self, Attempt, Merge, Outcome};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{self, BufRead, Read, Write};
@@ -80,11 +80,10 @@ impl Adapter {
         };
         let retry_deadline = duration("--retry-deadline", 30)?;
         let config_path = flags.remove("--config").map(PathBuf::from);
-        let config = config_path.as_deref().map(Config::load).transpose();
-        let config = config.map_err(|error| error.to_string())?;
+        let config = config_path.as_deref().map(Config::load).transpose()?;
         let token_file = flags.remove("--token-file");
         let token = match (token_file, std::env::var(TOKEN_ENV), flags.remove("--tenant")) {
-            (Some(path), _, _) => read_token_file(path.as_ref()).map_err(|e| e.to_string())?,
+            (Some(path), _, _) => read_token_file(path.as_ref())?,
             (None, Ok(text), _) => {
                 Token::new(text).map_err(|error| format!("{TOKEN_ENV}: {error}"))?
             }
@@ -172,16 +171,16 @@ impl Adapter {
         let mut merge = Merge::default();
         self.retry("POST", "/v1/append", body.to_string().as_bytes(), |reply| {
             let (attempt, detail) = match &reply {
-                Ok(reply) => match reply["outcome"].as_str().and_then(Outcome::parse) {
+                Ok(reply) => match reply["outcome"].as_str().and_then(outcome::parse) {
                     Some(outcome) => (Attempt::Answered(outcome), describe(reply)),
                     None => (Attempt::TransportError, "malformed response".into()),
                 },
                 Err((attempt, error)) => (*attempt, error.clone()),
             };
             match (merge.record(attempt), reply) {
-                (Step::Return(Outcome::Committed), Ok(reply)) => Ok(committed(&reply)),
-                (Step::Return(outcome), _) => Ok(failed(outcome, &detail)),
-                (Step::Retry, _) => Err(failed(merge.finish(), &detail)),
+                (Some(Outcome::Committed), Ok(reply)) => Ok(committed(&reply)),
+                (Some(outcome), _) => Ok(failed(outcome, &detail)),
+                (None, _) => Err(failed(merge.finish(), &detail)),
             }
         })
     }

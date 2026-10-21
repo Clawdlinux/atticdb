@@ -46,7 +46,7 @@ impl Auth {
 
 /// The 401 response, the same for a missing and a bad token.
 pub fn unauthorized() -> Response {
-    Response::error(401, "unauthorized")
+    Response::error(401, "unauthorized", None)
 }
 
 /// `Bearer <token>`, scheme case-insensitive.

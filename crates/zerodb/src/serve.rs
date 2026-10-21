@@ -9,7 +9,7 @@
 use crate::api::{self, Route};
 use crate::auth::Auth;
 use crate::config::{Config, Listen};
-use crate::http::{Limits, Response, ServerConn, Stream};
+use crate::http::{self, Limits, Response, ServerConn, Stream};
 use crate::listen::{self, Installed};
 use std::collections::HashMap;
 use std::io::{self, Write};
@@ -282,15 +282,10 @@ fn spawn_accept<S: Stream + Send + 'static>(
     })
 }
 
+/// Answers 503 on accept without reading, and closes without lingering.
 fn busy<S: Stream>(mut stream: S) {
-    let body = r#"{"outcome":"not_committed","error":"busy"}"#;
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
-    let _ = write!(
-        stream,
-        "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\n\
-         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let _ = http::write_response(&mut stream, &Response::error(503, "busy", None), true, deadline);
     let _ = stream.shutdown(Shutdown::Both);
 }
 

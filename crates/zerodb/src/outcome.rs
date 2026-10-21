@@ -5,35 +5,21 @@
 //! first attempt is already durable. An attempt whose connect failed sent nothing: it
 //! counts as `not_committed`, but the call still retries until the deadline.
 
-/// What a write call reports to its caller.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Outcome {
-    /// The write is durable.
-    Committed,
-    /// Nothing was written.
-    NotCommitted,
-    /// The write may or may not be durable.
-    Unknown,
+pub use zerodb_tape::Outcome;
+
+/// Parses the wire form used in response bodies.
+pub fn parse(text: &str) -> Option<Outcome> {
+    [Outcome::Committed, Outcome::NotCommitted, Outcome::Unknown]
+        .into_iter()
+        .find(|outcome| name(*outcome) == text)
 }
 
-impl Outcome {
-    /// Parses the wire form used in response bodies.
-    pub fn parse(text: &str) -> Option<Self> {
-        match text {
-            "committed" => Some(Self::Committed),
-            "not_committed" => Some(Self::NotCommitted),
-            "unknown" => Some(Self::Unknown),
-            _ => None,
-        }
-    }
-
-    /// Returns the wire form used in response bodies.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Committed => "committed",
-            Self::NotCommitted => "not_committed",
-            Self::Unknown => "unknown",
-        }
+/// Returns the wire form used in response bodies.
+pub fn name(outcome: Outcome) -> &'static str {
+    match outcome {
+        Outcome::Committed => "committed",
+        Outcome::NotCommitted => "not_committed",
+        Outcome::Unknown => "unknown",
     }
 }
 
@@ -48,15 +34,6 @@ pub enum Attempt {
     NotSent,
 }
 
-/// What the caller does after recording an attempt.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Step {
-    /// Stop and report this outcome.
-    Return(Outcome),
-    /// Retry with the same key until the deadline.
-    Retry,
-}
-
 /// The merged state of one call across its attempts.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Merge {
@@ -64,8 +41,9 @@ pub struct Merge {
 }
 
 impl Merge {
-    /// Folds in one attempt and says whether to return or retry.
-    pub fn record(&mut self, attempt: Attempt) -> Step {
+    /// Folds in one attempt. Returns the outcome to report now, or `None` to retry
+    /// with the same key until the deadline.
+    pub fn record(&mut self, attempt: Attempt) -> Option<Outcome> {
         let next = match (self.state, attempt) {
             (_, Attempt::Answered(Outcome::Committed)) => Outcome::Committed,
             (
@@ -79,8 +57,8 @@ impl Merge {
         };
         self.state = Some(next);
         match (next, attempt) {
-            (Outcome::Unknown, _) | (_, Attempt::NotSent) => Step::Retry,
-            (done, _) => Step::Return(done),
+            (Outcome::Unknown, _) | (_, Attempt::NotSent) => None,
+            (done, _) => Some(done),
         }
     }
 
@@ -104,7 +82,7 @@ mod tests {
         name: &'static str,
         previous: &'static [Attempt],
         this: Attempt,
-        step: Step,
+        step: Option<Outcome>,
         finish: Outcome,
     }
 
@@ -113,91 +91,91 @@ mod tests {
             name: "first committed",
             previous: &[],
             this: C,
-            step: Step::Return(Outcome::Committed),
+            step: Some(Outcome::Committed),
             finish: Outcome::Committed,
         },
         Case {
             name: "committed after unknown",
             previous: &[U],
             this: C,
-            step: Step::Return(Outcome::Committed),
+            step: Some(Outcome::Committed),
             finish: Outcome::Committed,
         },
         Case {
             name: "committed after transport",
             previous: &[T, U],
             this: C,
-            step: Step::Return(Outcome::Committed),
+            step: Some(Outcome::Committed),
             finish: Outcome::Committed,
         },
         Case {
             name: "first not_committed",
             previous: &[],
             this: N,
-            step: Step::Return(Outcome::NotCommitted),
+            step: Some(Outcome::NotCommitted),
             finish: Outcome::NotCommitted,
         },
         Case {
             name: "not_committed after transport",
             previous: &[T],
             this: N,
-            step: Step::Retry,
+            step: None,
             finish: Outcome::Unknown,
         },
         Case {
             name: "not_committed after unknown",
             previous: &[U],
             this: N,
-            step: Step::Retry,
+            step: None,
             finish: Outcome::Unknown,
         },
         Case {
             name: "not_committed twice after unknown",
             previous: &[U, N],
             this: N,
-            step: Step::Retry,
+            step: None,
             finish: Outcome::Unknown,
         },
         Case {
             name: "first unknown",
             previous: &[],
             this: U,
-            step: Step::Retry,
+            step: None,
             finish: Outcome::Unknown,
         },
         Case {
             name: "first transport",
             previous: &[],
             this: T,
-            step: Step::Retry,
+            step: None,
             finish: Outcome::Unknown,
         },
         Case {
             name: "only connect failures",
             previous: &[S],
             this: S,
-            step: Step::Retry,
+            step: None,
             finish: Outcome::NotCommitted,
         },
         Case {
             name: "connect failure after unknown",
             previous: &[U],
             this: S,
-            step: Step::Retry,
+            step: None,
             finish: Outcome::Unknown,
         },
         Case {
             name: "transport after connect failure",
             previous: &[S],
             this: T,
-            step: Step::Retry,
+            step: None,
             finish: Outcome::Unknown,
         },
         Case {
             name: "transport after unknown",
             previous: &[U],
             this: T,
-            step: Step::Retry,
+            step: None,
             finish: Outcome::Unknown,
         },
     ];
@@ -214,7 +192,7 @@ mod tests {
         }
         assert_eq!(Merge::default().finish(), Outcome::Unknown, "no attempt before the deadline");
         for outcome in [Outcome::Committed, Outcome::NotCommitted, Outcome::Unknown] {
-            assert_eq!(Outcome::parse(outcome.as_str()), Some(outcome), "{outcome:?} wire form");
+            assert_eq!(parse(name(outcome)), Some(outcome), "{outcome:?} wire form");
         }
     }
 }

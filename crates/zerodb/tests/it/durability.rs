@@ -16,7 +16,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 use zerodb::listen::SOCKET_NAME;
-use zerodb::outcome::Outcome;
+use zerodb::outcome::{parse, Outcome};
 
 /// One write call: its unique content, merged outcome and seq, if the receipt had one.
 type Call = (String, Outcome, Option<u64>);
@@ -151,7 +151,7 @@ impl Proxy {
 /// Classifies a `memory_append` tool result.
 fn outcome(result: &Value) -> Outcome {
     let word = text(result).split([':', ' ', ',']).next().unwrap();
-    let outcome = Outcome::parse(word).unwrap_or_else(|| panic!("{result}"));
+    let outcome = parse(word).unwrap_or_else(|| panic!("{result}"));
     assert_eq!(outcome == Outcome::Committed, result["isError"].is_null(), "{result}");
     outcome
 }
@@ -271,7 +271,7 @@ fn append(
     );
     match reply.map(|reply| serde_json::from_slice::<Value>(&reply.body).unwrap()) {
         Ok(reply) => {
-            let outcome = Outcome::parse(reply["outcome"].as_str().unwrap()).unwrap();
+            let outcome = parse(reply["outcome"].as_str().unwrap()).unwrap();
             (content.into(), outcome, reply["seqs"][0].as_u64())
         }
         Err(_) => (content.into(), Outcome::Unknown, None),

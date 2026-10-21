@@ -1,7 +1,7 @@
 use crate::support::{append_body, serve, sim_engine, Dir, Via, TOKEN_A, TOKEN_B};
 use serde_json::{json, Value};
 use std::sync::Arc;
-use zerodb::outcome::{Attempt, Merge, Outcome as Merged};
+use zerodb::outcome::{self, Attempt, Merge};
 use zerodb::serve::MAX_CONNECTIONS;
 use zerodb_core::{EngineError, ErrorKind, NewTurn, Role, Scope};
 use zerodb_tape::{Error, Outcome, SimDisk};
@@ -315,9 +315,9 @@ fn health_tracks_engine_state() {
     assert_eq!(retry, (503, json!({"outcome": "not_committed", "error": "poisoned"})));
     let mut merge = Merge::default();
     for body in [&unknown.1, &retry.1] {
-        merge.record(Attempt::Answered(Merged::parse(body["outcome"].as_str().unwrap()).unwrap()));
+        merge.record(Attempt::Answered(outcome::parse(body["outcome"].as_str().unwrap()).unwrap()));
     }
-    assert_eq!(merge.finish(), Merged::Unknown);
+    assert_eq!(merge.finish(), Outcome::Unknown);
     running.server.shutdown();
 
     // The engine has no public hook to fail a receipt after commit, or a space-error

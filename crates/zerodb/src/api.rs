@@ -38,7 +38,7 @@ pub enum Route {
 /// route and the tenant, which comes only from the token.
 pub fn check(auth: &Auth, head: &Head, tcp: bool) -> Result<(Route, Option<String>), Response> {
     if tcp && !head.header("host").is_some_and(loopback_host) {
-        return Err(Response::error(403, "forbidden_host"));
+        return Err(Response::error(403, "forbidden_host", None));
     }
     if (head.method.as_str(), head.path()) == ("GET", "/healthz") {
         return Ok((Route::Health, None));
@@ -48,9 +48,9 @@ pub fn check(auth: &Auth, head: &Head, tcp: bool) -> Result<(Route, Option<Strin
         ("POST", "/v1/append") => Ok((Route::Append, Some(tenant))),
         ("GET", "/v1/window") => Ok((Route::Window, Some(tenant))),
         (_, "/v1/append" | "/v1/window" | "/healthz") => {
-            Err(Response::error(405, "method_not_allowed"))
+            Err(Response::error(405, "method_not_allowed", None))
         }
-        _ => Err(Response::error(404, "not_found")),
+        _ => Err(Response::error(404, "not_found", None)),
     }
 }
 
@@ -159,15 +159,13 @@ pub fn append_response(result: Result<Appended, EngineError>) -> Response {
         Err(error) => error,
     };
     let (status, name) = classify(&error.kind);
-    let outcome = match error.outcome {
-        Outcome::Committed => {
-            let body = json!({"outcome": "committed", "receipt": null, "error": name});
-            return Response::json(200, &body);
-        }
-        Outcome::NotCommitted => "not_committed",
-        Outcome::Unknown => "unknown",
-    };
-    let mut body = json!({"outcome": outcome, "error": name});
+    if error.outcome == Outcome::Committed {
+        return Response::json(
+            200,
+            &json!({"outcome": "committed", "receipt": null, "error": name}),
+        );
+    }
+    let mut body = json!({"outcome": crate::outcome::name(error.outcome), "error": name});
     match error.kind {
         ErrorKind::ResourceExhausted(resource) => body["resource"] = json!(resource),
         ErrorKind::InvalidInput => body["message"] = json!(LIMITS),
@@ -287,12 +285,7 @@ fn turn_json(turn: Turn) -> Value {
         Ok(meta) => meta,
         Err(_) => Value::String(text(turn.meta)),
     };
-    let role = match turn.role {
-        Role::System => "system",
-        Role::User => "user",
-        Role::Assistant => "assistant",
-        Role::Tool => "tool",
-    };
+    let role = ROLES.iter().find(|(role, _)| *role == turn.role).map_or("", |(_, name)| *name);
     let mut out = json!({
         "seq": turn.seq,
         "lsn": turn.lsn,
