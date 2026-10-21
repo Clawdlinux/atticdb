@@ -102,8 +102,8 @@ fn writers(
     iterations: usize,
     readers: usize,
     append: impl Fn(usize, usize) + Sync,
-    read: impl Fn(usize, usize) -> bool + Sync,
-) -> (Duration, Vec<Duration>, Vec<Duration>, u64) {
+    read: impl Fn(usize, usize) -> Option<u64> + Sync,
+) -> (Duration, Vec<Duration>, Vec<Duration>, Queries) {
     let barrier = Barrier::new(WRITERS + readers + 1);
     let done = AtomicBool::new(false);
     std::thread::scope(|threads| {
@@ -128,21 +128,23 @@ fn writers(
                 threads.spawn(move || {
                     let mut samples = Vec::new();
                     let mut count = 0;
+                    let mut records = 0;
                     barrier.wait();
                     while !done.load(Ordering::Acquire) {
                         let start = Instant::now();
                         // A reader that finds nothing durable yet has not run a query.
-                        if !read(reader, count) {
+                        let Some(read) = read(reader, count) else {
                             std::thread::yield_now();
                             continue;
-                        }
+                        };
+                        records += read;
                         // Bound sample memory during the 1M-turn trace. Count every completed query.
                         if count.is_multiple_of(64) {
                             samples.push(start.elapsed());
                         }
                         count += 1;
                     }
-                    (count as u64, samples)
+                    (Queries { queries: count as u64, records }, samples)
                 })
             })
             .collect::<Vec<_>>();
@@ -152,10 +154,11 @@ fn writers(
         let elapsed = start.elapsed();
         done.store(true, Ordering::Release);
         let mut read_samples = Vec::new();
-        let mut queries = 0;
+        let mut queries = Queries::default();
         for reader in readers {
             let (n, samples) = reader.join().unwrap();
-            queries += n;
+            queries.queries += n.queries;
+            queries.records += n.records;
             read_samples.extend(samples);
         }
         (elapsed, samples, read_samples, queries)
@@ -188,8 +191,18 @@ fn reader_count(symmetric: bool) -> usize {
     }
 }
 
-fn window_report(label: &str, queries: u64, mut reads: Vec<Duration>) {
-    println!("{label}/window: queries={queries} sample_stride=64");
+#[derive(Clone, Copy, Default)]
+struct Queries {
+    queries: u64,
+    records: u64,
+}
+
+fn window_report(label: &str, queries: Queries, mut reads: Vec<Duration>) {
+    println!(
+        "{label}/window: queries={} records_per_query={:.3} sample_stride=64",
+        queries.queries,
+        queries.records as f64 / queries.queries.max(1) as f64
+    );
     latency(&format!("{label}/window"), &mut reads);
 }
 
@@ -203,8 +216,11 @@ fn bare(iterations: usize, batch: usize, n: usize, symmetric: bool) -> Stats {
         "matched encoded batch bytes: {:?}",
         templates.iter().map(|b| b.len()).collect::<Vec<_>>()
     );
-    // Engine Last(16) does 16 tape record reads. The bare reader does 16 positional reads,
-    // each the mean encoded record size with its footer share, ending at the synced offset.
+    // Engine Last(16) reads the 16 most recent turns of one session, one tape read each.
+    // Short sessions return fewer, so compare records_per_query, not only window latency.
+    // The bare reader does 16 positional reads ending at the synced offset. Each read is the
+    // mean encoded record size with its footer share. Its newest bytes sit in page cache, so
+    // it completes far more queries than Tape or Engine. That extra load may slow bare appends.
     let record_bytes = templates.iter().map(|b| b.len()).sum::<usize>() / (SIZES.len() * batch);
     assert!(zerodb_tape::sim::DEFAULT_SEGMENT_SIZE <= u64::from(u32::MAX));
     // Synced end as segment << 32 | offset, published after each sync.
@@ -247,7 +263,7 @@ fn bare(iterations: usize, batch: usize, n: usize, symmetric: bool) -> Stats {
             let packed = durable.load(Ordering::Acquire);
             let (segment, mut offset) = (packed >> 32, packed & u64::from(u32::MAX));
             if offset == 0 {
-                return false;
+                return None;
             }
             let mut file = files[reader].lock().unwrap();
             if file.as_ref().is_none_or(|(id, _)| *id != segment) {
@@ -255,6 +271,7 @@ fn bare(iterations: usize, batch: usize, n: usize, symmetric: bool) -> Stats {
             }
             let (_, file) = file.as_ref().unwrap();
             let mut buf = vec![0; record_bytes];
+            let mut records = 0;
             for _ in 0..WINDOW {
                 let len = record_bytes.min(offset as usize);
                 if len == 0 {
@@ -263,8 +280,9 @@ fn bare(iterations: usize, batch: usize, n: usize, symmetric: bool) -> Stats {
                 offset -= len as u64;
                 read_at(file, &mut buf[..len], offset);
                 black_box(&buf);
+                records += 1;
             }
-            true
+            Some(records)
         },
     );
     drop(sender);
@@ -293,16 +311,17 @@ fn tape(iterations: usize, batch: usize, n: usize, symmetric: bool) -> Stats {
             );
         },
         |_, _| {
-            // The last 16 durable LSNs through the same read path an engine window uses.
-            // Footers take no LSN, so these are 16 records. No session lookup is involved.
+            // The last 16 durable LSNs across all writers, through the read path an engine
+            // window uses. Footers take no LSN. No session lookup is involved.
             let end = tape.durable_lsn();
             if end == 0 {
-                return false;
+                return None;
             }
-            for lsn in end.saturating_sub(WINDOW as u64 - 1).max(1)..=end {
+            let start = end.saturating_sub(WINDOW as u64 - 1).max(1);
+            for lsn in start..=end {
                 black_box(tape.read(lsn).unwrap());
             }
-            true
+            Some(end - start + 1)
         },
     );
     let (groups, requests) = tape.group_stats();
@@ -350,13 +369,15 @@ fn engine(iterations: usize, batch: usize, n: usize, checkpoint_bytes: u64) -> S
         },
         |reader, i| {
             let scope = &scopes[(i + reader) % WRITERS][i / WRITERS % SESSIONS];
-            black_box(engine.window(scope, WindowQuery::Last(WINDOW)).unwrap());
-            true
+            Some(black_box(engine.window(scope, WindowQuery::Last(WINDOW)).unwrap()).len() as u64)
         },
     );
-    window_report("engine", queries, reads);
-    let mut stats = report("engine", elapsed, n, samples);
     let metrics = engine.metrics().unwrap();
+    // Each returned turn is one tape read. The metric is the source; the sum cross-checks it.
+    let records = metrics.window_reads - warmup.window_reads;
+    assert_eq!(records, queries.records);
+    window_report("engine", Queries { records, ..queries }, reads);
+    let mut stats = report("engine", elapsed, n, samples);
     index_report("engine", metrics.tape_index, n);
     println!(
         "engine: writer_groups={} mean_requests_per_group={:.3}",
