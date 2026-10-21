@@ -310,10 +310,9 @@ pub fn start(config: Config, exit_on_poison: bool) -> u8 {
 fn try_start(config: Config, exit_on_poison: bool) -> Result<u8, (u8, String)> {
     let fail = |message: String| (1, message);
     let data_dir = config.data_dir.ok_or_else(|| fail("set data_dir or --data-dir".into()))?;
-    // The socket binds at the path as given, so a relative path keeps it under sun_path.
-    // LOCK and the startup line carry the absolute path.
+    let data_dir = std::path::absolute(&data_dir).map_err(|error| fail(error.to_string()))?;
     let socket = config.unix_socket.unwrap_or_else(|| data_dir.join(listen::SOCKET_NAME));
-    let absolute = std::path::absolute(&socket).map_err(|error| fail(error.to_string()))?;
+    let socket = std::path::absolute(&socket).map_err(|error| fail(error.to_string()))?;
     let group = config.unix_socket_group.as_deref().map(listen::resolve_group).transpose();
     let group = group.map_err(fail)?;
     let default = Listen::Tcp(SocketAddr::from((Ipv4Addr::LOCALHOST, listen::DEFAULT_PORT)));
@@ -332,7 +331,7 @@ fn try_start(config: Config, exit_on_poison: bool) -> Result<u8, (u8, String)> {
         .create(&data_dir)
         .map_err(|error| fail(format!("cannot create {}: {error}", data_dir.display())))?;
     let mut options = EngineOptions::default();
-    let address = format!("instance={instance} unix={} tcp={tcp_text}", absolute.display());
+    let address = format!("instance={instance} unix={} tcp={tcp_text}", socket.display());
     options.tape.server_address = Some(address);
     let engine = open_engine(&data_dir, options).map_err(|error| match error.kind {
         ErrorKind::Storage(Error::DataDirLocked { holder }) => (
@@ -341,8 +340,8 @@ fn try_start(config: Config, exit_on_poison: bool) -> Result<u8, (u8, String)> {
         ),
         _ => fail(format!("cannot open {}: {error}", data_dir.display())),
     })?;
-    let unix = listen::install_unix(&socket, group, &instance).map_err(fail)?;
-    let listeners = Listeners { tcp, unix: Some((unix, socket)) };
+    let unix = listen::install_unix(&socket, group).map_err(fail)?;
+    let listeners = Listeners { tcp, unix: Some((unix, socket.clone())) };
     let auth = Auth::new(&config.tenants);
     let max_connections = MAX_CONNECTIONS;
     let config = ServeConfig { auth, instance, exit_on_poison, max_connections };
@@ -350,7 +349,7 @@ fn try_start(config: Config, exit_on_poison: bool) -> Result<u8, (u8, String)> {
     eprintln!(
         "zerodb: serving instance={} tcp={tcp_text} unix={}",
         server.shared.config.instance,
-        absolute.display()
+        socket.display()
     );
     server.wait();
     eprintln!("zerodb: engine poisoned, exiting so a fresh start can recover");

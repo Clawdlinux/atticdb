@@ -33,8 +33,7 @@ impl Dir {
         let name = format!("{:x}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
         let path = root.join(name);
         std::fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
-        // The in-process server's staging path. Spawned servers bind relative paths.
-        let staging = path.join(".zerodb-sock.a.0123456789abcdef0123456789abcdef/s");
+        let staging = path.join("d/.zs.01234567/s");
         assert!(
             staging.as_os_str().len() < zerodb::listen::SUN_PATH_BYTES,
             "{} is too deep for socket tests, set ZERODB_TEST_DIR to a short directory",
@@ -152,10 +151,7 @@ pub fn serve(engine: Arc<Engine>, dir: &Dir, max_connections: usize) -> Running 
     });
     let listeners = Listeners {
         tcp: Some(zerodb::listen::bind_tcp("127.0.0.1:0".parse().unwrap()).unwrap()),
-        unix: Some((
-            zerodb::listen::install_unix(&socket, None, &instance).unwrap(),
-            socket.clone(),
-        )),
+        unix: Some((zerodb::listen::install_unix(&socket, None).unwrap(), socket.clone())),
     };
     let config = ServeConfig {
         auth: Auth::new(&tenants),

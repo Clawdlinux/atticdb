@@ -17,7 +17,7 @@ pub const NEEDS_TLS: &str = "non-loopback listening needs TLS, which zerodb does
                              put a TLS proxy on loopback in front";
 /// `sun_path` size, terminating NUL included.
 pub const SUN_PATH_BYTES: usize = if cfg!(target_os = "linux") { 108 } else { 104 };
-const STAGING: &str = ".zerodb-sock.";
+const STAGING: &str = ".zs.";
 
 /// Binds a loopback TCP address. Any other address is refused.
 pub fn bind_tcp(addr: SocketAddr) -> Result<TcpListener, String> {
@@ -46,16 +46,13 @@ pub fn resolve_group(group: &str) -> Result<u32, String> {
 /// It binds inside a private 0700 staging directory, sets the mode (0600, or 0660 with
 /// `group`), then hard-links the socket onto `path`. A link fails if `path` exists, so an
 /// existing path is never clobbered, and nobody else can connect before the mode is set.
-pub fn install_unix(
-    path: &Path,
-    group: Option<u32>,
-    instance: &str,
-) -> Result<UnixListener, String> {
-    let parent =
-        path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or(Path::new("."));
-    // Scoped by the socket file name, so servers sharing a parent never touch each other's.
-    let prefix = format!("{STAGING}{}.", path.file_name().unwrap_or_default().to_string_lossy());
-    let staging = parent.join(format!("{prefix}{instance}"));
+pub fn install_unix(path: &Path, group: Option<u32>) -> Result<UnixListener, String> {
+    let path = &std::path::absolute(path).map_err(|error| format!("socket path: {error}"))?;
+    let parent = path.parent().unwrap_or(Path::new("/"));
+    // One short name per socket file name: a killed server's leftover is this same
+    // directory, and other sockets in a shared parent never match it.
+    let name = path.file_name().unwrap_or_default().as_encoded_bytes();
+    let staging = parent.join(format!("{STAGING}{}", &blake3::hash(name).to_hex()[..8]));
     let staged = staging.join("s");
     for checked in [path, &staged] {
         let bytes = checked.as_os_str().len() + 1;
@@ -94,13 +91,8 @@ pub fn install_unix(
             Err(error) => return Err(format!("cannot probe socket {}: {error}", path.display())),
         },
     }
-    // A kill before cleanup leaves staging directories behind. PIDs repeat, ids do not.
-    for entry in fs::read_dir(parent).into_iter().flatten().flatten() {
-        let leftover = entry.file_name().to_string_lossy().starts_with(&prefix)
-            && entry.metadata().is_ok_and(|meta| meta.is_dir() && meta.uid() == euid);
-        if leftover {
-            let _ = fs::remove_dir_all(entry.path());
-        }
+    if fs::symlink_metadata(&staging).is_ok_and(|meta| meta.is_dir() && meta.uid() == euid) {
+        let _ = fs::remove_dir_all(&staging);
     }
     DirBuilder::new()
         .mode(0o700)

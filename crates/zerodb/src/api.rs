@@ -287,7 +287,12 @@ fn turn_json(turn: Turn) -> Value {
         Ok(meta) => meta,
         Err(_) => Value::String(text(turn.meta)),
     };
-    let role = ROLES.iter().find(|(role, _)| *role == turn.role).map_or("", |(_, name)| *name);
+    let role = match turn.role {
+        Role::System => "system",
+        Role::User => "user",
+        Role::Assistant => "assistant",
+        Role::Tool => "tool",
+    };
     let mut out = json!({
         "seq": turn.seq,
         "lsn": turn.lsn,

@@ -1,15 +1,12 @@
 use crate::support::{append_body, Dir, Process, Via};
 use serde_json::{json, Value};
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::path::PathBuf;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 
-/// Spawned servers run in `dir` and get relative paths, so the socket's staging path
-/// stays under `sun_path` however deep the checkout is.
 struct Ctx {
     dir: Dir,
     config: PathBuf,
     token: String,
-    /// `dir/d`, passed to the server as `d`.
     data: PathBuf,
     /// `dir/d/zerodb.sock`.
     socket: PathBuf,
@@ -18,12 +15,17 @@ struct Ctx {
 }
 
 impl Ctx {
+    fn path(&self, name: &str) -> String {
+        self.dir.0.join(name).to_str().unwrap().to_owned()
+    }
+
     fn run(&self, args: &[&str]) -> Process {
         Process::spawn(&self.dir.0, args)
     }
 
-    fn serve(&self, data: &str, extra: &[&str]) -> Process {
-        let args = ["serve", "--config", self.config.to_str().unwrap(), "--data-dir", data];
+    fn serve(&self, data: &Path, extra: &[&str]) -> Process {
+        let (config, data) = (self.config.to_str().unwrap(), data.to_str().unwrap());
+        let args = ["serve", "--config", config, "--data-dir", data];
         let listen =
             if extra.contains(&"--listen") { &[][..] } else { &["--listen", "127.0.0.1:0"] };
         self.run(&[&args[..], listen, extra].concat())
@@ -47,7 +49,7 @@ impl Ctx {
 
     /// Starts a server on this data directory, kills it, and leaves its socket behind.
     fn stale_socket(&mut self) {
-        let mut first = self.serve("d", &[]);
+        let mut first = self.serve(&self.data, &[]);
         first.ready();
         first.child.kill().unwrap();
         first.wait();
@@ -55,8 +57,8 @@ impl Ctx {
     }
 
     /// Keeps a server on `data` with this row's socket path running.
-    fn other(&mut self, data: &str) {
-        let mut other = self.serve(data, &["--unix-socket", "d/zerodb.sock"]);
+    fn other(&mut self, data: &Path) {
+        let mut other = self.serve(data, &["--unix-socket", self.socket.to_str().unwrap()]);
         let (instance, _) = other.ready();
         self.other = Some((other, instance));
     }
@@ -65,7 +67,7 @@ impl Ctx {
 enum Expect {
     /// Exit code and a fragment of stderr.
     Fails(i32, &'static str),
-    /// Serves, and these entries of the data directory still exist.
+    /// Serves, and the staging directories of these other socket names still exist.
     Serves(&'static [&'static str]),
     /// `zerodb recover` refuses while the server runs, then cuts after the first write.
     Recovers,
@@ -76,7 +78,11 @@ enum Expect {
 
 const TENANT: &str = r#"{"name": "a", "token": "secret-token-0123456789abcdefghijkl"}"#;
 const TENANT_B: &str = r#"{"name": "b", "token": "secret-token-0123456789abcdefghijkX"}"#;
-const FOREIGN: &str = ".zerodb-sock.other.sock.0123456789abcdef0123456789abcdef";
+
+/// The staging directory name for a socket file name.
+fn staging(socket: &str) -> String {
+    format!(".zs.{}", &blake3::hash(socket.as_bytes()).to_hex()[..8])
+}
 
 /// Drives the real binary through startup. Every row starts from a fresh directory with
 /// a config made by `zerodb init`, and a data directory the server creates.
@@ -197,7 +203,7 @@ fn startup_checks() {
             "live socket of another server",
             |c| {
                 c.private_data_dir(0o700);
-                c.other("other");
+                c.other(&c.dir.0.join("other"));
                 vec![]
             },
             Expect::Fails(1, "another server is listening"),
@@ -221,26 +227,38 @@ fn startup_checks() {
         ),
         (
             "path past sun_path",
-            |_| vec!["--unix-socket".into(), "x".repeat(zerodb::listen::SUN_PATH_BYTES)],
-            Expect::Fails(1, "set --unix-socket to a shorter path"),
+            |c| vec!["--unix-socket".into(), c.path(&"x".repeat(zerodb::listen::SUN_PATH_BYTES))],
+            Expect::Fails(1, "sun_path limit; set --unix-socket to a shorter path"),
+        ),
+        (
+            "staging path past sun_path",
+            |c| {
+                // The socket path fits, but `<parent>/.zs.<8 hex>/s` does not.
+                let parent = c.dir.0.join("p".repeat(94 - c.dir.0.as_os_str().len()));
+                std::fs::DirBuilder::new().mode(0o700).create(&parent).unwrap();
+                c.socket = parent.join("x");
+                assert!(c.socket.as_os_str().len() < 100 && parent.as_os_str().len() == 95);
+                vec!["--unix-socket".into(), c.socket.to_str().unwrap().into()]
+            },
+            Expect::Fails(1, "sun_path limit; set --unix-socket to a shorter path"),
         ),
         (
             "leftover staging directory",
             |c| {
                 c.private_data_dir(0o700);
                 // A killed server's staging directory, and one of a server on another socket.
-                for name in [".zerodb-sock.zerodb.sock.0123456789abcdef0123456789abcdef", FOREIGN] {
-                    std::fs::create_dir(c.data.join(name)).unwrap();
+                for name in [staging("zerodb.sock"), staging("other.sock")] {
+                    std::fs::create_dir(c.data.join(&name)).unwrap();
                     std::fs::write(c.data.join(name).join("s"), "").unwrap();
                 }
                 vec![]
             },
-            Expect::Serves(&[FOREIGN]),
+            Expect::Serves(&["other.sock"]),
         ),
         (
             "second serve on a locked data dir",
             |c| {
-                c.other("d");
+                c.other(&c.data.clone());
                 vec![]
             },
             Expect::Fails(75, "is locked by pid="),
@@ -267,13 +285,17 @@ fn startup_checks() {
         let mut ctx = Ctx { dir, config, token, data, socket, other: None };
         let extra = prepare(&mut ctx);
         let extra: Vec<&str> = extra.iter().map(String::as_str).collect();
-        let mut server = ctx.serve("d", &extra);
+        let mut server = ctx.serve(&ctx.data, &extra);
         let unix = Via::Unix(ctx.socket.clone());
         match *expect {
             Expect::Fails(code, fragment) => {
                 let (status, stderr) = server.wait();
                 assert_eq!(status.code(), Some(code), "{case}: {stderr}");
                 assert!(stderr.contains(fragment), "{case}: {stderr}");
+                if case.starts_with("staging") {
+                    let parent = std::fs::read_dir(ctx.socket.parent().unwrap()).unwrap();
+                    assert_eq!(parent.count(), 0, "{case}: nothing is bound or staged");
+                }
                 for secret in [ctx.token.as_str(), "secret-token"] {
                     assert!(!stderr.contains(secret), "{case}: stderr leaks a token");
                 }
@@ -296,14 +318,15 @@ fn startup_checks() {
                 assert_eq!(unix.call(None, None, "GET", "/healthz", None), (200, health), "{case}");
                 let via = tcp.map_or(unix.clone(), Via::Tcp);
                 assert_eq!(ctx.append(&via, "k").0, 200, "{case}: the init token works");
-                let mut staging: Vec<String> = std::fs::read_dir(&ctx.data)
+                let mut left: Vec<String> = std::fs::read_dir(&ctx.data)
                     .unwrap()
                     .flatten()
                     .map(|entry| entry.file_name().to_string_lossy().into_owned())
-                    .filter(|name| name.starts_with(".zerodb-sock."))
+                    .filter(|name| name.starts_with(".zs."))
                     .collect();
-                staging.sort();
-                assert_eq!(staging, kept, "{case}: staging directories");
+                left.sort();
+                let kept: Vec<String> = kept.iter().map(|name| staging(name)).collect();
+                assert_eq!(left, kept, "{case}: staging directories");
             }
             Expect::Recovers => {
                 server.ready();
@@ -311,14 +334,15 @@ fn startup_checks() {
                 assert_eq!(status, 200, "{case}: {first}");
                 assert_eq!(ctx.append(&unix, "two").0, 200, "{case}");
                 let cut = first["last_lsn"].to_string();
-                let recover = ["recover", "--truncate-at", &cut, "--data-dir", "d"];
+                let data = ctx.data.to_str().unwrap();
+                let recover = ["recover", "--truncate-at", &cut, "--data-dir", data];
                 let (status, stderr) = ctx.run(&recover).wait();
                 assert_eq!(status.code(), Some(75), "{case}: refused under the lock: {stderr}");
                 server.child.kill().unwrap();
                 server.wait();
                 let (status, report) = ctx.run(&recover).wait();
                 assert!(status.success(), "{case}: {report}");
-                let mut restarted = ctx.serve("d", &[]);
+                let mut restarted = ctx.serve(&ctx.data, &[]);
                 restarted.ready();
                 let target = "/v1/window?agent=a&session=s&last=10";
                 let (_, window) = unix.call(None, Some(&ctx.token), "GET", target, None);
@@ -336,7 +360,7 @@ fn startup_checks() {
                 assert_eq!(status.code(), Some(70), "{case}: {stderr}");
                 assert!(!ctx.socket.exists(), "{case}: socket path removed");
                 // The written bytes survived the exit, so a fresh start finds the key.
-                let mut restarted = ctx.serve("d", &[]);
+                let mut restarted = ctx.serve(&ctx.data, &[]);
                 restarted.ready();
                 let (status, retry) = ctx.append(&unix, "poison");
                 assert_eq!(
