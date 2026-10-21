@@ -33,7 +33,8 @@ impl Dir {
         let name = format!("{:x}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
         let path = root.join(name);
         std::fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
-        let staging = path.join("d/.zerodb-sock.0123456789abcdef0123456789abcdef/s");
+        // The in-process server's staging path. Spawned servers bind relative paths.
+        let staging = path.join(".zerodb-sock.a.0123456789abcdef0123456789abcdef/s");
         assert!(
             staging.as_os_str().len() < zerodb::listen::SUN_PATH_BYTES,
             "{} is too deep for socket tests, set ZERODB_TEST_DIR to a short directory",
@@ -49,13 +50,14 @@ impl Drop for Dir {
     }
 }
 
-pub fn sim_engine(disk: &SimDisk, floor: Option<u64>) -> Arc<Engine> {
+pub fn sim_engine(disk: &SimDisk, floor: Option<u64>, max_sessions: usize) -> Arc<Engine> {
     let tape =
         TapeOptions { segment_size: 1 << 20, free_space_floor: floor, ..TapeOptions::default() };
     let opts = EngineOptions {
         tape,
         checkpoint_interval: Duration::from_secs(3600),
         checkpoint_bytes: u64::MAX,
+        max_sessions,
         ..EngineOptions::default()
     };
     let disk = Arc::new(disk.clone());
@@ -134,15 +136,15 @@ pub fn append_body(session: &str, key: &str, content: &str) -> Value {
            "turns": [{"role": "user", "content": content, "meta": {"k": 1}}]})
 }
 
-/// A server on TCP port 0 and a Unix socket in `dir`, serving tenants `a` and `b`.
+/// A server on TCP port 0 and a Unix socket `a` in `dir`, serving tenants `a` and `b`.
 pub struct Running {
     pub server: Server,
     pub vias: [Via; 2],
     pub instance: String,
 }
 
-pub fn serve(engine: Arc<Engine>, dir: &Dir) -> Running {
-    let socket = dir.0.join("api.sock");
+pub fn serve(engine: Arc<Engine>, dir: &Dir, max_connections: usize) -> Running {
+    let socket = dir.0.join("a");
     let instance = zerodb::random_hex(16).unwrap();
     let tenants = [("a", TOKEN_A), ("b", TOKEN_B)].map(|(name, token)| Tenant {
         name: name.into(),
@@ -150,13 +152,16 @@ pub fn serve(engine: Arc<Engine>, dir: &Dir) -> Running {
     });
     let listeners = Listeners {
         tcp: Some(zerodb::listen::bind_tcp("127.0.0.1:0".parse().unwrap()).unwrap()),
-        unix: Some(zerodb::listen::install_unix(&socket, None, &instance).unwrap()),
+        unix: Some((
+            zerodb::listen::install_unix(&socket, None, &instance).unwrap(),
+            socket.clone(),
+        )),
     };
     let config = ServeConfig {
         auth: Auth::new(&tenants),
         instance: instance.clone(),
         exit_on_poison: false,
-        unix_socket: Some(socket.clone()),
+        max_connections,
     };
     let server = serve::run(engine, listeners, config).unwrap();
     let vias = [Via::Tcp(server.tcp_addr().unwrap()), Via::Unix(socket)];
@@ -170,9 +175,11 @@ pub struct Process {
 }
 
 impl Process {
-    pub fn spawn(args: &[&str]) -> Self {
+    /// Runs `zerodb` with `args` in directory `cwd`.
+    pub fn spawn(cwd: &Path, args: &[&str]) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_zerodb"))
             .args(args)
+            .current_dir(cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -201,8 +208,8 @@ impl Process {
         self.stderr.lock().unwrap().clone()
     }
 
-    /// Waits for the startup line and returns `instance` and the TCP address.
-    pub fn ready(&mut self) -> (String, SocketAddr) {
+    /// Waits for the startup line and returns `instance` and the TCP address, if any.
+    pub fn ready(&mut self) -> (String, Option<SocketAddr>) {
         let deadline = Instant::now() + Duration::from_secs(60);
         loop {
             let output = self.output();
@@ -211,7 +218,7 @@ impl Process {
                     let start = line.find(name).unwrap() + name.len();
                     line[start..].split(' ').next().unwrap().to_owned()
                 };
-                return (field("instance="), field("tcp=").parse().unwrap());
+                return (field("instance="), field("tcp=").parse().ok());
             }
             let exited = self.child.try_wait().unwrap();
             assert!(exited.is_none() && Instant::now() < deadline, "not serving: {output}");

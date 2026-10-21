@@ -247,3 +247,39 @@ fn check_tenant_name(name: &str) -> Result<(), &'static str> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    mod fs {
+        // Cargo doesn't define CARGO_TARGET_TMPDIR for unit tests.
+        const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/tmp");
+        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/support.rs"));
+    }
+
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    const SECRET: &str = "secret-token-0123456789abcdefghijkl";
+
+    /// `zerodb mcp` reads token files in T4. Until then the check is pinned here.
+    #[test]
+    fn token_files_and_debug_never_leak() {
+        let dir = fs::TestDir::new();
+        let path = dir.0.join("token");
+        std::fs::write(&path, format!("{SECRET}\n")).unwrap();
+        for (mode, expect) in [(0o644, Err("found mode 0644")), (0o600, Ok(SECRET))] {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            match (read_token_file(&path), expect) {
+                (Ok(token), Ok(secret)) => assert_eq!(token.expose(), secret, "mode {mode:o}"),
+                (Err(error), Err(fragment)) => {
+                    let text = error.to_string();
+                    assert!(text.contains(fragment) && !text.contains(SECRET), "{text}");
+                }
+                (result, _) => panic!("mode {mode:o}: unexpected {result:?}"),
+            }
+        }
+        let config = parse(&format!(r#"{{"tenants": [{{"name": "a", "token": "{SECRET}"}}]}}"#));
+        assert!(!format!("{:?}", config.unwrap()).contains(SECRET), "Debug redacts tokens");
+    }
+}

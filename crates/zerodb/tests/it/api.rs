@@ -1,7 +1,8 @@
-use crate::support::{append_body, serve, sim_engine, Dir, TOKEN_A, TOKEN_B};
+use crate::support::{append_body, serve, sim_engine, Dir, Via, TOKEN_A, TOKEN_B};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use zerodb::outcome::{Attempt, Merge, Outcome as Merged};
+use zerodb::serve::MAX_CONNECTIONS;
 use zerodb_core::{EngineError, ErrorKind, NewTurn, Role, Scope};
 use zerodb_tape::{Error, Outcome, SimDisk};
 
@@ -17,8 +18,8 @@ fn receipt(body: &Value) -> Value {
 fn append_window_and_retry_over_both_listeners() {
     let disk = SimDisk::new(1);
     let dir = Dir::new();
-    let engine = sim_engine(&disk, None);
-    let running = serve(engine.clone(), &dir);
+    let engine = sim_engine(&disk, None, 100);
+    let running = serve(engine.clone(), &dir, MAX_CONNECTIONS);
     let mut firsts = Vec::new();
     for via in &running.vias {
         let name = via.name();
@@ -79,6 +80,33 @@ fn append_window_and_retry_over_both_listeners() {
         }
         let (status, _) = window_of("last=1&since_seq=1");
         assert_eq!(status, 400, "{name}: last and since_seq together");
+        // Engine limits answer 400 with a message that names the limit, not the input.
+        let long = "x".repeat(256);
+        for (row, field, value) in [
+            ("no turns", "turns", json!([])),
+            (
+                "meta over 64 KiB",
+                "turns",
+                json!([{"role": "user", "content": "", "meta": {"m": "x".repeat(65536)}}]),
+            ),
+            ("agent over 255 bytes", "agent", json!(long)),
+            ("session over 255 bytes", "session", json!(long)),
+        ] {
+            let mut body = append_body(&session, row, "v");
+            body[field] = value;
+            let (status, rejected) = via.a("POST", "/v1/append", Some(&body));
+            assert_eq!(
+                (status, &rejected["outcome"]),
+                (400, &json!("not_committed")),
+                "{name} {row}"
+            );
+            assert_eq!(rejected["error"], "invalid_input", "{name} {row}");
+            let message = rejected["message"].as_str().unwrap_or_default();
+            assert!(
+                message.contains("255 bytes") && !message.contains(&long),
+                "{name} {row}: {rejected}"
+            );
+        }
         firsts.push((name, first_body, first));
     }
 
@@ -98,8 +126,8 @@ fn append_window_and_retry_over_both_listeners() {
     assert_eq!(Arc::strong_count(&engine), 1, "shutdown releases the engine");
     drop(engine);
     // Reopen on the same directory. The old socket file is stale and gets replaced.
-    let engine = sim_engine(&disk, None);
-    let running = serve(engine, &dir);
+    let engine = sim_engine(&disk, None, 100);
+    let running = serve(engine, &dir, MAX_CONNECTIONS);
     for (via, (name, body, first)) in running.vias.iter().zip(firsts) {
         let (status, retry) = via.a("POST", "/v1/append", Some(&body));
         assert_eq!(status, 200, "{name}: after reopen");
@@ -112,7 +140,8 @@ fn append_window_and_retry_over_both_listeners() {
 #[test]
 fn auth_and_host_rules() {
     let dir = Dir::new();
-    let running = serve(sim_engine(&SimDisk::new(2), None), &dir);
+    let engine = sim_engine(&SimDisk::new(2), None, 100);
+    let running = serve(engine.clone(), &dir, MAX_CONNECTIONS);
     let [tcp, unix] = &running.vias;
     let (status, _) = unix.a("POST", "/v1/append", Some(&append_body("secret", "k", "a-data")));
     assert_eq!(status, 200);
@@ -201,13 +230,26 @@ fn auth_and_host_rules() {
     assert!(wire.contains("Connection: close"), "{wire}");
     assert!(started.elapsed().as_secs() < 5, "closed without waiting for the body");
     running.server.shutdown();
+
+    // Past the connection cap a new connection gets 503 busy and is closed.
+    let running = serve(engine, &dir, 2);
+    let unix = &running.vias[1];
+    let Via::Unix(path) = unix else { unreachable!() };
+    let idle = [0, 1].map(|_| std::os::unix::net::UnixStream::connect(path).unwrap());
+    let wire = unix.raw(b"GET /healthz HTTP/1.1\r\n\r\n");
+    let (head, body) = wire.split_once("\r\n\r\n").unwrap();
+    assert!(head.starts_with("HTTP/1.1 503 "), "{wire}");
+    let busy = json!({"outcome": "not_committed", "error": "busy"});
+    assert_eq!(serde_json::from_str::<Value>(body).unwrap(), busy);
+    drop(idle);
+    running.server.shutdown();
 }
 
 #[test]
 fn health_tracks_engine_state() {
     let disk = SimDisk::new(3);
     let dir = Dir::new();
-    let running = serve(sim_engine(&disk, Some(4096)), &dir);
+    let running = serve(sim_engine(&disk, Some(4096), 1), &dir, MAX_CONNECTIONS);
     let unix = &running.vias[1];
     let instance = running.instance.as_str();
     let health = || unix.call(None, None, "GET", "/healthz", None);
@@ -237,6 +279,14 @@ fn health_tracks_engine_state() {
 
     // I14: below the floor, writes stop without loss and reads go on.
     assert_eq!(append("first", "one").0, 200);
+    let second = append_body("s2", "other", "v");
+    let exhausted =
+        json!({"outcome": "not_committed", "error": "resource_exhausted", "resource": "sessions"});
+    assert_eq!(
+        unix.a("POST", "/v1/append", Some(&second)),
+        (429, exhausted),
+        "one session allowed"
+    );
     let capacity = SimDisk::DEFAULT_CAPACITY;
     let free = zerodb_tape::Io::available_bytes(&disk, "db".as_ref()).unwrap();
     disk.set_capacity(capacity - free + 4095).unwrap();
@@ -268,7 +318,8 @@ fn health_tracks_engine_state() {
     assert_eq!(merge.finish(), Merged::Unknown);
     running.server.shutdown();
 
-    // The engine has no public hook for these, so the response mapping is driven directly.
+    // The engine has no public hook to fail a receipt after commit, or a space-error
+    // cleanup, so these two rows drive the response mapping directly.
     let failure = |kind, outcome| Err(EngineError { kind, outcome });
     for (case, result, status, body) in [
         (
@@ -282,12 +333,6 @@ fn health_tracks_engine_state() {
             failure(ErrorKind::Storage(Error::DiskFull), Outcome::Unknown),
             507,
             json!({"outcome": "unknown", "error": "disk_full"}),
-        ),
-        (
-            "resource limit",
-            failure(ErrorKind::ResourceExhausted("sessions"), Outcome::NotCommitted),
-            429,
-            json!({"outcome": "not_committed", "error": "resource_exhausted", "resource": "sessions"}),
         ),
     ] {
         let response = zerodb::api::append_response(result);

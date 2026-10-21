@@ -16,6 +16,13 @@ pub const DEFAULT_WINDOW_BYTES: usize = 1 << 20;
 /// Largest `max_bytes` of a window.
 pub const MAX_WINDOW_BYTES: usize = 8 << 20;
 
+const ROLES: [(Role, &str); 4] = [
+    (Role::System, "system"),
+    (Role::User, "user"),
+    (Role::Assistant, "assistant"),
+    (Role::Tool, "tool"),
+];
+
 /// A route whose head passed the `Host` and auth checks.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Route {
@@ -115,12 +122,9 @@ fn parse_append(value: Value) -> Result<(String, String, String, Vec<NewTurn>), 
             let Value::Object(mut turn) = item else {
                 return Err("each turn must be an object".to_owned());
             };
-            let role = match string(&mut turn, "role")?.as_str() {
-                "system" => Role::System,
-                "user" => Role::User,
-                "assistant" => Role::Assistant,
-                "tool" => Role::Tool,
-                _ => return Err("role must be system, user, assistant or tool".into()),
+            let role = string(&mut turn, "role")?;
+            let Some(&(role, _)) = ROLES.iter().find(|(_, name)| *name == role) else {
+                return Err("role must be system, user, assistant or tool".into());
             };
             let content = string(&mut turn, "content")?.into_bytes();
             let meta = match turn.remove("meta") {
@@ -164,11 +168,16 @@ pub fn append_response(result: Result<Appended, EngineError>) -> Response {
         Outcome::Unknown => "unknown",
     };
     let mut body = json!({"outcome": outcome, "error": name});
-    if let ErrorKind::ResourceExhausted(resource) = error.kind {
-        body["resource"] = json!(resource);
+    match error.kind {
+        ErrorKind::ResourceExhausted(resource) => body["resource"] = json!(resource),
+        ErrorKind::InvalidInput => body["message"] = json!(LIMITS),
+        _ => {}
     }
     Response::json(status, &body)
 }
+
+const LIMITS: &str = "turns must not be empty; content is at most 4 MiB, meta at most 64 KiB, \
+                      agent and session at most 255 bytes each";
 
 fn classify(kind: &ErrorKind) -> (u16, &'static str) {
     match kind {
@@ -278,12 +287,7 @@ fn turn_json(turn: Turn) -> Value {
         Ok(meta) => meta,
         Err(_) => Value::String(text(turn.meta)),
     };
-    let role = match turn.role {
-        Role::System => "system",
-        Role::User => "user",
-        Role::Assistant => "assistant",
-        Role::Tool => "tool",
-    };
+    let role = ROLES.iter().find(|(role, _)| *role == turn.role).map_or("", |(_, name)| *name);
     let mut out = json!({
         "seq": turn.seq,
         "lsn": turn.lsn,

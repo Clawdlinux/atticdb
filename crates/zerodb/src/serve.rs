@@ -18,14 +18,13 @@ use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use zerodb_core::{Engine, EngineError, EngineOptions, ErrorKind, Health};
 use zerodb_tape::{Error, Tape};
 
-/// Most open connections. Past it a new connection gets 503 `busy` and is closed.
+/// Default cap on open connections. Past it a new connection gets 503 `busy`.
 pub const MAX_CONNECTIONS: usize = 256;
 /// Exit code when the data directory lock is held by another process.
 pub const EXIT_LOCKED: u8 = 75;
@@ -37,8 +36,9 @@ pub const EXIT_POISONED: u8 = 70;
 pub struct Listeners {
     /// Loopback TCP.
     pub tcp: Option<TcpListener>,
-    /// The Unix socket.
-    pub unix: Option<UnixListener>,
+    /// The Unix socket and the path it is reachable at. The path wakes the accept
+    /// loop on shutdown and is removed on a poison exit.
+    pub unix: Option<(UnixListener, PathBuf)>,
 }
 
 /// What [`run`] needs besides the engine and the listeners.
@@ -50,8 +50,8 @@ pub struct ServeConfig {
     pub instance: String,
     /// Stop and remove the socket path when the engine is poisoned.
     pub exit_on_poison: bool,
-    /// The path the Unix listener is reachable at. Removed on a poison exit.
-    pub unix_socket: Option<PathBuf>,
+    /// Most open connections, [`MAX_CONNECTIONS`] for `zerodb serve`.
+    pub max_connections: usize,
 }
 
 #[derive(Default)]
@@ -91,21 +91,38 @@ struct Shared {
     engine: Arc<Engine>,
     config: ServeConfig,
     tcp: Option<SocketAddr>,
+    unix: Option<PathBuf>,
     stopping: AtomicBool,
     tracker: Arc<Tracker>,
-    poison_check: Option<Sender<bool>>,
 }
 
 impl Shared {
     /// Stops the accept loops: they see the flag after a wake-up connection.
-    fn stop_accepting(&self) {
-        self.stopping.store(true, Ordering::Release);
+    /// Returns false when they were already stopping.
+    fn stop(&self) -> bool {
+        if self.stopping.swap(true, Ordering::AcqRel) {
+            return false;
+        }
         if let Some(addr) = self.tcp {
             let _ = TcpStream::connect(addr);
         }
-        if let Some(path) = &self.config.unix_socket {
+        if let Some(path) = &self.unix {
             let _ = UnixStream::connect(path);
         }
+        true
+    }
+
+    /// With `--exit-on-poison`, once the engine is poisoned: stop accepting, wait for
+    /// responses in flight, remove the socket path while the lock is still held.
+    fn exit_on_poison(&self) {
+        if !self.config.exit_on_poison || self.engine.health() != Health::Poisoned || !self.stop() {
+            return;
+        }
+        self.tracker.wait_until(|conns| conns.in_flight == 0);
+        if let Some(path) = &self.unix {
+            let _ = std::fs::remove_file(path);
+        }
+        self.tracker.update(|conns| conns.exited = true);
     }
 
     fn connection<S: Stream>(&self, stream: S, tcp: bool) {
@@ -117,6 +134,8 @@ impl Shared {
                 .inspect_err(|response| log(&head.method, head.path(), response, "-", started))
         };
         while let Some((request, (route, tenant, started))) = conn.next_request(check) {
+            // Counted once the body is in. A body still arriving at a poison exit gets a
+            // reset: the client sees a transport error and retries with the same key.
             self.tracker.update(|conns| conns.in_flight += 1);
             let (method, path) = (request.head.method.clone(), request.head.path().to_owned());
             let tenant = tenant.unwrap_or_default();
@@ -128,10 +147,8 @@ impl Shared {
             let _ = conn.respond(&response);
             log(&method, &path, &response, &tenant, started);
             self.tracker.update(|conns| conns.in_flight -= 1);
-            if route == Route::Append && self.engine.health() == Health::Poisoned {
-                if let Some(check) = &self.poison_check {
-                    let _ = check.send(false);
-                }
+            if route == Route::Append {
+                self.exit_on_poison();
             }
             if self.stopping.load(Ordering::Acquire) {
                 break;
@@ -175,10 +192,7 @@ impl Server {
     /// Stops accepting, closes every connection and joins every thread. Afterwards
     /// the server holds no reference to the engine.
     pub fn shutdown(self) {
-        self.shared.stop_accepting();
-        if let Some(check) = &self.shared.poison_check {
-            let _ = check.send(true);
-        }
+        self.shared.stop();
         for thread in self.threads {
             let _ = thread.join();
         }
@@ -194,13 +208,13 @@ impl Server {
 /// Serves an opened engine on bound listeners. Tests pass an engine on `SimDisk`.
 pub fn run(engine: Arc<Engine>, listeners: Listeners, config: ServeConfig) -> io::Result<Server> {
     let tcp = listeners.tcp.as_ref().map(TcpListener::local_addr).transpose()?;
-    let (check, checks) = mpsc::channel();
+    let (unix, unix_path) = listeners.unix.unzip();
     let shared = Arc::new(Shared {
         engine,
         tcp,
+        unix: unix_path,
         stopping: AtomicBool::new(false),
         tracker: Arc::default(),
-        poison_check: config.exit_on_poison.then_some(check),
         config,
     });
     let mut threads = Vec::new();
@@ -208,27 +222,19 @@ pub fn run(engine: Arc<Engine>, listeners: Listeners, config: ServeConfig) -> io
         let accept = move || listener.accept().map(|(stream, _)| stream);
         threads.push(spawn_accept(&shared, accept, TcpStream::try_clone, true)?);
     }
-    if let Some(listener) = listeners.unix {
+    if let Some(listener) = unix {
         let accept = move || listener.accept().map(|(stream, _)| stream);
         threads.push(spawn_accept(&shared, accept, UnixStream::try_clone, false)?);
     }
     if shared.config.exit_on_poison {
         let shared = shared.clone();
-        threads.push(thread::Builder::new().name("zerodb-poison".into()).spawn(move || loop {
-            match checks.recv_timeout(Duration::from_secs(1)) {
-                Ok(true) | Err(RecvTimeoutError::Disconnected) => return,
-                Ok(false) | Err(RecvTimeoutError::Timeout) => {}
+        let tick = move || {
+            while !shared.stopping.load(Ordering::Acquire) {
+                thread::sleep(Duration::from_secs(1));
+                shared.exit_on_poison();
             }
-            if shared.engine.health() == Health::Poisoned {
-                shared.stop_accepting();
-                shared.tracker.wait_until(|conns| conns.in_flight == 0);
-                if let Some(path) = &shared.config.unix_socket {
-                    let _ = std::fs::remove_file(path);
-                }
-                shared.tracker.update(|conns| conns.exited = true);
-                return;
-            }
-        })?);
+        };
+        threads.push(thread::Builder::new().name("zerodb-poison".into()).spawn(tick)?);
     }
     Ok(Server { shared, threads })
 }
@@ -252,7 +258,7 @@ fn spawn_accept<S: Stream + Send + 'static>(
         };
         let Ok(closer) = clone(&stream) else { continue };
         let mut conns = shared.tracker.lock();
-        if conns.open.len() >= MAX_CONNECTIONS {
+        if conns.open.len() >= shared.config.max_connections {
             drop(conns);
             busy(stream);
             continue;
@@ -304,9 +310,10 @@ pub fn start(config: Config, exit_on_poison: bool) -> u8 {
 fn try_start(config: Config, exit_on_poison: bool) -> Result<u8, (u8, String)> {
     let fail = |message: String| (1, message);
     let data_dir = config.data_dir.ok_or_else(|| fail("set data_dir or --data-dir".into()))?;
-    let data_dir = std::path::absolute(&data_dir).map_err(|error| fail(error.to_string()))?;
+    // The socket binds at the path as given, so a relative path keeps it under sun_path.
+    // LOCK and the startup line carry the absolute path.
     let socket = config.unix_socket.unwrap_or_else(|| data_dir.join(listen::SOCKET_NAME));
-    let socket = std::path::absolute(&socket).map_err(|error| fail(error.to_string()))?;
+    let absolute = std::path::absolute(&socket).map_err(|error| fail(error.to_string()))?;
     let group = config.unix_socket_group.as_deref().map(listen::resolve_group).transpose();
     let group = group.map_err(fail)?;
     let default = Listen::Tcp(SocketAddr::from((Ipv4Addr::LOCALHOST, listen::DEFAULT_PORT)));
@@ -325,7 +332,7 @@ fn try_start(config: Config, exit_on_poison: bool) -> Result<u8, (u8, String)> {
         .create(&data_dir)
         .map_err(|error| fail(format!("cannot create {}: {error}", data_dir.display())))?;
     let mut options = EngineOptions::default();
-    let address = format!("instance={instance} unix={} tcp={tcp_text}", socket.display());
+    let address = format!("instance={instance} unix={} tcp={tcp_text}", absolute.display());
     options.tape.server_address = Some(address);
     let engine = open_engine(&data_dir, options).map_err(|error| match error.kind {
         ErrorKind::Storage(Error::DataDirLocked { holder }) => (
@@ -335,15 +342,15 @@ fn try_start(config: Config, exit_on_poison: bool) -> Result<u8, (u8, String)> {
         _ => fail(format!("cannot open {}: {error}", data_dir.display())),
     })?;
     let unix = listen::install_unix(&socket, group, &instance).map_err(fail)?;
-    let listeners = Listeners { tcp, unix: Some(unix) };
+    let listeners = Listeners { tcp, unix: Some((unix, socket)) };
     let auth = Auth::new(&config.tenants);
-    let unix_socket = Some(socket.clone());
-    let config = ServeConfig { auth, instance, exit_on_poison, unix_socket };
+    let max_connections = MAX_CONNECTIONS;
+    let config = ServeConfig { auth, instance, exit_on_poison, max_connections };
     let server = run(Arc::new(engine), listeners, config).map_err(|e| fail(e.to_string()))?;
     eprintln!(
         "zerodb: serving instance={} tcp={tcp_text} unix={}",
         server.shared.config.instance,
-        socket.display()
+        absolute.display()
     );
     server.wait();
     eprintln!("zerodb: engine poisoned, exiting so a fresh start can recover");

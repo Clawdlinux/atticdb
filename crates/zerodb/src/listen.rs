@@ -53,7 +53,9 @@ pub fn install_unix(
 ) -> Result<UnixListener, String> {
     let parent =
         path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or(Path::new("."));
-    let staging = parent.join(format!("{STAGING}{instance}"));
+    // Scoped by the socket file name, so servers sharing a parent never touch each other's.
+    let prefix = format!("{STAGING}{}.", path.file_name().unwrap_or_default().to_string_lossy());
+    let staging = parent.join(format!("{prefix}{instance}"));
     let staged = staging.join("s");
     for checked in [path, &staged] {
         let bytes = checked.as_os_str().len() + 1;
@@ -94,7 +96,7 @@ pub fn install_unix(
     }
     // A kill before cleanup leaves staging directories behind. PIDs repeat, ids do not.
     for entry in fs::read_dir(parent).into_iter().flatten().flatten() {
-        let leftover = entry.file_name().to_string_lossy().starts_with(STAGING)
+        let leftover = entry.file_name().to_string_lossy().starts_with(&prefix)
             && entry.metadata().is_ok_and(|meta| meta.is_dir() && meta.uid() == euid);
         if leftover {
             let _ = fs::remove_dir_all(entry.path());
