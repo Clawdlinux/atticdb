@@ -123,7 +123,7 @@ impl Io for ObservedIo {
         } else {
             self.disk.allocate(file, len)
         };
-        self.event(format!("resize {} {len}", self.name(file).display()));
+        self.event(format!("allocate {} {len}", self.name(file).display()));
         result
     }
     fn available_bytes(&self, dir: &Path) -> Result<u64> {
@@ -348,12 +348,13 @@ pub(crate) fn primed_writer(
     floor: Option<u64>,
     capacity: u64,
     lsns: u64,
+    segment: u64,
 ) -> (Arc<ObservedIo>, WriterCore<Machine>, Arc<AtomicUsize>) {
     let io = Arc::new(ObservedIo::new(8));
     io.disk.set_capacity(capacity).unwrap();
     let prepares = Arc::new(AtomicUsize::new(0));
     let opts =
-        TapeOptions { segment_size: 4096, free_space_floor: floor, ..TapeOptions::default() };
+        TapeOptions { segment_size: segment, free_space_floor: floor, ..TapeOptions::default() };
     let (mut core, _) = WriterCore::open_with(
         Machine { prepares: prepares.clone(), ..Machine::default() },
         io.clone(),
@@ -363,13 +364,23 @@ pub(crate) fn primed_writer(
     )
     .unwrap();
     io.disk.set_capacity(capacity.max(16384)).unwrap();
-    let first = submit(&mut core, vec![record(Kind::Turn, 1, vec![7; 3800])], Durability::Durable);
+    // Leaves 184 bytes in the first segment. Later 120-byte frames fill whole segments.
+    let first = submit(
+        &mut core,
+        vec![record(Kind::Turn, 1, vec![7; segment as usize - 296])],
+        Durability::Durable,
+    );
     core.step();
     first.recv().unwrap().unwrap();
     while core.durable_lsn() < lsns {
-        let reply = submit(&mut core, vec![record(Kind::Turn, 1, [7; 8])], Durability::Durable);
+        let count = (lsns - core.durable_lsn()).min(1024);
+        let replies: Vec<_> = (0..count)
+            .map(|_| submit(&mut core, vec![record(Kind::Turn, 1, [7; 8])], Durability::Durable))
+            .collect();
         core.step();
-        reply.recv().unwrap().unwrap();
+        for reply in replies {
+            reply.recv().unwrap().unwrap();
+        }
     }
     io.disk.set_capacity(capacity).unwrap();
     (io, core, prepares)

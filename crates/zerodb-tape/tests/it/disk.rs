@@ -30,7 +30,8 @@ fn space_faults_set_group_outcome() {
     use Fault::*;
     for (case, fault, expect_read_only, expect_poisoned) in [
         ("whole group floor", Floor, true, false),
-        ("five percent floor", DefaultFloor(100_000), true, false),
+        // Capacity covers the 2 MiB index reservation at open. Five percent stays under the cap.
+        ("five percent floor", DefaultFloor(64 << 20), true, false),
         ("index growth floor", IndexFloor, true, false),
         ("index offsets allocation full", IndexOffsets, true, false),
         ("index routes allocation full", IndexRoutes, true, false),
@@ -48,8 +49,19 @@ fn space_faults_set_group_outcome() {
         let capacity = if let DefaultFloor(capacity) = fault { capacity } else { 1 << 30 };
         let floor = if matches!(fault, DefaultFloor(_)) { None } else { Some(100) };
         let indexed = matches!(fault, IndexFloor | IndexOffsets | IndexRoutes | IndexStat);
-        let boundary = if indexed { 512 } else { 1 };
-        let (io, mut core, prepares) = primed_writer(floor, capacity, boundary);
+        // Index backing grows in 1 MiB chunks. 131072 LSNs fill one offsets chunk and two routes
+        // chunks exactly, so the next LSN grows both files. Large segments keep priming fast.
+        let boundary = if indexed { 131072 } else { 1 };
+        let segment = if indexed { 1 << 20 } else { 4096 };
+        let index_lens = |disk: &SimDisk| {
+            ["LSN-OFFSETS", "LSN-ROUTES"].map(|name| {
+                let file = disk.open(&Path::new("db").join(name)).unwrap();
+                let len = disk.len(file).unwrap();
+                disk.close(file).unwrap();
+                len
+            })
+        };
+        let (io, mut core, prepares) = primed_writer(floor, capacity, boundary, segment);
         let before_prepares = prepares.load(Ordering::SeqCst);
         let before_manifest = manifest(&io.disk);
         let before_files = io.disk.list(Path::new("db")).unwrap();
@@ -59,9 +71,17 @@ fn space_faults_set_group_outcome() {
             .count() as u64
             + 1;
         let before_events = io.events.lock().unwrap().clone();
+        if indexed {
+            let allocations =
+                before_events.iter().filter(|e| e.starts_with("allocate db/LSN-")).count();
+            // Page-wise growth made 258 calls here, one per 1024-LSN group per file.
+            assert_eq!(allocations, 3, "{case}: index allocate calls while priming");
+            assert_eq!(index_lens(&io.disk), [1 << 20, 2 << 20], "{case}: primed index backing");
+        }
         let before_bytes = io.segment_bytes.load(Ordering::SeqCst);
         let used = capacity - io.disk.available_bytes(Path::new("db")).unwrap();
-        let reserve = 240 + 4096 + if indexed { 8192 } else { 0 };
+        let chunk = 1 << 20;
+        let reserve = 240 + segment + if indexed { 2 * chunk } else { 0 };
         let floor_bytes = floor.unwrap_or((capacity / 20).min(1 << 30));
         match fault {
             Floor | IndexFloor | DefaultFloor(_) => {
@@ -69,8 +89,14 @@ fn space_faults_set_group_outcome() {
             }
             Create => io.full_next_create.store(true, Ordering::SeqCst),
             Allocate | LaterAllocate | IndexOffsets | IndexRoutes => {
+                // Each row leaves one byte less than its failing allocation needs.
                 *io.capacity_after_space_check.lock().unwrap() = Some(
-                    used + if matches!(fault, LaterAllocate | IndexRoutes) { 8191 } else { 4095 },
+                    used + match fault {
+                        IndexOffsets => chunk - 1,
+                        IndexRoutes => 2 * chunk - 1,
+                        LaterAllocate => 8191,
+                        _ => 4095,
+                    },
                 )
             }
             Stat | IndexStat => io.space_error.store(true, Ordering::SeqCst),
@@ -138,7 +164,7 @@ fn space_faults_set_group_outcome() {
             assert!(matches!(retry.recv().unwrap().unwrap_err().kind, Error::Poisoned), "{case}");
             drop(core);
             let opts = TapeOptions {
-                segment_size: 4096,
+                segment_size: segment,
                 free_space_floor: floor,
                 ..TapeOptions::default()
             };
@@ -161,13 +187,19 @@ fn space_faults_set_group_outcome() {
         core.step();
         let Committed::Durable { txn, last_lsn, .. } = retry.recv().unwrap().unwrap();
         assert_eq!((txn, last_lsn), (boundary + 1, boundary + 1), "{case}");
+        if indexed {
+            assert_eq!(index_lens(&io.disk), [2 << 20, 3 << 20], "{case}: one chunk per file");
+        }
         assert!(!core.read_only() && !core.is_poisoned(), "{case}");
         assert_eq!(prepares.load(Ordering::SeqCst), before_prepares + 1, "{case}");
         drop(core);
         let image = Arc::new(io.disk.crash().unwrap());
         image.set_capacity(1 << 42).unwrap();
-        let opts =
-            TapeOptions { segment_size: 4096, free_space_floor: floor, ..TapeOptions::default() };
+        let opts = TapeOptions {
+            segment_size: segment,
+            free_space_floor: floor,
+            ..TapeOptions::default()
+        };
         let (core, report) = WriterCore::open_with(
             Machine::default(),
             image,
@@ -177,7 +209,9 @@ fn space_faults_set_group_outcome() {
         )
         .unwrap();
         assert_eq!(report.durable_lsn, boundary + 1, "{case}");
-        for lsn in 1..=boundary + 1 {
+        // One read per 4096-byte routes page keeps the 131072-LSN rows fast in debug builds.
+        let stride = if indexed { 256 } else { 1 };
+        for lsn in (1..=boundary + 1).step_by(stride).chain([boundary + 1]) {
             assert!(core.read(lsn).unwrap().is_some(), "{case}, lsn={lsn}");
         }
     }

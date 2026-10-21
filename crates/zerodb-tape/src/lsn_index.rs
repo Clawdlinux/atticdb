@@ -7,6 +7,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 const PAGE_BYTES: usize = 4096;
+// Backing grows in 1 MiB steps. Each step costs an allocate call that a later fsync journals.
+const RESERVE_CHUNK_BYTES: u64 = 1024 * 1024;
 // Charge page storage and cache bookkeeping together.
 const PAGE_CHARGE: usize = PAGE_BYTES + 128;
 pub(crate) const DEFAULT_BUDGET: usize = 8 * 1024 * 1024;
@@ -96,6 +98,7 @@ impl LsnIndex {
             let (page, _) = Self::address(lsn, width)?;
             page.checked_add(1)
                 .and_then(|pages| pages.checked_mul(PAGE_BYTES as u64))
+                .and_then(|bytes| bytes.checked_next_multiple_of(RESERVE_CHUNK_BYTES))
                 .ok_or(Error::Rejected("lsn_index"))
         };
         Ok([size(8)?, size(16)?])
