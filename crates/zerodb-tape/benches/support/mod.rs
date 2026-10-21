@@ -79,9 +79,17 @@ impl Bare {
             dirty: false,
         }
     }
+    pub fn path(dir: &Path, id: u64) -> PathBuf {
+        dir.join(format!("bare-{id}"))
+    }
+    /// Current segment and end offset. Bytes below the offset are durable after `sync`.
+    #[allow(dead_code, reason = "only G1 reads the bare log back")]
+    pub fn position(&self) -> (u64, u64) {
+        (self.segment, self.offset)
+    }
     #[track_caller]
     fn segment(dir: &Path, id: u64) -> File {
-        let path = dir.join(format!("bare-{id}"));
+        let path = Self::path(dir, id);
         let io = StdIo::new();
         let file = io.create(&path).unwrap();
         io.allocate(file, DEFAULT_SEGMENT_SIZE).unwrap();

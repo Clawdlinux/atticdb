@@ -11,6 +11,13 @@ Both paired-ratio medians beat M2. Absolute p99 medians are higher, and Engine r
 See [the 1M review run](#s1-review-fixes-and-1m-g1-macos) for eviction evidence and cause analysis.
 Linux NVMe and nightly LazyFS remain pending. This trace measures appends, not facts or forget.
 
+Reader load note (2026-10-21): from this commit G1 defaults to `G1_SYMMETRIC=1` (D74).
+Bare, Tape and Engine each run 2 concurrent readers of the 16 most recent records.
+Bare reads the bytes back with positional reads. Tape reads the last 16 durable LSNs.
+All earlier sections in this file used asymmetric load: only Engine ran readers.
+Their ratios include reader contention on the engine side only.
+Set `G1_SYMMETRIC=0` to reproduce those traces. No symmetric numbers are recorded yet.
+
 # M1 append baseline
 
 Measured on 2026-10-18. These are local development numbers, not G1 results.
