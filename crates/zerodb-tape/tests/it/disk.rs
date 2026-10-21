@@ -9,32 +9,30 @@ use zerodb_tape::sim::{frame::HEADER_LEN, SimClock, WriterCore};
 use zerodb_tape::{Committed, Durability, Kind, Outcome, TapeOptions};
 use zerodb_tape::{Error, Io, SimDisk};
 
+#[derive(Clone, Copy)]
+enum Fault {
+    Floor,
+    IndexFloor,
+    IndexOffsets,
+    IndexRoutes,
+    IndexStat,
+    DefaultFloor(u64),
+    Create,
+    Allocate,
+    LaterAllocate,
+    Stat,
+    Sync,
+    DirSync,
+    Manifest,
+}
+
 #[test]
 fn space_faults_set_group_outcome() {
-    #[derive(Clone, Copy)]
-    enum Fault {
-        Floor,
-        IndexFloor,
-        IndexOffsets,
-        IndexRoutes,
-        IndexStat,
-        DefaultFloor(u64),
-        Create,
-        Allocate,
-        LaterAllocate,
-        Stat,
-        Sync,
-        DirSync,
-        Manifest,
-    }
     use Fault::*;
     for (case, fault, expect_read_only, expect_poisoned) in [
         ("whole group floor", Floor, true, false),
-        ("five percent floor", DefaultFloor(100_000), true, false),
-        ("index growth floor", IndexFloor, true, false),
-        ("index offsets allocation full", IndexOffsets, true, false),
-        ("index routes allocation full", IndexRoutes, true, false),
-        ("index growth space query error", IndexStat, true, false),
+        // Capacity covers the 2 MiB index reservation at open. Five percent stays under the cap.
+        ("five percent floor", DefaultFloor(64 << 20), true, false),
         ("capped default floor", DefaultFloor(1 << 40), true, false),
         ("create full", Create, true, false),
         ("allocate full", Allocate, true, false),
@@ -44,142 +42,183 @@ fn space_faults_set_group_outcome() {
         ("directory sync error", DirSync, false, true),
         ("manifest write full", Manifest, false, true),
     ] {
-        eprintln!("case: {case}");
-        let capacity = if let DefaultFloor(capacity) = fault { capacity } else { 1 << 30 };
-        let floor = if matches!(fault, DefaultFloor(_)) { None } else { Some(100) };
-        let indexed = matches!(fault, IndexFloor | IndexOffsets | IndexRoutes | IndexStat);
-        let boundary = if indexed { 512 } else { 1 };
-        let (io, mut core, prepares) = primed_writer(floor, capacity, boundary);
-        let before_prepares = prepares.load(Ordering::SeqCst);
-        let before_manifest = manifest(&io.disk);
-        let before_files = io.disk.list(Path::new("db")).unwrap();
-        let next_segment = before_files
-            .iter()
-            .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with("seg-"))
-            .count() as u64
-            + 1;
-        let before_events = io.events.lock().unwrap().clone();
-        let before_bytes = io.segment_bytes.load(Ordering::SeqCst);
-        let used = capacity - io.disk.available_bytes(Path::new("db")).unwrap();
-        let reserve = 240 + 4096 + if indexed { 8192 } else { 0 };
-        let floor_bytes = floor.unwrap_or((capacity / 20).min(1 << 30));
-        match fault {
-            Floor | IndexFloor | DefaultFloor(_) => {
-                io.disk.set_capacity(used + floor_bytes + reserve - 1).unwrap()
-            }
-            Create => io.full_next_create.store(true, Ordering::SeqCst),
-            Allocate | LaterAllocate | IndexOffsets | IndexRoutes => {
-                *io.capacity_after_space_check.lock().unwrap() = Some(
-                    used + if matches!(fault, LaterAllocate | IndexRoutes) { 8191 } else { 4095 },
-                )
-            }
-            Stat | IndexStat => io.space_error.store(true, Ordering::SeqCst),
-            Sync => io.fail_at.store(io.syncs.load(Ordering::SeqCst) + 1, Ordering::SeqCst),
-            DirSync => io.fail_directory_sync.store(true, Ordering::SeqCst),
-            Manifest => io.full_manifest_write.store(true, Ordering::SeqCst),
+        space_fault(case, fault, expect_read_only, expect_poisoned);
+    }
+}
+
+// Index rows prime 131072 LSNs to cross a 1 MiB backing chunk.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "slow in debug")]
+fn index_growth_space_faults_set_group_outcome() {
+    use Fault::*;
+    for (case, fault, expect_read_only, expect_poisoned) in [
+        ("index growth floor", IndexFloor, true, false),
+        ("index offsets allocation full", IndexOffsets, true, false),
+        ("index routes allocation full", IndexRoutes, true, false),
+        ("index growth space query error", IndexStat, true, false),
+    ] {
+        space_fault(case, fault, expect_read_only, expect_poisoned);
+    }
+}
+
+fn space_fault(case: &str, fault: Fault, expect_read_only: bool, expect_poisoned: bool) {
+    use Fault::*;
+    eprintln!("case: {case}");
+    let capacity = if let DefaultFloor(capacity) = fault { capacity } else { 1 << 30 };
+    let floor = if matches!(fault, DefaultFloor(_)) { None } else { Some(100) };
+    let indexed = matches!(fault, IndexFloor | IndexOffsets | IndexRoutes | IndexStat);
+    // Index backing grows in 1 MiB chunks. 131072 LSNs fill one offsets chunk and two routes
+    // chunks exactly, so the next LSN grows both files. Large segments keep priming fast.
+    let boundary = if indexed { 131072 } else { 1 };
+    let segment = if indexed { 1 << 20 } else { 4096 };
+    let index_lens = |disk: &SimDisk| {
+        ["LSN-OFFSETS", "LSN-ROUTES"].map(|name| {
+            let file = disk.open(&Path::new("db").join(name)).unwrap();
+            let len = disk.len(file).unwrap();
+            disk.close(file).unwrap();
+            len
+        })
+    };
+    let (io, mut core, prepares) = primed_writer(floor, capacity, boundary, segment);
+    let before_prepares = prepares.load(Ordering::SeqCst);
+    let before_manifest = manifest(&io.disk);
+    let before_files = io.disk.list(Path::new("db")).unwrap();
+    let next_segment = before_files
+        .iter()
+        .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with("seg-"))
+        .count() as u64
+        + 1;
+    let before_events = io.events.lock().unwrap().clone();
+    if indexed {
+        let allocations =
+            before_events.iter().filter(|e| e.starts_with("allocate db/LSN-")).count();
+        // Page-wise growth made 258 calls here, one per 1024-LSN group per file.
+        assert_eq!(allocations, 3, "{case}: index allocate calls while priming");
+        assert_eq!(index_lens(&io.disk), [1 << 20, 2 << 20], "{case}: primed index backing");
+    }
+    let before_bytes = io.segment_bytes.load(Ordering::SeqCst);
+    let used = capacity - io.disk.available_bytes(Path::new("db")).unwrap();
+    let chunk = 1 << 20;
+    let reserve = 240 + segment + if indexed { 2 * chunk } else { 0 };
+    let floor_bytes = floor.unwrap_or((capacity / 20).min(1 << 30));
+    match fault {
+        Floor | IndexFloor | DefaultFloor(_) => {
+            io.disk.set_capacity(used + floor_bytes + reserve - 1).unwrap()
         }
-        let size = if matches!(fault, LaterAllocate) { 3800 } else { 8 };
-        let replies = [
-            submit(&mut core, vec![record(Kind::Turn, 1, vec![7; size])], Durability::Durable),
-            submit(&mut core, vec![record(Kind::Turn, 1, vec![7; size])], Durability::Durable),
-        ];
-        core.step();
-        for reply in replies {
-            let error = reply.recv().unwrap().unwrap_err();
-            assert_eq!(error.outcome, Outcome::NotCommitted, "{case}");
-            assert!(
-                match fault {
-                    Stat | IndexStat =>
-                        matches!(error.kind, Error::Io(std::io::ErrorKind::Other, _)),
-                    Sync | DirSync => matches!(error.kind, Error::SyncFailed(_)),
-                    _ => matches!(error.kind, Error::DiskFull),
+        Create => io.full_next_create.store(true, Ordering::SeqCst),
+        Allocate | LaterAllocate | IndexOffsets | IndexRoutes => {
+            // Each row leaves one byte less than its failing allocation needs.
+            *io.capacity_after_space_check.lock().unwrap() = Some(
+                used + match fault {
+                    IndexOffsets => chunk - 1,
+                    IndexRoutes => 2 * chunk - 1,
+                    LaterAllocate => 8191,
+                    _ => 4095,
                 },
-                "{case}: {error:?}"
-            );
-        }
-        assert_eq!(core.read_only(), expect_read_only, "{case}");
-        assert_eq!(core.is_poisoned(), expect_poisoned, "{case}");
-        assert_eq!(prepares.load(Ordering::SeqCst), before_prepares, "{case}");
-        assert_eq!(core.durable_lsn(), boundary, "{case}");
-        assert!(core.read(1).unwrap().is_some(), "{case}");
-        assert_eq!(io.segment_bytes.load(Ordering::SeqCst), before_bytes, "{case}");
-        if matches!(fault, LaterAllocate) {
-            assert_ne!(manifest(&io.disk), before_manifest, "{case}");
-        } else {
-            assert_eq!(manifest(&io.disk), before_manifest, "{case}");
-        }
-        assert_eq!(
-            io.disk.exists(&Path::new("db").join(format!("seg-{next_segment:016}.zdb"))).unwrap(),
-            matches!(fault, LaterAllocate | Sync | DirSync | Manifest),
-            "{case}"
-        );
-        assert!(
-            !io.disk
-                .exists(&Path::new("db").join(format!("seg-{:016}.zdb", next_segment + 1)))
-                .unwrap(),
-            "{case}"
-        );
-        if !matches!(fault, LaterAllocate | Sync | DirSync | Manifest) {
-            assert_eq!(io.disk.list(Path::new("db")).unwrap(), before_files, "{case}");
-        }
-        if matches!(fault, Floor | IndexFloor | DefaultFloor(_) | Stat | IndexStat) {
-            assert_eq!(*io.events.lock().unwrap(), before_events, "{case}");
-        }
-        let retry_size = if matches!(fault, DefaultFloor(_)) {
-            io.disk.set_capacity(used + floor_bytes + 120).unwrap();
-            8
-        } else {
-            io.disk.set_capacity(1 << 42).unwrap();
-            3800
-        };
-        if expect_poisoned {
-            let retry = submit(&mut core, vec![record(Kind::Turn, 1, [7; 8])], Durability::Durable);
-            core.step();
-            assert!(matches!(retry.recv().unwrap().unwrap_err().kind, Error::Poisoned), "{case}");
-            drop(core);
-            let opts = TapeOptions {
-                segment_size: 4096,
-                free_space_floor: floor,
-                ..TapeOptions::default()
-            };
-            core = WriterCore::open_with(
-                Machine { prepares: prepares.clone(), ..Machine::default() },
-                io.clone(),
-                Arc::new(SimClock::default()),
-                "db",
-                opts,
             )
-            .unwrap()
-            .0;
-            assert!(!io.disk.exists(Path::new("db/seg-0000000000000002.zdb")).unwrap(), "{case}");
         }
-        let retry = submit(
-            &mut core,
-            vec![record(Kind::Turn, 1, vec![7; retry_size])],
-            Durability::Durable,
+        Stat | IndexStat => io.space_error.store(true, Ordering::SeqCst),
+        Sync => io.fail_at.store(io.syncs.load(Ordering::SeqCst) + 1, Ordering::SeqCst),
+        DirSync => io.fail_directory_sync.store(true, Ordering::SeqCst),
+        Manifest => io.full_manifest_write.store(true, Ordering::SeqCst),
+    }
+    let size = if matches!(fault, LaterAllocate) { 3800 } else { 8 };
+    let replies = [
+        submit(&mut core, vec![record(Kind::Turn, 1, vec![7; size])], Durability::Durable),
+        submit(&mut core, vec![record(Kind::Turn, 1, vec![7; size])], Durability::Durable),
+    ];
+    core.step();
+    for reply in replies {
+        let error = reply.recv().unwrap().unwrap_err();
+        assert_eq!(error.outcome, Outcome::NotCommitted, "{case}");
+        assert!(
+            match fault {
+                Stat | IndexStat => matches!(error.kind, Error::Io(std::io::ErrorKind::Other, _)),
+                Sync | DirSync => matches!(error.kind, Error::SyncFailed(_)),
+                _ => matches!(error.kind, Error::DiskFull),
+            },
+            "{case}: {error:?}"
         );
+    }
+    assert_eq!(core.read_only(), expect_read_only, "{case}");
+    assert_eq!(core.is_poisoned(), expect_poisoned, "{case}");
+    assert_eq!(prepares.load(Ordering::SeqCst), before_prepares, "{case}");
+    assert_eq!(core.durable_lsn(), boundary, "{case}");
+    assert!(core.read(1).unwrap().is_some(), "{case}");
+    assert_eq!(io.segment_bytes.load(Ordering::SeqCst), before_bytes, "{case}");
+    if matches!(fault, LaterAllocate) {
+        assert_ne!(manifest(&io.disk), before_manifest, "{case}");
+    } else {
+        assert_eq!(manifest(&io.disk), before_manifest, "{case}");
+    }
+    assert_eq!(
+        io.disk.exists(&Path::new("db").join(format!("seg-{next_segment:016}.zdb"))).unwrap(),
+        matches!(fault, LaterAllocate | Sync | DirSync | Manifest),
+        "{case}"
+    );
+    assert!(
+        !io.disk
+            .exists(&Path::new("db").join(format!("seg-{:016}.zdb", next_segment + 1)))
+            .unwrap(),
+        "{case}"
+    );
+    if !matches!(fault, LaterAllocate | Sync | DirSync | Manifest) {
+        assert_eq!(io.disk.list(Path::new("db")).unwrap(), before_files, "{case}");
+    }
+    if matches!(fault, Floor | IndexFloor | DefaultFloor(_) | Stat | IndexStat) {
+        assert_eq!(*io.events.lock().unwrap(), before_events, "{case}");
+    }
+    let retry_size = if matches!(fault, DefaultFloor(_)) {
+        io.disk.set_capacity(used + floor_bytes + 120).unwrap();
+        8
+    } else {
+        io.disk.set_capacity(1 << 42).unwrap();
+        3800
+    };
+    if expect_poisoned {
+        let retry = submit(&mut core, vec![record(Kind::Turn, 1, [7; 8])], Durability::Durable);
         core.step();
-        let Committed::Durable { txn, last_lsn, .. } = retry.recv().unwrap().unwrap();
-        assert_eq!((txn, last_lsn), (boundary + 1, boundary + 1), "{case}");
-        assert!(!core.read_only() && !core.is_poisoned(), "{case}");
-        assert_eq!(prepares.load(Ordering::SeqCst), before_prepares + 1, "{case}");
+        assert!(matches!(retry.recv().unwrap().unwrap_err().kind, Error::Poisoned), "{case}");
         drop(core);
-        let image = Arc::new(io.disk.crash().unwrap());
-        image.set_capacity(1 << 42).unwrap();
-        let opts =
-            TapeOptions { segment_size: 4096, free_space_floor: floor, ..TapeOptions::default() };
-        let (core, report) = WriterCore::open_with(
-            Machine::default(),
-            image,
+        let opts = TapeOptions {
+            segment_size: segment,
+            free_space_floor: floor,
+            ..TapeOptions::default()
+        };
+        core = WriterCore::open_with(
+            Machine { prepares: prepares.clone(), ..Machine::default() },
+            io.clone(),
             Arc::new(SimClock::default()),
             "db",
             opts,
         )
-        .unwrap();
-        assert_eq!(report.durable_lsn, boundary + 1, "{case}");
-        for lsn in 1..=boundary + 1 {
-            assert!(core.read(lsn).unwrap().is_some(), "{case}, lsn={lsn}");
-        }
+        .unwrap()
+        .0;
+        assert!(!io.disk.exists(Path::new("db/seg-0000000000000002.zdb")).unwrap(), "{case}");
+    }
+    let retry =
+        submit(&mut core, vec![record(Kind::Turn, 1, vec![7; retry_size])], Durability::Durable);
+    core.step();
+    let Committed::Durable { txn, last_lsn, .. } = retry.recv().unwrap().unwrap();
+    assert_eq!((txn, last_lsn), (boundary + 1, boundary + 1), "{case}");
+    if indexed {
+        assert_eq!(index_lens(&io.disk), [2 << 20, 3 << 20], "{case}: one chunk per file");
+    }
+    assert!(!core.read_only() && !core.is_poisoned(), "{case}");
+    assert_eq!(prepares.load(Ordering::SeqCst), before_prepares + 1, "{case}");
+    drop(core);
+    let image = Arc::new(io.disk.crash().unwrap());
+    image.set_capacity(1 << 42).unwrap();
+    let opts =
+        TapeOptions { segment_size: segment, free_space_floor: floor, ..TapeOptions::default() };
+    let (core, report) =
+        WriterCore::open_with(Machine::default(), image, Arc::new(SimClock::default()), "db", opts)
+            .unwrap();
+    assert_eq!(report.durable_lsn, boundary + 1, "{case}");
+    // One read per 4096-byte routes page keeps the 131072-LSN rows fast in debug builds.
+    let stride = if indexed { 256 } else { 1 };
+    for lsn in (1..=boundary + 1).step_by(stride).chain([boundary + 1]) {
+        assert!(core.read(lsn).unwrap().is_some(), "{case}, lsn={lsn}");
     }
 }
 

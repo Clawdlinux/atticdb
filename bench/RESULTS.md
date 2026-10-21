@@ -1281,3 +1281,38 @@ These commands ran after both timed executions.
 The workspace command doesn't enable the core simulation feature. The tape seeded schedule stays ignored in debug.
 Both disk-full integration scenarios and the core health test passed.
 The seeded release simulations weren't rerun for this documentation-only task.
+
+## S2 index reservation regression on Linux NVMe (2026-10-21)
+
+Same VM and disk as the S1 Linux run: Azure Standard_L8s_v3, Ubuntu 24.04, kernel `7.0.0-1017-azure`, local NVMe, write cache `write through`.
+The disk was reformatted with `mkfs.ext4 -E lazy_itable_init=0,lazy_journal_init=0` to rule out lazy inode init.
+Every run used the asymmetric trace: only Engine runs window readers.
+
+Command per commit:
+
+```sh
+G1_TURNS=1000000 G1_REPS=3 G1_HISTORY=0 G1_REPLAY_PROBE=0 G1_CHECKPOINT_MIB=64 ./bench/g1.sh
+```
+
+Tape durable ack p99 per repetition, 1M turns:
+
+| Commit | What it is | Tape p99, ms | Tape/bare p99 median | Engine/bare p99 median |
+|---|---|---|---:|---:|
+| `911ffc0` | S1 merge | 0.67, 0.66, 0.65 | 1.411 | 4.012 |
+| `4c1e1a4` | S2, before index reservation | 0.65, 0.64, 1.03 | 1.468 | 4.130 |
+| `45eae2b` | S2 merge | 1.42, 1.46, 2.31 | 3.394 | 5.260 |
+| `ee15bf4` | main before this fix | 1.73, 2.53, 2.18 | 4.839 | 4.314 |
+| `1ce8296` | this fix, 2 runs of 3 reps | 0.66, 0.64, 0.65, 0.65, 0.64, 0.65 | 1.464, 1.467 | 2.649, 2.732 |
+
+At 192k turns no commit regressed. Tape p99 stayed near 0.70 ms. The cost grew with index size.
+
+Cause: `e6c9db3` reserved LSN index backing one 4 KiB page at a time.
+Each growth called `fallocate(0, len)` and `set_len` on the whole file, about 6000 times per 1M LSNs.
+That ran in the writer path, and the size changes rode along in the ext4 journal commit forced by the segment fsync.
+`1ce8296` reserves in 1 MiB chunks. A test that primes 131,072 LSNs now makes 3 index allocations instead of 258.
+
+Engine with the fix, 6 repetitions: p50 0.66 to 0.72 ms, p99 1.16 to 1.24 ms, p99.9 2.19 to 2.28 ms.
+At S1 the Engine p99 was 1.84 to 2.05 ms and p99.9 was 4.0 to 4.3 ms.
+
+Verdict: the Linux NVMe 1.5x gate still fails. Engine/bare p99 is about 2.7x.
+Tape alone is under 1.5x. The remaining gap is in the Engine layer, about 0.55 ms at p99.
