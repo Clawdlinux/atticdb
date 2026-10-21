@@ -24,7 +24,7 @@ Tenant names are 1 to 255 bytes. Tokens are at least 32 bytes. Duplicate names o
 - The socket is bound in a per-start `<parent>/.zs.<8 hex>` directory, then hard-linked into place under a `flock` on `<socket>.lock`. Servers on other data directories that share the path take turns.
 - A crash during that step can leave a `.zs.*` directory behind. The `.lock` file always stays. Both are harmless. A killed server also leaves its socket file. The next start on that path removes it.
 - `LOCK` and `GET /healthz` carry a per-start instance id.
-- At most 256 connections. Past that, a new connection gets 503 `busy`. A request body grows only as its bytes arrive, up to 8 MiB, and is dropped once parsed. Body memory stays under 256 x 2 x 8 MiB = 4 GiB in the worst case.
+- At most 256 connections. Past that, a new connection gets 503 `busy`. A request body grows only as its bytes arrive, up to 8 MiB, and is dropped once parsed. At most 2 bodies are parsed at once, and a JSON tree can be about 16x its body. Body memory stays under 256 x 8 MiB = 2 GiB of raw bodies or parsed turns, plus 2 parse trees of about 16 x 8 MiB each, in the worst case.
 - `--exit-on-poison`: when the engine is poisoned, stop accepting, finish responses in flight, remove the socket path if it is still the one this server installed, and exit 70. A fresh start recovers. Without it, a poisoned server serves reads and 503 `poisoned` until you restart it.
 - Logs: one stderr line per request with method, path, status, tenant and latency. Never headers, bodies or query strings.
 - Stop it with a signal. Every acknowledged write is already synced, so `kill` is safe.

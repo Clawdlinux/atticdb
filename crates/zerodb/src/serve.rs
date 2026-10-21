@@ -3,8 +3,9 @@
 //!
 //! Memory: at most [`MAX_CONNECTIONS`] connections. A request body grows only as its
 //! bytes arrive, up to the 8 MiB cap, and the raw body is dropped once parsed into
-//! turns. So body memory stays under 256 x 2 x 8 MiB = 4 GiB in the worst case, where
-//! every connection sends a full 8 MiB body at once.
+//! turns, which are no larger. At most 2 bodies are parsed at once, and a JSON tree can
+//! be about 16x its body. So body memory stays under 256 x 8 MiB = 2 GiB of raw bodies
+//! or turns, plus 2 parse trees of about 16 x 8 MiB each, in the worst case.
 
 use crate::api::{self, Route};
 use crate::auth::Auth;

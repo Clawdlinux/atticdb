@@ -89,7 +89,11 @@ impl Via {
     /// Writes raw bytes and reads until the server closes the connection.
     pub fn raw(&self, bytes: &[u8]) -> String {
         let mut stream = self.connect();
-        stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        // macOS fails `setsockopt` with EINVAL once the peer has closed, as after a busy
+        // answer. The read below then returns buffered data or EOF at once.
+        if let Err(error) = stream.set_read_timeout(Some(Duration::from_secs(10))) {
+            assert_eq!(error.raw_os_error(), Some(rustix::io::Errno::INVAL.raw_os_error()));
+        }
         stream.write_all(bytes).unwrap();
         let mut out = Vec::new();
         stream.read_to_end(&mut out).unwrap();

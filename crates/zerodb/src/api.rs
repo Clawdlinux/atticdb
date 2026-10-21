@@ -4,6 +4,7 @@ use crate::auth::{self, Auth};
 use crate::http::{Head, Response};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
+use std::sync::{Condvar, Mutex, PoisonError};
 use zerodb_core::{
     Appended, Engine, EngineError, ErrorKind, Health, NewTurn, Role, Scope, Turn, WindowQuery,
 };
@@ -78,12 +79,37 @@ pub fn health(engine: &Engine, instance: &str) -> Response {
     Response::json(status, &json!({"status": text, "instance": instance}))
 }
 
+/// Bodies parsed at once. An 8 MiB body like `[{},{},...]` grows about 16x as a `Value`
+/// tree, so parse memory is bounded by this, not by the connection count.
+const PARSERS: usize = 2;
+static PARSING: (Mutex<usize>, Condvar) = (Mutex::new(0), Condvar::new());
+
+/// One of the [`PARSERS`] slots, freed on drop.
+struct Parsing;
+
+impl Parsing {
+    fn wait() -> Self {
+        let busy = PARSING.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let wait = PARSING.1.wait_while(busy, |busy| *busy >= PARSERS);
+        *wait.unwrap_or_else(PoisonError::into_inner) += 1;
+        Self
+    }
+}
+
+impl Drop for Parsing {
+    fn drop(&mut self) {
+        *PARSING.0.lock().unwrap_or_else(PoisonError::into_inner) -= 1;
+        PARSING.1.notify_one();
+    }
+}
+
 /// `POST /v1/append`. The raw body is dropped once parsed.
 pub fn append(engine: &Engine, tenant: &str, body: Vec<u8>) -> Response {
+    let slot = Parsing::wait();
     let parsed = serde_json::from_slice(&body)
         .map_err(|_| "body must be JSON".to_owned())
         .and_then(parse_append);
-    drop(body);
+    drop((slot, body));
     match parsed {
         Ok((agent, session, key, turns)) => {
             let scope = Scope { tenant: tenant.to_owned(), agent, session };

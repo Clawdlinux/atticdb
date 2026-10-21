@@ -547,11 +547,15 @@ impl Engine {
         let mut turns = Vec::with_capacity((end - start).min(64) as usize);
         let mut bytes = 0usize;
         let mut truncated = false;
+        let mut current: Option<(usize, Arc<Vec<u64>>)> = None;
         for seq in seqs {
             let (page, offset) = address(seq);
-            let lsn = *self
-                .load_page(&key, page)?
-                .get(offset)
+            if current.as_ref().is_none_or(|(loaded, _)| *loaded != page) {
+                current = Some((page, self.load_page(&key, page)?));
+            }
+            let lsn = *current
+                .as_ref()
+                .and_then(|(_, slots)| slots.get(offset))
                 .ok_or_else(|| EngineError::rejected(ErrorKind::CorruptIndex))?;
             // Session LSNs grow with seq, so turns past the snapshot form a suffix.
             if lsn > snapshot {
