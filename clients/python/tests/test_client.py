@@ -1,9 +1,10 @@
 import os
+import socket
 import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from helpers import TOKEN, send_without_reading, turns, wait_for
+from helpers import TOKEN, send_without_reading, trickle, turns, wait_for
 from zerodb_client import Client, NotCommitted, OutcomeUnknown
 
 
@@ -41,6 +42,23 @@ def test_append_retry_and_window(server, listener):
     for url in ("http://10.0.0.1:80", "http://127.0.0.1.evil:1", "https://127.0.0.1:1"):
         with pytest.raises(ValueError, match="cleartext"):
             Client(url, TOKEN)
+    # vsock CIDs and ports are 32 bits, past TCP's 65535.
+    for url in ("vsock://2:4294967296", "vsock://x:1", "vsock://2"):
+        with pytest.raises(ValueError, match="each 0 to 2"):
+            Client(url, TOKEN)
+    if hasattr(socket, "AF_VSOCK"):
+        Client("vsock://4294967295:4294967295", TOKEN)
+
+    # JSON escapes each NUL to 6 bytes, so a 2 MiB window is a 12 MiB response.
+    nul = "\0" * (1 << 20)
+    for _ in range(2):
+        client.append("a", "nul", turns(nul))
+    window = client.window("a", "nul", last=2, max_bytes=2 << 20)
+    assert [turn["content"] for turn in window["turns"]] == [nul, nul]
+    # The 2 s reserve holds for the first attempt too: nothing is sent.
+    with pytest.raises(NotCommitted, match="less than 2 s left"):
+        Client(server.url[listener], TOKEN, retry_deadline=1).append("a", "late", turns("x"))
+    assert contents(client, "late") == []
 
 
 def test_retry_survives_server_restart(server):
@@ -82,3 +100,13 @@ def test_unknown_outcome_never_downgrades(server, restart):
         receipt = call.result()
     assert receipt["outcome"] == "committed" and receipt["deduplicated"] is True
     assert contents(client, "s") == ["maybe"]
+
+
+def test_deadline_bounds_a_slow_response(server):
+    # The reply trickles in for 10 s. The call gives up at its deadline with unknown.
+    path = os.path.join(server.dir, "slow")
+    with trickle(path, 10):
+        started = time.monotonic()
+        with pytest.raises(OutcomeUnknown, match="unknown: the write may be saved"):
+            Client(f"unix://{path}", TOKEN, retry_deadline=2.5).append("a", "s", turns("x"))
+        assert time.monotonic() - started < 4

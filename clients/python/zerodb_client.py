@@ -5,7 +5,6 @@ Writes follow the outcome rule: a call returns a `committed` receipt, raises
 be saved. Only `committed` replaces `unknown`, as in `crates/zerodb/src/outcome.rs`.
 """
 
-import http.client
 import json
 import random
 import secrets
@@ -15,8 +14,10 @@ import urllib.parse
 
 FIRST_BACKOFF = 0.05
 MAX_BACKOFF = 2.0
-# Time kept for the request itself: no new attempt starts with less left.
+# Time kept for the request itself: no attempt connects or sends with less left.
 MIN_ATTEMPT = 2.0
+# A window holds up to 8 MiB of content, and JSON escapes a byte to at most 6.
+MAX_RESPONSE = 6 * (8 << 20) + (1 << 20)
 RECEIPT = ("deduplicated", "txn", "first_lsn", "last_lsn", "seqs")
 
 
@@ -32,15 +33,37 @@ class OutcomeUnknown(Error):
     """The write may be saved. Call again with `idem_key` to settle it without a copy."""
 
 
-class _Socket(http.client.HTTPConnection):
-    def __init__(self, family, address, timeout):
-        super().__init__("localhost", timeout=timeout)
-        self._family, self._address = family, address
+def _left(deadline):
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise TimeoutError("deadline passed")
+    return left
 
-    def connect(self):
-        self.sock = socket.socket(self._family, socket.SOCK_STREAM)
-        self.sock.settimeout(self.timeout)
-        self.sock.connect(self._address)
+
+def _connect(family, address, deadline):
+    sock = socket.socket(family, socket.SOCK_STREAM)
+    try:
+        sock.settimeout(_left(deadline))
+        sock.connect(address)
+    except BaseException:
+        sock.close()
+        raise
+    return sock
+
+
+def _recv(sock, deadline):
+    """One read, bounded by what is left of the deadline."""
+    sock.settimeout(_left(deadline))
+    chunk = sock.recv(1 << 16)
+    if not chunk:
+        raise ConnectionError("connection closed before the whole response")
+    return chunk
+
+
+def _u32(text):
+    if not (text.isascii() and text.isdigit() and int(text) < 1 << 32):
+        raise ValueError("url must be vsock://<cid>:<port>, each 0 to 2^32 - 1")
+    return int(text)
 
 
 class Client:
@@ -52,16 +75,18 @@ class Client:
         self._url, self._token, self.retry_deadline = url, token, retry_deadline
         parts = urllib.parse.urlsplit(url)
         if parts.scheme == "unix" and not parts.netloc and parts.path.startswith("/"):
-            self._open = lambda timeout: _Socket(socket.AF_UNIX, parts.path, timeout)
+            self._connect = lambda deadline: _connect(socket.AF_UNIX, parts.path, deadline)
         elif parts.scheme == "vsock":
+            # vsock ports are 32 bits, so urlsplit's TCP port parsing does not apply.
+            cid, _, port = parts.netloc.partition(":")
+            address = (_u32(cid), _u32(port))
             if not hasattr(socket, "AF_VSOCK"):
                 raise ValueError("vsock:// needs socket.AF_VSOCK, which this platform lacks")
-            address = (int(parts.hostname), parts.port)
-            self._open = lambda timeout: _Socket(socket.AF_VSOCK, address, timeout)
+            self._connect = lambda deadline: _connect(socket.AF_VSOCK, address, deadline)
         elif parts.scheme == "http" and parts.hostname in ("127.0.0.1", "localhost", "::1"):
             # The token travels in cleartext, so http takes loopback only.
-            host, port = parts.hostname, parts.port
-            self._open = lambda timeout: http.client.HTTPConnection(host, port, timeout)
+            address = (parts.hostname, parts.port or 80)
+            self._connect = lambda deadline: socket.create_connection(address, _left(deadline))
         else:
             raise ValueError(
                 "url must be unix:///path, vsock://<cid>:<port> or "
@@ -81,8 +106,7 @@ class Client:
         deadline = time.monotonic() + self.retry_deadline
         state, backoff = None, FIRST_BACKOFF
         while True:
-            left = deadline - time.monotonic()
-            sent, _, reply, detail = self._attempt("POST", "/v1/append", body, left)
+            sent, _, reply, detail = self._attempt("POST", "/v1/append", body, deadline)
             # A failed connect sent nothing. A transport error or a malformed reply is unclear.
             outcome = (reply or {}).get("outcome") if sent else "not_committed"
             if outcome == "committed":
@@ -113,30 +137,54 @@ class Client:
         return self._read("/healthz", (200, 503))
 
     def _read(self, target, ok):
-        _, status, reply, detail = self._attempt("GET", target, None, self.retry_deadline)
+        deadline = time.monotonic() + self.retry_deadline
+        _, status, reply, detail = self._attempt("GET", target, None, deadline)
         if status not in ok:
             raise Error(f"GET {target.partition('?')[0]} failed ({detail})")
         return reply
 
-    def _attempt(self, method, target, body, timeout):
-        """One request on a new connection. Returns (sent, status, reply, detail)."""
-        conn = self._open(timeout)
+    def _attempt(self, method, target, body, deadline):
+        """One request on a new connection, all by `deadline`. Nothing is sent unless
+        2 s are left before connecting and before sending. Returns
+        (sent, status, reply, detail)."""
+        late = False, None, None, "less than 2 s left before the deadline"
+        if time.monotonic() > deadline - MIN_ATTEMPT:
+            return late
         try:
+            sock = self._connect(deadline - MIN_ATTEMPT)
+        except OSError as error:
+            return False, None, None, f"connect failed: {error}"
+        with sock:
+            if time.monotonic() > deadline - MIN_ATTEMPT:
+                return late
             try:
-                conn.connect()
-            except OSError as error:
-                return False, None, None, f"connect failed: {error}"
-            headers = {"Authorization": f"Bearer {self._token}"}
-            if body is not None:
-                headers["Content-Type"] = "application/json"
-            conn.request(method, target, body, headers)
-            response = conn.getresponse()
-            status, reply = response.status, json.loads(response.read())
-        except (OSError, http.client.HTTPException, ValueError) as error:
-            return True, None, None, f"{type(error).__name__}: {error}"
-        finally:
-            conn.close()
+                status, reply = self._exchange(sock, method, target, body, deadline)
+            except (OSError, ValueError, IndexError) as error:
+                return True, None, None, f"{type(error).__name__}: {error}"
         if not isinstance(reply, dict):
             return True, None, None, "malformed response"
         error = ": ".join(str(reply[k]) for k in ("error", "message") if k in reply)
         return True, status, reply, f"{status} {error}".strip()
+
+    def _exchange(self, sock, method, target, body, deadline):
+        """Sends one request and reads one `Content-Length` response by `deadline`."""
+        head = f"{method} {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n"
+        head += f"Authorization: Bearer {self._token}\r\n"
+        if body is not None:
+            head += f"Content-Type: application/json\r\nContent-Length: {len(body)}\r\n"
+        sock.settimeout(_left(deadline))
+        sock.sendall(head.encode() + b"\r\n" + (body or b""))
+        data = b""
+        while b"\r\n\r\n" not in data and len(data) < 1 << 16:
+            data += _recv(sock, deadline)
+        head, _, rest = data.partition(b"\r\n\r\n")
+        lines = head.decode("latin-1").split("\r\n")
+        fields = (line.partition(":") for line in lines[1:])
+        lengths = [int(v) for k, _, v in fields if k.strip().lower() == "content-length"]
+        if len(lengths) != 1 or not 0 <= lengths[0] <= MAX_RESPONSE:
+            raise ValueError("response without one valid Content-Length")
+        chunks, size = [rest], len(rest)
+        while size < lengths[0]:
+            chunks.append(_recv(sock, deadline))
+            size += len(chunks[-1])
+        return int(lines[0].split(" ", 2)[1]), json.loads(b"".join(chunks)[: lengths[0]])

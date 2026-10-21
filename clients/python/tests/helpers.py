@@ -1,9 +1,11 @@
 import itertools
 import json
 import os
+import contextlib
 import shutil
 import socket
 import subprocess
+import threading
 import time
 
 TOKEN = "token-a-0123456789abcdefghijklmnopqrstuv"
@@ -88,3 +90,30 @@ def send_without_reading(path, body):
     sock.connect(path)
     sock.sendall(f"{head}Content-Length: {len(data)}\r\n\r\n".encode() + data)
     return sock
+
+
+@contextlib.contextmanager
+def trickle(path, seconds):
+    """A Unix socket server that reads a request, then sends a response head one byte
+    every 0.1 s for `seconds`, until the client hangs up."""
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(path)
+    listener.listen()
+
+    def serve():
+        conn, _ = listener.accept()
+        with conn:
+            conn.recv(1 << 16)
+            head = b"HTTP/1.1 200 \r\nX-Pad: " + b"x" * int(seconds * 10)
+            with contextlib.suppress(OSError):
+                for byte in head[: int(seconds * 10)]:
+                    time.sleep(0.1)
+                    conn.sendall(bytes([byte]))
+
+    thread = threading.Thread(target=serve)
+    thread.start()
+    try:
+        yield
+    finally:
+        thread.join()
+        listener.close()

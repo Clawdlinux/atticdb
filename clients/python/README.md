@@ -21,7 +21,8 @@ print(client.health())
 
 - `append` returns the receipt when the write committed. `deduplicated` is true when an earlier attempt with the same key wrote it.
 - `receipt_missing: True` means the write is durable but the server could not rebuild its receipt. Do not retry it.
-- It retries with the same `idem_key` until `retry_deadline` (30 s by default). A failed connect sent nothing.
+- It retries with the same `idem_key` until `retry_deadline` (30 s by default). The deadline bounds connect, send and every read.
+- An attempt sends nothing when connect fails or under 2 s are left, the first attempt included. So a `retry_deadline` under 2 s sends nothing and raises `NotCommitted`.
 - `NotCommitted` means nothing was written. Calling again is safe.
 - `OutcomeUnknown` means the write may be saved. Call again with `error.idem_key` to settle it without a second copy.
 
