@@ -291,8 +291,15 @@ impl<S: Stream> ServerConn<S> {
         };
         let idle_deadline = now + self.limits.idle_timeout;
         let mut chunk = [0; 8192];
+        // Bytes already searched for the blank line that ends a head. httparse runs only
+        // once that line or the size limit is reached, so a trickle costs one parse.
+        let mut scanned = 0;
         loop {
-            if !self.buf.is_empty() {
+            skip_leading_blank_lines(&mut self.buf, &mut scanned);
+            let ready = self.buf.len() >= self.limits.head_bytes
+                || ends_head(&self.buf[scanned.saturating_sub(2)..]);
+            scanned = self.buf.len();
+            if ready {
                 if let Some((head, used)) = parse_head(&self.buf, &self.limits).map_err(Some)? {
                     self.buf.drain(..used);
                     return Ok(head);
@@ -307,18 +314,27 @@ impl<S: Stream> ServerConn<S> {
         }
     }
 
+    /// Grows the body as bytes arrive, never past the declared length. A connection
+    /// holds at most `min(declared, 2 x received)` body bytes, so a client that declares
+    /// 8 MiB and sends nothing costs nothing. The worst case per connection is the
+    /// body cap, which bounds memory together with the connection cap.
     fn read_body(&mut self, len: u64) -> io::Result<Vec<u8>> {
         let len = usize::try_from(len).map_err(|_| io::Error::from(ErrorKind::InvalidData))?;
         let deadline = Instant::now() + self.limits.body_timeout;
         let buffered = len.min(self.buf.len());
         let mut body: Vec<u8> = self.buf.drain(..buffered).collect();
-        body.resize(len, 0);
-        let mut filled = buffered;
-        while filled < len {
-            match read_until(&mut self.stream, &mut body[filled..], deadline)? {
-                0 => return Err(ErrorKind::UnexpectedEof.into()),
-                n => filled += n,
+        let mut chunk = [0; 16 * 1024];
+        while body.len() < len {
+            let want = (len - body.len()).min(chunk.len());
+            let n = read_until(&mut self.stream, &mut chunk[..want], deadline)?;
+            if n == 0 {
+                return Err(ErrorKind::UnexpectedEof.into());
             }
+            if body.capacity() - body.len() < n {
+                let target = (body.capacity() * 2).max(body.len() + n).min(len);
+                body.reserve_exact(target - body.len());
+            }
+            body.extend_from_slice(&chunk[..n]);
         }
         Ok(body)
     }
@@ -349,6 +365,29 @@ impl<S: Stream> ServerConn<S> {
         let mut sink = [0; 8192];
         while let Ok(1..) = read_until(&mut self.stream, &mut sink, deadline) {}
     }
+}
+
+/// Drops empty lines before a request line, which RFC 9112 lets a server ignore.
+/// Without this, each one would look like the end of a head.
+fn skip_leading_blank_lines(buf: &mut Vec<u8>, scanned: &mut usize) {
+    let mut start = 0;
+    loop {
+        match buf.get(start..) {
+            Some([b'\n', ..]) => start += 1,
+            Some([b'\r', b'\n', ..]) => start += 2,
+            _ => break,
+        }
+    }
+    if start > 0 {
+        buf.drain(..start);
+        *scanned = scanned.saturating_sub(start);
+    }
+}
+
+/// Whether the bytes hold the blank line that ends a head: `\n\n` or `\n\r\n`.
+fn ends_head(bytes: &[u8]) -> bool {
+    bytes.windows(2).any(|pair| pair == b"\n\n")
+        || bytes.windows(3).any(|triple| triple == b"\n\r\n")
 }
 
 /// Parses a complete head, or returns `None` when more bytes are needed.
@@ -783,6 +822,30 @@ mod tests {
             ..BASE
         },
         Case {
+            name: "head and body sent one byte at a time",
+            input: || {
+                trickle(
+                    "\r\n\r\nPOST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello",
+                    0,
+                )
+            },
+            bodies: &[b"hello"],
+            statuses: &[200],
+            ..BASE
+        },
+        Case {
+            name: "head end split across reads",
+            input: || {
+                let mut steps = send("GET / HTTP/1.1\r\nX: a\r");
+                steps.extend([Step::Sleep(10), Step::Send(b"\n\r".to_vec())]);
+                steps.extend([Step::Sleep(10), Step::Send(b"\n".to_vec())]);
+                steps
+            },
+            bodies: &[b""],
+            statuses: &[200],
+            ..BASE
+        },
+        Case {
             name: "sixty-four header lines",
             input: || send(&header_lines(64)),
             bodies: &[b""],
@@ -856,6 +919,12 @@ mod tests {
         Case {
             name: "head over 16 KiB",
             input: || send(&format!("GET / HTTP/1.1\r\nX-Pad: {}\r\n\r\n", "a".repeat(16 * 1024))),
+            statuses: &[431],
+            ..BASE
+        },
+        Case {
+            name: "16 KiB without a line break",
+            input: || send(&format!("GET /{}", "a".repeat(16 * 1024))),
             statuses: &[431],
             ..BASE
         },

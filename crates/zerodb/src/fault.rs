@@ -3,6 +3,7 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use zerodb_tape::{Error, FileId, Io, LockGuard, Result, StdIo};
 
@@ -11,8 +12,11 @@ pub const TRIGGER: &str = "FAULT-SYNC-ONCE";
 
 /// Real I/O that fails the next segment sync while `<data_dir>/FAULT-SYNC-ONCE` exists.
 ///
+/// It starts disarmed. Recovery can open and sync segments when it repairs a torn
+/// tail, so the server calls [`FaultIo::arm`] only after `Engine::open` returns.
+///
 /// The writer reopens each segment with [`Io::open`] after preparing it with
-/// [`Io::create`], so only handles from `open` on `seg-*.zdb` are armed. Segment
+/// [`Io::create`], so only handles from `open` on `seg-*.zdb` are watched. Segment
 /// preparation, checkpoint, index and directory syncs pass through, and the failure
 /// always lands on an append. The written bytes stay in the file, as with a real
 /// sync failure.
@@ -21,12 +25,23 @@ pub struct FaultIo {
     inner: StdIo,
     trigger: PathBuf,
     segments: Mutex<BTreeSet<FileId>>,
+    armed: AtomicBool,
 }
 
 impl FaultIo {
     /// Wraps real I/O for one data directory.
     pub fn new(data_dir: &Path) -> Self {
-        Self { inner: StdIo::new(), trigger: data_dir.join(TRIGGER), segments: Mutex::default() }
+        Self {
+            inner: StdIo::new(),
+            trigger: data_dir.join(TRIGGER),
+            segments: Mutex::default(),
+            armed: AtomicBool::new(false),
+        }
+    }
+
+    /// Lets the trigger fail syncs. Call it after the engine finishes opening.
+    pub fn arm(&self) {
+        self.armed.store(true, Ordering::Release);
     }
 
     fn segments(&self) -> Result<std::sync::MutexGuard<'_, BTreeSet<FileId>>> {
@@ -90,7 +105,10 @@ impl Io for FaultIo {
 
     fn sync_data(&self, file: FileId) -> Result<()> {
         // Removing the trigger is the claim, so concurrent syncs fail at most once.
-        if self.segments()?.contains(&file) && std::fs::remove_file(&self.trigger).is_ok() {
+        if self.armed.load(Ordering::Acquire)
+            && self.segments()?.contains(&file)
+            && std::fs::remove_file(&self.trigger).is_ok()
+        {
             return Err(Error::SyncFailed("injected by FAULT-SYNC-ONCE".into()));
         }
         self.inner.sync_data(file)

@@ -3,9 +3,9 @@
 //! Errors name the path and the mode, never file content, so a token cannot leak
 //! through an error message.
 
-use serde_json::{Map, Value};
+use serde_json::{json, Value};
 use std::fmt;
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -120,11 +120,8 @@ pub fn init(path: &Path, tenant: &str) -> Result<Token, Error> {
     let token = crate::random_hex(MIN_TOKEN_BYTES)
         .map_err(|error| fail(format!("cannot read /dev/urandom: {error}")))
         .and_then(|hex| Token::new(hex).map_err(|message| fail(message.into())))?;
-    let mut tenants = Map::new();
-    tenants.insert(tenant.to_owned(), Value::String(token.expose().to_owned()));
-    let mut root = Map::new();
-    root.insert("tenants".into(), Value::Object(tenants));
-    let mut text = serde_json::to_string_pretty(&Value::Object(root))
+    let tenants = json!([{"name": tenant, "token": token.expose()}]);
+    let mut text = serde_json::to_string_pretty(&json!({ "tenants": tenants }))
         .map_err(|_| fail("cannot encode the configuration".into()))?;
     text.push('\n');
     let mut file = OpenOptions::new()
@@ -142,9 +139,15 @@ pub fn init(path: &Path, tenant: &str) -> Result<Token, Error> {
 }
 
 /// Opens once, checks the open handle with `fstat`, then reads from the same handle.
+/// `O_NONBLOCK` keeps a FIFO from blocking the open. It is then refused as not regular.
 fn read_private(path: &Path, what: &str) -> Result<String, Error> {
     let fail = |message: String| Error(format!("{what} {}: {message}", path.display()));
-    let file = File::open(path).map_err(|error| fail(format!("cannot open: {error}")))?;
+    let nonblock = rustix::fs::OFlags::NONBLOCK.bits() as i32;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(nonblock)
+        .open(path)
+        .map_err(|error| fail(format!("cannot open: {error}")))?;
     let meta = file.metadata().map_err(|error| fail(format!("cannot stat: {error}")))?;
     let euid = rustix::process::geteuid().as_raw();
     let mode = meta.mode() & 0o7777;
@@ -208,18 +211,28 @@ fn non_empty(value: Value, field: &str) -> Result<String, String> {
 }
 
 fn tenants(value: Value) -> Result<Vec<Tenant>, String> {
-    let Value::Object(entries) = value else {
-        return Err("tenants must be an object of tenant name to token".into());
+    let shape = "tenants must be an array of {\"name\": ..., \"token\": ...} objects";
+    let Value::Array(entries) = value else {
+        return Err(shape.into());
     };
-    let mut tenants = Vec::with_capacity(entries.len());
-    for (name, token) in entries {
-        check_tenant_name(&name)?;
-        let Value::String(token) = token else {
-            return Err("each tenant token must be a string".into());
+    let mut tenants: Vec<Tenant> = Vec::with_capacity(entries.len());
+    for (index, entry) in entries.into_iter().enumerate() {
+        let fail = |message: &str| format!("tenants[{index}]: {message}");
+        let Value::Object(mut fields) = entry else {
+            return Err(fail(shape));
         };
-        let token = Token::new(token)?;
-        if tenants.iter().any(|tenant: &Tenant| tenant.token == token) {
-            return Err("two tenants share a token".into());
+        let (Some(Value::String(name)), Some(Value::String(token)), true) =
+            (fields.remove("name"), fields.remove("token"), fields.is_empty())
+        else {
+            return Err(fail("needs exactly a string \"name\" and a string \"token\""));
+        };
+        check_tenant_name(&name).map_err(fail)?;
+        let token = Token::new(token).map_err(fail)?;
+        if tenants.iter().any(|tenant| tenant.name == name) {
+            return Err(fail("two tenants share a name"));
+        }
+        if tenants.iter().any(|tenant| tenant.token == token) {
+            return Err(fail("two tenants share a token"));
         }
         tenants.push(Tenant { name, token });
     }
@@ -231,4 +244,140 @@ fn check_tenant_name(name: &str) -> Result<(), &'static str> {
         return Err("tenant names must be 1 to 255 UTF-8 bytes");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    mod fs {
+        // Cargo doesn't define CARGO_TARGET_TMPDIR for unit tests.
+        const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/tmp");
+        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/support.rs"));
+    }
+
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    const SECRET: &str = "secret-token-0123456789abcdefghijkl";
+
+    enum Kind {
+        File(u32),
+        Fifo,
+    }
+
+    struct Case {
+        name: &'static str,
+        kind: Kind,
+        body: &'static str,
+        /// Tenant names on success, or a fragment of the error.
+        expect: Result<&'static [&'static str], &'static str>,
+    }
+
+    const CASES: &[Case] = &[
+        Case {
+            name: "two tenants",
+            kind: Kind::File(0o600),
+            body: r#"{"listen": "none", "tenants": [
+                {"name": "a", "token": "secret-token-0123456789abcdefghijkl"},
+                {"name": "b", "token": "secret-token-0123456789abcdefghijkX"}]}"#,
+            expect: Ok(&["a", "b"]),
+        },
+        Case {
+            name: "fifo is refused without blocking",
+            kind: Kind::Fifo,
+            body: "",
+            expect: Err("must be a regular file"),
+        },
+        Case {
+            name: "group-readable file",
+            kind: Kind::File(0o640),
+            body: r#"{"tenants": [{"name": "a", "token": "secret-token-0123456789abcdefghijkl"}]}"#,
+            expect: Err("found mode 0640"),
+        },
+        Case {
+            name: "duplicate tenant name",
+            kind: Kind::File(0o600),
+            body: r#"{"tenants": [
+                {"name": "a", "token": "secret-token-0123456789abcdefghijkl"},
+                {"name": "a", "token": "secret-token-0123456789abcdefghijkX"}]}"#,
+            expect: Err("tenants[1]: two tenants share a name"),
+        },
+        Case {
+            name: "duplicate token",
+            kind: Kind::File(0o600),
+            body: r#"{"tenants": [
+                {"name": "a", "token": "secret-token-0123456789abcdefghijkl"},
+                {"name": "b", "token": "secret-token-0123456789abcdefghijkl"}]}"#,
+            expect: Err("tenants[1]: two tenants share a token"),
+        },
+        Case {
+            name: "short token",
+            kind: Kind::File(0o600),
+            body: r#"{"tenants": [{"name": "a", "token": "secret-token"}]}"#,
+            expect: Err("at least 32 bytes"),
+        },
+        Case {
+            name: "name to token map",
+            kind: Kind::File(0o600),
+            body: r#"{"tenants": {"a": "secret-token-0123456789abcdefghijkl"}}"#,
+            expect: Err("must be an array"),
+        },
+        Case {
+            name: "extra tenant field",
+            kind: Kind::File(0o600),
+            body: r#"{"tenants": [{"name": "a", "token": "secret-token-0123456789abcdefghijkl", "x": 1}]}"#,
+            expect: Err("exactly a string"),
+        },
+    ];
+
+    #[test]
+    fn config_files_are_checked_before_use() {
+        let dir = fs::TestDir::new();
+        for (index, case) in CASES.iter().enumerate() {
+            let path = dir.0.join(format!("config-{index}.json"));
+            match case.kind {
+                Kind::File(mode) => {
+                    std::fs::write(&path, case.body).unwrap();
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+                }
+                Kind::Fifo => {
+                    let status = std::process::Command::new("mkfifo")
+                        .args(["-m", "600"])
+                        .arg(&path)
+                        .status()
+                        .unwrap();
+                    assert!(status.success(), "{}: mkfifo", case.name);
+                }
+            }
+            let (send, receive) = mpsc::channel();
+            let load = path.clone();
+            std::thread::spawn(move || {
+                let _ = send.send(Config::load(&load));
+            });
+            let loaded = receive
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap_or_else(|_| panic!("{}: load blocked", case.name));
+            match (loaded, case.expect) {
+                (Ok(config), Ok(names)) => {
+                    let got: Vec<&str> = config.tenants.iter().map(|t| t.name.as_str()).collect();
+                    assert_eq!(got, names, "{}: tenants", case.name);
+                    assert!(!format!("{config:?}").contains(SECRET), "{}: Debug", case.name);
+                }
+                (Err(error), Err(fragment)) => {
+                    let text = error.to_string();
+                    assert!(text.contains(fragment), "{}: error {text:?}", case.name);
+                    assert!(text.contains(&*path.to_string_lossy()), "{}: path", case.name);
+                    assert!(!text.contains("secret-token"), "{}: content echoed", case.name);
+                }
+                (result, _) => panic!("{}: unexpected {result:?}", case.name),
+            }
+        }
+        let path = dir.0.join("init.json");
+        let token = init(&path, "alice").unwrap();
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.tenant("alice").map(|t| &t.token), Some(&token), "init round trip");
+        assert!(init(&path, "alice").is_err(), "init never overwrites");
+    }
 }
