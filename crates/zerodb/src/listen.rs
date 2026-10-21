@@ -7,8 +7,9 @@ use std::io::ErrorKind;
 use std::net::{SocketAddr, TcpListener};
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 /// The default TCP port, on 127.0.0.1.
 pub const DEFAULT_PORT: u16 = 7425;
@@ -20,6 +21,7 @@ pub const NEEDS_TLS: &str = "non-loopback listening needs TLS, which zerodb does
 /// `sun_path` size, terminating NUL included.
 pub const SUN_PATH_BYTES: usize = if cfg!(target_os = "linux") { 108 } else { 104 };
 const STAGING: &str = ".zs.";
+const PROBE: Duration = Duration::from_secs(1);
 
 /// Binds a loopback TCP address. Any other address is refused.
 pub fn bind_tcp(addr: SocketAddr) -> std::io::Result<TcpListener> {
@@ -103,8 +105,13 @@ pub fn install_unix(
         Ok(meta) if !meta.file_type().is_socket() => {
             return Err(format!("{} exists and is not a socket", path.display()))
         }
-        Ok(_) => match UnixStream::connect(path) {
+        // Bounded, so a listener with a full backlog cannot hang startup under the lock.
+        // Only a refused connect proves the socket stale. A timeout counts as live.
+        Ok(_) => match crate::launch::connect_unix(path, Instant::now() + PROBE) {
             Ok(_) => return Err(format!("another server is listening on {}", path.display())),
+            Err(error) if error.kind() == ErrorKind::TimedOut => {
+                return Err(format!("another server is listening on {}", path.display()))
+            }
             Err(error) if error.kind() == ErrorKind::ConnectionRefused => fs::remove_file(path)
                 .map_err(|error| {
                     format!("cannot remove stale socket {}: {error}", path.display())
@@ -161,8 +168,12 @@ impl Installed {
 fn lock(path: &Path) -> std::io::Result<OwnedFd> {
     let mut name = path.as_os_str().to_owned();
     name.push(".lock");
-    let flags = OFlags::CREATE | OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let flags =
+        OFlags::CREATE | OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK;
     let fd = rustix::fs::open(Path::new(&name), flags, Mode::from_raw_mode(0o600))?;
+    if !rustix::fs::FileType::from_raw_mode(rustix::fs::fstat(&fd)?.st_mode).is_file() {
+        return Err(std::io::Error::other(format!("{} must be a regular file", name.display())));
+    }
     rustix::fs::flock(&fd, FlockOperation::LockExclusive)?;
     Ok(fd)
 }

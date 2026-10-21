@@ -14,7 +14,7 @@ use crate::http::{self, Limits, Response, ServerConn, Stream};
 use crate::listen::{self, Installed};
 use rustix::event::{PollFd, PollFlags, Timespec};
 use std::collections::HashMap;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::os::fd::AsFd;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -374,9 +374,11 @@ fn try_start(config: Config, exit_on_poison: bool) -> Result<u8, (u8, String)> {
 
 /// The `LOCK` contents when another process holds the data directory lock.
 fn lock_holder(dir: &Path) -> Option<String> {
-    let file = std::fs::File::open(dir.join("LOCK")).ok()?;
+    let mut options = std::fs::OpenOptions::new();
+    let mut file = crate::config::open_regular(options.read(true), &dir.join("LOCK")).ok()?;
     let held = matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock));
-    held.then(|| std::fs::read_to_string(dir.join("LOCK")).ok())?
+    let mut holder = String::new();
+    (held && file.read_to_string(&mut holder).is_ok()).then_some(holder)
 }
 
 #[cfg(feature = "fault-inject")]

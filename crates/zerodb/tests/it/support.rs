@@ -2,8 +2,9 @@ use serde_json::{json, Value};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::os::fd::OwnedFd;
 use std::os::unix::fs::DirBuilderExt;
-use std::os::unix::net::UnixStream;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,6 +15,30 @@ use zerodb::config::{Tenant, Token};
 use zerodb::serve::{self, Listeners, ServeConfig, Server};
 use zerodb_core::{Engine, EngineOptions};
 use zerodb_tape::{SimDisk, SystemClock, TapeOptions};
+
+/// Makes a mode 0600 FIFO at `path`.
+pub fn mkfifo(path: &Path) {
+    let status = Command::new("mkfifo").args(["-m", "600"]).arg(path).status();
+    assert!(status.unwrap().success(), "mkfifo {}", path.display());
+}
+
+/// A Unix listener at `path` that never accepts, with its backlog full. Holds the
+/// listener and the queued connections until dropped.
+pub fn saturated(path: &Path) -> Vec<OwnedFd> {
+    use rustix::net::{AddressFamily, SocketAddrUnix, SocketType};
+    let listener = UnixListener::bind(path).unwrap();
+    rustix::net::listen(&listener, 0).unwrap();
+    let mut held = vec![OwnedFd::from(listener)];
+    for _ in 0..1024 {
+        let socket = rustix::net::socket(AddressFamily::UNIX, SocketType::STREAM, None).unwrap();
+        rustix::io::ioctl_fionbio(&socket, true).unwrap();
+        if rustix::net::connect(&socket, &SocketAddrUnix::new(path).unwrap()).is_err() {
+            return held;
+        }
+        held.push(socket);
+    }
+    panic!("the backlog of {} never filled", path.display());
+}
 
 pub const TOKEN_A: &str = "token-a-0123456789abcdefghijklmnopqrstuv";
 pub const TOKEN_B: &str = "token-b-0123456789abcdefghijklmnopqrstuv";

@@ -8,7 +8,7 @@
 use crate::http::{self, Stream};
 use serde_json::Value;
 use std::fs::OpenOptions;
-use std::io::{self, ErrorKind};
+use std::io::{self, ErrorKind, Read};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::net::UnixStream;
@@ -130,8 +130,11 @@ impl Launch {
     /// in the config, never on the command line or in the environment.
     fn spawn(&mut self, dir: &Path, config: &Path) -> io::Result<()> {
         crate::listen::owned_dir(dir, 0o077).map_err(io::Error::other)?;
-        let (mut log, path) = (OpenOptions::new(), dir.join("serve.log"));
-        let log = log.create(true).append(true).mode(0o600).open(&path)?;
+        let path = dir.join("serve.log");
+        let log = crate::config::open_regular(
+            OpenOptions::new().create(true).append(true).mode(0o600),
+            &path,
+        )?;
         crate::config::check_private(&log, &path, "server log").map_err(io::Error::other)?;
         let child = Command::new(std::env::current_exe()?)
             .arg("serve")
@@ -167,7 +170,7 @@ fn connect_tcp(authority: &str, deadline: Instant) -> io::Result<TcpStream> {
 
 /// Connects by `deadline`. A blocking connect waits while the listen backlog is full;
 /// a nonblocking one fails with `EAGAIN` instead, so it is retried until the deadline.
-fn connect_unix(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
+pub(crate) fn connect_unix(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
     use rustix::net::{AddressFamily, SocketAddrUnix, SocketType};
     let socket = rustix::net::socket(AddressFamily::UNIX, SocketType::STREAM, None)?;
     rustix::io::fcntl_setfd(&socket, rustix::io::FdFlags::CLOEXEC)?;
@@ -187,7 +190,10 @@ fn connect_unix(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
 /// and answered `/healthz` on this connection with the instance id in `LOCK`. The token
 /// then goes over the same connection. Otherwise the reason, and no token was sent.
 fn discover(dir: &Path, deadline: Instant) -> Result<UnixStream, String> {
-    let lock = std::fs::read_to_string(dir.join("LOCK")).map_err(|e| format!("LOCK: {e}"))?;
+    let mut lock = String::new();
+    crate::config::open_regular(OpenOptions::new().read(true), &dir.join("LOCK"))
+        .and_then(|mut file| file.read_to_string(&mut lock))
+        .map_err(|e| format!("LOCK: {e}"))?;
     // `pid=<pid> instance=<id> unix=<path> tcp=<addr>`. The path may hold spaces.
     let fields = lock.trim_end().rsplit_once(" tcp=").map(|(head, _)| head);
     let instance =

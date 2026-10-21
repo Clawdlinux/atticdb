@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -209,28 +209,31 @@ fn tool_calls_over_stdio() {
 
     // No attempt sent a byte, so nothing was written. A listener whose backlog is full
     // never accepts: connecting must still stop at the deadline.
-    let full = dir.0.join("full");
-    let listener = UnixListener::bind(&full).unwrap();
-    rustix::net::listen(&listener, 0).unwrap();
-    let mut queued = Vec::new();
-    for _ in 0..1024 {
-        use rustix::net::{AddressFamily, SocketAddrUnix, SocketType};
-        let socket = rustix::net::socket(AddressFamily::UNIX, SocketType::STREAM, None).unwrap();
-        rustix::io::ioctl_fionbio(&socket, true).unwrap();
-        if rustix::net::connect(&socket, &SocketAddrUnix::new(&full).unwrap()).is_err() {
-            break;
-        }
-        queued.push(socket);
+    let _full = support::saturated(&dir.0.join("full"));
+    // FIFOs where a file belongs must not block an open: the call fails by its deadline.
+    init_config(&dir);
+    for name in ["fifo-log", "fifo-lock"] {
+        std::fs::DirBuilder::new().mode(0o700).create(dir.0.join(name)).unwrap();
     }
-    assert!(queued.len() < 1024, "the backlog is full");
-    let (gone, full) = (dir.0.join("gone"), format!("unix://{}", full.display()));
-    for (case, args, deadline, detail) in [
-        ("no socket", ["--url", &format!("unix://{}", gone.display())], "2500ms", ""),
-        ("no LOCK", ["--data-dir", "empty"], "2500ms", ""),
-        ("full backlog", ["--url", &full], "2500ms", ""),
-        ("server up, deadline under 2 s", ["--url", &url], "1s", "less than 2 s left"),
-    ] {
-        let args = [&args[..], &["--retry-deadline", deadline]].concat();
+    support::mkfifo(&dir.0.join("fifo-log/serve.log"));
+    support::mkfifo(&dir.0.join("fifo-lock/LOCK"));
+    let (gone, full) = (dir.0.join("gone"), format!("unix://{}", dir.0.join("full").display()));
+    let gone = format!("unix://{}", gone.display());
+    let rows: [(&str, &[&str], &str, &str); 6] = [
+        ("no socket", &["--url", &gone], "2500ms", ""),
+        ("no LOCK", &["--data-dir", "empty"], "2500ms", ""),
+        ("full backlog", &["--url", &full], "2500ms", ""),
+        ("server up, deadline under 2 s", &["--url", &url], "1s", "less than 2 s left"),
+        (
+            "FIFO at serve.log on auto-start",
+            &["--config", "c.json", "--data-dir", "fifo-log"],
+            "2500ms",
+            "",
+        ),
+        ("FIFO at LOCK during discovery", &["--data-dir", "fifo-lock"], "2500ms", ""),
+    ];
+    for (case, args, deadline, detail) in rows {
+        let args = [args, &["--retry-deadline", deadline]].concat();
         let mut mcp = Mcp::start(&dir.0, &args, Some(TOKEN_A));
         mcp.handshake();
         let result = mcp.call("memory_append", json!({"content": "lost?"}));

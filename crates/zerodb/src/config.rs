@@ -137,15 +137,20 @@ pub fn init(path: &Path, tenant: &str) -> Result<Token, String> {
     Ok(token)
 }
 
-/// Opens once, checks the open handle with `fstat`, then reads from the same handle.
-/// `O_NONBLOCK` keeps a FIFO from blocking the open. It is then refused as not regular.
+/// Opens with `O_NONBLOCK`, so a FIFO cannot block the open, then refuses anything but a
+/// regular file, checked with `fstat` on the handle. Read or write through that handle.
+pub fn open_regular(options: &mut OpenOptions, path: &Path) -> std::io::Result<File> {
+    let file = options.custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32).open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::other("must be a regular file"));
+    }
+    Ok(file)
+}
+
+/// Opens once with [`open_regular`] and [`check_private`], then reads the same handle.
 fn read_private(path: &Path, what: &str) -> Result<String, String> {
     let fail = |message: String| format!("{what} {}: {message}", path.display());
-    let nonblock = rustix::fs::OFlags::NONBLOCK.bits() as i32;
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(nonblock)
-        .open(path)
+    let file = open_regular(OpenOptions::new().read(true), path)
         .map_err(|error| fail(format!("cannot open: {error}")))?;
     check_private(&file, path, what)?;
     let mut text = String::new();

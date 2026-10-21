@@ -1,5 +1,6 @@
-use crate::support::{append_body, Dir, Process, Via};
+use crate::support::{self, append_body, Dir, Process, Via};
 use serde_json::{json, Value};
+use std::os::fd::OwnedFd;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
@@ -12,6 +13,8 @@ struct Ctx {
     socket: PathBuf,
     /// Another server that must keep working after the row.
     other: Option<(Process, String)>,
+    /// Sockets the row keeps open, such as a saturated listener.
+    held: Vec<OwnedFd>,
 }
 
 impl Ctx {
@@ -101,11 +104,7 @@ fn startup_checks() {
             "config is a FIFO",
             |c| {
                 std::fs::remove_file(&c.config).unwrap();
-                let status = std::process::Command::new("mkfifo")
-                    .args(["-m", "600"])
-                    .arg(&c.config)
-                    .status();
-                assert!(status.unwrap().success());
+                support::mkfifo(&c.config);
                 vec![]
             },
             Expect::Fails(1, "must be a regular file"),
@@ -295,6 +294,30 @@ fn startup_checks() {
             Expect::Fails(75, "is locked by pid="),
         ),
         (
+            "LOCK is a FIFO and the TCP port is taken",
+            |c| {
+                c.private_data_dir(0o700);
+                support::mkfifo(&c.data.join("LOCK"));
+                let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                let listen = taken.local_addr().unwrap().to_string();
+                c.held.push(taken.into());
+                vec!["--listen".into(), listen]
+            },
+            Expect::Fails(1, "cannot listen on"),
+        ),
+        // macOS refuses a connect to a full backlog with ECONNREFUSED, as for a stale
+        // socket, so only Linux can tell a saturated listener is live.
+        #[cfg(target_os = "linux")]
+        (
+            "saturated listener at the socket path",
+            |c| {
+                c.private_data_dir(0o700);
+                c.held = support::saturated(&c.socket);
+                vec![]
+            },
+            Expect::Fails(1, "another server is listening"),
+        ),
+        (
             "second serve on the same fixed port and data dir",
             |c| {
                 let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -332,7 +355,7 @@ fn startup_checks() {
         let data = dir.0.join("d");
         let socket = data.join(zerodb::listen::SOCKET_NAME);
         let token = token.trim().to_owned();
-        let mut ctx = Ctx { dir, config, token, data, socket, other: None };
+        let mut ctx = Ctx { dir, config, token, data, socket, other: None, held: vec![] };
         let extra = prepare(&mut ctx);
         let extra: Vec<&str> = extra.iter().map(String::as_str).collect();
         let mut server = match extra.first() {
@@ -345,6 +368,9 @@ fn startup_checks() {
                 let (status, stderr) = server.wait();
                 assert_eq!(status.code(), Some(code), "{case}: {stderr}");
                 assert!(stderr.contains(fragment), "{case}: {stderr}");
+                if case.starts_with("saturated") {
+                    assert!(ctx.socket.exists(), "{case}: the live socket stays");
+                }
                 if case.starts_with("staging") {
                     let parent = std::fs::read_dir(ctx.socket.parent().unwrap()).unwrap();
                     assert_eq!(parent.count(), 0, "{case}: nothing is bound or staged");
