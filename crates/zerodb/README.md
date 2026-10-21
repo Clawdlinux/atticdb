@@ -73,8 +73,8 @@ Branch on `outcome`, never on the status alone. One call is one `idem_key`, reus
 - `committed` from any attempt: done.
 - `not_committed` on the first attempt: nothing was written. Calling again is safe.
 - A transport error or `unknown`: retry with the same key. From then on only `committed` replaces `unknown`. A later `not_committed` can come from a poisoned or full writer that never looked at the key, so it does not prove the first attempt failed.
-- A call whose attempts all failed to connect sent no bytes. It reports `not_committed`.
-- Retries back off from 50 ms, doubling to 2 s with jitter, until the retry deadline (30 s by default, `--retry-deadline` in `zerodb mcp`). No new attempt starts with less than 2 s left.
+- A call whose attempts all sent no bytes reports `not_committed`. An attempt sends nothing when connect fails or under 2 s are left.
+- Retries back off from 50 ms, doubling to 2 s with jitter, until the retry deadline (30 s by default, `--retry-deadline` in `zerodb mcp`). No attempt connects or sends with less than 2 s left, the first one included. A retry deadline under 2 s sends nothing.
 - A retry after the key leaves the dedup window writes again.
 
 `zerodb mcp` and the [Python client](../../clients/python/README.md) both follow it.

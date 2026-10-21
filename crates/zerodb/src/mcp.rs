@@ -20,8 +20,8 @@ pub const TOKEN_ENV: &str = "ZERODB_TOKEN";
 const VERSIONS: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 const FIRST_BACKOFF: Duration = Duration::from_millis(50);
 const MAX_BACKOFF: Duration = Duration::from_secs(2);
-/// Time kept for the request itself: no new attempt starts, and connecting stops, with
-/// less than this left before the deadline.
+/// Time kept for the request itself: no attempt connects or sends with less than this
+/// left before the deadline.
 const MIN_ATTEMPT: Duration = Duration::from_secs(2);
 /// Longest stdin line. A request body cannot be larger anyway.
 const MAX_LINE: u64 = 8 << 20;
@@ -239,11 +239,20 @@ impl Adapter {
         deadline: Instant,
     ) -> Result<Value, (Attempt, String)> {
         let connect_by = deadline.checked_sub(MIN_ATTEMPT).unwrap_or(deadline);
+        // Checked before connecting and before sending. Nothing sent merges as
+        // not_committed, which never clears an earlier unknown.
+        let reserve = || {
+            let late = (Attempt::NotSent, "less than 2 s left before the deadline".to_owned());
+            (Instant::now() < connect_by).then_some(()).ok_or(late)
+        };
+        reserve()?;
         let (mut stream, host) =
             self.launch.connect(connect_by).map_err(|e| (Attempt::NotSent, e.to_string()))?;
+        reserve()?;
         let auth = format!("Bearer {}", self.token.expose());
         let headers = [("Host", host.as_str()), ("Authorization", auth.as_str())];
-        let max = crate::http::Limits::default().body_bytes;
+        // JSON escapes a byte to at most 6 (`\u0000`), plus 1 MiB for the rest of a window.
+        let max = 6 * crate::api::MAX_WINDOW_BYTES as u64 + (1 << 20);
         let lost = |error: String| (Attempt::TransportError, error);
         let response =
             crate::http::exchange(&mut *stream, method, target, &headers, body, deadline, max);

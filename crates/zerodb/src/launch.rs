@@ -9,7 +9,7 @@ use crate::http::{self, Stream};
 use serde_json::Value;
 use std::fs::OpenOptions;
 use std::io::{self, ErrorKind};
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
@@ -85,9 +85,11 @@ impl Launch {
     /// call finds it.
     pub fn connect(&mut self, deadline: Instant) -> io::Result<(Box<dyn Stream>, String)> {
         let dir = match (&self.url, &self.data_dir) {
-            (Some(Url::Unix(path)), _) => return unix(path),
+            (Some(Url::Unix(path)), _) => {
+                return Ok((Box::new(connect_unix(path, deadline)?), "localhost".into()))
+            }
             (Some(Url::Tcp(authority)), _) => {
-                return Ok((Box::new(TcpStream::connect(authority.as_str())?), authority.clone()))
+                return Ok((Box::new(connect_tcp(authority, deadline)?), authority.clone()))
             }
             (None, Some(dir)) => dir.clone(),
             (None, None) => return Err(io::Error::other("no --url and no data directory")),
@@ -97,7 +99,7 @@ impl Launch {
                 eprintln!("zerodb mcp: started server exited: {status}");
                 self.child = None;
             }
-            match discover(&dir) {
+            match discover(&dir, deadline) {
                 Ok(stream) => {
                     (self.backoff, self.refused) = (FIRST_BACKOFF, String::new());
                     return Ok((Box::new(stream), "localhost".into()));
@@ -152,14 +154,39 @@ impl Launch {
     }
 }
 
-fn unix(path: &Path) -> io::Result<(Box<dyn Stream>, String)> {
-    Ok((Box::new(UnixStream::connect(path)?), "localhost".into()))
+fn connect_tcp(authority: &str, deadline: Instant) -> io::Result<TcpStream> {
+    let mut error = io::Error::new(ErrorKind::NotFound, format!("{authority} has no address"));
+    for addr in authority.to_socket_addrs()? {
+        match TcpStream::connect_timeout(&addr, http::remaining(deadline)?) {
+            Ok(stream) => return Ok(stream),
+            Err(next) => error = next,
+        }
+    }
+    Err(error)
+}
+
+/// Connects by `deadline`. A blocking connect waits while the listen backlog is full;
+/// a nonblocking one fails with `EAGAIN` instead, so it is retried until the deadline.
+fn connect_unix(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
+    use rustix::net::{AddressFamily, SocketAddrUnix, SocketType};
+    let socket = rustix::net::socket(AddressFamily::UNIX, SocketType::STREAM, None)?;
+    rustix::io::fcntl_setfd(&socket, rustix::io::FdFlags::CLOEXEC)?;
+    rustix::io::ioctl_fionbio(&socket, true)?;
+    let addr = SocketAddrUnix::new(path)?;
+    while let Err(error) = rustix::net::connect(&socket, &addr) {
+        if error != rustix::io::Errno::AGAIN {
+            return Err(error.into());
+        }
+        std::thread::sleep(POLL.min(http::remaining(deadline)?));
+    }
+    rustix::io::ioctl_fionbio(&socket, false)?;
+    Ok(UnixStream::from(socket))
 }
 
 /// A connection to the socket named in `LOCK`, if it is ours, under an owner-only parent,
 /// and answered `/healthz` on this connection with the instance id in `LOCK`. The token
 /// then goes over the same connection. Otherwise the reason, and no token was sent.
-fn discover(dir: &Path) -> Result<UnixStream, String> {
+fn discover(dir: &Path, deadline: Instant) -> Result<UnixStream, String> {
     let lock = std::fs::read_to_string(dir.join("LOCK")).map_err(|e| format!("LOCK: {e}"))?;
     // `pid=<pid> instance=<id> unix=<path> tcp=<addr>`. The path may hold spaces.
     let fields = lock.trim_end().rsplit_once(" tcp=").map(|(head, _)| head);
@@ -200,9 +227,9 @@ fn discover(dir: &Path) -> Result<UnixStream, String> {
         }
     }
     let fail = |error: io::Error| format!("{}: {error}", socket.display());
-    let mut stream = UnixStream::connect(&socket).map_err(fail)?;
+    let mut stream = connect_unix(&socket, deadline).map_err(fail)?;
     let headers = [("Host", "localhost"), ("Connection", "keep-alive")];
-    let deadline = Instant::now() + PROBE_TIMEOUT;
+    let deadline = deadline.min(Instant::now() + PROBE_TIMEOUT);
     let response = http::exchange(&mut stream, "GET", "/healthz", &headers, &[], deadline, 4096);
     let response = response.map_err(fail)?;
     let health: Value = serde_json::from_slice(&response.body).unwrap_or_default();

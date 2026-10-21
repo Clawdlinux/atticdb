@@ -15,7 +15,7 @@ zerodb-tape = { path = "../zerodb-tape" }
 blake3 = "=1.8.7"
 serde_json = { version = "=1.0.154", default-features = false, features = ["std"] }
 httparse = { version = "=1.10.1", default-features = false }
-rustix = { version = "=1.1.2", default-features = false, features = ["event", "fs", "process", "std"] }
+rustix = { version = "=1.1.2", default-features = false, features = ["event", "fs", "net", "process", "std"] }
 
 [dev-dependencies]
 zerodb-tape = { path = "../zerodb-tape", features = ["sim"] }

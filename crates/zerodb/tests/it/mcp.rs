@@ -100,6 +100,17 @@ const FOREIGN_SOCKETS: [&str; 5] = [
     "/run/systemd/journal/stdout",
 ];
 
+const FOREIGN_ROW: &str = "a socket owned by another user";
+
+/// A root-owned socket from [`FOREIGN_SOCKETS`], when the tests do not run as root.
+fn foreign_socket() -> Option<&'static Path> {
+    let euid = rustix::process::geteuid().as_raw();
+    FOREIGN_SOCKETS.iter().map(Path::new).find(|path| {
+        std::fs::symlink_metadata(path)
+            .is_ok_and(|meta| meta.file_type().is_socket() && meta.uid() != euid)
+    })
+}
+
 /// Drives the adapter as a model's client would, against a server started by the test.
 #[test]
 fn tool_calls_over_stdio() {
@@ -196,23 +207,40 @@ fn tool_calls_over_stdio() {
     assert!(!hex_run && !stdout.contains("idem"), "no key reaches the model: {stdout}");
     assert!(!stdout.contains(TOKEN_A) && !stdout.contains("tenant"), "{stdout}");
 
-    // No server reachable and none started: no attempt sent a byte, so nothing was written.
-    let gone = format!("unix://{}", dir.0.join("gone").display());
-    for args in [["--url", &gone], ["--data-dir", "empty"]] {
-        let mut mcp = Mcp::start(
-            &dir.0,
-            &[&args[..], &["--retry-deadline", "300ms"]].concat(),
-            Some(TOKEN_A),
-        );
+    // No attempt sent a byte, so nothing was written. A listener whose backlog is full
+    // never accepts: connecting must still stop at the deadline.
+    let full = dir.0.join("full");
+    let listener = UnixListener::bind(&full).unwrap();
+    rustix::net::listen(&listener, 0).unwrap();
+    let mut queued = Vec::new();
+    for _ in 0..1024 {
+        use rustix::net::{AddressFamily, SocketAddrUnix, SocketType};
+        let socket = rustix::net::socket(AddressFamily::UNIX, SocketType::STREAM, None).unwrap();
+        rustix::io::ioctl_fionbio(&socket, true).unwrap();
+        if rustix::net::connect(&socket, &SocketAddrUnix::new(&full).unwrap()).is_err() {
+            break;
+        }
+        queued.push(socket);
+    }
+    assert!(queued.len() < 1024, "the backlog is full");
+    let (gone, full) = (dir.0.join("gone"), format!("unix://{}", full.display()));
+    for (case, args, deadline, detail) in [
+        ("no socket", ["--url", &format!("unix://{}", gone.display())], "2500ms", ""),
+        ("no LOCK", ["--data-dir", "empty"], "2500ms", ""),
+        ("full backlog", ["--url", &full], "2500ms", ""),
+        ("server up, deadline under 2 s", ["--url", &url], "1s", "less than 2 s left"),
+    ] {
+        let args = [&args[..], &["--retry-deadline", deadline]].concat();
+        let mut mcp = Mcp::start(&dir.0, &args, Some(TOKEN_A));
         mcp.handshake();
         let result = mcp.call("memory_append", json!({"content": "lost?"}));
-        assert_eq!(result["isError"], true, "{args:?}");
-        assert!(
-            text(&result).starts_with("not_committed: nothing was written"),
-            "{args:?}: {result}"
-        );
+        assert_eq!(result["isError"], true, "{case}");
+        let expect = format!("not_committed: nothing was written ({detail}");
+        assert!(text(&result).starts_with(&expect), "{case}: {result}");
         assert_eq!(mcp.close().0.code(), Some(0));
     }
+    let (_, lost) = running.vias[1].a("GET", "/v1/window?agent=mcp&session=default&last=9", None);
+    assert_eq!(lost["turns"], json!([]), "nothing sent under 2 s");
 }
 
 /// Adapters find or start one server, and send the token only to a server they trust.
@@ -235,6 +263,13 @@ fn launch_race_starts_one_server() {
     for mcp in &mut racers {
         assert_committed(&mcp.response()["result"], "racer");
     }
+    // JSON escapes each NUL to 6 bytes, so a 2 MiB window is a 12 MiB response.
+    let nul = "\0".repeat(1 << 20);
+    for _ in 0..2 {
+        assert_committed(&racers[0].call("memory_append", json!({"content": nul})), "NUL");
+    }
+    let window = racers[0].call("memory_recent", json!({"n": 2, "max_bytes": 2 << 20}));
+    assert_eq!(contents(&window), [nul.as_str(); 2], "{}", text(&window).len());
     // The loser says the directory is locked and exits 75. It may still be starting when both
     // adapters already trust the winner, so wait for its line.
     let log = || std::fs::read_to_string(data.join("serve.log")).unwrap();
@@ -289,18 +324,8 @@ fn launch_race_starts_one_server() {
             "not writable by group or others unless sticky",
         ),
         (
-            "a socket owned by another user",
-            |_, _, instance| {
-                let euid = rustix::process::geteuid().as_raw();
-                let foreign = FOREIGN_SOCKETS.iter().map(Path::new).find(|path| {
-                    std::fs::symlink_metadata(path)
-                        .is_ok_and(|meta| meta.file_type().is_socket() && meta.uid() != euid)
-                });
-                let needs = "this row needs a root-owned socket and a non-root user";
-                let socket =
-                    foreign.unwrap_or_else(|| panic!("{needs}; none of {FOREIGN_SOCKETS:?}"));
-                (Some(lock_text(instance, socket, "none")), vec![])
-            },
+            FOREIGN_ROW,
+            |_, _, instance| (Some(lock_text(instance, foreign_socket().unwrap(), "none")), vec![]),
             "must be a socket owned by uid",
         ),
         (
@@ -316,6 +341,13 @@ fn launch_race_starts_one_server() {
         ),
     ];
     for (case, setup, refusal) in rows {
+        if *case == FOREIGN_ROW && foreign_socket().is_none() {
+            let why = format!("none of {FOREIGN_SOCKETS:?} is a socket owned by another user");
+            // GitHub runners have these sockets and run as non-root, so CI always covers it.
+            assert!(std::env::var_os("CI").is_none(), "{case}: {why}");
+            eprintln!("SKIPPED ROW {case:?}: {why}. Run as non-root on a stock host.");
+            continue;
+        }
         let old = lock_field(&data, "instance=");
         assert!(kill_holder(&data), "{case}: stop the server");
         let (lock, fakes) = setup(&dir.0, &data, &old);

@@ -473,7 +473,8 @@ pub fn write_response<S: Stream + ?Sized>(
     write_until(stream, &bytes, deadline)
 }
 
-fn remaining(deadline: Instant) -> io::Result<Duration> {
+/// Time left before `deadline`, or `TimedOut` when none is.
+pub(crate) fn remaining(deadline: Instant) -> io::Result<Duration> {
     deadline
         .checked_duration_since(Instant::now())
         .filter(|left| !left.is_zero())

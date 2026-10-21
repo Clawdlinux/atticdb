@@ -2,8 +2,9 @@
 //!
 //! Only `committed` replaces `unknown`. A later `not_committed` cannot clear an
 //! earlier unclear attempt, because the engine can reject a retry of a key whose
-//! first attempt is already durable. An attempt whose connect failed sent nothing: it
-//! counts as `not_committed`, but the call still retries until the deadline.
+//! first attempt is already durable. An attempt that sent nothing, because connect failed
+//! or under 2 s were left, counts as `not_committed`. The call still retries until the
+//! deadline.
 
 pub use zerodb_tape::Outcome;
 
@@ -30,7 +31,7 @@ pub enum Attempt {
     Answered(Outcome),
     /// Reset, timeout, or a short or malformed response, after the request was sent.
     TransportError,
-    /// Connect failed, so nothing was sent.
+    /// Nothing was sent: connect failed, or under 2 s were left to connect or send.
     NotSent,
 }
 
