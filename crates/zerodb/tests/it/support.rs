@@ -152,10 +152,7 @@ pub fn serve(engine: Arc<Engine>, dir: &Dir, max_connections: usize) -> Running 
     });
     let listeners = Listeners {
         tcp: Some(zerodb::listen::bind_tcp("127.0.0.1:0".parse().unwrap()).unwrap()),
-        unix: Some((
-            zerodb::listen::install_unix(&socket, None, &instance).unwrap(),
-            socket.clone(),
-        )),
+        unix: Some(zerodb::listen::install_unix(&socket, None, &instance).unwrap()),
     };
     let config = ServeConfig {
         auth: Auth::new(&tenants),

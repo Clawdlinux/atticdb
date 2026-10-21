@@ -10,12 +10,12 @@ use crate::api::{self, Route};
 use crate::auth::Auth;
 use crate::config::{Config, Listen};
 use crate::http::{Limits, Response, ServerConn, Stream};
-use crate::listen;
+use crate::listen::{self, Installed};
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
@@ -35,9 +35,9 @@ pub const EXIT_POISONED: u8 = 70;
 pub struct Listeners {
     /// Loopback TCP.
     pub tcp: Option<TcpListener>,
-    /// The Unix socket and the path it is reachable at. The path wakes the accept
-    /// loop on shutdown and is removed on a poison exit.
-    pub unix: Option<(UnixListener, PathBuf)>,
+    /// The Unix socket and the path it is installed at. The path wakes the accept
+    /// loop on shutdown and is removed on a poison exit if it is still ours.
+    pub unix: Option<(UnixListener, Installed)>,
 }
 
 /// What [`run`] needs besides the engine and the listeners.
@@ -90,7 +90,7 @@ struct Shared {
     engine: Arc<Engine>,
     config: ServeConfig,
     tcp: Option<SocketAddr>,
-    unix: Option<PathBuf>,
+    unix: Option<Installed>,
     stopping: AtomicBool,
     tracker: Arc<Tracker>,
 }
@@ -105,8 +105,8 @@ impl Shared {
         if let Some(addr) = self.tcp {
             let _ = TcpStream::connect(addr);
         }
-        if let Some(path) = &self.unix {
-            let _ = UnixStream::connect(path);
+        if let Some(unix) = &self.unix {
+            let _ = UnixStream::connect(&unix.path);
         }
         true
     }
@@ -118,8 +118,8 @@ impl Shared {
             return;
         }
         self.tracker.wait_until(|conns| conns.in_flight == 0);
-        if let Some(path) = &self.unix {
-            let _ = std::fs::remove_file(path);
+        if let Some(unix) = &self.unix {
+            let _ = unix.remove();
         }
         self.tracker.update(|conns| conns.exited = true);
     }
@@ -338,7 +338,7 @@ fn try_start(config: Config, exit_on_poison: bool) -> Result<u8, (u8, String)> {
         _ => fail(format!("cannot open {}: {error}", data_dir.display())),
     })?;
     let unix = listen::install_unix(&socket, group, &instance).map_err(fail)?;
-    let listeners = Listeners { tcp, unix: Some((unix, socket.clone())) };
+    let listeners = Listeners { tcp, unix: Some(unix) };
     let auth = Auth::new(&config.tenants);
     let max_connections = MAX_CONNECTIONS;
     let config = ServeConfig { auth, instance, exit_on_poison, max_connections };

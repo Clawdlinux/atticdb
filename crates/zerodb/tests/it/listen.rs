@@ -74,8 +74,9 @@ enum Expect {
     /// Two servers start at once with one socket path: one serves, the other fails.
     OneWins,
     /// `--exit-on-poison` with the fault trigger: the write gets unknown and the server exits 70.
+    /// With `true`, another server installed a socket at the path first, and it stays.
     #[cfg(feature = "fault-inject")]
-    ExitsOnPoison,
+    ExitsOnPoison(bool),
 }
 
 const TENANT: &str = r#"{"name": "a", "token": "secret-token-0123456789abcdefghijkl"}"#;
@@ -308,7 +309,13 @@ fn startup_checks() {
             Expect::Fails(75, "is locked by pid="),
         ),
         #[cfg(feature = "fault-inject")]
-        ("exit on poison", |_| vec!["--exit-on-poison".into()], Expect::ExitsOnPoison),
+        ("exit on poison", |_| vec!["--exit-on-poison".into()], Expect::ExitsOnPoison(false)),
+        #[cfg(feature = "fault-inject")]
+        (
+            "exit on poison keeps a socket another server installed later",
+            |_| vec!["--exit-on-poison".into()],
+            Expect::ExitsOnPoison(true),
+        ),
         ("recover", |_| vec![], Expect::Recovers),
     ];
 
@@ -420,13 +427,22 @@ fn startup_checks() {
                 assert_eq!(contents, [&json!("one")], "{case}: only turns at or below the cut");
             }
             #[cfg(feature = "fault-inject")]
-            Expect::ExitsOnPoison => {
-                server.ready();
+            Expect::ExitsOnPoison(replaced) => {
+                let (_, tcp) = server.ready();
+                let other = replaced.then(|| {
+                    std::fs::remove_file(&ctx.socket).unwrap();
+                    std::os::unix::net::UnixListener::bind(&ctx.socket).unwrap()
+                });
                 std::fs::write(ctx.data.join("FAULT-SYNC-ONCE"), "").unwrap();
                 let unknown = json!({"outcome": "unknown", "error": "storage"});
-                assert_eq!(ctx.append(&unix, "poison"), (500, unknown), "{case}");
+                assert_eq!(ctx.append(&Via::Tcp(tcp.unwrap()), "poison"), (500, unknown), "{case}");
                 let (status, stderr) = server.wait();
                 assert_eq!(status.code(), Some(70), "{case}: {stderr}");
+                if other.is_some() {
+                    let kept = std::os::unix::net::UnixStream::connect(&ctx.socket);
+                    assert!(kept.is_ok(), "{case}: {kept:?}");
+                    continue;
+                }
                 assert!(!ctx.socket.exists(), "{case}: socket path removed");
                 // The written bytes survived the exit, so a fresh start finds the key.
                 let mut restarted = ctx.serve(&ctx.data, &[]);

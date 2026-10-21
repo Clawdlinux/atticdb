@@ -1,12 +1,14 @@
 //! TCP and Unix socket listeners, with the checks that keep the lock race and stale
 //! sockets safe. The Unix socket is installed only by the process that holds the lock.
 
+use rustix::fs::{FlockOperation, Mode, OFlags};
 use std::fs::{self, DirBuilder, Permissions};
 use std::io::ErrorKind;
 use std::net::{SocketAddr, TcpListener};
+use std::os::fd::OwnedFd;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// The default TCP port, on 127.0.0.1.
 pub const DEFAULT_PORT: u16 = 7425;
@@ -66,15 +68,16 @@ pub fn owned_dir(dir: &Path, mask: u32) -> Result<(), String> {
 
 /// Installs the Unix socket at `path`. Call it only while holding the data directory lock.
 ///
-/// It binds inside a private 0700 staging directory named after this start's `instance`,
-/// sets the mode (0600, or 0660 with `group`), then hard-links the socket onto `path`. A
-/// link fails if `path` exists, so an existing path is never clobbered, and nobody else
-/// can connect before the mode is set. Other staging directories are never touched.
+/// Every change to `path` happens under an exclusive `flock` on `<path>.lock`, so servers on
+/// other data directories that share the path take turns. It binds inside a private 0700
+/// staging directory named after this start's `instance`, sets the mode (0600, or 0660 with
+/// `group`), then hard-links the socket onto `path`. A live socket at `path` fails, a stale
+/// one is removed first. Nobody else can connect before the mode is set.
 pub fn install_unix(
     path: &Path,
     group: Option<u32>,
     instance: &str,
-) -> Result<UnixListener, String> {
+) -> Result<(UnixListener, Installed), String> {
     let path = &std::path::absolute(path).map_err(|error| format!("socket path: {error}"))?;
     let parent = path.parent().unwrap_or(Path::new("/"));
     let staging = parent.join(format!("{STAGING}{}", instance.get(..8).unwrap_or(instance)));
@@ -90,6 +93,8 @@ pub fn install_unix(
         }
     }
     owned_dir(parent, 0o022)?;
+    let _lock =
+        lock(path).map_err(|error| format!("cannot lock {}.lock: {error}", path.display()))?;
     match fs::symlink_metadata(path) {
         Err(error) if error.kind() == ErrorKind::NotFound => {}
         Err(error) => return Err(format!("socket {}: {error}", path.display())),
@@ -97,10 +102,11 @@ pub fn install_unix(
             return Err(format!("{} exists and is not a socket", path.display()))
         }
         Ok(_) => match UnixStream::connect(path) {
-            Ok(_) => return Err(live(path)),
-            // Stale. It stays until the link below fails on it: a server on another data
-            // directory may be linking this same path right now.
-            Err(error) if error.kind() == ErrorKind::ConnectionRefused => {}
+            Ok(_) => return Err(format!("another server is listening on {}", path.display())),
+            Err(error) if error.kind() == ErrorKind::ConnectionRefused => fs::remove_file(path)
+                .map_err(|error| {
+                    format!("cannot remove stale socket {}: {error}", path.display())
+                })?,
             Err(error) => return Err(format!("cannot probe socket {}: {error}", path.display())),
         },
     }
@@ -117,27 +123,44 @@ pub fn install_unix(
             &staged,
             Permissions::from_mode(if group.is_some() { 0o660 } else { 0o600 }),
         )?;
-        if let Err(error) = fs::hard_link(&staged, path) {
-            let refused = |e: std::io::Error| e.kind() == ErrorKind::ConnectionRefused;
-            if error.kind() != ErrorKind::AlreadyExists
-                || !UnixStream::connect(path).is_err_and(refused)
-            {
-                return Err(error);
-            }
-            fs::remove_file(path)?;
-            fs::hard_link(&staged, path)?;
-        }
-        Ok(listener)
+        fs::hard_link(&staged, path)?;
+        let meta = fs::symlink_metadata(path)?;
+        Ok((listener, Installed { path: path.clone(), id: (meta.dev(), meta.ino()) }))
     })();
     let _ = fs::remove_file(&staged);
     let _ = fs::remove_dir(&staging);
-    installed.map_err(|error: std::io::Error| match UnixStream::connect(path) {
-        // Another server on another data directory linked the same path first.
-        Ok(_) if error.kind() == ErrorKind::AlreadyExists => live(path),
-        _ => format!("cannot install socket {}: {error}", path.display()),
+    installed.map_err(|error: std::io::Error| {
+        format!("cannot install socket {}: {error}", path.display())
     })
 }
 
-fn live(path: &Path) -> String {
-    format!("another server is listening on {}", path.display())
+/// A socket path this server installed, and the file it linked there.
+#[derive(Clone, Debug)]
+pub struct Installed {
+    /// Where clients connect.
+    pub path: PathBuf,
+    id: (u64, u64),
+}
+
+impl Installed {
+    /// Removes the path, under the same lock as the install, if it is still our socket.
+    /// A socket another server installed there later stays.
+    pub fn remove(&self) -> std::io::Result<()> {
+        let _lock = lock(&self.path)?;
+        let meta = fs::symlink_metadata(&self.path)?;
+        if (meta.dev(), meta.ino()) == self.id {
+            fs::remove_file(&self.path)?;
+        }
+        Ok(())
+    }
+}
+
+/// An exclusive `flock` on `<path>.lock`, held until the descriptor drops.
+fn lock(path: &Path) -> std::io::Result<OwnedFd> {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".lock");
+    let flags = OFlags::CREATE | OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let fd = rustix::fs::open(Path::new(&name), flags, Mode::from_raw_mode(0o600))?;
+    rustix::fs::flock(&fd, FlockOperation::LockExclusive)?;
+    Ok(fd)
 }
