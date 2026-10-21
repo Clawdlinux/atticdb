@@ -1,7 +1,6 @@
-#![allow(clippy::unwrap_used)]
-
+use crate::support::submit;
 use std::sync::Arc;
-use zerodb_tape::sim::{PreparedBatch, SimClock, WriteRequest, WriterCore};
+use zerodb_tape::sim::{SimClock, WriterCore};
 use zerodb_tape::{Durability, Kind, RecordInput, SimDisk, TapeOptions};
 
 #[test]
@@ -20,9 +19,8 @@ fn paged_offsets_cross_segments_recover_and_reload_within_budget() {
                 RecordInput { kind: Kind::Turn, tenant_id: 1, content }
             })
             .collect();
-        let batch = PreparedBatch::new(records, Durability::Durable).unwrap();
-        let (request, reply) = WriteRequest::new(batch);
-        core.enqueue(request);
+        let reply = submit(&mut core, records, Durability::Durable);
+
         core.step();
         reply.recv().unwrap().unwrap();
         assert!(core.index_stats().unwrap().resident_bytes <= opts.lsn_index_bytes);
@@ -30,13 +28,17 @@ fn paged_offsets_cross_segments_recover_and_reload_within_budget() {
     let evictions = core.index_stats().unwrap().page_evictions;
     assert!(evictions > 0);
     assert!(core.index_stats().unwrap().dirty_page_evictions > 0);
+    let dirty = core.index_stats().unwrap().dirty_page_evictions;
     disk.enospc_after_bytes(0).unwrap();
-    assert!(core.read(1).is_err());
-    assert_eq!(core.index_stats().unwrap().page_evictions, evictions);
+    assert_eq!(core.read(1).unwrap().unwrap().payload, expected[0], "full disk keeps reads");
+    let stats = core.index_stats().unwrap();
+    assert_eq!(stats.dirty_page_evictions, dirty, "failed write-back keeps the page dirty");
+    assert!(stats.resident_bytes <= opts.lsn_index_bytes + 4224);
     disk.enospc_after_bytes(usize::MAX).unwrap();
     assert_eq!(core.read(1920).unwrap().unwrap().payload, expected[1919]);
     let reads_before = core.index_stats().unwrap().page_reloads;
     for lsn in [1, 1920, 256, 1025, 512, 1919, 1] {
+        eprintln!("case: lsn={lsn:?}");
         assert_eq!(core.read(lsn).unwrap().unwrap().payload, expected[lsn as usize - 1]);
         assert!(core.index_stats().unwrap().resident_bytes <= opts.lsn_index_bytes);
     }

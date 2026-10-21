@@ -1,8 +1,8 @@
 //! Inline segment preparation and whole-transaction placement.
 
-use crate::dir::{DataDir, Handle};
+use crate::dir::{DataDir, Handle, SegmentPrepareError};
 use crate::{Error, Result};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// Default preallocated segment length.
 pub const DEFAULT_SEGMENT_SIZE: u64 = 64 * 1024 * 1024;
@@ -16,6 +16,8 @@ pub struct SegmentWriter {
     offset: u64,
     size: u64,
     written_bytes: u64,
+    ready: VecDeque<u64>,
+    group_reserved: bool,
 }
 
 impl std::fmt::Debug for SegmentWriter {
@@ -35,6 +37,49 @@ impl SegmentWriter {
 
     pub(crate) fn position(&self) -> (u64, u64) {
         (self.active, self.written_bytes)
+    }
+
+    pub(crate) fn group_space(&self, sizes: impl Iterator<Item = u64>) -> u64 {
+        let mut remaining = self.size - self.offset;
+        let mut rolls = 0u64;
+        let mut bytes = 0u64;
+        for size in sizes {
+            bytes = bytes.saturating_add(size);
+            if size > remaining {
+                rolls += 1;
+                remaining = self.size;
+            }
+            remaining -= size;
+        }
+        bytes
+            .saturating_add(rolls.saturating_sub(self.ready.len() as u64).saturating_mul(self.size))
+    }
+
+    pub(crate) fn prepare_group(
+        &mut self,
+        sizes: impl Iterator<Item = u64>,
+    ) -> std::result::Result<(), SegmentPrepareError> {
+        let mut remaining = self.size - self.offset;
+        let mut rolls = 0;
+        for size in sizes {
+            if size > remaining {
+                rolls += 1;
+                remaining = self.size;
+            }
+            remaining -= size;
+        }
+        while self.ready.len() < rolls {
+            let id = self.dir.prepare_segment(self.size)?;
+            let file = Handle::open(self.dir.io.clone(), &self.dir.segment_path(id))?;
+            self.files.insert(id, file);
+            self.ready.push_back(id);
+        }
+        self.group_reserved = true;
+        Ok(())
+    }
+
+    pub(crate) fn finish_group(&mut self) {
+        self.group_reserved = false;
     }
 
     /// Opens the last prepared segment at its recovered transaction boundary.
@@ -59,6 +104,8 @@ impl SegmentWriter {
             offset,
             size,
             written_bytes: 0,
+            ready: VecDeque::new(),
+            group_reserved: false,
         })
     }
 
@@ -69,9 +116,21 @@ impl SegmentWriter {
         }
         if len as u64 > self.size - self.offset {
             let padding = self.size - self.offset;
-            let id = self.dir.prepare_next_segment(self.size)?;
-            let file = Handle::open(self.dir.io.clone(), &self.dir.segment_path(id))?;
-            self.files.insert(id, file);
+            let id = if let Some(id) = self.ready.pop_front() {
+                id
+            } else {
+                // Groups reserve every roll using submitted sizes.
+                // Rewrites cannot grow, so a group cannot exhaust its reservations.
+                if self.group_reserved {
+                    return Err(Error::InvalidFrame(
+                        "prepared group outgrew reserved segments".into(),
+                    ));
+                }
+                let id = self.dir.prepare_next_segment(self.size)?;
+                let file = Handle::open(self.dir.io.clone(), &self.dir.segment_path(id))?;
+                self.files.insert(id, file);
+                id
+            };
             self.active = id;
             self.offset = 0;
             self.written_bytes = self.written_bytes.saturating_add(padding);
@@ -98,13 +157,68 @@ impl SegmentWriter {
             self.dir.io.sync_data(file.id).map_err(|e| Error::SyncFailed(e.to_string()))?;
         }
         self.dirty.clear();
-        self.files.retain(|id, _| *id == self.active);
+        self.files.retain(|id, _| *id == self.active || self.ready.contains(id));
         Ok(())
     }
 
+    /// Removes partial bytes and restores the tail. Reservation is best-effort.
+    /// macOS `F_PREALLOCATE` reserves `len` past the physical end of file.
+    /// Sparse fallback lets the poisoned writer sync and publish its successful prefix.
     pub(crate) fn discard_partial(&mut self) -> Result<()> {
         let file = self.files.get(&self.active).ok_or(Error::Poisoned)?;
         self.dir.io.set_len(file.id, self.offset)?;
-        self.dir.io.set_len(file.id, self.size)
+        self.dir
+            .io
+            .allocate(file.id, self.size)
+            .or_else(|_| self.dir.io.set_len(file.id, self.size))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use crate::{Io, SimDisk};
+    use std::path::Path;
+    use std::sync::Arc;
+
+    #[test]
+    fn discard_keeps_a_sparse_tail_when_reservation_fails() {
+        for lost_space in [false, true] {
+            let disk = Arc::new(SimDisk::new(18));
+            let dir = DataDir::open(disk.clone(), "db", None, 4096).unwrap();
+            let mut writer = SegmentWriter::new(dir, 4096, 0).unwrap();
+            writer.write_batch(&[1; 512]).unwrap();
+            let used = disk.total_bytes(Path::new("db")).unwrap()
+                - disk.available_bytes(Path::new("db")).unwrap();
+            disk.set_capacity(used).unwrap();
+            disk.enospc_after_bytes(100).unwrap();
+            assert!(matches!(
+                writer.write_batch(&[2; 512]),
+                Err(Error::Io(std::io::ErrorKind::StorageFull, _))
+            ));
+            if lost_space {
+                disk.set_capacity(used - 512).unwrap();
+            }
+            let result = writer.discard_partial();
+            let file = writer.files[&writer.active].id;
+            disk.enospc_after_bytes(usize::MAX).unwrap();
+            if lost_space {
+                result.unwrap();
+                assert_eq!(disk.len(file).unwrap(), 4096);
+                assert_eq!(disk.available_bytes(Path::new("db")).unwrap(), 3072);
+                disk.write_at(file, 512, &[3; 3072]).unwrap();
+                assert!(matches!(
+                    disk.write_at(file, 3584, b"x"),
+                    Err(Error::Io(std::io::ErrorKind::StorageFull, _))
+                ));
+                disk.write_at(file, 0, b"retained").unwrap();
+            } else {
+                result.unwrap();
+                assert_eq!(disk.available_bytes(Path::new("db")).unwrap(), 0);
+                writer.write_batch(&[3; 512]).unwrap();
+                assert_eq!(disk.available_bytes(Path::new("db")).unwrap(), 0);
+            }
+        }
     }
 }

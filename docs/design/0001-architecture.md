@@ -190,7 +190,19 @@ An unreadable frame can hide its LSN. The reported range includes every decodabl
 
 ### Disk space
 
-A reserve (default 1 GiB or 5% of the volume, whichever is smaller) is kept free. Writes fail with `DiskFull` (`not_committed`) before the reserve is touched. Compaction may use the reserve. Forget and compaction never run on the writer thread.
+The free-space floor defaults to `min(1 GiB, 5% of total volume bytes)`.
+Before preparing each group, the writer budgets encoded bytes, segment reservations and index backing growth against available space.
+A clean floor hit returns `DiskFull` with `NotCommitted` and sets read-only. Reads keep serving acknowledged data.
+The writer reserves segment and LSN-index backing space before `prepare`, including both in the floor budget.
+`LSN-OFFSETS` and `LSN-ROUTES` grow in whole pages through the highest LSN the queued group can assign.
+Dirty-page eviction during cold reads writes only within reserved backing space, preserving the bounded cache.
+Recovery rebuilds resident index pages before optional backing reservations. Full-disk or space-query failures start read-only without poisoning.
+The next write retries outstanding reservations and any unknown default-floor query. The on-disk format is unchanged.
+Sparse fallback relies on the floor; APFS and btrfs retain the same allocation caveat as segments.
+`Engine::health()` reports this observed state without blocking or querying space.
+Only a later write's passing space check clears read-only.
+Data-write, sync, and manifest failures still poison the writer. Poisoning requires reopening.
+Future compaction may use the reserve. Forget and compaction won't run on the writer thread.
 
 ## Compaction and forget
 
@@ -292,7 +304,11 @@ Allowed crates, each with a reason:
 - `tokio`, `axum`: HTTP server only. The engine core does not use async.
 - `proptest`, `criterion`: tests and benches.
 
-No `libc` in v0.1. Preallocation uses `set_len`. Rust std `sync_data` already issues `F_FULLFSYNC` on macOS.
+S2 replaces the original no-libc rule with rustix for free-space queries and preallocation. D71 records the choice.
+Segments and LSN-index backing files are allocated on the write path before application preparation.
+Linux and macOS reserve blocks before setting the file length. Unsupported operations fall back to sparse `set_len`.
+Other platforms also use sparse `set_len`. Preallocation isn't a guarantee on APFS or btrfs.
+Rust std `sync_data` already issues `F_FULLFSYNC` on macOS.
 
 ## Milestones and size budgets
 

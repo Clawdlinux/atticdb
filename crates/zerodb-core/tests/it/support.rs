@@ -7,22 +7,28 @@ use zerodb_tape::{Error, FileId, Io, LockGuard, Result, SimDisk};
 
 #[derive(Debug)]
 pub struct ProbeIo {
-    disk: SimDisk,
+    pub disk: SimDisk,
     pub fail_read: AtomicBool,
+    pub space_error: AtomicBool,
+    pub allocation_full: AtomicBool,
     files: Mutex<BTreeMap<FileId, PathBuf>>,
     pub writes: Mutex<Vec<(String, PathBuf)>>,
     pub read_gate: Mutex<Option<(mpsc::SyncSender<()>, mpsc::Receiver<()>)>>,
 }
 impl ProbeIo {
+    #[track_caller]
     pub fn new(seed: u64) -> Self {
         Self {
             disk: SimDisk::new(seed),
             fail_read: AtomicBool::new(false),
+            space_error: AtomicBool::new(false),
+            allocation_full: AtomicBool::new(false),
             files: Mutex::new(BTreeMap::new()),
             writes: Mutex::new(Vec::new()),
             read_gate: Mutex::new(None),
         }
     }
+    #[track_caller]
     fn register(&self, path: &Path, file: Result<FileId>) -> Result<FileId> {
         let id = file?;
         self.files.lock().unwrap().insert(id, path.to_owned());
@@ -74,6 +80,33 @@ impl Io for ProbeIo {
     fn set_len(&self, f: FileId, n: u64) -> Result<()> {
         self.disk.set_len(f, n)
     }
+    fn allocate(&self, f: FileId, n: u64) -> Result<()> {
+        if self.allocation_full.swap(false, Ordering::SeqCst) {
+            return Err(Error::Io(
+                std::io::ErrorKind::StorageFull,
+                "injected allocation failure".into(),
+            ));
+        }
+        self.disk.allocate(f, n)
+    }
+    fn available_bytes(&self, dir: &Path) -> Result<u64> {
+        if self.space_error.load(Ordering::SeqCst) {
+            return Err(Error::Io(
+                std::io::ErrorKind::Other,
+                "injected space query failure".into(),
+            ));
+        }
+        self.disk.available_bytes(dir)
+    }
+    fn total_bytes(&self, dir: &Path) -> Result<u64> {
+        if self.space_error.load(Ordering::SeqCst) {
+            return Err(Error::Io(
+                std::io::ErrorKind::Other,
+                "injected space query failure".into(),
+            ));
+        }
+        self.disk.total_bytes(dir)
+    }
     fn sync_data(&self, f: FileId) -> Result<()> {
         self.disk.sync_data(f)
     }
@@ -96,3 +129,71 @@ impl Io for ProbeIo {
         self.disk.try_lock_exclusive(p)
     }
 }
+
+pub(crate) mod sessions {
+
+    use std::sync::Arc;
+    use std::time::Duration;
+    use zerodb_core::{Engine, EngineOptions, NewTurn, Role, Scope};
+    use zerodb_tape::sim::SimClock;
+    use zerodb_tape::{SimDisk, TapeOptions};
+
+    #[track_caller]
+    pub(crate) fn scope(session: &str) -> Scope {
+        Scope { tenant: "tenant".into(), agent: "agent".into(), session: session.into() }
+    }
+
+    #[track_caller]
+    pub(crate) fn turn(value: u64) -> NewTurn {
+        NewTurn { role: Role::User, content: value.to_le_bytes().to_vec(), meta: vec![] }
+    }
+
+    #[track_caller]
+    pub(crate) fn options() -> EngineOptions {
+        EngineOptions {
+            tape: TapeOptions { segment_size: 64 * 1024, ..TapeOptions::default() },
+            checkpoint_interval: Duration::from_secs(3600),
+            checkpoint_bytes: u64::MAX,
+            ..EngineOptions::default()
+        }
+    }
+
+    #[track_caller]
+    pub(crate) fn open(disk: Arc<SimDisk>, opts: EngineOptions) -> Engine {
+        Engine::open_with(disk, Arc::new(SimClock::default()), "db", opts).unwrap()
+    }
+}
+
+pub(crate) mod facts {
+
+    use zerodb_core::fact;
+
+    #[track_caller]
+    pub(crate) fn fact() -> fact::Fact {
+        fact::Fact {
+            key: String::new(),
+            content: vec![],
+            meta: vec![],
+            agent: String::new(),
+            source_refs: vec![],
+            idem_key: None,
+            tombstone: false,
+        }
+    }
+}
+
+pub(crate) mod turns {
+
+    use zerodb_core::turn::{NewTurn, Role};
+
+    #[track_caller]
+    pub(crate) fn turn() -> NewTurn {
+        NewTurn { role: Role::User, content: b"hello".to_vec(), meta: vec![] }
+    }
+}
+
+mod fs {
+    const ROOT: &str = env!("CARGO_TARGET_TMPDIR");
+    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/support.rs"));
+}
+pub(crate) use fs::TestDir;

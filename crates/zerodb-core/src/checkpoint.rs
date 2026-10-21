@@ -957,6 +957,15 @@ mod tests {
         fn set_len(&self, f: FileId, n: u64) -> zerodb_tape::Result<()> {
             self.hit(self.disk.set_len(f, n))
         }
+        fn allocate(&self, f: FileId, n: u64) -> zerodb_tape::Result<()> {
+            self.hit(self.disk.allocate(f, n))
+        }
+        fn available_bytes(&self, dir: &Path) -> zerodb_tape::Result<u64> {
+            self.disk.available_bytes(dir)
+        }
+        fn total_bytes(&self, dir: &Path) -> zerodb_tape::Result<u64> {
+            self.disk.total_bytes(dir)
+        }
         fn sync_data(&self, f: FileId) -> zerodb_tape::Result<()> {
             self.hit(self.disk.sync_data(f))
         }

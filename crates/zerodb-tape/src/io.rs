@@ -62,6 +62,13 @@ pub trait Io: Send + Sync {
     fn len(&self, file: FileId) -> Result<u64>;
     /// Truncates or zero-extends a file.
     fn set_len(&self, file: FileId, n: u64) -> Result<()>;
+    /// Reserves blocks up to `len` on an empty or shorter file, then sets its length.
+    /// Copy-on-write filesystems can still run out later.
+    fn allocate(&self, file: FileId, len: u64) -> Result<()>;
+    /// Returns bytes available to an unprivileged writer in this directory.
+    fn available_bytes(&self, dir: &Path) -> Result<u64>;
+    /// Returns the filesystem capacity in bytes.
+    fn total_bytes(&self, dir: &Path) -> Result<u64>;
     /// Persists file data and its length, but not its directory entry.
     fn sync_data(&self, file: FileId) -> Result<()>;
     /// Persists directory entries.
@@ -80,6 +87,14 @@ pub trait Io: Send + Sync {
 
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>> {
     mutex.lock().map_err(|_| Error::Io(std::io::ErrorKind::Other, "I/O mutex poisoned".into()))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn preallocation_fallback(error: rustix::io::Errno) -> bool {
+    use rustix::io::Errno;
+    error == Errno::OPNOTSUPP
+        || error == Errno::NOTSUP
+        || (cfg!(target_os = "linux") && error == Errno::NOSYS)
 }
 
 /// Real filesystem I/O with serialized access to each handle.
@@ -145,6 +160,52 @@ impl Io for StdIo {
 
     fn set_len(&self, file: FileId, n: u64) -> Result<()> {
         Ok(lock(self.file(file)?.as_ref())?.set_len(n)?)
+    }
+
+    /// Linux and macOS reserve blocks with rustix `fallocate`. Other platforms use `set_len`.
+    ///
+    /// On macOS, rustix tries contiguous `F_PREALLOCATE`, then noncontiguous allocation, then calls `ftruncate`.
+    /// rustix asks macOS for the whole target length past the physical end of file.
+    /// So macOS preallocates only when an empty file grows. Growing a non-empty file uses `set_len`.
+    /// Zero lengths and unsupported preallocation use `set_len`.
+    /// APFS and btrfs can need extra space after preallocation. The writer's floor remains the guard.
+    fn allocate(&self, file: FileId, len: u64) -> Result<()> {
+        let file = self.file(file)?;
+        let file = lock(&file)?;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            #[cfg(target_os = "linux")]
+            let preallocate = len > 0;
+            #[cfg(target_os = "macos")]
+            let preallocate = {
+                let current_len = file.metadata()?.len();
+                if len == current_len {
+                    return Ok(());
+                }
+                current_len == 0
+            };
+            if preallocate {
+                match rustix::fs::fallocate(&*file, rustix::fs::FallocateFlags::empty(), 0, len) {
+                    Ok(()) => {
+                        #[cfg(target_os = "macos")]
+                        return Ok(());
+                    }
+                    Err(error) if preallocation_fallback(error) => {}
+                    Err(error) => return Err(std::io::Error::from(error).into()),
+                }
+            }
+        }
+        Ok(file.set_len(len)?)
+    }
+
+    fn available_bytes(&self, dir: &Path) -> Result<u64> {
+        let stat = rustix::fs::statvfs(dir).map_err(std::io::Error::from)?;
+        Ok(stat.f_bavail.saturating_mul(stat.f_frsize))
+    }
+
+    fn total_bytes(&self, dir: &Path) -> Result<u64> {
+        let stat = rustix::fs::statvfs(dir).map_err(std::io::Error::from)?;
+        Ok(stat.f_blocks.saturating_mul(stat.f_frsize))
     }
 
     fn sync_data(&self, file: FileId) -> Result<()> {
@@ -248,19 +309,35 @@ impl Clock for SimClock {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
+    mod fs {
+        // Cargo doesn't define CARGO_TARGET_TMPDIR for unit tests.
+        const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/tmp");
+        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/support.rs"));
+    }
 
     use super::*;
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
+    fn preallocation_errno_policy_preserves_real_errors() {
+        use rustix::io::Errno;
+        for error in [Errno::OPNOTSUPP, Errno::NOTSUP] {
+            assert!(preallocation_fallback(error));
+        }
+        assert_eq!(preallocation_fallback(Errno::NOSYS), cfg!(target_os = "linux"));
+        for error in [Errno::NOSPC, Errno::IO, Errno::INVAL, Errno::PERM, Errno::INTR] {
+            assert!(!preallocation_fallback(error));
+        }
+        assert_eq!(std::io::Error::from(Errno::NOSPC).kind(), std::io::ErrorKind::StorageFull);
+    }
+
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "slow in debug")]
     fn ten_thousand_atomic_installs_release_open_handles() {
-        let dir = std::env::current_dir()
-            .unwrap()
-            .join("target")
-            .join(format!("install-handles-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = fs::TestDir::new();
         let io = StdIo::new();
-        let temporary = dir.join("MANIFEST.tmp");
-        let target = dir.join("MANIFEST");
+        let temporary = dir.0.join("MANIFEST.tmp");
+        let target = dir.0.join("MANIFEST");
         for _ in 0..10_000 {
             let file = io.create(&temporary).unwrap();
             io.write_at(file, 0, b"manifest").unwrap();
@@ -269,6 +346,5 @@ mod tests {
             assert!(lock(&io.files).unwrap().is_empty());
         }
         io.remove(&target).unwrap();
-        std::fs::remove_dir(&dir).unwrap();
     }
 }

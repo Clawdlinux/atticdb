@@ -1,7 +1,7 @@
 //! Tape storage primitives for zerodb.
 //!
 //! Import storage types from the crate root. Implementation modules aren't public.
-//! Deterministic driver access requires the `sim` feature.
+//! Deterministic disk and driver access require the `sim` feature outside unit tests.
 //!
 //! ```compile_fail
 //! use zerodb_tape::writer::WriterCore;
@@ -24,6 +24,7 @@ pub(crate) mod recovery;
 pub(crate) mod segment;
 #[cfg(any(test, feature = "sim"))]
 pub mod sim;
+#[cfg(any(test, feature = "sim"))]
 pub(crate) mod simdisk;
 mod state_machine;
 pub(crate) mod writer;
@@ -33,6 +34,7 @@ pub use frame::{Digest, Frame, Header, Kind};
 pub use io::{Clock, FileId, Io, LockGuard, StdIo, SystemClock};
 pub use lsn_index::LsnIndexStats;
 pub use recovery::RecoveryReport;
+#[cfg(any(test, feature = "sim"))]
 pub use simdisk::SimDisk;
 pub use state_machine::{CommittedRecord, NoopStateMachine, Prepare, StateMachine};
 pub use writer::{

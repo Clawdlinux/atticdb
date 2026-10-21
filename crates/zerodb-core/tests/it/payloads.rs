@@ -1,0 +1,210 @@
+use crate::support::facts::*;
+use proptest::prelude::*;
+use zerodb_core::{fact, forget};
+
+proptest! {
+    #[test]
+    fn fact_round_trip(
+        key in ".{0,40}", agent in ".{0,40}",
+        content in prop::collection::vec(any::<u8>(), 0..4096),
+        meta in prop::collection::vec(any::<u8>(), 0..1024),
+        source_refs in prop::collection::vec(any::<u64>(), 0..30),
+        idem_key in prop::option::of(".{0,30}"), tombstone in any::<bool>(),
+    ) {
+        let value = fact::Fact { key, agent, content, meta, source_refs, idem_key, tombstone };
+        prop_assert_eq!(fact::decode(&fact::encode(&value).unwrap()).unwrap(), value);
+    }
+
+    #[test]
+    fn forget_round_trip(
+        agent in ".{0,40}", session in ".{0,40}", key in ".{0,40}",
+        lsns in prop::collection::vec(any::<u64>(), 0..30),
+        idem_key in prop::option::of(".{0,30}"),
+        up_to_lsn in prop::option::of(any::<u64>()), tag in 0u8..3,
+    ) {
+        let selector = match tag {
+            0 => forget::Selector::Session { agent, session },
+            1 => forget::Selector::FactKey(key),
+            _ => forget::Selector::Lsns(lsns),
+        };
+        let value = forget::Forget { selector, idem_key, up_to_lsn };
+        prop_assert_eq!(forget::decode(&forget::encode(&value).unwrap()).unwrap(), value);
+    }
+    #[test]
+    fn garbage_never_panics(data in prop::collection::vec(any::<u8>(), 0..8192)) {
+        let _ = fact::decode(&data);
+        let _ = forget::decode(&data);
+        let _ = zerodb_core::turn::decode(&data);
+    }
+}
+
+#[test]
+fn payloads_reject_versions_truncation_tags_and_trailing_bytes() {
+    #[derive(Clone, Copy, Debug)]
+    enum Codec {
+        Fact,
+        Forget,
+    }
+    let values = [
+        (Codec::Fact, fact::encode(&fact()).unwrap()),
+        (
+            Codec::Forget,
+            forget::encode(&forget::Forget {
+                selector: forget::Selector::FactKey("key".into()),
+                idem_key: Some("retry".into()),
+                up_to_lsn: Some(1),
+            })
+            .unwrap(),
+        ),
+    ];
+    for (codec, mut data) in values {
+        eprintln!("case: {codec:?}");
+        let decode = |bytes: &[u8]| match codec {
+            Codec::Fact => fact::decode(bytes).map(|_| ()),
+            Codec::Forget => forget::decode(bytes).map(|_| ()),
+        };
+        for n in 0..data.len() {
+            assert!(decode(&data[..n]).is_err());
+        }
+        data.push(0);
+        assert!(decode(&data).is_err());
+        data.pop();
+        data[0] = 2;
+        assert!(decode(&data).is_err());
+    }
+    let mut data = fact::encode(&fact()).unwrap();
+    *data.last_mut().unwrap() = 2;
+    assert!(fact::decode(&data).is_err());
+    data[21] = 2;
+    assert!(fact::decode(&data).is_err());
+}
+
+#[test]
+fn fact_limits_apply_to_every_field_in_both_directions() {
+    #[derive(Clone, Copy, Debug)]
+    enum Field {
+        Key,
+        Content,
+        Meta,
+        Agent,
+        SourceRefs,
+        IdemKey,
+    }
+    for (field, length_offset) in [
+        (Field::Key, 1),
+        (Field::Content, 5),
+        (Field::Meta, 9),
+        (Field::Agent, 13),
+        (Field::SourceRefs, 17),
+        (Field::IdemKey, 22),
+    ] {
+        eprintln!("case: {field:?}");
+        let mut value = fact();
+        match field {
+            Field::Key => value.key = "k".repeat(1024),
+            Field::Content => value.content = vec![0; 4 * 1024 * 1024],
+            Field::Meta => value.meta = vec![0; 65536],
+            Field::Agent => value.agent = "a".repeat(255),
+            Field::SourceRefs => value.source_refs = vec![1; 1024],
+            Field::IdemKey => value.idem_key = Some("i".repeat(128)),
+        }
+        let mut encoded = fact::encode(&value).unwrap();
+        assert_eq!(fact::decode(&encoded).unwrap(), value, "{field:?}");
+        match field {
+            Field::Key => value.key.push('k'),
+            Field::Content => value.content.push(0),
+            Field::Meta => value.meta.push(0),
+            Field::Agent => value.agent.push('a'),
+            Field::SourceRefs => value.source_refs.push(1),
+            Field::IdemKey => value.idem_key.as_mut().unwrap().push('i'),
+        }
+        assert!(fact::encode(&value).is_err(), "{field:?}");
+        encoded[length_offset..length_offset + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(fact::decode(&encoded).is_err(), "{field:?}");
+    }
+}
+
+#[test]
+fn forget_limits_apply_to_every_selector_and_retry_key() {
+    for selector in [
+        forget::Selector::Session { agent: "a".repeat(256), session: String::new() },
+        forget::Selector::Session { agent: String::new(), session: "s".repeat(256) },
+        forget::Selector::FactKey("k".repeat(1025)),
+        forget::Selector::Lsns(vec![1; 1025]),
+    ] {
+        eprintln!("case: selector={selector:?}");
+        assert!(
+            forget::encode(&forget::Forget { selector, idem_key: None, up_to_lsn: None }).is_err()
+        );
+    }
+    assert!(forget::encode(&forget::Forget {
+        selector: forget::Selector::Lsns(vec![]),
+        idem_key: Some("i".repeat(129)),
+        up_to_lsn: None,
+    })
+    .is_err());
+    for data in [
+        vec![1, 4],
+        vec![1, 1, 0xff, 0xff, 0xff, 0xff],
+        vec![1, 2, 0xff, 0xff, 0xff, 0xff],
+        vec![1, 3, 0xff, 0xff, 0xff, 0xff],
+    ] {
+        eprintln!("case: data={data:?}");
+        assert!(forget::decode(&data).is_err());
+    }
+}
+
+mod turns {
+    use crate::support::turns::*;
+    use proptest::prelude::*;
+    use zerodb_core::turn::{decode, encode, NewTurn, Role};
+
+    #[test]
+    fn limits_and_tags_are_checked() {
+        let mut value = turn();
+        assert!(encode(&"a".repeat(256), "s", 0, &value, None).is_err());
+        assert!(encode("a", &"s".repeat(256), 0, &value, None).is_err());
+        assert!(encode("a", "s", 0, &value, Some(&"k".repeat(129))).is_err());
+        value.meta = vec![0; 65537];
+        assert!(encode("a", "s", 0, &value, None).is_err());
+        value.meta = vec![0; 65536];
+        value.content = vec![0; 4 * 1024 * 1024 + 1];
+        assert!(encode("a", "s", 0, &value, None).is_err());
+        value.content.pop();
+        let mut bytes =
+            encode(&"a".repeat(255), &"s".repeat(255), 0, &value, Some(&"k".repeat(128))).unwrap();
+        assert_eq!(decode(&bytes).unwrap().turn, value);
+        bytes[0] = 99;
+        assert!(decode(&bytes).is_err());
+        let bytes = encode("a", "s", 4, &turn(), None).unwrap();
+        for len in 0..bytes.len() {
+            assert!(decode(&bytes[..len]).is_err());
+        }
+        let mut trailing = bytes;
+        trailing.push(0);
+        assert!(decode(&trailing).is_err());
+    }
+
+    proptest! {
+        #[test]
+        fn round_trip(
+            agent in ".{0,40}", session in ".{0,40}", seq in any::<u64>(),
+            content in prop::collection::vec(any::<u8>(), 0..4096),
+            meta in prop::collection::vec(any::<u8>(), 0..1024),
+            key in prop::option::of(".{0,30}"), role in 0u8..4,
+        ) {
+            let value = NewTurn {
+                role: [Role::System, Role::User, Role::Assistant, Role::Tool][role as usize],
+                content, meta,
+            };
+            let bytes = encode(&agent, &session, seq, &value, key.as_deref()).unwrap();
+            let decoded = decode(&bytes).unwrap();
+            prop_assert_eq!(decoded.agent_id, agent);
+            prop_assert_eq!(decoded.session_id, session);
+            prop_assert_eq!(decoded.seq, seq);
+            prop_assert_eq!(decoded.turn, value);
+            prop_assert_eq!(decoded.idem_key, key);
+        }
+
+    }
+}

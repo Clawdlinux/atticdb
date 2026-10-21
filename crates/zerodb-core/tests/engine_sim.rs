@@ -4,12 +4,12 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use zerodb_core::{
-    turn::decode, Appended, Engine, EngineOptions, ErrorKind, NewTurn, Outcome, Role, Scope, Turn,
-    WindowQuery,
+    turn::decode, Appended, Engine, EngineOptions, ErrorKind, Health, NewTurn, Outcome, Role,
+    Scope, SimAppend, Turn, WindowQuery,
 };
-use zerodb_tape::sim::SimClock;
+use zerodb_tape::sim::{CapacityError, CapacityPlan, PublishPause, SimClock, StorageFullFault};
 use zerodb_tape::{Clock, Error, FileId, Io, Kind, LockGuard, Result, SimDisk, Tape, TapeOptions};
 
 struct Rng(u64);
@@ -32,6 +32,9 @@ impl Rng {
 // Capture before the caller observes its reply. Later writes cannot alter the crash image.
 struct FaultIo {
     disk: SimDisk,
+    storage_full: StorageFullFault,
+    watch_segment_writes: AtomicBool,
+    segment_writes: AtomicUsize,
     cut: AtomicUsize,
     image: Mutex<Option<SimDisk>>,
     fail_before: AtomicBool,
@@ -44,6 +47,9 @@ impl FaultIo {
     fn new(disk: SimDisk) -> Self {
         Self {
             disk,
+            storage_full: StorageFullFault::default(),
+            watch_segment_writes: AtomicBool::new(false),
+            segment_writes: AtomicUsize::new(0),
             cut: AtomicUsize::new(0),
             image: Mutex::new(None),
             fail_before: AtomicBool::new(false),
@@ -83,15 +89,24 @@ impl FaultIo {
 }
 impl Io for FaultIo {
     fn create(&self, p: &Path) -> Result<FileId> {
-        self.after(self.disk.create(p))
+        let file = self.after(self.disk.create(p))?;
+        self.storage_full.opened(p, file);
+        Ok(file)
     }
     fn open(&self, p: &Path) -> Result<FileId> {
-        self.disk.open(p)
+        let file = self.disk.open(p)?;
+        self.storage_full.opened(p, file);
+        Ok(file)
     }
     fn close(&self, f: FileId) -> Result<()> {
+        self.storage_full.closed(f);
         self.disk.close(f)
     }
     fn write_at(&self, f: FileId, o: u64, b: &[u8]) -> Result<()> {
+        if self.watch_segment_writes.load(Ordering::SeqCst) && self.storage_full.is_segment(f) {
+            self.segment_writes.fetch_add(1, Ordering::SeqCst);
+        }
+        self.storage_full.before_write(&self.disk, f, b.len());
         self.after(self.disk.write_at(f, o, b))
     }
     fn read_at(&self, f: FileId, o: u64, b: &mut [u8]) -> Result<usize> {
@@ -103,7 +118,17 @@ impl Io for FaultIo {
     fn set_len(&self, f: FileId, n: u64) -> Result<()> {
         self.after(self.disk.set_len(f, n))
     }
+    fn allocate(&self, f: FileId, n: u64) -> Result<()> {
+        self.after(self.disk.allocate(f, n))
+    }
+    fn available_bytes(&self, dir: &Path) -> Result<u64> {
+        self.disk.available_bytes(dir)
+    }
+    fn total_bytes(&self, dir: &Path) -> Result<u64> {
+        self.disk.total_bytes(dir)
+    }
     fn sync_data(&self, f: FileId) -> Result<()> {
+        self.storage_full.before_sync(&self.disk, f);
         self.sync(|| self.disk.sync_data(f))
     }
     fn sync_dir(&self, p: &Path) -> Result<()> {
@@ -240,7 +265,10 @@ impl Oracle {
             let batch = u64::from_le_bytes(decoded.turn.meta[..8].try_into().unwrap()) as usize;
             assert_eq!(self.batches[batch].scope, scope);
             assert_eq!(self.batches[batch].key, decoded.idem_key);
-            assert!(self.batches[batch].receipt.is_some() || pending.contains(&batch));
+            assert!(
+                self.batches[batch].receipt.is_some() || pending.contains(&batch),
+                "NotCommitted or unwritten batch recovered: batch={batch}"
+            );
             let turns = transactions.entry(record.txn).or_default();
             let input = &self.batches[batch].turns[turns.len()];
             assert_eq!(*input, decoded.turn);
@@ -297,6 +325,12 @@ fn retry(engine: &Engine, oracle: &mut Oracle, index: usize) {
     } else {
         oracle.apply(index, receipt);
     }
+    let scope = oracle.batches[index].scope;
+    assert_eq!(
+        engine.window(&oracle.scopes[scope], WindowQuery::Last(usize::MAX)).unwrap(),
+        oracle.history[scope],
+        "an acknowledged retry must be immediately readable"
+    );
 }
 
 fn random_batch(rng: &mut Rng, index: usize, scope: usize, time: u64) -> Batch {
@@ -351,6 +385,17 @@ fn corrupt_page_checksum(disk: &SimDisk, rng: &mut Rng) {
 }
 
 fn run_seed(seed: u64) -> Vec<Vec<Turn>> {
+    let plan = CapacityPlan::new(seed);
+    match std::panic::catch_unwind(|| run_seed_with_capacity(seed, &plan)) {
+        Ok(history) => history,
+        Err(error) => {
+            eprintln!("engine simulation seed={seed} fault_plan={plan:?}");
+            std::panic::resume_unwind(error);
+        }
+    }
+}
+
+fn run_seed_with_capacity(seed: u64, plan: &CapacityPlan) -> Vec<Vec<Turn>> {
     let mut rng = Rng(seed);
     let opts = EngineOptions {
         tape: TapeOptions {
@@ -507,14 +552,205 @@ fn run_seed(seed: u64) -> Vec<Vec<Turn>> {
         }
     }
     let mut history = oracle.history;
-    history.extend(grouped_seed(seed));
+    history.extend(grouped_seed(seed, plan));
     history
 }
 
-fn grouped_seed(seed: u64) -> Vec<Vec<Turn>> {
+fn enqueue_keyed_batch<'a>(
+    engine: &'a Engine,
+    oracle: &mut Oracle,
+    rng: &mut Rng,
+    clock: &SimClock,
+) -> (usize, SimAppend<'a>) {
+    let index = oracle.batches.len();
+    let scope = rng.below(4);
+    let mut batch = random_batch(rng, index, scope, clock.now_ns());
+    batch.turns.truncate(1);
+    let len = 512 + rng.below(2048);
+    batch.turns[0].content = rng.bytes(len);
+    batch.key = Some(format!("key-{index}"));
+    let reply = engine
+        .enqueue_sim(&oracle.scopes[scope], batch.turns.clone(), batch.key.as_deref())
+        .unwrap();
+    oracle.batches.push(batch);
+    (index, reply)
+}
+
+fn capacity_faults(
+    engine: Arc<Engine>,
+    io: &mut Arc<FaultIo>,
+    clock: &Arc<SimClock>,
+    opts: &EngineOptions,
+    oracle: &mut Oracle,
+    rng: &mut Rng,
+    plan: &CapacityPlan,
+) -> Arc<Engine> {
+    let snapshot = |engine: &Engine, scopes: &[Scope]| {
+        let metrics = engine.metrics().unwrap();
+        let turns = scopes
+            .iter()
+            .map(|scope| engine.window(scope, WindowQuery::Last(usize::MAX)).unwrap())
+            .collect::<Vec<_>>();
+        (
+            metrics.durable_lsn,
+            metrics.tenants,
+            metrics.dedup_entries,
+            metrics.dedup_window_effective,
+            turns,
+        )
+    };
+    let before = snapshot(&engine, &oracle.scopes);
+    let mut txn =
+        oracle.batches.iter().filter_map(|b| b.receipt.as_ref().map(|r| r.txn)).max().unwrap();
+    let mut indices = Vec::new();
+    let mut queued = Vec::new();
+    for _ in 0..2 + rng.below(3) {
+        let (index, reply) = enqueue_keyed_batch(&engine, oracle, rng, clock);
+        queued.push(reply);
+        indices.push(index);
+    }
+    plan.limit(&io.disk);
+    io.segment_writes.store(0, Ordering::SeqCst);
+    io.watch_segment_writes.store(true, Ordering::SeqCst);
+    engine.step_sim().unwrap();
+    io.watch_segment_writes.store(false, Ordering::SeqCst);
+    assert_eq!(io.segment_writes.load(Ordering::SeqCst), 0, "a floor rejection wrote to a segment");
+    for reply in queued {
+        let error = reply.finish().unwrap_err();
+        assert!(matches!(error.kind, ErrorKind::Storage(Error::DiskFull)));
+        assert_eq!(error.outcome, Outcome::NotCommitted);
+    }
+    assert_eq!(engine.health(), Health::ReadOnly, "a clean floor hit must not poison");
+    let (scope, oldest) = oracle
+        .history
+        .iter()
+        .enumerate()
+        .filter_map(|(scope, turns)| turns.first().map(|turn| (scope, turn)))
+        .min_by_key(|(_, turn)| turn.lsn)
+        .unwrap();
+    let capacity = io.disk.total_bytes(Path::new("db")).unwrap();
+    let free = io.disk.available_bytes(Path::new("db")).unwrap();
+    io.disk.set_capacity(capacity - free).unwrap();
+    let reloads = engine.metrics().unwrap().tape_index.page_reloads;
+    assert_eq!(
+        engine
+            .window(&oracle.scopes[scope], WindowQuery::Since { seq: oldest.seq, limit: 1 })
+            .unwrap_or_else(|error| panic!("read-only cold read must not allocate: {error:?}")),
+        vec![oldest.clone()],
+        "acknowledged turn must remain readable with no free space"
+    );
+    if opts.tape.lsn_index_bytes == 4224 {
+        assert!(
+            engine.metrics().unwrap().tape_index.page_reloads > reloads,
+            "sampled a cold index page"
+        );
+    }
+    assert_eq!(io.disk.available_bytes(Path::new("db")).unwrap(), 0);
+    assert_eq!(engine.health(), Health::ReadOnly, "cold reads must not clear read-only");
+    io.disk.set_capacity(capacity).unwrap();
+    if let Some(index) =
+        oracle.batches.iter().position(|batch| batch.receipt.is_some() && batch.key.is_some())
+    {
+        retry(&engine, oracle, index);
+        assert_eq!(engine.health(), Health::ReadOnly, "a committed retry does not recheck space");
+    }
+    assert_eq!(
+        snapshot(&engine, &oracle.scopes),
+        before,
+        "a floor hit changed engine state or dedup"
+    );
+
+    plan.free(&io.disk);
+    let mut lsn = before.0;
+    for index in indices {
+        retry(&engine, oracle, index);
+        let receipt = oracle.batches[index].receipt.as_ref().unwrap();
+        txn += 1;
+        assert_eq!(receipt.txn, txn, "a floor rejection consumed a transaction");
+        assert_eq!(receipt.first_lsn, lsn + 1, "a floor rejection consumed an LSN");
+        assert_eq!(
+            engine.metrics().unwrap().durable_lsn,
+            receipt.last_lsn,
+            "a rejected key returned a receipt without a durable write"
+        );
+        lsn = receipt.last_lsn;
+        assert_eq!(engine.health(), Health::Ok, "freed space must clear read-only");
+        retry(&engine, oracle, index);
+    }
+    // Retained keys must still return their original receipts after the rejection.
+    for index in 0..oracle.batches.len() {
+        if oracle.batches[index].receipt.is_some() && oracle.batches[index].key.is_some() {
+            retry(&engine, oracle, index);
+        }
+    }
+
+    let mut queued = Vec::new();
+    for _ in 0..2 + rng.below(3) {
+        queued.push(enqueue_keyed_batch(&engine, oracle, rng, clock));
+    }
+    io.storage_full.arm(plan);
+    io.cut.store(plan.cut, Ordering::SeqCst);
+    let full_before = io.disk.storage_full_returns().unwrap();
+    engine.step_sim().unwrap();
+    assert_eq!(engine.health(), Health::Poisoned, "post-prepare StorageFull must poison");
+    assert_eq!(io.disk.storage_full_returns().unwrap() - full_before, 1);
+    let image = io.image.lock().unwrap().take();
+    let mut pending = Vec::new();
+    let mut post_return_pending = Vec::new();
+    for (position, (index, reply)) in queued.into_iter().enumerate() {
+        let error = reply.finish().unwrap_err();
+        let (class, outcomes) = plan.expected(position);
+        assert!(
+            match &error.kind {
+                ErrorKind::Storage(error) => class.matches(error),
+                ErrorKind::Poisoned => class == CapacityError::Poisoned,
+                _ => false,
+            },
+            "{error:?}"
+        );
+        assert!(outcomes.contains(&error.outcome), "{error:?}");
+        if error.outcome == Outcome::Unknown {
+            post_return_pending.push(index);
+        }
+        if image.is_some() || error.outcome == Outcome::Unknown {
+            pending.push(index);
+        }
+    }
+    io.cut.store(0, Ordering::SeqCst);
+    let crashed = io.disk.crash().unwrap();
+    drop(engine);
+    if image.is_some() {
+        oracle.clone().recover(&crashed, clock.clone(), opts, &post_return_pending);
+    }
+    let next = image.unwrap_or(crashed);
+    oracle.recover(&next, clock.clone(), opts, &pending);
+    next.set_capacity(SimDisk::DEFAULT_CAPACITY).unwrap();
+    *io = Arc::new(FaultIo::new(next));
+    let engine = Arc::new(open(io.clone(), clock.clone(), opts));
+    assert_eq!(engine.health(), Health::Ok);
+    oracle.verify(&engine, rng);
+    for index in pending {
+        if oracle.batches[index].receipt.is_none() {
+            oracle.batches[index].time = clock.now_ns();
+        }
+        retry(&engine, oracle, index);
+        retry(&engine, oracle, index);
+    }
+    engine
+}
+
+fn grouped_seed(seed: u64, plan: &CapacityPlan) -> Vec<Vec<Turn>> {
     let mut rng = Rng(seed ^ 0x47b3_6f21_91e2_450a);
+    let generations = 3;
+    let capacity_generation = rng.below(generations);
     let opts = EngineOptions {
-        tape: TapeOptions { segment_size: 64 * 1024, inline_sim: true, ..TapeOptions::default() },
+        tape: TapeOptions {
+            segment_size: 64 * 1024,
+            inline_sim: true,
+            free_space_floor: Some(plan.floor),
+            lsn_index_bytes: if seed.is_multiple_of(3) { 4224 } else { 8 * 1024 * 1024 },
+            ..TapeOptions::default()
+        },
         checkpoint_bytes: 8192,
         ..EngineOptions::default()
     };
@@ -533,7 +769,7 @@ fn grouped_seed(seed: u64) -> Vec<Vec<Turn>> {
         oracle.apply(index, receipt);
     }
 
-    fn frame_v2_engine_faults(seed: u64) {
+    fn frame_faults(seed: u64) {
         use zerodb_tape::sim::frame;
         for proof in [false, true] {
             let disk = Arc::new(SimDisk::new(seed));
@@ -599,10 +835,14 @@ fn grouped_seed(seed: u64) -> Vec<Vec<Turn>> {
             }
         }
     }
-    frame_v2_engine_faults(seed);
-    for generation in 0..3 {
+    frame_faults(seed);
+    for generation in 0..generations {
         for group in 0..8 {
             clock.advance(1 + rng.below(2_000_000_000) as u64);
+            if generation == capacity_generation && group == plan.delay + 1 {
+                engine =
+                    capacity_faults(engine, &mut io, &clock, &opts, &mut oracle, &mut rng, plan);
+            }
             let count = 2 + rng.below(3);
             let mut queued = Vec::new();
             for position in 0..count {
@@ -773,8 +1013,13 @@ fn grouped_seed(seed: u64) -> Vec<Vec<Turn>> {
 #[test]
 fn inline_group_publishes_once_and_replies_with_original_sequences() {
     let io = Arc::new(FaultIo::new(SimDisk::new(19)));
+    let pause = Arc::new(PublishPause::default());
     let opts = EngineOptions {
-        tape: TapeOptions { inline_sim: true, ..TapeOptions::default() },
+        tape: TapeOptions {
+            inline_sim: true,
+            publish_pause: Some(pause.clone()),
+            ..TapeOptions::default()
+        },
         ..EngineOptions::default()
     };
     let engine = open(io.clone(), Arc::new(SimClock::default()), &opts);
@@ -785,50 +1030,52 @@ fn inline_group_publishes_once_and_replies_with_original_sequences() {
     let syncs = io.syncs.load(Ordering::SeqCst);
     let first = engine.enqueue_sim(&scope, vec![turn.clone()], Some("same-group")).unwrap();
     let duplicate = engine.enqueue_sim(&scope, vec![turn.clone()], Some("same-group")).unwrap();
-    let keyless = engine.enqueue_sim(&scope, vec![turn], None).unwrap();
+    let keyless = engine.enqueue_sim(&scope, vec![turn.clone()], None).unwrap();
     assert_eq!(engine.metrics().unwrap().durable_lsn, before.durable_lsn);
-    engine.step_sim().unwrap();
+    let retried = std::thread::scope(|threads| {
+        let (engine, scope, turn) = (&engine, &scope, &turn);
+        let (arrived, release) = pause.arm();
+        let publishing = threads.spawn(move || engine.step_sim().unwrap());
+        arrived.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        let parked = engine.metrics().unwrap();
+        assert_eq!(parked.dedup_entries, before.dedup_entries + 1);
+        assert_eq!(parked.durable_lsn, before.durable_lsn);
+        assert!(engine.window(scope, WindowQuery::Since { seq: 2, limit: 1 }).unwrap().is_empty());
+
+        let (started, starting) = mpsc::sync_channel(0);
+        let (replied, reply) = mpsc::channel();
+        let retrying = threads.spawn(move || {
+            started.send(()).unwrap();
+            replied.send(engine.append(scope, vec![turn.clone()], Some("same-group"))).unwrap();
+        });
+        starting.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        assert!(
+            matches!(
+                reply.recv_timeout(std::time::Duration::from_secs(1)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ),
+            "retry returned before the tape watermark covered its receipt"
+        );
+        release.send(()).unwrap();
+        publishing.join().unwrap();
+        let retried = reply.recv_timeout(std::time::Duration::from_secs(10)).unwrap().unwrap();
+        retrying.join().unwrap();
+        let visible = engine.window(scope, WindowQuery::Since { seq: 2, limit: 1 }).unwrap();
+        assert_eq!(visible.len(), 1, "an acknowledged concurrent retry must be readable");
+        assert_eq!(visible[0].lsn, retried.last_lsn);
+        assert_eq!(visible[0].content, turn.content);
+        retried
+    });
     let first = first.finish().unwrap();
     assert_eq!(first.seqs, vec![2]);
+    assert_eq!(retried, first);
     assert_eq!(duplicate.finish().unwrap(), first);
     assert_eq!(keyless.finish().unwrap().seqs, vec![3]);
     assert_eq!(io.syncs.load(Ordering::SeqCst) - syncs, 1);
-    assert_eq!(engine.metrics().unwrap().writer_groups - before.writer_groups, 1);
-    assert_eq!(engine.metrics().unwrap().writer_group_requests - before.writer_group_requests, 3);
+    let after = engine.metrics().unwrap();
+    assert_eq!(after.writer_groups - before.writer_groups, 2);
+    assert_eq!(after.writer_group_requests - before.writer_group_requests, 4);
     assert_eq!(engine.window(&scope, WindowQuery::Last(10)).unwrap().len(), 3);
-}
-
-#[test]
-fn oracle_rejects_partial_unknown_batches_and_missing_acknowledgements() {
-    for partial in [false, true] {
-        let opts = EngineOptions {
-            tape: TapeOptions { inline_sim: true, ..TapeOptions::default() },
-            ..EngineOptions::default()
-        };
-        let clock = Arc::new(SimClock::default());
-        let io = Arc::new(FaultIo::new(SimDisk::new(21)));
-        let engine = open(io.clone(), clock.clone(), &opts);
-        let before = io.disk.crash().unwrap();
-        let mut oracle = Oracle::new();
-        let mut batch = random_batch(&mut Rng(21), 0, 0, 0);
-        batch.turns.truncate(1);
-        let receipt =
-            engine.append(&oracle.scopes[0], batch.turns.clone(), batch.key.as_deref()).unwrap();
-        if partial {
-            batch.turns.push(batch.turns[0].clone());
-        }
-        oracle.batches.push(batch);
-        if !partial {
-            oracle.apply(0, receipt);
-        }
-        let image = if partial { io.disk.crash().unwrap() } else { before };
-        drop(engine);
-        let pending = if partial { vec![0] } else { vec![] };
-        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            oracle.recover(&image, clock, &opts, &pending);
-        }))
-        .is_err());
-    }
 }
 
 #[test]
@@ -915,6 +1162,7 @@ fn missing_checkpoint_filename_after_crash_replays_the_tape() {
     let turn = NewTurn { role: Role::User, content: vec![9], meta: vec![] };
     let mut observed = false;
     for seed in 0..128 {
+        eprintln!("case: seed={seed}");
         let io = Arc::new(FaultIo::new(SimDisk::new(seed)));
         let clock = Arc::new(SimClock::default());
         let engine = open(io.clone(), clock.clone(), &opts);
@@ -930,14 +1178,18 @@ fn missing_checkpoint_filename_after_crash_replays_the_tape() {
                 .unwrap()
         {
             let engine = Engine::open_with(Arc::new(image), clock, "db", opts.clone()).unwrap();
-            assert_eq!(engine.metrics().unwrap().checkpoint_warnings, 1);
-            assert_eq!(engine.metrics().unwrap().replayed_records, 3);
-            assert_eq!(engine.window(&scope, WindowQuery::Last(10)).unwrap().len(), 2);
+            assert_eq!(engine.metrics().unwrap().checkpoint_warnings, 1, "seed={seed}");
+            assert_eq!(engine.metrics().unwrap().replayed_records, 3, "seed={seed}");
+            assert_eq!(
+                engine.window(&scope, WindowQuery::Last(10)).unwrap().len(),
+                2,
+                "seed={seed}"
+            );
             observed = true;
             break;
         }
     }
-    assert!(observed, "no missing-reference crash image was exercised");
+    assert!(observed, "seeds=0..128: no missing-reference crash image was exercised");
 }
 
 #[test]
@@ -951,14 +1203,9 @@ fn seeded_engine_recovery() {
     for offset in 0..count {
         let seed = first.wrapping_add(offset);
         if let Err(error) = std::panic::catch_unwind(|| run_seed(seed)) {
-            eprintln!("engine simulation seed={seed}\nrepro: ZERODB_SIM_SEED={seed} cargo test -p zerodb-core --release --features sim --test engine_sim -- --nocapture");
+            eprintln!("engine simulation seed={seed}\nrepro: ZERODB_SIM_SEED={seed} cargo test -p zerodb-core --release --features sim --test engine_sim");
             std::panic::resume_unwind(error);
         }
     }
     eprintln!("engine simulation passed: {count} seeds starting at {first}");
-}
-
-#[test]
-fn engine_simulation_is_reproducible() {
-    assert_eq!(run_seed(19), run_seed(19));
 }

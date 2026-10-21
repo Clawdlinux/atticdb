@@ -1,4 +1,5 @@
 use crate::checkpoint::{self, Worker};
+use crate::dedup::DedupKey;
 use crate::error::{lock, Result};
 use crate::machine::Machine;
 use crate::session::{address, Key};
@@ -6,8 +7,8 @@ use crate::state::State;
 use crate::turn::{decode, encode};
 use crate::{EngineError, EngineOptions, ErrorKind, NewTurn, Role};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, TryLockError};
 use zerodb_tape::{Clock, Committed, Durability, Io, Kind, RecordInput, StdIo, SystemClock, Tape};
 
 /// A session's isolation boundary.
@@ -104,11 +105,24 @@ pub struct Metrics {
     /// Registered tenants.
     pub tenants: usize,
 }
+
+/// Writer availability. Reads retain the last durable view.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Health {
+    /// No write-blocking failure has been observed.
+    Ok,
+    /// A space check failed or preallocation ran out of space. A later write retries.
+    ReadOnly,
+    /// Storage or shared state failed. Reopen before writing again.
+    Poisoned,
+}
+
 /// Durable session storage. Drop joins the checkpoint worker before closing the tape.
 pub struct Engine {
     worker: Worker,
     tape: Tape<Machine>,
     state: Arc<Mutex<State>>,
+    failed: Arc<AtomicBool>,
     io: Arc<dyn Io>,
     dir: PathBuf,
     tenant_creation: Mutex<()>,
@@ -124,6 +138,24 @@ impl std::fmt::Debug for Engine {
 }
 
 impl Engine {
+    /// Returns writer health without blocking or performing I/O.
+    /// Poisoning takes precedence over read-only mode.
+    ///
+    /// Only a later write that passes its space check clears `Health::ReadOnly`.
+    /// Keep sending writes or retries to read-only instances. Don't drain them.
+    pub fn health(&self) -> Health {
+        if self.tape.is_poisoned()
+            || self.failed.load(Ordering::Acquire)
+            || matches!(self.state.try_lock(), Err(TryLockError::Poisoned(_)))
+        {
+            Health::Poisoned
+        } else if self.tape.read_only() {
+            Health::ReadOnly
+        } else {
+            Health::Ok
+        }
+    }
+
     /// Creates the directory, recovers its tape, and starts background workers using real filesystem I/O.
     pub fn open(path: impl AsRef<Path>, opts: EngineOptions) -> Result<Self> {
         std::fs::create_dir_all(path.as_ref()).map_err(zerodb_tape::Error::from)?;
@@ -183,10 +215,12 @@ impl Engine {
         checkpoint::sweep(io.as_ref(), &dir, &chain)?;
         let worker = Worker::start(io.clone(), dir.clone(), state.clone(), &opts)?;
         lock(&state)?.notify = worker.sender.clone();
+        let failed = lock(&state)?.failed.clone();
         Ok(Self {
             worker,
             tape,
             state,
+            failed,
             io,
             dir,
             tenant_creation: Mutex::new(()),
@@ -218,7 +252,27 @@ impl Engine {
             }
             *hash.finalize().as_bytes()
         });
-        let mut tenant = lock(&self.state)?.tenants.get(&scope.tenant);
+        let mut tenant = {
+            let state = lock(&self.state)?;
+            let tenant = state.tenants.get(&scope.tenant);
+            if let (Some(tenant), Some(idem_key), Some(digest)) = (tenant, idem_key, digest) {
+                let key = DedupKey(tenant, scope.session.clone(), idem_key.to_owned());
+                if let Some(entry) = state.dedup.get(&key) {
+                    if let Some(error) = &state.failure {
+                        return Err(error.clone());
+                    }
+                    let Committed::Durable { txn, last_lsn, reply, .. } = entry.resolve(digest)?;
+                    // Read the tape watermark after taking the state lock, like window_snapshot.
+                    // Machine publication releases this lock before the tape advances its watermark.
+                    // Only covered receipts bypass the writer, so the next read cannot lag this ack.
+                    if last_lsn <= self.tape.durable_lsn() {
+                        drop(state);
+                        return self.receipt(turns.len() as u64, txn, last_lsn, &reply);
+                    }
+                }
+            }
+            tenant
+        };
         let _creation = if tenant.is_none() {
             let guard = lock(&self.tenant_creation)?;
             tenant = lock(&self.state)?.tenants.get(&scope.tenant);
@@ -555,6 +609,97 @@ impl Drop for Pin<'_> {
         if let Ok(mut state) = self.engine.state.lock() {
             if let Some(entry) = state.index.sessions.get_mut(&self.key) {
                 entry.pins = entry.pins.saturating_sub(1);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+    use zerodb_tape::sim::SimClock;
+    use zerodb_tape::{CommittedRecord, SimDisk, StateMachine, TapeOptions};
+
+    #[test]
+    fn health_never_waits_and_failures_override_read_only() {
+        enum Failure {
+            None,
+            Publication,
+            Lock,
+        }
+        for (case, read_only, failure, expected) in [
+            ("healthy", false, Failure::None, Health::Ok),
+            ("read-only", true, Failure::None, Health::ReadOnly),
+            ("publication failure beats read-only", true, Failure::Publication, Health::Poisoned),
+            ("poisoned lock beats read-only", true, Failure::Lock, Health::Poisoned),
+        ] {
+            let io = Arc::new(SimDisk::new(0));
+            let opts = EngineOptions {
+                tape: TapeOptions {
+                    segment_size: 64 * 1024,
+                    free_space_floor: Some(4096),
+                    ..TapeOptions::default()
+                },
+                checkpoint_interval: Duration::from_secs(3600),
+                checkpoint_bytes: u64::MAX,
+                ..EngineOptions::default()
+            };
+            let engine =
+                Engine::open_with(io.clone(), Arc::new(SimClock::default()), "db", opts.clone())
+                    .unwrap();
+            if read_only {
+                io.set_capacity(0).unwrap();
+                let error = engine
+                    .append(
+                        &Scope { tenant: "t".into(), agent: "a".into(), session: "s".into() },
+                        vec![NewTurn { role: Role::User, content: vec![1], meta: vec![] }],
+                        None,
+                    )
+                    .unwrap_err();
+                assert_eq!(error.outcome, zerodb_tape::Outcome::NotCommitted, "{case}");
+            }
+            match failure {
+                Failure::None => {}
+                Failure::Publication => {
+                    let mut machine =
+                        Machine::new(engine.state.clone(), io, "db".into(), opts).unwrap();
+                    machine.publish(&[CommittedRecord {
+                        lsn: 1,
+                        txn: 1,
+                        kind: Kind::Fact,
+                        tenant_id: 1,
+                        commit_time_ns: 1,
+                        payload: Arc::from([]),
+                    }]);
+                    assert!(engine.state.lock().unwrap().failure.is_some(), "{case}");
+                }
+                Failure::Lock => {
+                    assert!(
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            let _state = engine.state.lock().unwrap();
+                            panic!("injected state lock failure");
+                        }))
+                        .is_err(),
+                        "{case}"
+                    );
+                }
+            }
+            assert_eq!(engine.tape.read_only(), read_only, "{case}");
+            assert!(!engine.tape.is_poisoned(), "{case}");
+            assert_eq!(engine.health(), expected, "{case}");
+            if !matches!(failure, Failure::Lock) {
+                std::thread::scope(|threads| {
+                    let state = engine.state.lock().unwrap();
+                    let (sender, receiver) = mpsc::sync_channel(1);
+                    let engine = &engine;
+                    threads.spawn(move || sender.send(engine.health()).unwrap());
+                    let observed = receiver.recv_timeout(Duration::from_secs(5));
+                    drop(state);
+                    assert_eq!(observed, Ok(expected), "{case}: state lock held");
+                });
             }
         }
     }

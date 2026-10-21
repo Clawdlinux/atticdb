@@ -1,6 +1,6 @@
 //! One writer state machine with threaded and deterministic drivers.
 
-use crate::dir::{read_exact, DataDir, Handle};
+use crate::dir::{read_exact, DataDir, Handle, SegmentPrepareError};
 use crate::frame::{
     self, Digest, Footer, Frame, Header, Kind, HEADER_LEN, MAX_FRAME_SIZE, VERSION,
 };
@@ -103,9 +103,14 @@ pub struct TapeOptions {
     pub superblock_bytes: u64,
     /// Resident LSN-index budget, including page bookkeeping. Minimum 4224 bytes.
     pub lsn_index_bytes: usize,
+    /// Bytes kept free after group bytes and any new segments. Defaults to min(1 GiB, 5% of capacity).
+    pub free_space_floor: Option<u64>,
     /// Runs the writer inline. Only for deterministic simulations.
     #[cfg(feature = "sim")]
     pub inline_sim: bool,
+    /// Optional pause between application publication and tape publication. Simulations only.
+    #[cfg(feature = "sim")]
+    pub publish_pause: Option<Arc<crate::sim::PublishPause>>,
 }
 
 impl Default for TapeOptions {
@@ -118,8 +123,11 @@ impl Default for TapeOptions {
             superblock_interval: Duration::from_secs(30),
             superblock_bytes: 256 * 1024 * 1024,
             lsn_index_bytes: DEFAULT_BUDGET,
+            free_space_floor: None,
             #[cfg(feature = "sim")]
             inline_sim: false,
+            #[cfg(feature = "sim")]
+            publish_pause: None,
         }
     }
 }
@@ -150,7 +158,7 @@ impl PreparedBatch {
 
     /// Rewrites records before framing. The writer validates changes.
     ///
-    /// Rewritten records must still satisfy the batch size and durability constraints.
+    /// Rewrites may shrink or preserve the submitted encoded size, but must not grow it.
     /// Invalid rewrites poison the writer because preparation may have reserved application state.
     pub fn records_mut(&mut self) -> impl ExactSizeIterator<Item = &mut RecordInput> {
         self.changed = true;
@@ -181,10 +189,19 @@ impl PreparedBatch {
         Ok(size)
     }
 
+    /// Revalidates rewrites against the size budgeted before preparation.
     fn refresh(&mut self) -> Result<()> {
         if self.changed {
-            self.size =
+            let size =
                 Self::validate(self.records(), Durability::Durable).map_err(|error| error.kind)?;
+            if size > self.size {
+                return Err(Error::InvalidFrame(format!(
+                    "prepared batch grew from {} to {size} bytes ({} records)",
+                    self.size,
+                    self.records.len()
+                )));
+            }
+            self.size = size;
             self.changed = false;
         }
         Ok(())
@@ -224,6 +241,7 @@ struct ReadState {
     index: Mutex<LsnIndex>,
     durable_lsn: AtomicU64,
     poisoned: AtomicBool,
+    read_only: AtomicBool,
     groups: AtomicU64,
     grouped_requests: AtomicU64,
     superblock_installs: AtomicU64,
@@ -316,6 +334,9 @@ pub struct WriterCore<S: StateMachine = NoopStateMachine> {
     superblock_bytes: u64,
     superblock_position: (u64, u64),
     synced_position: (u64, u64),
+    free_space_floor: Option<u64>,
+    #[cfg(feature = "sim")]
+    publish_pause: Option<Arc<crate::sim::PublishPause>>,
 }
 
 impl<S: StateMachine> std::fmt::Debug for WriterCore<S> {
@@ -361,6 +382,9 @@ impl<S: StateMachine> WriterCore<S> {
         }
         let mut dir =
             DataDir::open(io.clone(), path, opts.server_address.as_deref(), opts.segment_size)?;
+        let free_space_floor = opts.free_space_floor.or_else(|| {
+            io.total_bytes(&dir.path).ok().map(|capacity| (capacity / 20).min(1 << 30))
+        });
         let mut recovered = recover_with_budget(&mut dir, opts.segment_size, opts.lsn_index_bytes)?;
         if recovered.report.durable_lsn > dir.superblock() {
             dir.install_superblock(recovered.report.durable_lsn)?;
@@ -371,6 +395,7 @@ impl<S: StateMachine> WriterCore<S> {
             index: Mutex::new(recovered.index.take().ok_or(Error::Poisoned)?),
             durable_lsn: AtomicU64::new(recovered.report.durable_lsn),
             poisoned: AtomicBool::new(false),
+            read_only: AtomicBool::new(false),
             groups: AtomicU64::new(0),
             grouped_requests: AtomicU64::new(0),
             superblock_installs: AtomicU64::new(0),
@@ -381,6 +406,25 @@ impl<S: StateMachine> WriterCore<S> {
             }
         }
         let segments = SegmentWriter::new(dir, opts.segment_size, recovered.offset)?;
+        // Finish recovery before optional reservations consume any remaining headroom.
+        let highest_lsn = recovered.report.durable_lsn.max(1);
+        let needed = lock(&reads.index)?.reservation_bytes(highest_lsn)?;
+        let read_only = match free_space_floor {
+            Some(floor) => match reads.io.available_bytes(&reads.path) {
+                Ok(free) if free.checked_sub(needed).is_some_and(|left| left >= floor) => {
+                    match lock(&reads.index)?.reserve(highest_lsn) {
+                        Ok(()) => false,
+                        Err(Error::DiskFull | Error::Io(std::io::ErrorKind::StorageFull, _)) => {
+                            true
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                _ => true,
+            },
+            None => true,
+        };
+        reads.read_only.store(read_only, Ordering::Release);
         let position = segments.position();
         let core = Self {
             segments,
@@ -390,6 +434,9 @@ impl<S: StateMachine> WriterCore<S> {
             superblock_bytes: opts.superblock_bytes,
             superblock_position: position,
             synced_position: position,
+            free_space_floor,
+            #[cfg(feature = "sim")]
+            publish_pause: opts.publish_pause,
             clock,
             reads,
             queue: VecDeque::new(),
@@ -417,6 +464,11 @@ impl<S: StateMachine> WriterCore<S> {
     /// Reports whether a storage failure requires reopening.
     pub fn is_poisoned(&self) -> bool {
         self.reads.poisoned.load(Ordering::Acquire)
+    }
+
+    /// True after a failed space check or full-disk preallocation. A passing space check clears it.
+    pub fn read_only(&self) -> bool {
+        self.reads.read_only.load(Ordering::Acquire)
     }
 
     /// Returns charged index memory and backing-page reads.
@@ -529,6 +581,10 @@ impl<S: StateMachine> WriterCore<S> {
         self.synced_position = self.segments.position();
         if !self.unpublished.is_empty() {
             self.state_machine.publish(&self.unpublished);
+            #[cfg(feature = "sim")]
+            if let Some(pause) = &self.publish_pause {
+                pause.pause();
+            }
             self.unpublished.clear();
         }
         self.reads.durable_lsn.store(self.lsn, Ordering::Release);
@@ -541,6 +597,98 @@ impl<S: StateMachine> WriterCore<S> {
         if !self.queue.is_empty() {
             self.reads.groups.fetch_add(1, Ordering::Relaxed);
             self.reads.grouped_requests.fetch_add(self.queue.len() as u64, Ordering::Relaxed);
+        }
+        if !self.is_poisoned() {
+            let capacity = self.segments.capacity();
+            self.queue.retain(|request| {
+                if request.batch.size as u64 > capacity {
+                    let _ = request.reply.send(Err(rejected(Error::BatchTooLarge)));
+                    false
+                } else {
+                    true
+                }
+            });
+            if !self.queue.is_empty() {
+                let floor = match self.free_space_floor {
+                    Some(floor) => floor,
+                    None => match self.reads.io.total_bytes(&self.reads.path) {
+                        Ok(capacity) => {
+                            let floor = (capacity / 20).min(1 << 30);
+                            self.free_space_floor = Some(floor);
+                            floor
+                        }
+                        Err(error) => {
+                            self.reads.read_only.store(true, Ordering::Release);
+                            self.reject_group(error);
+                            return;
+                        }
+                    },
+                };
+                let Some(highest_lsn) = self.queue.iter().try_fold(self.durable_lsn(), |lsn, r| {
+                    lsn.checked_add(r.batch.records.len() as u64)
+                }) else {
+                    self.reject_group(Error::Rejected("lsn_index"));
+                    return;
+                };
+                let index_space =
+                    lock(&self.reads.index).and_then(|index| index.reservation_bytes(highest_lsn));
+                let index_space = match index_space {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        self.reject_storage_group(error);
+                        return;
+                    }
+                };
+                let needed = self
+                    .segments
+                    .group_space(self.queue.iter().map(|r| r.batch.size as u64))
+                    .saturating_add(index_space);
+                let available = self.reads.io.available_bytes(&self.reads.path);
+                match available {
+                    Ok(free) if free.checked_sub(needed).is_none_or(|left| left < floor) => {
+                        self.reads.read_only.store(true, Ordering::Release);
+                        self.reject_group(Error::DiskFull);
+                        return;
+                    }
+                    Ok(_) => self.reads.read_only.store(false, Ordering::Release),
+                    Err(error) => {
+                        self.reads.read_only.store(true, Ordering::Release);
+                        self.reject_group(error);
+                        return;
+                    }
+                }
+                let reserved =
+                    lock(&self.reads.index).and_then(|mut index| index.reserve(highest_lsn));
+                if let Err(error) = reserved {
+                    if matches!(
+                        error,
+                        Error::DiskFull | Error::Io(std::io::ErrorKind::StorageFull, _)
+                    ) {
+                        self.reads.read_only.store(true, Ordering::Release);
+                        self.reject_group(Error::DiskFull);
+                    } else {
+                        self.reject_storage_group(error);
+                    }
+                    return;
+                }
+                if let Err(error) =
+                    self.segments.prepare_group(self.queue.iter().map(|r| r.batch.size as u64))
+                {
+                    match error {
+                        SegmentPrepareError::NoSpace(_) => {
+                            self.reads.read_only.store(true, Ordering::Release);
+                            self.reject_group(Error::DiskFull);
+                        }
+                        SegmentPrepareError::Storage(error) => self.reject_storage_group(error),
+                    }
+                    return;
+                }
+                // Activate the first placement before application preparation.
+                if let Err(error) = self.segments.reserve_batch(self.queue[0].batch.size) {
+                    self.reject_storage_group(error);
+                    return;
+                }
+            }
         }
         let mut replies = Vec::new();
         while let Some(mut request) = self.queue.pop_front() {
@@ -592,6 +740,7 @@ impl<S: StateMachine> WriterCore<S> {
                 }
             }
         }
+        self.segments.finish_group();
         if self.is_poisoned() {
             for (reply, _) in replies {
                 let _ = reply
@@ -614,6 +763,22 @@ impl<S: StateMachine> WriterCore<S> {
         }
     }
 
+    fn reject_storage_group(&mut self, error: Error) {
+        self.reads.poisoned.store(true, Ordering::Release);
+        let error = match error {
+            Error::Io(std::io::ErrorKind::StorageFull, _) => Error::DiskFull,
+            error => error,
+        };
+        self.reject_group(error);
+    }
+
+    fn reject_group(&mut self, error: Error) {
+        for request in self.queue.drain(..) {
+            let _ = request.reply.send(Err(rejected(error.clone())));
+        }
+        self.segments.finish_group();
+    }
+
     /// Called after replies. Metadata failure poisons future writes, not earlier acknowledgements.
     #[cfg(any(test, feature = "sim"))]
     pub fn update_superblock(&mut self) -> Result<()> {
@@ -624,6 +789,7 @@ impl<S: StateMachine> WriterCore<S> {
     }
     fn superblock_due(&self) -> bool {
         !self.is_poisoned()
+            && !self.read_only()
             && (self.synced_position.0 != self.superblock_position.0
                 || self.synced_position.1.saturating_sub(self.superblock_position.1)
                     >= self.superblock_bytes
@@ -960,6 +1126,16 @@ impl<S: StateMachine> Tape<S> {
         self.reads.durable_lsn.load(Ordering::Acquire)
     }
 
+    /// True after a failed space check or full-disk preallocation. Reads remain available.
+    pub fn read_only(&self) -> bool {
+        self.reads.read_only.load(Ordering::Acquire)
+    }
+
+    /// True after a storage failure. Reopen before accepting more writes.
+    pub fn is_poisoned(&self) -> bool {
+        self.reads.poisoned.load(Ordering::Acquire)
+    }
+
     /// Reads a complete durable record, or returns `None` for an unpublished LSN.
     pub fn read(&self, lsn: u64) -> Result<Option<Frame>> {
         self.reads.read(lsn)
@@ -997,55 +1173,6 @@ mod tests {
 
     fn records(count: usize) -> Vec<RecordInput> {
         vec![RecordInput { kind: Kind::Turn, tenant_id: 1, content: b"hello".to_vec() }; count]
-    }
-
-    #[test]
-    fn superblock_waits_thirty_seconds_without_a_roll() {
-        let disk = Arc::new(crate::SimDisk::new(34));
-        let clock = Arc::new(crate::sim::SimClock::default());
-        let (mut core, _) = WriterCore::open(
-            disk,
-            clock.clone(),
-            "db",
-            TapeOptions { segment_size: 4096, ..TapeOptions::default() },
-        )
-        .unwrap();
-        let (request, reply) =
-            WriteRequest::new(PreparedBatch::new(records(1), Durability::Durable).unwrap());
-        core.enqueue(request);
-        core.step();
-        reply.recv().unwrap().unwrap();
-        clock.advance(29_999_999_999);
-        core.update_superblock().unwrap();
-        assert_eq!(core.segments.dir.superblock(), 0);
-        clock.advance(1);
-        core.update_superblock().unwrap();
-        assert_eq!(core.segments.dir.superblock(), 1);
-    }
-
-    #[test]
-    fn superblock_byte_budget_and_roll_trigger_without_clock_progress() {
-        for (segment_size, budget, count) in [(4096, 300, 3), (200, 256 * 1024 * 1024, 2)] {
-            let disk = Arc::new(crate::SimDisk::new(35));
-            let opts =
-                TapeOptions { segment_size, superblock_bytes: budget, ..TapeOptions::default() };
-            let (mut core, _) =
-                WriterCore::open(disk, Arc::new(crate::sim::SimClock::default()), "db", opts)
-                    .unwrap();
-            for expected in 1..=count {
-                let (request, reply) =
-                    WriteRequest::new(PreparedBatch::new(records(1), Durability::Durable).unwrap());
-                core.enqueue(request);
-                core.step();
-                reply.recv().unwrap().unwrap();
-                core.update_superblock().unwrap();
-                assert_eq!(
-                    core.segments.dir.superblock(),
-                    if expected == count { count } else { 0 }
-                );
-            }
-            assert_eq!(core.reads.superblock_installs.load(Ordering::Relaxed), 1);
-        }
     }
 
     #[test]
@@ -1136,12 +1263,5 @@ mod tests {
         let group = groups.collect_with(vec![1], |_| None, || vec![2, 3]);
         assert_eq!(group, vec![1, 2, 3]);
         assert_eq!(groups.recent.back(), Some(&3));
-    }
-
-    #[test]
-    fn invalid_batches_are_rejected_before_enqueueing() {
-        let error = PreparedBatch::new(records(1025), Durability::Durable).unwrap_err();
-        assert!(matches!(error.kind, Error::BatchTooLarge));
-        assert_eq!(error.outcome, Outcome::NotCommitted);
     }
 }

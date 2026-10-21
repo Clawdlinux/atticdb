@@ -36,6 +36,7 @@ pub(crate) struct LsnIndex {
     io: Arc<dyn Io>,
     offsets: Handle,
     routes: Handle,
+    reserved: [u64; 2],
     pages: HashMap<PageKey, Page>,
     fifo: VecDeque<PageKey>,
     budget: usize,
@@ -75,6 +76,7 @@ impl LsnIndex {
             io,
             offsets,
             routes,
+            reserved: [0; 2],
             pages: HashMap::new(),
             fifo: VecDeque::new(),
             budget,
@@ -84,6 +86,37 @@ impl LsnIndex {
             evictions: 0,
             dirty_evictions: 0,
         })
+    }
+
+    fn backing_sizes(lsn: u64) -> Result<[u64; 2]> {
+        if lsn == 0 {
+            return Ok([0; 2]);
+        }
+        let size = |width| {
+            let (page, _) = Self::address(lsn, width)?;
+            page.checked_add(1)
+                .and_then(|pages| pages.checked_mul(PAGE_BYTES as u64))
+                .ok_or(Error::Rejected("lsn_index"))
+        };
+        Ok([size(8)?, size(16)?])
+    }
+
+    pub(crate) fn reservation_bytes(&self, lsn: u64) -> Result<u64> {
+        let sizes = Self::backing_sizes(lsn)?;
+        Ok(sizes[0]
+            .saturating_sub(self.reserved[0])
+            .saturating_add(sizes[1].saturating_sub(self.reserved[1])))
+    }
+
+    pub(crate) fn reserve(&mut self, lsn: u64) -> Result<()> {
+        for (slot, size) in Self::backing_sizes(lsn)?.into_iter().enumerate() {
+            if size > self.reserved[slot] {
+                let file = if slot == 0 { &self.offsets } else { &self.routes };
+                self.io.allocate(file.id, size)?;
+                self.reserved[slot] = size;
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn stats(&self) -> LsnIndexStats {
@@ -96,30 +129,45 @@ impl LsnIndex {
         }
     }
 
-    fn page(&mut self, key: PageKey) -> Result<&mut Page> {
+    fn page(&mut self, key: PageKey, read: bool) -> Result<&mut Page> {
         if !self.pages.contains_key(&key) {
-            if (self.pages.len() + 1) * PAGE_CHARGE > self.budget {
-                let oldest = self.fifo.pop_front().ok_or(Error::Poisoned)?;
-                let page = self.pages.remove(&oldest).ok_or(Error::Poisoned)?;
+            // Loop so a cache over budget after a full disk shrinks once write-backs succeed.
+            while (self.pages.len() + 1) * PAGE_CHARGE > self.budget {
+                let oldest = *self.fifo.front().ok_or(Error::Poisoned)?;
+                let page = self.pages.get(&oldest).ok_or(Error::Poisoned)?;
+                let mut victim = Some(0);
                 if page.dirty {
                     let file = if oldest.0 { &self.routes } else { &self.offsets };
-                    if let Err(error) = self.io.write_at(
+                    match self.io.write_at(
                         file.id,
                         oldest.1 * PAGE_BYTES as u64,
                         page.bytes.as_slice(),
                     ) {
-                        self.pages.insert(oldest, page);
-                        self.fifo.push_front(oldest);
-                        return Err(error);
+                        Ok(()) => self.dirty_evictions += 1,
+                        // A read-only open can leave dirty pages over unreserved holes. Reads then
+                        // evict a clean page or load one over budget. Only inserts create dirty pages.
+                        Err(Error::DiskFull | Error::Io(std::io::ErrorKind::StorageFull, _))
+                            if read =>
+                        {
+                            victim = self
+                                .fifo
+                                .iter()
+                                .position(|k| self.pages.get(k).is_some_and(|page| !page.dirty));
+                        }
+                        Err(error) => return Err(error),
                     }
-                    self.dirty_evictions += 1;
                 }
+                let Some(at) = victim else { break };
+                let evicted = self.fifo.remove(at).ok_or(Error::Poisoned)?;
+                self.pages.remove(&evicted).ok_or(Error::Poisoned)?;
                 self.evictions += 1;
             }
             let mut page = Page { bytes: Box::new([0; PAGE_BYTES]), dirty: false };
             let file = if key.0 { &self.routes } else { &self.offsets };
             let offset = key.1 * PAGE_BYTES as u64;
-            if offset < self.io.len(file.id)? {
+            // Newly reserved pages are zeroed. Reload only pages containing earlier records.
+            let width = if key.0 { 16 } else { 8 };
+            if self.len > 0 && key.1 <= Self::address(self.len, width)?.0 {
                 read_exact(self.io.as_ref(), file.id, offset, page.bytes.as_mut_slice())?;
                 self.reloads += 1;
             }
@@ -145,13 +193,15 @@ impl LsnIndex {
             }
             _ => lsn,
         };
+        // Recovery can rebuild resident pages without allocating backing space.
+        // Live groups reserve backing before preparation.
         let (page, at) = Self::address(lsn, 16)?;
-        let route = self.page((true, page))?;
+        let route = self.page((true, page), false)?;
         route.bytes[at..at + 8].copy_from_slice(&segment.to_le_bytes());
         route.bytes[at + 8..at + 16].copy_from_slice(&first.to_le_bytes());
         route.dirty = true;
         let (page, at) = Self::address(lsn, 8)?;
-        let offsets = self.page((false, page))?;
+        let offsets = self.page((false, page), false)?;
         offsets.bytes[at..at + 8].copy_from_slice(&offset.to_le_bytes());
         offsets.dirty = true;
         self.active = Some((segment, first));
@@ -164,7 +214,7 @@ impl LsnIndex {
             return Ok(None);
         }
         let (page, at) = Self::address(lsn, 16)?;
-        let route = self.page((true, page))?;
+        let route = self.page((true, page), true)?;
         let segment =
             u64::from_le_bytes(route.bytes[at..at + 8].try_into().map_err(|_| Error::Poisoned)?);
         let first = u64::from_le_bytes(
@@ -176,7 +226,7 @@ impl LsnIndex {
         // Segment arrays occupy adjacent ranges. Routing is paged too, so segment count cannot grow the resident directory.
         let index = lsn - first;
         let (page, at) = Self::address(first + index, 8)?;
-        let offsets = self.page((false, page))?;
+        let offsets = self.page((false, page), true)?;
         let offset =
             u64::from_le_bytes(offsets.bytes[at..at + 8].try_into().map_err(|_| Error::Poisoned)?);
         Ok(Some((segment, offset)))

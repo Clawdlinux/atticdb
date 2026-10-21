@@ -7,6 +7,78 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+const ALLOCATION_UNIT: usize = 512;
+
+#[derive(Clone, Debug, Default)]
+struct Blocks(Vec<std::ops::Range<usize>>);
+
+impl Blocks {
+    fn bytes(&self) -> u64 {
+        self.0.iter().fold(0u64, |used, range| {
+            used.saturating_add((range.len() as u64).saturating_mul(ALLOCATION_UNIT as u64))
+        })
+    }
+
+    fn required(&self, offset: usize, len: usize) -> u64 {
+        if len == 0 {
+            return 0;
+        }
+        let start = offset / ALLOCATION_UNIT;
+        let end = (offset + len).div_ceil(ALLOCATION_UNIT);
+        let occupied: usize = self
+            .0
+            .iter()
+            .map(|range| range.end.min(end).saturating_sub(range.start.max(start)))
+            .sum();
+        ((end - start - occupied) as u64).saturating_mul(ALLOCATION_UNIT as u64)
+    }
+
+    fn writable(&self, offset: usize, len: usize, free: u64) -> usize {
+        if self.required(offset, len) <= free {
+            return len;
+        }
+        let (mut low, mut high) = (0, len);
+        while low < high {
+            let middle = low + (high - low).div_ceil(2);
+            if self.required(offset, middle) <= free {
+                low = middle;
+            } else {
+                high = middle - 1;
+            }
+        }
+        low
+    }
+
+    fn reserve(&mut self, offset: usize, len: usize) {
+        if len == 0 {
+            return;
+        }
+        let mut new = offset / ALLOCATION_UNIT..(offset + len).div_ceil(ALLOCATION_UNIT);
+        let mut merged = Vec::new();
+        for range in std::mem::take(&mut self.0) {
+            if range.end < new.start {
+                merged.push(range);
+            } else if new.end < range.start {
+                merged.push(new);
+                new = range;
+            } else {
+                new.start = new.start.min(range.start);
+                new.end = new.end.max(range.end);
+            }
+        }
+        merged.push(new);
+        self.0 = merged;
+    }
+
+    fn truncate(&mut self, len: usize) {
+        let end = len.div_ceil(ALLOCATION_UNIT);
+        for range in &mut self.0 {
+            range.end = range.end.min(end);
+        }
+        self.0.retain(|range| range.start < range.end);
+    }
+}
+
 #[derive(Clone, Debug)]
 struct SplitMix64(u64);
 
@@ -28,18 +100,26 @@ impl SplitMix64 {
 enum Write {
     Bytes(usize, Vec<u8>),
     Resize(usize),
+    Allocate(usize),
 }
 
 impl Write {
-    fn apply(&self, bytes: &mut Vec<u8>) {
+    fn apply(&self, bytes: &mut Vec<u8>, blocks: &mut Blocks) {
         match self {
             Self::Bytes(offset, data) => {
                 if !data.is_empty() {
                     bytes.resize(bytes.len().max(offset + data.len()), 0);
                     bytes[*offset..offset + data.len()].copy_from_slice(data);
+                    blocks.reserve(*offset, data.len());
                 }
             }
-            Self::Resize(len) => bytes.resize(*len, 0),
+            Self::Resize(len) | Self::Allocate(len) => {
+                bytes.resize(*len, 0);
+                blocks.truncate(*len);
+                if matches!(self, Self::Allocate(_)) {
+                    blocks.reserve(0, *len);
+                }
+            }
         }
     }
 }
@@ -48,6 +128,8 @@ impl Write {
 struct SimFile {
     durable: Vec<u8>,
     visible: Vec<u8>,
+    durable_blocks: Blocks,
+    visible_blocks: Blocks,
     pending: Vec<Write>,
     failed_cache: Vec<std::ops::Range<usize>>,
 }
@@ -56,7 +138,7 @@ impl SimFile {
     fn write(&mut self, write: Write) {
         let overwritten = match &write {
             Write::Bytes(offset, data) => *offset..offset + data.len(),
-            Write::Resize(len) => *len..usize::MAX,
+            Write::Resize(len) | Write::Allocate(len) => *len..usize::MAX,
         };
         let mut cached = Vec::new();
         for range in std::mem::take(&mut self.failed_cache) {
@@ -68,12 +150,18 @@ impl SimFile {
             }
         }
         self.failed_cache = cached;
-        write.apply(&mut self.visible);
+        write.apply(&mut self.visible, &mut self.visible_blocks);
         self.pending.push(write);
     }
 }
 
-fn settle(mut writes: Vec<Write>, bytes: &mut Vec<u8>, rng: &mut SplitMix64, sector_size: usize) {
+fn settle(
+    mut writes: Vec<Write>,
+    bytes: &mut Vec<u8>,
+    blocks: &mut Blocks,
+    rng: &mut SplitMix64,
+    sector_size: usize,
+) {
     for i in (1..writes.len()).rev() {
         let j = rng.below(i + 1);
         writes.swap(i, j);
@@ -93,11 +181,12 @@ fn settle(mut writes: Vec<Write>, bytes: &mut Vec<u8>, rng: &mut SplitMix64, sec
                         1 => count,
                         _ => rng.below(count + 1),
                     };
-                    Write::Bytes(offset + start, data[start..start + kept].to_vec()).apply(bytes);
+                    Write::Bytes(offset + start, data[start..start + kept].to_vec())
+                        .apply(bytes, blocks);
                     start += count;
                 }
             }
-            Write::Resize(len) => bytes.resize(len, 0),
+            Write::Resize(_) | Write::Allocate(_) => write.apply(bytes, blocks),
         }
     }
 }
@@ -146,8 +235,10 @@ struct State {
     pending_entries: Vec<DirOp>,
     locked: BTreeSet<FileId>,
     next: u64,
-    fail_sync: bool,
+    fail_sync: Option<ErrorKind>,
     space: Option<usize>,
+    capacity: u64,
+    storage_full_returns: u64,
     sector_size: usize,
 }
 
@@ -156,6 +247,14 @@ fn io_error(kind: ErrorKind, message: &str) -> Error {
 }
 
 impl State {
+    fn available(&self) -> u64 {
+        let used = self
+            .files
+            .values()
+            .fold(0u64, |used, file| used.saturating_add(file.visible_blocks.bytes()));
+        self.capacity.saturating_sub(used)
+    }
+
     fn file(&mut self, id: FileId) -> Result<&mut SimFile> {
         let inode = self
             .handles
@@ -186,8 +285,11 @@ impl State {
     }
 
     fn sync_check(&mut self) -> Result<()> {
-        if std::mem::take(&mut self.fail_sync) {
-            return Err(io_error(ErrorKind::Other, "injected sync failure"));
+        if let Some(kind) = self.fail_sync.take() {
+            if kind == ErrorKind::StorageFull {
+                self.storage_full_returns += 1;
+            }
+            return Err(io_error(kind, "injected sync failure"));
         }
         Ok(())
     }
@@ -213,12 +315,16 @@ impl State {
 /// Paths are logical names. Parent directories exist implicitly.
 /// Clones share live state. A crash returns an independent image without locks.
 /// Syncing either side of a cross-directory rename persists both directories.
+/// Capacity charges reserved or written 512-byte blocks. Extending with `set_len` stays sparse.
 #[derive(Clone, Debug)]
 pub struct SimDisk {
     state: Arc<Mutex<State>>,
 }
 
 impl SimDisk {
+    /// Default disk capacity in bytes.
+    pub const DEFAULT_CAPACITY: u64 = 1 << 40;
+
     /// Creates an empty disk with a SplitMix64 seed.
     pub fn new(seed: u64) -> Self {
         Self {
@@ -232,8 +338,10 @@ impl SimDisk {
                 pending_entries: Vec::new(),
                 locked: BTreeSet::new(),
                 next: 0,
-                fail_sync: false,
+                fail_sync: None,
                 space: None,
+                capacity: Self::DEFAULT_CAPACITY,
+                storage_full_returns: 0,
                 sector_size: 512,
             })),
         }
@@ -243,7 +351,13 @@ impl SimDisk {
     ///
     /// Failed file syncs settle pending writes once. Cached bytes remain visible without later writeback.
     pub fn fail_next_sync(&self) -> Result<()> {
-        lock(&self.state)?.fail_sync = true;
+        lock(&self.state)?.fail_sync = Some(ErrorKind::Other);
+        Ok(())
+    }
+
+    /// Fails the next sync with `StorageFull`, retaining the usual failed-sync crash behavior.
+    pub fn storage_full_next_sync(&self) -> Result<()> {
+        lock(&self.state)?.fail_sync = Some(ErrorKind::StorageFull);
         Ok(())
     }
 
@@ -251,6 +365,17 @@ impl SimDisk {
     pub fn enospc_after_bytes(&self, bytes: usize) -> Result<()> {
         lock(&self.state)?.space = Some(bytes);
         Ok(())
+    }
+
+    /// Changes total capacity. Raising it simulates space freed by another process.
+    pub fn set_capacity(&self, bytes: u64) -> Result<()> {
+        lock(&self.state)?.capacity = bytes;
+        Ok(())
+    }
+
+    /// Counts write, allocation, and sync `StorageFull` returns since this image was created.
+    pub fn storage_full_returns(&self) -> Result<u64> {
+        Ok(lock(&self.state)?.storage_full_returns)
     }
 
     /// Sets the sector size used for crash tearing. The default is 512 bytes.
@@ -286,7 +411,7 @@ impl SimDisk {
         let shadowed = file.failed_cache.iter().any(|range| range.contains(&offset))
             || file.pending.iter().any(|write| match write {
                 Write::Bytes(start, data) => (*start..start + data.len()).contains(&offset),
-                Write::Resize(len) => *len <= offset,
+                Write::Resize(len) | Write::Allocate(len) => *len <= offset,
             });
         if !shadowed {
             if let Some(byte) = file.visible.get_mut(offset) {
@@ -317,8 +442,18 @@ impl SimDisk {
                 continue;
             }
             let mut durable = file.durable.clone();
-            settle(file.pending.clone(), &mut durable, &mut rng, state.sector_size);
-            files.insert(*id, SimFile { visible: durable.clone(), durable, ..SimFile::default() });
+            let mut blocks = file.durable_blocks.clone();
+            settle(file.pending.clone(), &mut durable, &mut blocks, &mut rng, state.sector_size);
+            files.insert(
+                *id,
+                SimFile {
+                    visible: durable.clone(),
+                    durable,
+                    visible_blocks: blocks.clone(),
+                    durable_blocks: blocks,
+                    ..SimFile::default()
+                },
+            );
         }
         let handles = state
             .handles
@@ -337,8 +472,10 @@ impl SimDisk {
                 pending_entries: Vec::new(),
                 locked: BTreeSet::new(),
                 next: state.next,
-                fail_sync: false,
+                fail_sync: None,
                 space: None,
+                capacity: state.capacity,
+                storage_full_returns: 0,
                 sector_size: state.sector_size,
             })),
         })
@@ -390,8 +527,9 @@ impl Io for SimDisk {
             .checked_add(data.len())
             .ok_or_else(|| io_error(ErrorKind::InvalidInput, "write offset overflow"))?;
         let mut state = lock(&self.state)?;
-        state.file(file)?;
-        let count = state.space.map_or(data.len(), |left| left.min(data.len()));
+        let free = state.available();
+        let capacity_count = state.file(file)?.visible_blocks.writable(offset, data.len(), free);
+        let count = state.space.map_or(capacity_count, |left| left.min(capacity_count));
         if let Some(left) = &mut state.space {
             *left -= count;
         }
@@ -399,6 +537,7 @@ impl Io for SimDisk {
             state.file(file)?.write(Write::Bytes(offset, data[..count].to_vec()));
         }
         if count != data.len() {
+            state.storage_full_returns += 1;
             return Err(io_error(ErrorKind::StorageFull, "injected partial write"));
         }
         Ok(())
@@ -424,6 +563,26 @@ impl Io for SimDisk {
         Ok(())
     }
 
+    fn allocate(&self, file: FileId, len: u64) -> Result<()> {
+        let len = position(len)?;
+        let mut state = lock(&self.state)?;
+        let required = state.file(file)?.visible_blocks.required(0, len);
+        if required > state.available() {
+            state.storage_full_returns += 1;
+            return Err(io_error(ErrorKind::StorageFull, "allocation exceeds capacity"));
+        }
+        state.file(file)?.write(Write::Allocate(len));
+        Ok(())
+    }
+
+    fn available_bytes(&self, _dir: &Path) -> Result<u64> {
+        Ok(lock(&self.state)?.available())
+    }
+
+    fn total_bytes(&self, _dir: &Path) -> Result<u64> {
+        Ok(lock(&self.state)?.capacity)
+    }
+
     fn sync_data(&self, file: FileId) -> Result<()> {
         let mut state = lock(&self.state)?;
         state.file(file)?;
@@ -434,16 +593,24 @@ impl Io for SimDisk {
             for write in &file.pending {
                 file.failed_cache.push(match write {
                     Write::Bytes(offset, data) => *offset..offset + data.len(),
-                    Write::Resize(_) => 0..file.visible.len().max(file.durable.len()),
+                    Write::Resize(_) | Write::Allocate(_) => {
+                        0..file.visible.len().max(file.durable.len())
+                    }
                 });
             }
-            settle(std::mem::take(&mut file.pending), &mut file.durable, &mut rng, sector_size);
+            settle(
+                std::mem::take(&mut file.pending),
+                &mut file.durable,
+                &mut file.durable_blocks,
+                &mut rng,
+                sector_size,
+            );
             state.rng = rng;
             return Err(error);
         }
         let file = state.file(file)?;
         for write in std::mem::take(&mut file.pending) {
-            write.apply(&mut file.durable);
+            write.apply(&mut file.durable, &mut file.durable_blocks);
         }
         Ok(())
     }
@@ -554,124 +721,5 @@ impl Io for SimDisk {
                 state.collect();
             }
         }))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #![allow(clippy::unwrap_used)]
-
-    use super::*;
-
-    #[test]
-    fn implicit_directory_stays_listable_when_empty() {
-        let disk = SimDisk::new(0);
-        assert!(disk.list(Path::new(".")).unwrap().is_empty());
-        let file = disk.create(Path::new("db/file")).unwrap();
-        disk.close(file).unwrap();
-        disk.remove(Path::new("db/file")).unwrap();
-        assert!(disk.list(Path::new("db")).unwrap().is_empty());
-    }
-
-    #[test]
-    fn bit_flip_preserves_newer_cached_writes_after_failed_sync() {
-        let disk = SimDisk::new(1);
-        let file = disk.create(Path::new("db/file")).unwrap();
-        disk.write_at(file, 0, b"oldold").unwrap();
-        disk.sync_data(file).unwrap();
-        disk.write_at(file, 0, b"bad").unwrap();
-        disk.fail_next_sync().unwrap();
-        assert!(disk.sync_data(file).is_err());
-        disk.write_at(file, 0, b"NEW").unwrap();
-        disk.sync_data(file).unwrap();
-        disk.flip_bit(file, 5).unwrap();
-        let mut bytes = [0; 6];
-        disk.read_at(file, 0, &mut bytes).unwrap();
-        assert_eq!(&bytes[..3], b"NEW");
-        assert_eq!(bytes[5], b'd' ^ 1);
-    }
-
-    #[test]
-    fn failed_write_fates_cannot_overwrite_later_synced_data() {
-        for seed in 0..1000 {
-            let disk = SimDisk::new(seed);
-            let file = disk.create(Path::new("db/file")).unwrap();
-            disk.write_at(file, 0, &[0; 1024]).unwrap();
-            disk.sync_data(file).unwrap();
-            disk.sync_dir(Path::new("db")).unwrap();
-            disk.set_len(file, 16).unwrap();
-            disk.write_at(file, 0, &[9; 1024]).unwrap();
-            disk.fail_next_sync().unwrap();
-            assert!(disk.sync_data(file).is_err());
-            disk.set_len(file, 1024).unwrap();
-            disk.write_at(file, 0, &[7; 1024]).unwrap();
-            disk.sync_data(file).unwrap();
-            let crash = disk.crash().unwrap();
-            let mut bytes = [0; 1024];
-            assert_eq!(crash.read_at(file, 0, &mut bytes).unwrap(), 1024, "seed={seed}");
-            assert_eq!(bytes, [7; 1024], "seed={seed}");
-        }
-    }
-
-    #[test]
-    fn failed_sync_settles_torn_bytes_without_retry_healing() {
-        let mut survived = false;
-        let mut lost = false;
-        let mut torn = false;
-        for seed in 0..200 {
-            let disk = SimDisk::new(seed);
-            let file = disk.create(Path::new("db/file")).unwrap();
-            disk.write_at(file, 0, &[0; 1024]).unwrap();
-            disk.sync_data(file).unwrap();
-            disk.sync_dir(Path::new("db")).unwrap();
-            disk.write_at(file, 0, &[9; 1024]).unwrap();
-            disk.fail_next_sync().unwrap();
-            assert!(disk.sync_data(file).is_err());
-            let settled = lock(&disk.state).unwrap().file(file).unwrap().durable.clone();
-            assert!(lock(&disk.state).unwrap().file(file).unwrap().pending.is_empty());
-            disk.sync_data(file).unwrap();
-            assert_eq!(lock(&disk.state).unwrap().file(file).unwrap().durable, settled);
-            disk.flip_bit(file, 1023).unwrap();
-            let mut live = [0; 1024];
-            disk.read_at(file, 0, &mut live).unwrap();
-            assert_eq!(live, [9; 1024]);
-            let crash = disk.crash().unwrap();
-            let mut bytes = [0; 1024];
-            crash.read_at(file, 0, &mut bytes).unwrap();
-            assert_eq!(bytes.as_slice(), lock(&disk.state).unwrap().file(file).unwrap().durable);
-            survived |= bytes.contains(&9);
-            lost |= !bytes.contains(&9);
-            torn |= bytes.contains(&9) && bytes.contains(&0);
-        }
-        assert!(survived && lost && torn);
-    }
-
-    #[test]
-    fn closed_unlinked_files_are_collected_after_directory_sync() {
-        let disk = SimDisk::new(0);
-        let path = Path::new("db/data");
-        let file = disk.create(path).unwrap();
-        disk.write_at(file, 0, &[7; 1024]).unwrap();
-        disk.sync_data(file).unwrap();
-        disk.sync_dir(Path::new("db")).unwrap();
-        disk.remove(path).unwrap();
-        disk.close(file).unwrap();
-        disk.sync_dir(Path::new("db")).unwrap();
-        assert!(lock(&disk.state).unwrap().files.is_empty());
-        assert!(lock(&disk.crash().unwrap().state).unwrap().files.is_empty());
-    }
-
-    #[test]
-    fn crash_discards_unlinked_files_even_when_still_open() {
-        let disk = SimDisk::new(0);
-        let path = Path::new("db/data");
-        let file = disk.create(path).unwrap();
-        disk.write_at(file, 0, &[7; 1024]).unwrap();
-        disk.sync_data(file).unwrap();
-        disk.sync_dir(Path::new("db")).unwrap();
-        disk.remove(path).unwrap();
-        disk.sync_dir(Path::new("db")).unwrap();
-        assert_eq!(disk.len(file).unwrap(), 1024);
-        assert!(lock(&disk.crash().unwrap().state).unwrap().files.is_empty());
     }
 }

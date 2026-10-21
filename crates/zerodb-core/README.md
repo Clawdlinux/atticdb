@@ -54,6 +54,36 @@ The first tenant transaction allows 1023 turns. Later transactions allow 1024.
 The tape's 4 MiB encoded batch limit includes headers and the footer.
 That limit can reject content below the codec's independent 4 MiB field limit.
 
+## Health
+
+`Engine::health()` returns `Health::Ok`, `Health::ReadOnly`, or `Health::Poisoned`.
+Health reflects observed failures. It doesn't query disk space.
+Health probes never wait for the shared-state mutex.
+`Ok` means no write-blocking failure has been observed.
+The tape checks free space before preparing each write group.
+Its default floor is `min(1 GiB, 5% of total volume bytes)`, chosen at open.
+Override it with `EngineOptions::tape.free_space_floor = Some(bytes)`.
+The check budgets group bytes and new segment reservations before comparing the remaining space with the floor.
+Below the floor, new appends return `ErrorKind::Storage(zerodb_tape::Error::DiskFull)` with `Outcome::NotCommitted`.
+Clean full-disk failures during segment creation or preallocation return the same error and outcome.
+Linux and macOS preallocate through rustix. Unsupported operations and other platforms fall back to sparse `set_len`.
+Preallocation isn't a guarantee on APFS or btrfs. See [tape storage details](../zerodb-tape/README.md#io-and-simulation).
+These rejections set health to `ReadOnly`. Reads keep serving acknowledged turns.
+A failed space query also sets `ReadOnly`. Its original storage error and `NotCommitted` outcome pass through.
+Only a later write that passes the space check clears `ReadOnly`.
+Idle instances stay `ReadOnly`, even after space returns.
+Callers and orchestrators must keep sending writes or retries to a `ReadOnly` instance. Don't drain it.
+Space-check rejections don't add retry keys. Retry the same `idem_key` after space returns to commit normally.
+Further retries return that durable receipt without writing again.
+Committed keys return their original receipt even during a space outage.
+Reusing a committed key with different payloads returns `IdempotencyConflict`, including during outages.
+These retries check published dedup state before submission. They don't recheck space or clear `ReadOnly`.
+The append path takes the shared-state mutex, as it already does for tenant lookup and session pinning.
+`Poisoned` takes precedence over `ReadOnly` and requires reopening before writing.
+It reports tape poisoning, shared-state failures, or a poisoned state lock.
+Data-write, sync, and manifest failures poison the writer, even when disk exhaustion caused them.
+Health describes writer availability. It doesn't guarantee every read will succeed after storage corruption.
+
 ## Payload format
 
 Version 1 uses little-endian integers. Every length prefix is a u32 byte count.
@@ -179,7 +209,7 @@ The `sim` feature enables the engine fault harness:
 ```sh
 cargo test -p zerodb-core --release --features sim --test engine_sim
 ZERODB_SIM_SEEDS=10000 cargo test -p zerodb-core --release --features sim --test engine_sim
-ZERODB_SIM_SEED=19 cargo test -p zerodb-core --release --features sim --test engine_sim -- --nocapture
+ZERODB_SIM_SEED=19 cargo test -p zerodb-core --release --features sim --test engine_sim
 ```
 
 The default is 500 seeds. `ZERODB_SIM_SEED` selects 1 seed unless `ZERODB_SIM_SEEDS` also sets a count.

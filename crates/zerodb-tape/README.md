@@ -85,7 +85,10 @@ Unknown versions, malformed lengths and invalid structures are rejected.
 
 Caller-side preparation checks sizes. The writer assigns LSNs and reserves the final disk location before calculating CRCs.
 `StateMachine::prepare` may rewrite a batch, reject it, or return a cached reply.
-Rewrites are validated before framing.
+`prepare` must not grow a batch past its submitted encoded size. Shrinking and equal-size rewrites are allowed.
+Rewrites are validated before framing against the size budgeted by the free-space check and segment reservations.
+Growth fails before writing and poisons the writer, even when it fits a reserved segment.
+Preparation may already have reserved application state, so reopening is required after an invalid rewrite.
 Preparation reservations must stay private until publication.
 
 The writer syncs every dirty segment in the group before calling `publish`.
@@ -93,6 +96,36 @@ It advances the durable LSN only after publication, then releases replies.
 Cached replies share that sync and publication outcome.
 A failed write or sync poisons the writer. Later appends are rejected.
 Reads retain the published view.
+
+At open, the free-space floor defaults to `min(1 GiB, 5% of total volume bytes)`.
+Set `TapeOptions::free_space_floor` to `Some(bytes)` to override it.
+The writer checks space once per group, before application preparation.
+It budgets encoded bytes, new segments, and LSN-index backing growth before comparing the remainder with the floor.
+A floor hit rejects the whole group with `DiskFull` and `NotCommitted`, without preparing application state.
+Required segments and LSN-index backing pages are reserved with `Io::allocate` before application preparation.
+The highest possible group LSN bounds growth of `LSN-OFFSETS` and `LSN-ROUTES`, rounded to 4096-byte pages.
+Open attempts index reservations after recovery, only when the space query and floor allow them.
+Preallocated index backing lets cold reads evict dirty pages without new blocks or an increased cache budget.
+Without it, a full disk keeps dirty pages resident. Cold reads evict a clean page or exceed the budget by one page.
+Recovery recreates these derived files and rebuilds resident pages before attempting optional backing reservations.
+An index fitting its cache can reopen without allocating backing blocks.
+Full-disk or space-query failures defer reservations and start read-only, without poisoning.
+The next write retries outstanding reservations and any unknown default-floor query before `prepare`.
+Sparse fallback relies on the floor; APFS and btrfs retain the same allocation caveat as segments.
+Clean full-disk failures during segment creation or allocation return the same error and outcome.
+These rejections set `read_only()` without poisoning. A later write's passing space check clears it.
+Idle time and health probes never clear read-only, even after space returns.
+Failed allocations remove their segment files.
+Unused prepared segments can serve later groups before shutdown.
+Recovery accepts fully zero, full-sized trailing reservations as unused, regardless of their size or count.
+It drops surplus reservations without a torn-tail warning and may keep one empty segment as the append target.
+Nonzero fragments and gaps before later data retain corruption checks.
+A failed space query also sets `read_only()` and rejects the group without poisoning.
+The original storage error and `NotCommitted` outcome pass through unchanged.
+Segment sync, directory sync, manifest failures, and ambiguous cleanup failures still poison the writer.
+Unlike read-only, poisoning requires reopening before writes can resume.
+The core's non-blocking `Engine::health()` reports `Ok`, `ReadOnly`, or `Poisoned`. Poisoning takes precedence.
+See [core health](../zerodb-core/README.md#health) for retry behavior.
 
 Commit timestamps use `max(previous + 1 ns, clock)`.
 Open recovers the previous timestamp from the tape.
@@ -167,7 +200,23 @@ Reads still verify the requested LSN and location-bound frame CRC.
 Handles survive rename and removal until closed. Exclusive locks follow file identity.
 Both backends return sorted full paths from directory listings.
 `StdIo` uses real files. `SimDisk` uses logical paths.
+`SimDisk` requires the `sim` feature outside unit tests. Production builds omit it.
 `SimClock` advances manually. `SystemClock` can move backwards.
+
+`StdIo::allocate` reserves blocks through rustix on Linux and macOS for empty or shorter files.
+It then exposes the requested file length.
+On macOS, rustix tries contiguous `F_PREALLOCATE`, then `F_ALLOCATEALL`, and calls `ftruncate`.
+Equal or smaller macOS lengths skip preallocation, which would reserve beyond the current physical end.
+Zero lengths skip preallocation. Other platforms fall back to sparse `set_len`.
+`EOPNOTSUPP`, `ENOTSUP`, and Linux `ENOSYS` also fall back to sparse `set_len`.
+`ENOSPC` remains `StorageFull`. Other errors propagate.
+Preallocation does not guarantee later writes on APFS or btrfs. The free-space floor remains the guard.
+`SimDisk` charges reserved or written 512-byte blocks, including metadata.
+Its `set_len` extension stays sparse until written or allocated. Truncation frees the discarded blocks.
+Partial-write cleanup truncates and tries to re-reserve the tail with `allocate`.
+Any reservation error falls back to sparse `set_len`, so the successful prefix can still sync and publish.
+The failed write then reports `NotCommitted`. The writer remains poisoned.
+Truncation, resize, or sync failures can still report `Unknown`.
 
 `SimDisk::crash()` returns an independent image without changing the original.
 The same seed and operations produce the same image.
@@ -176,9 +225,11 @@ The default sector size is 512 bytes.
 Renames are atomic. Unsynced directory operations can disappear.
 
 `fail_next_sync()` settles pending writes once through the tearing model, then reports failure.
+`storage_full_next_sync()` uses the same model with a typed `StorageFull` error.
 Clean cache bytes can remain readable without later writeback. Retrying sync does not heal them.
 New writes can still persist independently.
 `enospc_after_bytes()` allows partial writes before reporting a full disk.
+`storage_full_returns()` counts actual write, allocation, and sync `StorageFull` errors per crash generation.
 Bit-flip helpers damage durable bytes.
 Crash images reset fault controls and release locks.
 

@@ -2,7 +2,7 @@
 
 Agent memory database written in Rust. Durable writes and fast recent-history reads.
 
-Status: early. The tape, session engine and S1 storage changes are implemented. This isn't ready for production.
+Status: early. The tape, session engine and S2 disk-full handling are implemented. This isn't ready for production.
 
 ## Why
 
@@ -76,10 +76,14 @@ Retry keys return original receipts within bounded tenant and global windows.
 Session pages use a resident-memory budget. Cold pages reload from checkpoints.
 A bad checkpoint triggers full replay with a warning.
 
+`Engine::health()` reports `Ok`, `ReadOnly`, or `Poisoned` without checking disk space or blocking.
+A clean floor hit rejects the group before preparation. Reads keep serving acknowledged turns.
+Only a later write's passing space check clears `ReadOnly`. Poisoning requires reopening.
+
 See [the core API notes](crates/zerodb-core/README.md) for formats and limits.
 See [benchmark results](bench/RESULTS.md) for the measured macOS workload and its limits.
 
-## Next steps
+## Steps
 
 | Step | Scope |
 |---|---|
@@ -99,6 +103,28 @@ cargo test --workspace
 cargo test --workspace --release
 ZERODB_SIM_SEEDS=2000 cargo test -p zerodb-tape --release --features sim --test sim
 ZERODB_SIM_SEEDS=2000 cargo test -p zerodb-core --release --features sim --test engine_sim
+```
+
+See [TESTING.md](TESTING.md) before adding or changing coverage.
+Each crate has 1 integration binary in `tests/it/main.rs`.
+Behavior modules share fixtures through `tests/it/support.rs`.
+The `sim` and `engine_sim` targets keep their CI names.
+
+Run a behavior module with `cargo test -p zerodb-tape --test it recovery::`.
+Debug builds skip slow filesystem tests and seeded tape schedules.
+The existing release CI step runs the filesystem checks.
+The named simulation commands run 2,000 seeds.
+Both sims vary disk headroom around the free-space floor and release space before retrying.
+Each seed chooses the capacity phase's generation, covering fresh and recovered writers.
+Floor rejections must issue no segment writes, including unpublished frames.
+They inject partial-write and sync `StorageFull` errors alongside crash cuts.
+The oracles check rejection state, read-only recovery, and acknowledged durability after reopening.
+The engine sim also checks dedup state and verifies rejected-key retries commit exactly once.
+Failures print the seed, capacity plan, and the existing repro command.
+To run the ignored checks in debug:
+
+```sh
+cargo test --workspace -- --ignored
 ```
 
 ## License

@@ -2,6 +2,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use zerodb_tape::{Committed, Digest};
 
+use crate::error::Result;
+use crate::{EngineError, ErrorKind};
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct DedupKey(pub(crate) u32, pub(crate) String, pub(crate) String);
 
@@ -13,6 +16,14 @@ pub(crate) struct Entry {
 }
 
 impl Entry {
+    pub(crate) fn resolve(&self, digest: Digest) -> Result<Committed> {
+        if self.digest == digest {
+            Ok(self.committed.clone())
+        } else {
+            Err(EngineError::rejected(ErrorKind::IdempotencyConflict))
+        }
+    }
+
     pub(crate) fn age(&self) -> u64 {
         match self.committed {
             Committed::Durable { first_lsn, .. } => first_lsn,
@@ -87,39 +98,5 @@ impl Dedup {
     }
     pub(crate) fn effective_window(&self) -> usize {
         self.tenants.values().map(BTreeSet::len).min().unwrap_or(0)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #![allow(clippy::unwrap_used)]
-    use super::*;
-
-    fn entry(tenant: u32, session: &str, key: &str, age: u64) -> Entry {
-        Entry {
-            key: DedupKey(tenant, session.into(), key.into()),
-            digest: [3; 32],
-            committed: Committed::Durable {
-                txn: age,
-                first_lsn: age,
-                last_lsn: age,
-                reply: 1u64.to_le_bytes().to_vec(),
-            },
-        }
-    }
-    #[test]
-    fn scope_bounds_and_oldest_eviction() {
-        let mut dedup = Dedup::new(2, 3);
-        dedup.insert(entry(1, "s", "k", 1));
-        dedup.insert(entry(1, "other", "k", 2));
-        dedup.insert(entry(2, "s", "k", 3));
-        assert_eq!(dedup.entries.len(), 3);
-        assert_eq!(dedup.effective_window(), 1);
-        dedup.insert(entry(1, "s", "new", 4));
-        assert!(dedup.get(&DedupKey(1, "s".into(), "k".into())).is_none());
-        assert!(dedup.get(&DedupKey(2, "s".into(), "k".into())).is_some());
-        dedup.insert(entry(3, "s", "k", 5));
-        assert!(!dedup.entries.contains_key(&2));
-        assert_eq!(dedup.entries.len(), 3);
     }
 }

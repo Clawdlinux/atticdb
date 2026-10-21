@@ -121,11 +121,7 @@ impl Machine {
         if let Some(entry) =
             dedup_key.as_ref().and_then(|key| self.dedup.get(key).or_else(|| state.dedup.get(key)))
         {
-            return if entry.digest == digest {
-                Ok(Prepare::Reply(entry.committed.clone()))
-            } else {
-                Err(EngineError::rejected(ErrorKind::IdempotencyConflict))
-            };
+            return entry.resolve(digest).map(Prepare::Reply);
         }
         if dedup_key.is_some() && !self.dedup.can_stage(tenant) {
             return Err(EngineError::rejected(ErrorKind::ResourceExhausted("prepared_dedup")));
@@ -274,7 +270,7 @@ impl StateMachine for Machine {
         for record in records {
             if let Err(mut error) = self.install(&mut state, record, false) {
                 error.outcome = Outcome::Committed;
-                state.failure = Some(error);
+                state.fail(error);
                 break;
             }
         }
@@ -432,7 +428,7 @@ mod tests {
             let mut initial = State::new(&opts);
             initial.tenants.insert("t", 1, 1, 10_000).unwrap();
             let content = if corrupt {
-                initial.failure = Some(EngineError::rejected(ErrorKind::CorruptIndex));
+                initial.fail(EngineError::rejected(ErrorKind::CorruptIndex));
                 crate::turn::encode(
                     "a",
                     "s",
