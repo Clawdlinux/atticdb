@@ -467,13 +467,20 @@ fn main() {
     if env_number("G1_HISTORY", 1) != 0 {
         history_windows();
     }
-    let (platform, pending) = match std::env::consts::OS {
-        "macos" => ("macOS", "Linux NVMe and nightly LazyFS remain pending."),
-        "linux" => ("Linux", "Nightly LazyFS remains pending."),
-        other => (other, "Linux NVMe and nightly LazyFS remain pending."),
-    };
-    println!(
-        "{platform} local 1.5x verdict: {} (median ratio={ratio:.3}). {pending} Append-only trace.",
-        if ratio <= 1.5 { "PASS" } else { "FAIL" }
-    );
+    // Only a Linux NVMe run may print the release verdict. G1_NVME=1 marks that run.
+    if std::env::consts::OS == "linux" && env_number("G1_NVME", 0) != 0 {
+        println!(
+            "Linux NVMe 1.5x verdict: {} (median ratio={ratio:.3}). Nightly LazyFS remains pending. Append-only trace.",
+            if ratio <= 1.5 { "PASS" } else { "FAIL" }
+        );
+    } else {
+        let platform = match std::env::consts::OS {
+            "macos" => "macOS",
+            "linux" => "Linux",
+            other => other,
+        };
+        println!(
+            "{platform} local measurement: median ratio={ratio:.3} (1.5x target). Not the release verdict. Linux NVMe verdict pending: rerun on Linux NVMe with G1_NVME=1."
+        );
+    }
 }
