@@ -168,6 +168,19 @@ fn startup_checks() {
             Expect::Fails(1, "exactly a string"),
         ),
         (
+            "mcp token file mode 0644",
+            |c| {
+                let path = c.dir.0.join("t");
+                std::fs::write(&path, &c.token).unwrap();
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+                let url = format!("unix://{}", c.socket.display());
+                ["mcp", "--token-file", path.to_str().unwrap(), "--url", &url]
+                    .map(Into::into)
+                    .into()
+            },
+            Expect::Fails(1, "found mode 0644"),
+        ),
+        (
             "non-loopback tcp",
             |_| vec!["--listen".into(), "0.0.0.0:0".into()],
             Expect::Fails(1, zerodb::listen::NEEDS_TLS),
@@ -285,7 +298,10 @@ fn startup_checks() {
         let mut ctx = Ctx { dir, config, token, data, socket, other: None };
         let extra = prepare(&mut ctx);
         let extra: Vec<&str> = extra.iter().map(String::as_str).collect();
-        let mut server = ctx.serve(&ctx.data, &extra);
+        let mut server = match extra.first() {
+            Some(&"mcp") => ctx.run(&extra),
+            _ => ctx.serve(&ctx.data, &extra),
+        };
         let unix = Via::Unix(ctx.socket.clone());
         match *expect {
             Expect::Fails(code, fragment) => {

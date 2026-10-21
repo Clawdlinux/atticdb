@@ -2,4 +2,5 @@
 
 mod api;
 mod listen;
+mod mcp;
 mod support;

@@ -41,6 +41,23 @@ pub fn resolve_group(group: &str) -> Result<u32, String> {
         .ok_or_else(|| format!("group {group:?} is not in /etc/group; pass its numeric gid"))
 }
 
+/// Checks a socket's directory: owned by the effective uid, not writable by group or others.
+pub fn check_parent(parent: &Path) -> Result<(), String> {
+    let euid = rustix::process::geteuid().as_raw();
+    let meta = fs::metadata(parent)
+        .map_err(|error| format!("socket directory {}: {error}", parent.display()))?;
+    if !meta.is_dir() || meta.uid() != euid || meta.mode() & 0o022 != 0 {
+        return Err(format!(
+            "socket directory {} must be a directory owned by uid {euid} and not writable by group or others, \
+             found mode {:04o} owned by uid {}",
+            parent.display(),
+            meta.mode() & 0o7777,
+            meta.uid()
+        ));
+    }
+    Ok(())
+}
+
 /// Installs the Unix socket at `path`. Call it only while holding the data directory lock.
 ///
 /// It binds inside a private 0700 staging directory, sets the mode (0600, or 0660 with
@@ -64,18 +81,7 @@ pub fn install_unix(path: &Path, group: Option<u32>) -> Result<UnixListener, Str
             ));
         }
     }
-    let euid = rustix::process::geteuid().as_raw();
-    let meta = fs::metadata(parent)
-        .map_err(|error| format!("socket directory {}: {error}", parent.display()))?;
-    if !meta.is_dir() || meta.uid() != euid || meta.mode() & 0o022 != 0 {
-        return Err(format!(
-            "socket directory {} must be a directory owned by uid {euid} and not writable by group or others, \
-             found mode {:04o} owned by uid {}",
-            parent.display(),
-            meta.mode() & 0o7777,
-            meta.uid()
-        ));
-    }
+    check_parent(parent)?;
     match fs::symlink_metadata(path) {
         Err(error) if error.kind() == ErrorKind::NotFound => {}
         Err(error) => return Err(format!("socket {}: {error}", path.display())),
@@ -91,6 +97,7 @@ pub fn install_unix(path: &Path, group: Option<u32>) -> Result<UnixListener, Str
             Err(error) => return Err(format!("cannot probe socket {}: {error}", path.display())),
         },
     }
+    let euid = rustix::process::geteuid().as_raw();
     if fs::symlink_metadata(&staging).is_ok_and(|meta| meta.is_dir() && meta.uid() == euid) {
         let _ = fs::remove_dir_all(&staging);
     }

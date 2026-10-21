@@ -499,13 +499,24 @@ fn retryable(error: &io::Error) -> bool {
     matches!(error.kind(), ErrorKind::Interrupted | ErrorKind::WouldBlock | ErrorKind::TimedOut)
 }
 
+/// macOS fails `setsockopt` with `EINVAL` once the peer has closed. A read or write then
+/// returns at once, so the deadline still holds.
+fn timeout_set(result: io::Result<()>) -> io::Result<()> {
+    match result {
+        Err(error) if error.raw_os_error() == Some(rustix::io::Errno::INVAL.raw_os_error()) => {
+            Ok(())
+        }
+        result => result,
+    }
+}
+
 fn read_until<S: Stream + ?Sized>(
     stream: &mut S,
     buf: &mut [u8],
     deadline: Instant,
 ) -> io::Result<usize> {
     loop {
-        stream.set_read_timeout(Some(remaining(deadline)?))?;
+        timeout_set(stream.set_read_timeout(Some(remaining(deadline)?)))?;
         match stream.read(buf) {
             Err(error) if retryable(&error) => {}
             result => return result,
@@ -519,7 +530,7 @@ fn write_until<S: Stream + ?Sized>(
     deadline: Instant,
 ) -> io::Result<()> {
     while !bytes.is_empty() {
-        stream.set_write_timeout(Some(remaining(deadline)?))?;
+        timeout_set(stream.set_write_timeout(Some(remaining(deadline)?)))?;
         match stream.write(bytes) {
             Ok(0) => return Err(ErrorKind::WriteZero.into()),
             Ok(n) => bytes = &bytes[n..],

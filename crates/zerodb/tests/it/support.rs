@@ -164,44 +164,54 @@ pub fn serve(engine: Arc<Engine>, dir: &Dir, max_connections: usize) -> Running 
     Running { server, vias, instance }
 }
 
-/// A spawned `zerodb` process. Its stderr is collected. Drop kills it.
+/// A spawned `zerodb` process. Its output is collected. Drop kills it.
 pub struct Process {
     pub child: Child,
+    stdout: Arc<Mutex<String>>,
     stderr: Arc<Mutex<String>>,
 }
 
 impl Process {
     /// Runs `zerodb` with `args` in directory `cwd`.
     pub fn spawn(cwd: &Path, args: &[&str]) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_zerodb"))
-            .args(args)
-            .current_dir(cwd)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let stderr = Arc::new(Mutex::new(String::new()));
-        let output = [
-            BufReader::new(Box::new(child.stdout.take().unwrap()) as Box<dyn Read + Send>),
-            BufReader::new(Box::new(child.stderr.take().unwrap())),
-        ];
-        for lines in output {
-            let sink = stderr.clone();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_zerodb"));
+        Self::start(command.args(args).current_dir(cwd).stdin(Stdio::null()))
+    }
+
+    /// Runs a command with stdout and stderr collected.
+    pub fn start(command: &mut Command) -> Self {
+        let mut child = command.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        let collect = |stream: Box<dyn Read + Send>| {
+            let sink = Arc::new(Mutex::new(String::new()));
+            let lines = BufReader::new(stream).lines();
+            let writer = sink.clone();
             std::thread::spawn(move || {
-                for line in lines.lines().map_while(Result::ok) {
-                    let mut sink = sink.lock().unwrap();
+                for line in lines.map_while(Result::ok) {
+                    let mut sink = writer.lock().unwrap();
                     sink.push_str(&line);
                     sink.push('\n');
                 }
             });
-        }
-        Self { child, stderr }
+            sink
+        };
+        let stdout = collect(Box::new(child.stdout.take().unwrap()));
+        let stderr = collect(Box::new(child.stderr.take().unwrap()));
+        Self { child, stdout, stderr }
     }
 
-    /// Everything the process printed so far, stdout and stderr.
-    pub fn output(&self) -> String {
+    /// Complete lines printed to stdout so far.
+    pub fn stdout(&self) -> String {
+        self.stdout.lock().unwrap().clone()
+    }
+
+    /// Complete lines printed to stderr so far.
+    pub fn stderr(&self) -> String {
         self.stderr.lock().unwrap().clone()
+    }
+
+    /// Everything the process printed so far, stdout then stderr.
+    pub fn output(&self) -> String {
+        self.stdout() + &self.stderr()
     }
 
     /// Waits for the startup line and returns `instance` and the TCP address, if any.
