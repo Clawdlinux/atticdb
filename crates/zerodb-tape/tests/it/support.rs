@@ -583,7 +583,7 @@ pub(crate) fn superblock_installs(io: &ObservedIo) -> usize {
         .count()
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "linux")]
 pub fn preallocation_supported(dir: &Path) -> bool {
     use rustix::io::Errno;
     let path = dir.join("preallocation-probe");

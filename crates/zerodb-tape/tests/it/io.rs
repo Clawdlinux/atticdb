@@ -48,7 +48,7 @@ fn filesystem_operations_through_trait_object() {
 #[test]
 fn allocation_sets_length_for_growth_repeats_and_shrink() {
     let dir = TestDir::new();
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(target_os = "linux")]
     let preallocation_supported = crate::support::preallocation_supported(&dir.0);
     let io = StdIo::new();
     let path = dir.0.join("resized");
@@ -78,7 +78,9 @@ fn allocation_sets_length_for_growth_repeats_and_shrink() {
         metadata_file.sync_all().unwrap();
         let metadata = metadata_file.metadata().unwrap();
         assert_eq!(metadata.len(), len, "{case}: length={len}");
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        // APFS reported 704 to 1696 of 2048 blocks for a 1 MiB F_PREALLOCATE when other tests
+        // allocated in parallel, and all 2048 in isolation. Only Linux checks the lower bound.
+        #[cfg(target_os = "linux")]
         if expect_reserved && preallocation_supported {
             use std::os::unix::fs::MetadataExt;
             assert!(metadata.blocks() * 512 >= len, "{case}: length={len}");
