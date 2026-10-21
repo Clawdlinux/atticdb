@@ -18,6 +18,7 @@ httparse = { version = "=1.10.1", default-features = false }
 rustix = { version = "=1.1.2", default-features = false, features = ["fs", "process", "std"] }
 
 [dev-dependencies]
+zerodb-tape = { path = "../zerodb-tape", features = ["sim"] }
 proptest = { version = "1.9", default-features = false, features = ["std"] }
 
 [[bin]]

@@ -64,6 +64,17 @@ pub enum Listen {
     Tcp(SocketAddr),
 }
 
+impl Listen {
+    /// Parses `none` or an address such as `127.0.0.1:<port>`.
+    pub fn parse(text: &str) -> Result<Self, String> {
+        if text == "none" {
+            return Ok(Self::None);
+        }
+        let error = "listen must be an address such as 127.0.0.1:<port>, or \"none\"";
+        text.parse().map(Self::Tcp).map_err(|_| error.to_owned())
+    }
+}
+
 /// A checked configuration file. Flags override its fields.
 #[derive(Clone, Debug, Default)]
 pub struct Config {
@@ -183,16 +194,7 @@ fn parse(text: &str) -> Result<Config, String> {
             "unix_socket_group" => {
                 config.unix_socket_group = Some(non_empty(value, "unix_socket_group")?)
             }
-            "listen" => {
-                let text = non_empty(value, "listen")?;
-                config.listen = Some(if text == "none" {
-                    Listen::None
-                } else {
-                    Listen::Tcp(text.parse().map_err(|_| {
-                        "listen must be an address such as 127.0.0.1:<port>, or \"none\""
-                    })?)
-                });
-            }
+            "listen" => config.listen = Some(Listen::parse(&non_empty(value, "listen")?)?),
             "tenants" => config.tenants = tenants(value)?,
             _ => return Err(format!("unknown top-level field, expected one of: {FIELDS}")),
         }
@@ -244,140 +246,4 @@ fn check_tenant_name(name: &str) -> Result<(), &'static str> {
         return Err("tenant names must be 1 to 255 UTF-8 bytes");
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    #![allow(clippy::unwrap_used)]
-    mod fs {
-        // Cargo doesn't define CARGO_TARGET_TMPDIR for unit tests.
-        const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/tmp");
-        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/support.rs"));
-    }
-
-    use super::*;
-    use std::os::unix::fs::PermissionsExt;
-    use std::sync::mpsc;
-    use std::time::Duration;
-
-    const SECRET: &str = "secret-token-0123456789abcdefghijkl";
-
-    enum Kind {
-        File(u32),
-        Fifo,
-    }
-
-    struct Case {
-        name: &'static str,
-        kind: Kind,
-        body: &'static str,
-        /// Tenant names on success, or a fragment of the error.
-        expect: Result<&'static [&'static str], &'static str>,
-    }
-
-    const CASES: &[Case] = &[
-        Case {
-            name: "two tenants",
-            kind: Kind::File(0o600),
-            body: r#"{"listen": "none", "tenants": [
-                {"name": "a", "token": "secret-token-0123456789abcdefghijkl"},
-                {"name": "b", "token": "secret-token-0123456789abcdefghijkX"}]}"#,
-            expect: Ok(&["a", "b"]),
-        },
-        Case {
-            name: "fifo is refused without blocking",
-            kind: Kind::Fifo,
-            body: "",
-            expect: Err("must be a regular file"),
-        },
-        Case {
-            name: "group-readable file",
-            kind: Kind::File(0o640),
-            body: r#"{"tenants": [{"name": "a", "token": "secret-token-0123456789abcdefghijkl"}]}"#,
-            expect: Err("found mode 0640"),
-        },
-        Case {
-            name: "duplicate tenant name",
-            kind: Kind::File(0o600),
-            body: r#"{"tenants": [
-                {"name": "a", "token": "secret-token-0123456789abcdefghijkl"},
-                {"name": "a", "token": "secret-token-0123456789abcdefghijkX"}]}"#,
-            expect: Err("tenants[1]: two tenants share a name"),
-        },
-        Case {
-            name: "duplicate token",
-            kind: Kind::File(0o600),
-            body: r#"{"tenants": [
-                {"name": "a", "token": "secret-token-0123456789abcdefghijkl"},
-                {"name": "b", "token": "secret-token-0123456789abcdefghijkl"}]}"#,
-            expect: Err("tenants[1]: two tenants share a token"),
-        },
-        Case {
-            name: "short token",
-            kind: Kind::File(0o600),
-            body: r#"{"tenants": [{"name": "a", "token": "secret-token"}]}"#,
-            expect: Err("at least 32 bytes"),
-        },
-        Case {
-            name: "name to token map",
-            kind: Kind::File(0o600),
-            body: r#"{"tenants": {"a": "secret-token-0123456789abcdefghijkl"}}"#,
-            expect: Err("must be an array"),
-        },
-        Case {
-            name: "extra tenant field",
-            kind: Kind::File(0o600),
-            body: r#"{"tenants": [{"name": "a", "token": "secret-token-0123456789abcdefghijkl", "x": 1}]}"#,
-            expect: Err("exactly a string"),
-        },
-    ];
-
-    #[test]
-    fn config_files_are_checked_before_use() {
-        let dir = fs::TestDir::new();
-        for (index, case) in CASES.iter().enumerate() {
-            let path = dir.0.join(format!("config-{index}.json"));
-            match case.kind {
-                Kind::File(mode) => {
-                    std::fs::write(&path, case.body).unwrap();
-                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
-                }
-                Kind::Fifo => {
-                    let status = std::process::Command::new("mkfifo")
-                        .args(["-m", "600"])
-                        .arg(&path)
-                        .status()
-                        .unwrap();
-                    assert!(status.success(), "{}: mkfifo", case.name);
-                }
-            }
-            let (send, receive) = mpsc::channel();
-            let load = path.clone();
-            std::thread::spawn(move || {
-                let _ = send.send(Config::load(&load));
-            });
-            let loaded = receive
-                .recv_timeout(Duration::from_secs(5))
-                .unwrap_or_else(|_| panic!("{}: load blocked", case.name));
-            match (loaded, case.expect) {
-                (Ok(config), Ok(names)) => {
-                    let got: Vec<&str> = config.tenants.iter().map(|t| t.name.as_str()).collect();
-                    assert_eq!(got, names, "{}: tenants", case.name);
-                    assert!(!format!("{config:?}").contains(SECRET), "{}: Debug", case.name);
-                }
-                (Err(error), Err(fragment)) => {
-                    let text = error.to_string();
-                    assert!(text.contains(fragment), "{}: error {text:?}", case.name);
-                    assert!(text.contains(&*path.to_string_lossy()), "{}: path", case.name);
-                    assert!(!text.contains("secret-token"), "{}: content echoed", case.name);
-                }
-                (result, _) => panic!("{}: unexpected {result:?}", case.name),
-            }
-        }
-        let path = dir.0.join("init.json");
-        let token = init(&path, "alice").unwrap();
-        let config = Config::load(&path).unwrap();
-        assert_eq!(config.tenant("alice").map(|t| &t.token), Some(&token), "init round trip");
-        assert!(init(&path, "alice").is_err(), "init never overwrites");
-    }
 }

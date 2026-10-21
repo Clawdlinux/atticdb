@@ -499,7 +499,11 @@ fn retryable(error: &io::Error) -> bool {
     matches!(error.kind(), ErrorKind::Interrupted | ErrorKind::WouldBlock | ErrorKind::TimedOut)
 }
 
-fn read_until<S: Stream>(stream: &mut S, buf: &mut [u8], deadline: Instant) -> io::Result<usize> {
+fn read_until<S: Stream + ?Sized>(
+    stream: &mut S,
+    buf: &mut [u8],
+    deadline: Instant,
+) -> io::Result<usize> {
     loop {
         stream.set_read_timeout(Some(remaining(deadline)?))?;
         match stream.read(buf) {
@@ -509,7 +513,11 @@ fn read_until<S: Stream>(stream: &mut S, buf: &mut [u8], deadline: Instant) -> i
     }
 }
 
-fn write_until<S: Stream>(stream: &mut S, mut bytes: &[u8], deadline: Instant) -> io::Result<()> {
+fn write_until<S: Stream + ?Sized>(
+    stream: &mut S,
+    mut bytes: &[u8],
+    deadline: Instant,
+) -> io::Result<()> {
     while !bytes.is_empty() {
         stream.set_write_timeout(Some(remaining(deadline)?))?;
         match stream.write(bytes) {
@@ -541,7 +549,7 @@ impl fmt::Debug for ClientResponse {
 
 /// Writes one request with `Connection: close` and reads one `Content-Length`
 /// response, all before `deadline`. `headers` should include `Host`.
-pub fn exchange<S: Stream>(
+pub fn exchange<S: Stream + ?Sized>(
     stream: &mut S,
     method: &str,
     target: &str,

@@ -67,7 +67,7 @@ An interior cut fails with both nearest valid boundaries. The retained prefix mu
 A durable intent resumes an interrupted cut before normal recovery checks the superblock.
 The report and log name the cut, dropped range and byte count.
 Dropped LSNs may be reused, including acknowledged LSNs. D73 documents this exception to I3.
-CLI wiring arrives with the server binary in S3.
+`zerodb recover --truncate-at <lsn> --data-dir <dir>` runs it from the command line.
 
 ### Session engine
 
