@@ -236,7 +236,9 @@ fn auth_and_host_rules() {
     let unix = &running.vias[1];
     let Via::Unix(path) = unix else { unreachable!() };
     let idle = [0, 1].map(|_| std::os::unix::net::UnixStream::connect(path).unwrap());
-    let wire = unix.raw(b"GET /healthz HTTP/1.1\r\n\r\n");
+    // It answers on accept without reading, so send nothing: closing over unread bytes
+    // makes Linux reset the connection before the client reads the answer.
+    let wire = unix.raw(b"");
     let (head, body) = wire.split_once("\r\n\r\n").unwrap();
     assert!(head.starts_with("HTTP/1.1 503 "), "{wire}");
     let busy = json!({"outcome": "not_committed", "error": "busy"});

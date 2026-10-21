@@ -5,7 +5,7 @@
 
 use serde_json::{json, Value};
 use std::fmt;
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -159,6 +159,21 @@ fn read_private(path: &Path, what: &str) -> Result<String, Error> {
         .custom_flags(nonblock)
         .open(path)
         .map_err(|error| fail(format!("cannot open: {error}")))?;
+    check_private(&file, path, what)?;
+    let mut text = String::new();
+    file.take(MAX_FILE_BYTES + 1)
+        .read_to_string(&mut text)
+        .map_err(|error| fail(format!("cannot read: {error}")))?;
+    if text.len() as u64 > MAX_FILE_BYTES {
+        return Err(fail(format!("larger than {MAX_FILE_BYTES} bytes")));
+    }
+    Ok(text)
+}
+
+/// Checks an open file with `fstat`: a regular file owned by the effective uid, with no
+/// group or other bits. The error names the path and the mode, never content.
+pub fn check_private(file: &File, path: &Path, what: &str) -> Result<(), Error> {
+    let fail = |message: String| Error(format!("{what} {}: {message}", path.display()));
     let meta = file.metadata().map_err(|error| fail(format!("cannot stat: {error}")))?;
     let euid = rustix::process::geteuid().as_raw();
     let mode = meta.mode() & 0o7777;
@@ -169,14 +184,7 @@ fn read_private(path: &Path, what: &str) -> Result<String, Error> {
             meta.uid()
         )));
     }
-    let mut text = String::new();
-    file.take(MAX_FILE_BYTES + 1)
-        .read_to_string(&mut text)
-        .map_err(|error| fail(format!("cannot read: {error}")))?;
-    if text.len() as u64 > MAX_FILE_BYTES {
-        return Err(fail(format!("larger than {MAX_FILE_BYTES} bytes")));
-    }
-    Ok(text)
+    Ok(())
 }
 
 fn parse(text: &str) -> Result<Config, String> {

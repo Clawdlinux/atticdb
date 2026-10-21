@@ -5,7 +5,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::Duration;
 use zerodb::config::{Config, Listen};
 
 const USAGE: &str = "usage:
@@ -17,18 +16,6 @@ const USAGE: &str = "usage:
              [--tenant <name>] [--token-file <path>] [--agent <name>] [--session <name>]
              [--start-timeout <n>s|<n>ms] [--retry-deadline <n>s|<n>ms]
   The mcp token comes from --token-file, ZERODB_TOKEN, or the config entry for --tenant.";
-
-const MCP_FLAGS: &[&str] = &[
-    "--url",
-    "--data-dir",
-    "--config",
-    "--tenant",
-    "--token-file",
-    "--agent",
-    "--session",
-    "--start-timeout",
-    "--retry-deadline",
-];
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -42,7 +29,11 @@ fn main() -> ExitCode {
             )
             .and_then(serve),
             "recover" => flags(rest, &["--truncate-at", "--data-dir"], &[]).and_then(recover),
-            "mcp" => flags(rest, MCP_FLAGS, &[]).and_then(mcp),
+            "mcp" => {
+                let valued = ["--url", "--data-dir", "--config", "--tenant", "--token-file"];
+                let more = ["--agent", "--session", "--start-timeout", "--retry-deadline"];
+                flags(rest, &[&valued[..], &more].concat(), &[]).map(zerodb::mcp::start)
+            }
             _ => None,
         },
         None => None,
@@ -106,27 +97,4 @@ fn serve(mut flags: HashMap<String, String>) -> Option<u8> {
 fn recover(mut flags: HashMap<String, String>) -> Option<u8> {
     let lsn = flags.remove("--truncate-at")?.parse().ok()?;
     Some(zerodb::serve::recover(Path::new(&flags.remove("--data-dir")?), lsn))
-}
-
-fn mcp(mut flags: HashMap<String, String>) -> Option<u8> {
-    let mut duration = |name: &str, default: Duration| match flags.remove(name) {
-        None => Some(default),
-        Some(text) => match text.strip_suffix("ms") {
-            Some(ms) => ms.parse().ok().map(Duration::from_millis),
-            None => text.strip_suffix('s')?.parse().ok().map(Duration::from_secs),
-        },
-    };
-    let start_timeout = duration("--start-timeout", Duration::from_secs(60))?;
-    let retry_deadline = duration("--retry-deadline", Duration::from_secs(30))?;
-    Some(zerodb::mcp::start(zerodb::mcp::Options {
-        url: flags.remove("--url"),
-        data_dir: flags.remove("--data-dir").map(PathBuf::from),
-        config: flags.remove("--config").map(PathBuf::from),
-        tenant: flags.remove("--tenant"),
-        token_file: flags.remove("--token-file").map(PathBuf::from),
-        agent: flags.remove("--agent").unwrap_or_else(|| "mcp".into()),
-        session: flags.remove("--session").unwrap_or_else(|| "default".into()),
-        start_timeout,
-        retry_deadline,
-    }))
 }

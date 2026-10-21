@@ -181,6 +181,11 @@ fn startup_checks() {
             Expect::Fails(1, "found mode 0644"),
         ),
         (
+            "mcp url over non-loopback http",
+            |_| ["mcp", "--url", "http://example.com:80"].map(Into::into).into(),
+            Expect::Fails(1, "http sends the token in cleartext"),
+        ),
+        (
             "non-loopback tcp",
             |_| vec!["--listen".into(), "0.0.0.0:0".into()],
             Expect::Fails(1, zerodb::listen::NEEDS_TLS),

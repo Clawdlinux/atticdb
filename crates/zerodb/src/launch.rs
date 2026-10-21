@@ -32,16 +32,19 @@ pub enum Url {
 }
 
 impl Url {
-    /// Parses `unix:///path` or `http://127.0.0.1:<port>`.
+    /// Parses `unix:///path` or `http://<loopback host>:<port>`. The token travels in
+    /// cleartext, so `http` takes only 127.0.0.1, localhost or [::1].
     pub fn parse(text: &str) -> Result<Self, String> {
         if let Some(path) = text.strip_prefix("unix://").filter(|path| path.starts_with('/')) {
             return Ok(Self::Unix(path.into()));
         }
         match text.strip_prefix("http://").map(|rest| rest.trim_end_matches('/')) {
-            Some(authority) if !authority.is_empty() && !authority.contains('/') => {
+            Some(authority) if crate::api::loopback_host(authority.as_bytes()) => {
                 Ok(Self::Tcp(authority.into()))
             }
-            _ => Err("url must be unix:///path or http://127.0.0.1:<port>".into()),
+            _ => Err("url must be unix:///path or http://<127.0.0.1, localhost or [::1]>:<port>; \
+                      http sends the token in cleartext"
+                .into()),
         }
     }
 }
@@ -72,8 +75,9 @@ impl Launch {
         Self { url, data_dir, config, start_timeout, child, next_spawn, backoff, refused }
     }
 
-    /// Opens a connection and returns it with the `Host` header to send.
-    pub fn connect(&mut self) -> io::Result<(Box<dyn Stream>, String)> {
+    /// Opens a connection and returns it with the `Host` header to send. Waits for a
+    /// server until `--start-timeout` or `deadline`, whichever comes first.
+    pub fn connect(&mut self, deadline: Instant) -> io::Result<(Box<dyn Stream>, String)> {
         let dir = match (&self.url, &self.data_dir) {
             (Some(Url::Unix(path)), _) => return unix(path),
             (Some(Url::Tcp(authority)), _) => {
@@ -82,16 +86,16 @@ impl Launch {
             (None, Some(dir)) => dir.clone(),
             (None, None) => return Err(io::Error::other("no --url and no data directory")),
         };
-        let deadline = Instant::now() + self.start_timeout;
+        let deadline = deadline.min(Instant::now() + self.start_timeout);
         loop {
             if let Some(Ok(Some(status))) = self.child.as_mut().map(Child::try_wait) {
                 eprintln!("zerodb mcp: started server exited: {status}");
                 self.child = None;
             }
             match discover(&dir) {
-                Ok(socket) => {
+                Ok(stream) => {
                     (self.backoff, self.refused) = (FIRST_BACKOFF, String::new());
-                    return unix(&socket);
+                    return Ok((Box::new(stream), "localhost".into()));
                 }
                 Err(reason) if reason != self.refused => {
                     eprintln!("zerodb mcp: no trusted server: {reason}");
@@ -117,8 +121,9 @@ impl Launch {
     /// in the config, never on the command line or in the environment.
     fn spawn(&mut self, dir: &Path, config: &Path) -> io::Result<()> {
         DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
-        let mut log = OpenOptions::new();
-        let log = log.create(true).append(true).mode(0o600).open(dir.join("serve.log"))?;
+        let (mut log, path) = (OpenOptions::new(), dir.join("serve.log"));
+        let log = log.create(true).append(true).mode(0o600).open(&path)?;
+        crate::config::check_private(&log, &path, "server log").map_err(io::Error::other)?;
         let child = Command::new(std::env::current_exe()?)
             .arg("serve")
             .arg("--config")
@@ -144,9 +149,10 @@ fn unix(path: &Path) -> io::Result<(Box<dyn Stream>, String)> {
     Ok((Box::new(UnixStream::connect(path)?), "localhost".into()))
 }
 
-/// The socket named in `LOCK`, if it is ours, under an owner-only parent, and answers
-/// `/healthz` with the instance id in `LOCK`. Otherwise the reason, and no token was sent.
-fn discover(dir: &Path) -> Result<PathBuf, String> {
+/// A connection to the socket named in `LOCK`, if it is ours, under an owner-only parent,
+/// and answered `/healthz` on this connection with the instance id in `LOCK`. The token
+/// then goes over the same connection. Otherwise the reason, and no token was sent.
+fn discover(dir: &Path) -> Result<UnixStream, String> {
     let lock = std::fs::read_to_string(dir.join("LOCK")).map_err(|e| format!("LOCK: {e}"))?;
     // `pid=<pid> instance=<id> unix=<path> tcp=<addr>`. The path may hold spaces.
     let fields = lock.trim_end().rsplit_once(" tcp=").map(|(head, _)| head);
@@ -167,23 +173,15 @@ fn discover(dir: &Path) -> Result<PathBuf, String> {
         ));
     }
     crate::listen::check_parent(socket.parent().unwrap_or(Path::new("")))?;
-    let probe = |socket: &Path| {
-        let deadline = Instant::now() + PROBE_TIMEOUT;
-        let mut stream = UnixStream::connect(socket)?;
-        http::exchange(
-            &mut stream,
-            "GET",
-            "/healthz",
-            &[("Host", "localhost")],
-            &[],
-            deadline,
-            4096,
-        )
-    };
-    let response = probe(&socket).map_err(|error| format!("{}: {error}", socket.display()))?;
+    let fail = |error: io::Error| format!("{}: {error}", socket.display());
+    let mut stream = UnixStream::connect(&socket).map_err(fail)?;
+    let headers = [("Host", "localhost"), ("Connection", "keep-alive")];
+    let deadline = Instant::now() + PROBE_TIMEOUT;
+    let response = http::exchange(&mut stream, "GET", "/healthz", &headers, &[], deadline, 4096);
+    let response = response.map_err(fail)?;
     let health: Value = serde_json::from_slice(&response.body).unwrap_or_default();
     if matches!(response.status, 200 | 503) && health["instance"] == instance {
-        Ok(socket)
+        Ok(stream)
     } else {
         Err(format!("{} is not instance {instance} from LOCK", socket.display()))
     }

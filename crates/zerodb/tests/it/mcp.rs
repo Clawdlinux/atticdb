@@ -52,7 +52,9 @@ impl Mcp {
             if let Some(line) = self.process.stdout().lines().nth(self.read) {
                 self.read += 1;
                 let response: Value = serde_json::from_str(line).unwrap();
-                assert_eq!(response["id"], self.read as u64, "responses come in order");
+                if !response["id"].is_null() {
+                    assert_eq!(response["id"], self.read as u64, "responses come in order");
+                }
                 return response;
             }
             assert!(Instant::now() < deadline, "no response: {}", self.process.stderr());
@@ -218,7 +220,8 @@ fn lock_text(instance: &str, socket: &Path, tcp: &str) -> String {
 
 /// Root-owned sockets that exist on stock macOS and Linux hosts. A test cannot create a
 /// socket owned by another user without root, so it points `LOCK` at one of these.
-const FOREIGN_SOCKETS: [&str; 4] = [
+const FOREIGN_SOCKETS: [&str; 5] = [
+    "/run/systemd/notify",
     "/var/run/mDNSResponder",
     "/var/run/syslog",
     "/run/dbus/system_bus_socket",
@@ -300,6 +303,15 @@ fn tool_calls_over_stdio() {
     assert_eq!((missing["isError"].clone(), text(&missing)), (json!(true), "content is required"));
     let reply = mcp.request("tools/call", json!({"name": "memory_delete", "arguments": {}}));
     assert_eq!(reply["error"]["code"], -32602, "unknown tool");
+
+    // A line over 8 MiB is refused, and the next line is read as usual.
+    mcp.next_id += 1;
+    let long =
+        json!({"jsonrpc": "2.0", "id": mcp.next_id, "method": "ping", "pad": "x".repeat(8 << 20)});
+    mcp.send(&long);
+    let refused = json!({"code": -32600, "message": "message longer than 8 MiB"});
+    assert_eq!(mcp.response(), json!({"jsonrpc": "2.0", "id": null, "error": refused}));
+    assert_eq!(mcp.request("ping", json!({}))["result"], json!({}), "ping after a long line");
 
     let (status, _) = mcp.close();
     assert_eq!(status.code(), Some(0), "stdin closed: {}", mcp.process.stderr());
@@ -392,8 +404,9 @@ fn launch_race_starts_one_server() {
                     std::fs::symlink_metadata(path)
                         .is_ok_and(|meta| meta.file_type().is_socket() && meta.uid() != euid)
                 });
-                let socket = foreign
-                    .unwrap_or_else(|| panic!("no socket of another user in {FOREIGN_SOCKETS:?}"));
+                let needs = "this row needs a root-owned socket and a non-root user";
+                let socket =
+                    foreign.unwrap_or_else(|| panic!("{needs}; none of {FOREIGN_SOCKETS:?}"));
                 (Some(lock_text(instance, socket, "none")), vec![])
             },
             "must be a socket owned by uid",

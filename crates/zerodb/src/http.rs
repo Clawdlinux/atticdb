@@ -495,19 +495,10 @@ fn remaining(deadline: Instant) -> io::Result<Duration> {
         .ok_or_else(|| io::Error::new(ErrorKind::TimedOut, "deadline passed"))
 }
 
+const EINVAL: i32 = rustix::io::Errno::INVAL.raw_os_error();
+
 fn retryable(error: &io::Error) -> bool {
     matches!(error.kind(), ErrorKind::Interrupted | ErrorKind::WouldBlock | ErrorKind::TimedOut)
-}
-
-/// macOS fails `setsockopt` with `EINVAL` once the peer has closed. A read or write then
-/// returns at once, so the deadline still holds.
-fn timeout_set(result: io::Result<()>) -> io::Result<()> {
-    match result {
-        Err(error) if error.raw_os_error() == Some(rustix::io::Errno::INVAL.raw_os_error()) => {
-            Ok(())
-        }
-        result => result,
-    }
 }
 
 fn read_until<S: Stream + ?Sized>(
@@ -516,7 +507,12 @@ fn read_until<S: Stream + ?Sized>(
     deadline: Instant,
 ) -> io::Result<usize> {
     loop {
-        timeout_set(stream.set_read_timeout(Some(remaining(deadline)?)))?;
+        // macOS fails `setsockopt` with EINVAL once the peer has closed. The read then
+        // returns at once, so the deadline still holds. Same for writes below.
+        match stream.set_read_timeout(Some(remaining(deadline)?)) {
+            Err(error) if error.raw_os_error() != Some(EINVAL) => return Err(error),
+            _ => {}
+        }
         match stream.read(buf) {
             Err(error) if retryable(&error) => {}
             result => return result,
@@ -530,7 +526,10 @@ fn write_until<S: Stream + ?Sized>(
     deadline: Instant,
 ) -> io::Result<()> {
     while !bytes.is_empty() {
-        timeout_set(stream.set_write_timeout(Some(remaining(deadline)?)))?;
+        match stream.set_write_timeout(Some(remaining(deadline)?)) {
+            Err(error) if error.raw_os_error() != Some(EINVAL) => return Err(error),
+            _ => {}
+        }
         match stream.write(bytes) {
             Ok(0) => return Err(ErrorKind::WriteZero.into()),
             Ok(n) => bytes = &bytes[n..],
@@ -558,8 +557,8 @@ impl fmt::Debug for ClientResponse {
     }
 }
 
-/// Writes one request with `Connection: close` and reads one `Content-Length`
-/// response, all before `deadline`. `headers` should include `Host`.
+/// Writes one request and reads one `Content-Length` response, all before `deadline`.
+/// `headers` should include `Host`. Without a `Connection` header it sends `close`.
 pub fn exchange<S: Stream + ?Sized>(
     stream: &mut S,
     method: &str,
@@ -581,7 +580,10 @@ pub fn exchange<S: Stream + ?Sized>(
     if method != "GET" || !body.is_empty() {
         head.push_str(&format!("Content-Length: {}\r\n", body.len()));
     }
-    head.push_str("Connection: close\r\n\r\n");
+    if !headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("connection")) {
+        head.push_str("Connection: close\r\n");
+    }
+    head.push_str("\r\n");
     let mut bytes = head.into_bytes();
     bytes.extend_from_slice(body);
     write_until(stream, &bytes, deadline)?;

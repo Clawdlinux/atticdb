@@ -55,7 +55,7 @@ pub fn check(auth: &Auth, head: &Head, tcp: bool) -> Result<(Route, Option<Strin
 }
 
 /// `127.0.0.1`, `localhost` or `[::1]`, with an optional port.
-fn loopback_host(value: &[u8]) -> bool {
+pub(crate) fn loopback_host(value: &[u8]) -> bool {
     let text = String::from_utf8_lossy(value).to_ascii_lowercase();
     let (host, port) = match text.strip_prefix("[::1]") {
         Some(port) => ("[::1]", port),

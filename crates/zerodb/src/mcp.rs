@@ -9,7 +9,8 @@ use crate::config::{read_token_file, Config, Token};
 use crate::launch::{Launch, Url};
 use crate::outcome::{Attempt, Merge, Outcome, Step};
 use serde_json::{json, Value};
-use std::io::{self, BufRead, Write};
+use std::collections::HashMap;
+use std::io::{self, BufRead, Read, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -19,32 +20,8 @@ pub const TOKEN_ENV: &str = "ZERODB_TOKEN";
 const VERSIONS: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 const FIRST_BACKOFF: Duration = Duration::from_millis(50);
 const MAX_BACKOFF: Duration = Duration::from_secs(2);
-/// Each attempt may take this long even past the retry deadline, so a slow start
-/// does not turn the first attempt into an unclear one.
-const MIN_ATTEMPT: Duration = Duration::from_secs(2);
-
-/// `zerodb mcp` flags.
-#[derive(Debug)]
-pub struct Options {
-    /// `--url`: an operator-chosen server. No discovery, no instance check.
-    pub url: Option<String>,
-    /// `--data-dir`, overriding the config's.
-    pub data_dir: Option<PathBuf>,
-    /// `--config`, needed to start a server or to find `--tenant`'s token.
-    pub config: Option<PathBuf>,
-    /// `--tenant`: whose token to take from the config.
-    pub tenant: Option<String>,
-    /// `--token-file`.
-    pub token_file: Option<PathBuf>,
-    /// `--agent`.
-    pub agent: String,
-    /// `--session`, the default when a tool passes none.
-    pub session: String,
-    /// `--start-timeout`.
-    pub start_timeout: Duration,
-    /// `--retry-deadline`.
-    pub retry_deadline: Duration,
-}
+/// Longest stdin line. A request body cannot be larger anyway.
+const MAX_LINE: u64 = 8 << 20;
 
 struct Adapter {
     agent: String,
@@ -55,56 +32,79 @@ struct Adapter {
     initialized: bool,
 }
 
-/// Runs the adapter until stdin closes. Returns the exit code.
-pub fn start(options: Options) -> u8 {
-    let mut adapter = match Adapter::new(options) {
+/// Runs the adapter on `zerodb mcp`'s flags until stdin closes. Returns the exit code.
+pub fn start(flags: HashMap<String, String>) -> u8 {
+    let mut adapter = match Adapter::new(flags) {
         Ok(adapter) => adapter,
         Err(message) => {
             eprintln!("zerodb: {message}");
             return 1;
         }
     };
-    let mut stdout = io::stdout();
-    for line in io::stdin().lock().split(b'\n') {
-        let Ok(line) = line else { break };
-        if line.iter().all(u8::is_ascii_whitespace) {
-            continue;
+    let (mut stdin, mut stdout, mut line) = (io::stdin().lock(), io::stdout(), Vec::new());
+    loop {
+        line.clear();
+        match (&mut stdin).take(MAX_LINE + 1).read_until(b'\n', &mut line) {
+            Ok(0) | Err(_) => return 0,
+            Ok(_) => {}
         }
-        if let Some(reply) = adapter.handle(&line) {
+        let reply = if line.len() as u64 > MAX_LINE && !line.ends_with(b"\n") {
+            let _ = stdin.skip_until(b'\n');
+            Some(rpc_error(Value::Null, -32600, "message longer than 8 MiB"))
+        } else if line.iter().all(u8::is_ascii_whitespace) {
+            None
+        } else {
+            adapter.handle(&line)
+        };
+        if let Some(reply) = reply {
             let _ = writeln!(stdout, "{reply}").and_then(|()| stdout.flush());
         }
     }
-    0
 }
 
 impl Adapter {
-    fn new(options: Options) -> Result<Self, String> {
-        let config = options.config.as_deref().map(Config::load).transpose();
+    fn new(mut flags: HashMap<String, String>) -> Result<Self, String> {
+        let url = flags.remove("--url").as_deref().map(Url::parse).transpose()?;
+        let mut duration = |name: &str, default: u64| match flags.remove(name) {
+            None => Ok(Duration::from_secs(default)),
+            Some(text) => match text.strip_suffix("ms") {
+                Some(ms) => ms.parse().map(Duration::from_millis).ok(),
+                None => {
+                    text.strip_suffix('s').and_then(|s| s.parse().ok()).map(Duration::from_secs)
+                }
+            }
+            .ok_or(format!("{name} must be <n>s or <n>ms")),
+        };
+        let start_timeout = duration("--start-timeout", 60)?;
+        let retry_deadline = duration("--retry-deadline", 30)?;
+        let config_path = flags.remove("--config").map(PathBuf::from);
+        let config = config_path.as_deref().map(Config::load).transpose();
         let config = config.map_err(|error| error.to_string())?;
-        let token = match (&options.token_file, std::env::var(TOKEN_ENV), &options.tenant) {
-            (Some(path), _, _) => read_token_file(path).map_err(|error| error.to_string())?,
+        let token_file = flags.remove("--token-file");
+        let token = match (token_file, std::env::var(TOKEN_ENV), flags.remove("--tenant")) {
+            (Some(path), _, _) => read_token_file(path.as_ref()).map_err(|e| e.to_string())?,
             (None, Ok(text), _) => {
                 Token::new(text).map_err(|error| format!("{TOKEN_ENV}: {error}"))?
             }
             (None, Err(_), Some(name)) => config
                 .as_ref()
-                .and_then(|config| config.tenant(name))
+                .and_then(|config| config.tenant(&name))
                 .map(|tenant| tenant.token.clone())
                 .ok_or_else(|| format!("tenant {name:?} is not in the config"))?,
             _ => return Err(format!("set {TOKEN_ENV}, --token-file, or --config with --tenant")),
         };
-        let url = options.url.as_deref().map(Url::parse).transpose()?;
-        let data_dir = options.data_dir.or_else(|| config.and_then(|config| config.data_dir));
+        let data_dir = flags.remove("--data-dir").map(PathBuf::from);
+        let data_dir = data_dir.or_else(|| config.and_then(|config| config.data_dir));
         let data_dir = data_dir.map(std::path::absolute).transpose().map_err(|e| e.to_string())?;
         if url.is_none() && data_dir.is_none() {
             return Err("set --url, or --data-dir or a config with data_dir".into());
         }
         Ok(Self {
-            agent: options.agent,
-            session: options.session,
+            agent: flags.remove("--agent").unwrap_or_else(|| "mcp".into()),
+            session: flags.remove("--session").unwrap_or_else(|| "default".into()),
             token,
-            retry_deadline: options.retry_deadline,
-            launch: Launch::new(url, data_dir, options.config, options.start_timeout),
+            retry_deadline,
+            launch: Launch::new(url, data_dir, config_path, start_timeout),
             initialized: false,
         })
     }
@@ -229,6 +229,7 @@ impl Adapter {
         }
     }
 
+    /// One attempt, connect included, bounded by the call's deadline.
     fn request(
         &mut self,
         method: &str,
@@ -236,10 +237,9 @@ impl Adapter {
         body: &[u8],
         deadline: Instant,
     ) -> io::Result<Value> {
-        let (mut stream, host) = self.launch.connect()?;
+        let (mut stream, host) = self.launch.connect(deadline)?;
         let auth = format!("Bearer {}", self.token.expose());
         let headers = [("Host", host.as_str()), ("Authorization", auth.as_str())];
-        let deadline = deadline.max(Instant::now() + MIN_ATTEMPT);
         let max = crate::http::Limits::default().body_bytes;
         let response =
             crate::http::exchange(&mut *stream, method, target, &headers, body, deadline, max)?;

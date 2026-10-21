@@ -12,7 +12,7 @@ use crate::config::{Config, Listen};
 use crate::http::{Limits, Response, ServerConn, Stream};
 use crate::listen;
 use std::collections::HashMap;
-use std::io;
+use std::io::{self, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -161,7 +161,9 @@ impl Shared {
 fn log(method: &str, path: &str, response: &Response, tenant: &str, started: Instant) {
     let tenant = if tenant.is_empty() { "-" } else { tenant };
     let ms = started.elapsed().as_secs_f64() * 1000.0;
-    eprintln!("zerodb: {method} {path} {} tenant={tenant} {ms:.3}ms", response.status);
+    // Not `eprintln!`: it panics when stderr fails, such as on a full disk under serve.log.
+    let status = response.status;
+    let _ = writeln!(io::stderr(), "zerodb: {method} {path} {status} tenant={tenant} {ms:.3}ms");
 }
 
 /// A running server.
@@ -301,7 +303,7 @@ pub fn start(config: Config, exit_on_poison: bool) -> u8 {
     match try_start(config, exit_on_poison) {
         Ok(code) => code,
         Err((code, message)) => {
-            eprintln!("zerodb: {message}");
+            let _ = writeln!(io::stderr(), "zerodb: {message}");
             code
         }
     }
@@ -346,13 +348,14 @@ fn try_start(config: Config, exit_on_poison: bool) -> Result<u8, (u8, String)> {
     let max_connections = MAX_CONNECTIONS;
     let config = ServeConfig { auth, instance, exit_on_poison, max_connections };
     let server = run(Arc::new(engine), listeners, config).map_err(|e| fail(e.to_string()))?;
-    eprintln!(
+    let _ = writeln!(
+        io::stderr(),
         "zerodb: serving instance={} tcp={tcp_text} unix={}",
         server.shared.config.instance,
         socket.display()
     );
     server.wait();
-    eprintln!("zerodb: engine poisoned, exiting so a fresh start can recover");
+    let _ = writeln!(io::stderr(), "zerodb: engine poisoned, exiting so a fresh start can recover");
     Ok(EXIT_POISONED)
 }
 
