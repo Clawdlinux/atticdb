@@ -9,6 +9,7 @@ Import storage types from `zerodb_tape`.
 `Tape::open(io, clock, directory, options)` locks the directory and starts the writer.
 `Tape::open_with(state_machine, io, clock, directory, options)` also attaches application state.
 Real directories must already exist.
+`TapeOptions::server_address` is written into `LOCK`. `zerodb serve` puts its instance id and socket path there.
 
 `Tape::append(records, Durability::Durable)` returns `Committed::Durable` or `WriteError`.
 The receipt contains the transaction ID, inclusive record LSN range and application reply.
@@ -179,6 +180,7 @@ The operator cut never raises that floor. Normal recovery handles retained data 
 Open resumes an interrupted intent before checking the floor.
 Reports and logs include the cut, dropped range and dropped bytes.
 Dropped LSNs may be reused, including acknowledged LSNs. D73 documents this explicit exception to I3.
+`zerodb recover --truncate-at <lsn> --data-dir <dir>` runs the cut from the command line.
 
 ## Paged LSN index
 
