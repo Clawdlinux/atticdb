@@ -11,6 +11,7 @@ use std::fmt;
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::os::unix::net::UnixStream;
+use std::sync::{Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 /// A byte stream with timeouts, implemented for TCP and Unix sockets.
@@ -150,12 +151,14 @@ pub struct Response {
     pub status: u16,
     /// JSON body bytes.
     pub body: Vec<u8>,
+    /// A share of a [`Budget`] that lasts until the response is dropped, after its write.
+    pub(crate) _held: Option<Held>,
 }
 
 impl Response {
     /// A response with a JSON body.
     pub fn json(status: u16, body: &Value) -> Self {
-        Self { status, body: body.to_string().into_bytes() }
+        Self { status, body: body.to_string().into_bytes(), _held: None }
     }
 
     /// `{"outcome": "not_committed", "error": <error>, "message"?: <message>}`. Nothing
@@ -455,8 +458,8 @@ fn parse_length(value: &[u8]) -> Option<u64> {
         .try_fold(0u64, |total, digit| total.checked_mul(10)?.checked_add(u64::from(digit - b'0')))
 }
 
-/// Writes one response by `deadline`. The reason phrase is empty, which RFC 9112
-/// allows: clients must ignore it.
+/// Writes one response by `deadline`, the head and then the body, without copying the
+/// body. The reason phrase is empty, which RFC 9112 allows: clients must ignore it.
 pub fn write_response<S: Stream + ?Sized>(
     stream: &mut S,
     response: &Response,
@@ -465,12 +468,48 @@ pub fn write_response<S: Stream + ?Sized>(
 ) -> io::Result<()> {
     let (status, length) = (response.status, response.body.len());
     let connection = if close { "close" } else { "keep-alive" };
-    let mut bytes = format!(
+    let head = format!(
         "HTTP/1.1 {status} \r\nContent-Type: application/json\r\nContent-Length: {length}\r\nConnection: {connection}\r\n\r\n"
-    )
-    .into_bytes();
-    bytes.extend_from_slice(&response.body);
-    write_until(stream, &bytes, deadline)
+    );
+    write_until(stream, head.as_bytes(), deadline)?;
+    write_until(stream, &response.body, deadline)
+}
+
+/// A shared limit on what is in flight, such as parses or response bytes. A taker waits
+/// for room. One that exceeds the whole limit goes alone, when nothing else is held.
+pub(crate) struct Budget {
+    used: Mutex<usize>,
+    freed: Condvar,
+    limit: usize,
+}
+
+/// A share of a [`Budget`], given back on drop.
+pub(crate) struct Held(&'static Budget, usize);
+
+impl Budget {
+    pub(crate) const fn new(limit: usize) -> Self {
+        Self { used: Mutex::new(0), freed: Condvar::new(), limit }
+    }
+
+    /// Takes `amount`, waiting up to `wait` for room. `None` when the wait runs out.
+    pub(crate) fn take(&'static self, amount: usize, wait: Duration) -> Option<Held> {
+        let used = self.used.lock().unwrap_or_else(PoisonError::into_inner);
+        let full = |used: &mut usize| *used > 0 && used.saturating_add(amount) > self.limit;
+        let waited = self.freed.wait_timeout_while(used, wait, full);
+        let (mut used, waited) = waited.unwrap_or_else(PoisonError::into_inner);
+        if waited.timed_out() {
+            return None;
+        }
+        *used += amount;
+        Some(Held(self, amount))
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        *self.0.used.lock().unwrap_or_else(PoisonError::into_inner) -= self.1;
+        self.0.freed.notify_all();
+    }
 }
 
 /// Time left before `deadline`, or `TimedOut` when none is.
@@ -703,7 +742,7 @@ mod tests {
         while let Some((request, ())) = conn.next_request(check) {
             assert_eq!(request.body.len() as u64, request.head.content_length);
             bodies.push(request.body);
-            let reply = Response { status: 200, body: vec![b'x'; reply_bytes] };
+            let reply = Response { status: 200, body: vec![b'x'; reply_bytes], _held: None };
             if conn.respond(&reply).is_err() {
                 write_errors += 1;
             }
@@ -1105,6 +1144,24 @@ mod tests {
                 run.elapsed
             );
         }
+    }
+
+    #[test]
+    fn budget_waits_and_lets_an_oversized_taker_go_alone() {
+        static BUDGET: Budget = Budget::new(10);
+        let short = Duration::from_millis(20);
+        let first = BUDGET.take(6, short).unwrap();
+        assert!(BUDGET.take(6, short).is_none(), "6 + 6 is over 10");
+        let second = BUDGET.take(4, short).unwrap();
+        drop(first);
+        assert!(BUDGET.take(7, short).is_none(), "4 + 7 is over 10");
+        drop(second);
+        let alone = BUDGET.take(25, short).unwrap();
+        assert!(BUDGET.take(1, short).is_none(), "nothing joins an oversized taker");
+        let waiter = thread::spawn(|| BUDGET.take(5, Duration::from_secs(10)).is_some());
+        thread::sleep(short);
+        drop(alone);
+        assert!(waiter.join().unwrap(), "a waiter gets room once it is freed");
     }
 
     #[test]

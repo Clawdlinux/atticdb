@@ -3,9 +3,13 @@
 //!
 //! Memory: at most [`MAX_CONNECTIONS`] connections. A request body grows only as its
 //! bytes arrive, up to the 8 MiB cap, and the raw body is dropped once parsed into
-//! turns, which are no larger. At most 2 bodies are parsed at once, and a JSON tree can
-//! be about 16x its body. So body memory stays under 256 x 8 MiB = 2 GiB of raw bodies
-//! or turns, plus 2 parse trees of about 16 x 8 MiB each, in the worst case.
+//! turns, which are no larger. At most 2 JSON trees exist at once, request parses and
+//! window builds together, and a tree can be about 16x its body. A window reads at most
+//! 8 MiB of turns; its body is at most 6x that, since JSON escapes a byte to at most 6.
+//! Window bodies being written total at most 256 MiB, and at most 2 more wait for that
+//! budget, up to 5 s before 503 `busy`. So request and window memory stays under about
+//! 256 x 8 MiB = 2 GiB of raw bodies or turns, plus 2 trees of about 16 x 8 MiB, plus
+//! 256 MiB + 2 x 49 MiB of window bodies, in the worst case.
 
 use crate::api::{self, Route};
 use crate::auth::Auth;
@@ -218,6 +222,8 @@ pub fn run(engine: Arc<Engine>, listeners: Listeners, config: ServeConfig) -> io
         listener.set_nonblocking(true)?;
         let accept = move || {
             let (stream, _) = ready(&listener)?.accept()?;
+            // A response is written as a head and a body, so do not hold the body back.
+            stream.set_nodelay(true)?;
             stream.set_nonblocking(false).map(|()| stream)
         };
         threads.push(spawn_accept(&shared, accept, TcpStream::try_clone, true)?);
@@ -301,7 +307,7 @@ fn spawn_accept<S: Stream + Send + 'static>(
 /// Answers 503 on accept without reading, and closes without lingering.
 fn busy<S: Stream>(mut stream: S) {
     let deadline = Instant::now() + Duration::from_secs(1);
-    let _ = http::write_response(&mut stream, &Response::error(503, "busy", None), true, deadline);
+    let _ = http::write_response(&mut stream, &api::busy(), true, deadline);
     let _ = stream.shutdown(Shutdown::Both);
 }
 

@@ -1,10 +1,10 @@
 //! HTTP routes: `POST /v1/append`, `GET /v1/window` and `GET /healthz`.
 
 use crate::auth::{self, Auth};
-use crate::http::{Head, Response};
+use crate::http::{Budget, Head, Response};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
-use std::sync::{Condvar, Mutex, PoisonError};
+use std::time::Duration;
 use zerodb_core::{
     Appended, Engine, EngineError, ErrorKind, Health, NewTurn, Role, Scope, Turn, WindowQuery,
 };
@@ -79,33 +79,23 @@ pub fn health(engine: &Engine, instance: &str) -> Response {
     Response::json(status, &json!({"status": text, "instance": instance}))
 }
 
-/// Bodies parsed at once. An 8 MiB body like `[{},{},...]` grows about 16x as a `Value`
-/// tree, so parse memory is bounded by this, not by the connection count.
-const PARSERS: usize = 2;
-static PARSING: (Mutex<usize>, Condvar) = (Mutex::new(0), Condvar::new());
+/// JSON trees in memory at once: request parses and window builds. An 8 MiB body like
+/// `[{},{},...]` grows about 16x as a `Value` tree, so this bounds tree memory, not the
+/// connection count.
+static PARSERS: Budget = Budget::new(2);
+/// Window bytes being written at once.
+static SENDING: Budget = Budget::new(256 << 20);
+/// How long a window waits for [`SENDING`] before it answers 503 `busy`.
+const SEND_WAIT: Duration = Duration::from_secs(5);
 
-/// One of the [`PARSERS`] slots, freed on drop.
-struct Parsing;
-
-impl Parsing {
-    fn wait() -> Self {
-        let busy = PARSING.0.lock().unwrap_or_else(PoisonError::into_inner);
-        let wait = PARSING.1.wait_while(busy, |busy| *busy >= PARSERS);
-        *wait.unwrap_or_else(PoisonError::into_inner) += 1;
-        Self
-    }
-}
-
-impl Drop for Parsing {
-    fn drop(&mut self) {
-        *PARSING.0.lock().unwrap_or_else(PoisonError::into_inner) -= 1;
-        PARSING.1.notify_one();
-    }
+/// 503 `busy`: nothing reached the engine.
+pub(crate) fn busy() -> Response {
+    Response::error(503, "busy", None)
 }
 
 /// `POST /v1/append`. The raw body is dropped once parsed.
 pub fn append(engine: &Engine, tenant: &str, body: Vec<u8>) -> Response {
-    let slot = Parsing::wait();
+    let Some(slot) = PARSERS.take(1, Duration::MAX) else { return busy() };
     let value: Result<Value, _> = serde_json::from_slice(&body);
     // The tape takes at most 1,024 records per batch. Reject more before encoding, which
     // copies the agent, session and key into every turn outside the parse limit.
@@ -231,8 +221,17 @@ pub fn window(engine: &Engine, tenant: &str, target: &str) -> Response {
     };
     match engine.window_budget(&scope, query, max_bytes) {
         Ok(window) => {
-            let turns: Vec<Value> = window.turns.into_iter().map(turn_json).collect();
-            Response::json(200, &json!({"turns": turns, "truncated": window.truncated}))
+            // Meta is reparsed into trees, so the JSON is built under the tree limit. The
+            // send budget is taken there too, so at most 2 built bodies wait for it.
+            let Some(_slot) = PARSERS.take(1, Duration::MAX) else { return busy() };
+            let mut body = json!({"truncated": window.truncated});
+            body["turns"] = window.turns.into_iter().map(turn_json).collect();
+            let response = Response::json(200, &body);
+            drop(body);
+            match SENDING.take(response.body.len(), SEND_WAIT) {
+                Some(held) => Response { _held: Some(held), ..response },
+                None => busy(),
+            }
         }
         Err(error) => {
             let (status, name) = classify(&error.kind);
