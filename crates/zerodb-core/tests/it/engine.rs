@@ -322,7 +322,8 @@ fn write_outages_report_health_preserve_reads_and_retry_keys() {
                     if matches!(fault, Fault::ReopenFull | Fault::ReopenDirtyFull) {
                         let capacity = io.disk.total_bytes(std::path::Path::new("db")).unwrap();
                         let free = io.disk.available_bytes(std::path::Path::new("db")).unwrap();
-                        // Recovery write-backs fit in 5 pages. Reservation plus floor needs 6.
+                        // Recovery write-backs fit in 5 pages. Reservation plus floor needs two
+                        // 1 MiB index chunks, so open stays read-only.
                         let headroom =
                             if matches!(fault, Fault::ReopenDirtyFull) { 20480 } else { 0 };
                         io.disk.set_capacity(capacity - free + headroom).unwrap();
@@ -491,7 +492,8 @@ fn write_outages_report_health_preserve_reads_and_retry_keys() {
             ) {
                 for (name, width) in [("LSN-OFFSETS", 8), ("LSN-ROUTES", 16)] {
                     let file = io.disk.open(&std::path::Path::new("db").join(name)).unwrap();
-                    let required = (retried.last_lsn * width).div_ceil(4096) * 4096;
+                    // Index backing grows in whole 1 MiB chunks.
+                    let required = (retried.last_lsn * width).div_ceil(1 << 20) << 20;
                     assert_eq!(
                         io.disk.len(file).unwrap(),
                         required,

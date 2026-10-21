@@ -103,7 +103,8 @@ The writer checks space once per group, before application preparation.
 It budgets encoded bytes, new segments, and LSN-index backing growth before comparing the remainder with the floor.
 A floor hit rejects the whole group with `DiskFull` and `NotCommitted`, without preparing application state.
 Required segments and LSN-index backing pages are reserved with `Io::allocate` before application preparation.
-The highest possible group LSN bounds growth of `LSN-OFFSETS` and `LSN-ROUTES`, rounded to 4096-byte pages.
+The highest possible group LSN bounds growth of `LSN-OFFSETS` and `LSN-ROUTES`, rounded up to 1 MiB chunks per file.
+A fresh open needs about 2 MiB above the floor to start read-write, which only matters on tiny volumes or very small explicit floors.
 Open attempts index reservations after recovery, only when the space query and floor allow them.
 Preallocated index backing lets cold reads evict dirty pages without new blocks or an increased cache budget.
 Without it, a full disk keeps dirty pages resident. Cold reads evict a clean page or exceed the budget by one page.
@@ -189,7 +190,7 @@ Each 4096-byte page is charged another 128 bytes for cache bookkeeping.
 Eviction uses FIFO. Dirty evictions write derived pages, without adding a tape sync.
 
 `LSN-OFFSETS` stores 8 bytes per record. `LSN-ROUTES` stores 16 routing bytes per record.
-Files are page-padded and rebuilt at every open.
+Files are padded to 1 MiB chunks and rebuilt at every open.
 They are derived indexes, not recovery authorities.
 Reads still verify the requested LSN and location-bound frame CRC.
 `Tape::index_stats()` reports resident bytes, the budget, evictions, dirty evictions and page reloads.
