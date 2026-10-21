@@ -12,6 +12,8 @@ zerodb recover --truncate-at <lsn> --data-dir ./data
 
 - TCP listens on `127.0.0.1:7425` by default. `--listen <addr>` picks another loopback address, port 0 included. `--listen none` binds no TCP. A non-loopback address fails startup, because zerodb has no TLS. Put a TLS proxy on loopback in front.
 - The Unix socket defaults to `<data_dir>/zerodb.sock`. Set it with `--unix-socket`. Its parent must be owned by the server's user and not writable by group or others. The socket is mode 0600. `--unix-socket-group <gid or name>` makes it 0660 with that group. Names come from `/etc/group`. Groups from LDAP or other NSS sources need the numeric gid.
+- The data directory is created with mode 0700. An existing one must be owned by the server's user with no group or other bits, or startup fails.
+- The socket is bound in a per-start `.zs.<8 hex>` directory next to it, then linked into place. A crash during that step can leave one such directory behind. It is safe to delete.
 - Startup order: config, TCP, then the engine and its lock, then the Unix socket. Only the lock holder replaces a stale socket. A path with a live server or a non-socket file fails startup.
 - `LOCK` and `GET /healthz` carry a per-start instance id.
 - At most 256 connections. Past that, a new connection gets 503 `busy`. A request body grows only as its bytes arrive, up to 8 MiB, and is dropped once parsed. Body memory stays under 256 x 2 x 8 MiB = 4 GiB in the worst case.

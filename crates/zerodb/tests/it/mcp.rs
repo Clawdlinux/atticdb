@@ -397,6 +397,18 @@ fn launch_race_starts_one_server() {
             "not writable by group or others",
         ),
         (
+            "a group-writable grandparent",
+            |root, _, instance| {
+                let parent = root.join("gw").join("p");
+                std::fs::create_dir_all(&parent).unwrap();
+                let mode = std::fs::Permissions::from_mode(0o770);
+                std::fs::set_permissions(root.join("gw"), mode).unwrap();
+                let seen = fake_unix(&parent.join("s"), instance);
+                (Some(lock_text(instance, &parent.join("s"), "none")), vec![(seen, false)])
+            },
+            "not writable by group or others unless sticky",
+        ),
+        (
             "a socket owned by another user",
             |_, _, instance| {
                 let euid = rustix::process::geteuid().as_raw();
@@ -441,11 +453,6 @@ fn launch_race_starts_one_server() {
             assert_eq!(connections > 0, probed, "{case}: {connections} connections");
             assert_eq!(seen.authorized.load(Ordering::SeqCst), 0, "{case}: token sent");
         }
-        let staged = std::fs::read_dir(&data).unwrap().flatten();
-        assert!(
-            !staged.into_iter().any(|e| e.file_name().to_string_lossy().starts_with(".zs.")),
-            "{case}"
-        );
         assert_eq!(mcp.close().0.code(), Some(0), "{case}");
     }
 

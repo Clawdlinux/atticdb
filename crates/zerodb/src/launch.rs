@@ -7,10 +7,10 @@
 
 use crate::http::{self, Stream};
 use serde_json::Value;
-use std::fs::{DirBuilder, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::{self, ErrorKind};
 use std::net::TcpStream;
-use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -120,7 +120,7 @@ impl Launch {
     /// `zerodb serve` on the Unix socket only, outliving this adapter. The token stays
     /// in the config, never on the command line or in the environment.
     fn spawn(&mut self, dir: &Path, config: &Path) -> io::Result<()> {
-        DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+        crate::listen::private_dir(dir).map_err(io::Error::other)?;
         let (mut log, path) = (OpenOptions::new(), dir.join("serve.log"));
         let log = log.create(true).append(true).mode(0o600).open(&path)?;
         crate::config::check_private(&log, &path, "server log").map_err(io::Error::other)?;
@@ -159,9 +159,13 @@ fn discover(dir: &Path) -> Result<UnixStream, String> {
     let instance =
         fields.and_then(|head| head.split(' ').find_map(|field| field.strip_prefix("instance=")));
     let socket = fields.and_then(|head| head.split_once(" unix=")).map(|(_, path)| path);
-    let (Some(instance), Some(socket)) = (instance, socket.map(PathBuf::from)) else {
+    let (Some(instance), Some(socket)) = (instance, socket.map(Path::new)) else {
         return Err("LOCK names no server".into());
     };
+    // Resolve symlinks first, so the checks below cover the directories actually used.
+    let parent = socket.parent().map(std::fs::canonicalize).transpose();
+    let parent = parent.map_err(|error| format!("socket {}: {error}", socket.display()))?;
+    let socket = parent.unwrap_or_default().join(socket.file_name().unwrap_or_default());
     let euid = rustix::process::geteuid().as_raw();
     let meta = std::fs::symlink_metadata(&socket);
     let meta = meta.map_err(|error| format!("socket {}: {error}", socket.display()))?;
@@ -172,7 +176,22 @@ fn discover(dir: &Path) -> Result<UnixStream, String> {
             meta.uid()
         ));
     }
-    crate::listen::check_parent(socket.parent().unwrap_or(Path::new("")))?;
+    let mut dirs = socket.ancestors().skip(1);
+    crate::listen::check_parent(dirs.next().unwrap_or(Path::new("/")))?;
+    // OpenSSH StrictModes: anyone who can rename a directory above the socket can swap it.
+    for dir in dirs {
+        let meta = std::fs::metadata(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
+        let writable = meta.mode() & 0o022 != 0 && meta.mode() & 0o1000 == 0;
+        if (meta.uid() != 0 && meta.uid() != euid) || writable {
+            return Err(format!(
+                "{} must be owned by root or uid {euid} and not writable by group or others \
+                 unless sticky, found mode {:04o} owned by uid {}",
+                dir.display(),
+                meta.mode() & 0o7777,
+                meta.uid()
+            ));
+        }
+    }
     let fail = |error: io::Error| format!("{}: {error}", socket.display());
     let mut stream = UnixStream::connect(&socket).map_err(fail)?;
     let headers = [("Host", "localhost"), ("Connection", "keep-alive")];

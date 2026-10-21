@@ -71,6 +71,8 @@ enum Expect {
     Serves(&'static [&'static str]),
     /// `zerodb recover` refuses while the server runs, then cuts after the first write.
     Recovers,
+    /// Two servers start at once with one socket path: one serves, the other fails.
+    OneWins,
     /// `--exit-on-poison` with the fault trigger: the write gets unknown and the server exits 70.
     #[cfg(feature = "fault-inject")]
     ExitsOnPoison,
@@ -79,7 +81,7 @@ enum Expect {
 const TENANT: &str = r#"{"name": "a", "token": "secret-token-0123456789abcdefghijkl"}"#;
 const TENANT_B: &str = r#"{"name": "b", "token": "secret-token-0123456789abcdefghijkX"}"#;
 
-/// The staging directory name for a socket file name.
+/// A staging directory name as an earlier scheme derived it from the socket file name.
 fn staging(socket: &str) -> String {
     format!(".zs.{}", &blake3::hash(socket.as_bytes()).to_hex()[..8])
 }
@@ -236,12 +238,34 @@ fn startup_checks() {
             Expect::Fails(1, "is not a socket"),
         ),
         (
-            "group-writable parent",
+            "group-writable socket directory",
             |c| {
-                c.private_data_dir(0o770);
-                vec![]
+                let parent = c.dir.0.join("g");
+                std::fs::create_dir(&parent).unwrap();
+                std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o770)).unwrap();
+                c.socket = parent.join("s");
+                vec!["--unix-socket".into(), c.socket.to_str().unwrap().into()]
             },
             Expect::Fails(1, "not writable by group or others"),
+        ),
+        (
+            "existing data dir with mode 0755",
+            |c| {
+                c.private_data_dir(0o755);
+                vec![]
+            },
+            Expect::Fails(1, "mode 0700 or stricter, found mode 0755"),
+        ),
+        (
+            "two data dirs race for one socket path",
+            |c| {
+                c.socket = c.dir.0.join("shared.sock");
+                let socket = c.socket.to_str().unwrap().to_owned();
+                let other = c.serve(&c.dir.0.join("other"), &["--unix-socket", &socket]);
+                c.other = Some((other, String::new()));
+                vec!["--unix-socket".into(), socket]
+            },
+            Expect::OneWins,
         ),
         (
             "path past sun_path",
@@ -261,17 +285,18 @@ fn startup_checks() {
             Expect::Fails(1, "sun_path limit; set --unix-socket to a shorter path"),
         ),
         (
-            "leftover staging directory",
+            "leftover staging directories",
             |c| {
                 c.private_data_dir(0o700);
-                // A killed server's staging directory, and one of a server on another socket.
+                // Left by killed servers. Staging names are per start, so none is ours to
+                // delete: it may belong to a server starting on another data directory.
                 for name in [staging("zerodb.sock"), staging("other.sock")] {
                     std::fs::create_dir(c.data.join(&name)).unwrap();
                     std::fs::write(c.data.join(name).join("s"), "").unwrap();
                 }
                 vec![]
             },
-            Expect::Serves(&["other.sock"]),
+            Expect::Serves(&["zerodb.sock", "other.sock"]),
         ),
         (
             "second serve on a locked data dir",
@@ -321,8 +346,30 @@ fn startup_checks() {
                     assert!(!stderr.contains(secret), "{case}: stderr leaks a token");
                 }
             }
+            Expect::OneWins => {
+                let (other, _) = ctx.other.take().unwrap();
+                let mut pair = [server, other];
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                let lost = loop {
+                    if let Some(lost) =
+                        (0..2).find(|&i| pair[i].child.try_wait().unwrap().is_some())
+                    {
+                        break lost;
+                    }
+                    assert!(std::time::Instant::now() < deadline, "{case}: neither failed");
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                };
+                let (status, stderr) = pair[lost].wait();
+                assert_eq!(status.code(), Some(1), "{case}: {stderr}");
+                assert!(stderr.contains("another server is listening on"), "{case}: {stderr}");
+                let (instance, _) = pair[1 - lost].ready();
+                let health = json!({"status": "ok", "instance": instance});
+                assert_eq!(unix.call(None, None, "GET", "/healthz", None), (200, health), "{case}");
+            }
             Expect::Serves(kept) => {
                 let (instance, tcp) = server.ready();
+                let data = std::fs::metadata(&ctx.data).unwrap();
+                assert_eq!(data.mode() & 0o777, 0o700, "{case}: data directory mode");
                 let meta = std::fs::symlink_metadata(&ctx.socket).unwrap();
                 let group = extra.iter().position(|arg| *arg == "--unix-socket-group");
                 let mode = if group.is_some() { 0o660 } else { 0o600 };

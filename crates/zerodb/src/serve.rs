@@ -14,7 +14,6 @@ use crate::listen;
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
-use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -327,11 +326,7 @@ fn try_start(config: Config, exit_on_poison: bool) -> Result<u8, (u8, String)> {
         None => "none".into(),
     };
     let instance = crate::random_hex(16).map_err(|error| fail(error.to_string()))?;
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&data_dir)
-        .map_err(|error| fail(format!("cannot create {}: {error}", data_dir.display())))?;
+    listen::private_dir(&data_dir).map_err(fail)?;
     let mut options = EngineOptions::default();
     let address = format!("instance={instance} unix={} tcp={tcp_text}", socket.display());
     options.tape.server_address = Some(address);
@@ -342,7 +337,7 @@ fn try_start(config: Config, exit_on_poison: bool) -> Result<u8, (u8, String)> {
         ),
         _ => fail(format!("cannot open {}: {error}", data_dir.display())),
     })?;
-    let unix = listen::install_unix(&socket, group).map_err(fail)?;
+    let unix = listen::install_unix(&socket, group, &instance).map_err(fail)?;
     let listeners = Listeners { tcp, unix: Some((unix, socket.clone())) };
     let auth = Auth::new(&config.tenants);
     let max_connections = MAX_CONNECTIONS;
