@@ -195,6 +195,7 @@ Before preparing each group, the writer budgets encoded bytes, segment reservati
 A clean floor hit returns `DiskFull` with `NotCommitted` and sets read-only. Reads keep serving acknowledged data.
 The writer reserves segment and LSN-index backing space before `prepare`, including both in the floor budget.
 `LSN-OFFSETS` and `LSN-ROUTES` grow in 1 MiB chunks through the highest LSN the queued group can assign.
+A fresh open needs about 2 MiB above the floor to start read-write, which only matters on tiny volumes or very small explicit floors.
 Dirty-page eviction during cold reads writes only within reserved backing space, preserving the bounded cache.
 Recovery rebuilds resident index pages before optional backing reservations. Full-disk or space-query failures start read-only without poisoning.
 The next write retries outstanding reservations and any unknown default-floor query. The on-disk format is unchanged.
