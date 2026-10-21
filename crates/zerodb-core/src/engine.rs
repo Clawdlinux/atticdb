@@ -240,10 +240,13 @@ impl Engine {
         if scope.tenant.len() > 255 || turns.is_empty() {
             return Err(EngineError::rejected(ErrorKind::InvalidInput));
         }
-        let payloads = turns
-            .iter()
-            .map(|turn| encode(&scope.agent, &scope.session, 0, turn, idem_key))
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let encode_all = || {
+            turns
+                .iter()
+                .map(|turn| encode(&scope.agent, &scope.session, 0, turn, idem_key))
+                .collect::<std::result::Result<Vec<_>, _>>()
+        };
+        let payloads = encode_all()?;
         let digest = idem_key.map(|_| {
             let mut hash = blake3::Hasher::new();
             for payload in &payloads {
@@ -280,19 +283,25 @@ impl Engine {
         } else {
             None
         };
-        let mut records = Vec::new();
-        if tenant.is_none() {
-            records.push(RecordInput {
-                kind: Kind::TenantCreate,
-                tenant_id: 0,
-                content: scope.tenant.as_bytes().to_vec(),
-            });
-        }
-        records.extend(payloads.into_iter().map(|content| RecordInput {
-            kind: Kind::Turn,
-            tenant_id: tenant.unwrap_or(0),
-            content,
-        }));
+        let records = |payloads: Vec<Vec<u8>>| {
+            let mut records = Vec::with_capacity(payloads.len() + 1);
+            if tenant.is_none() {
+                records.push(RecordInput {
+                    kind: Kind::TenantCreate,
+                    tenant_id: 0,
+                    content: scope.tenant.as_bytes().to_vec(),
+                });
+            }
+            records.extend(payloads.into_iter().map(|content| RecordInput {
+                kind: Kind::Turn,
+                tenant_id: tenant.unwrap_or(0),
+                content,
+            }));
+            records
+        };
+        // The first write moves the payloads. A hot-page retry re-encodes the same inputs, which
+        // yields the same bytes the digest covers, so the common path never copies a payload.
+        let mut payloads = Some(payloads);
         for attempt in 0..2 {
             let pin = tenant
                 .map(|id| self.pin(Key(id, scope.agent.clone(), scope.session.clone())))
@@ -306,9 +315,13 @@ impl Engine {
                 }
                 result => result?,
             };
+            let payloads = match payloads.take() {
+                Some(payloads) => payloads,
+                None => encode_all()?,
+            };
             let result = self
                 .tape
-                .append_with_digest(records.clone(), Durability::Durable, digest)
+                .append_with_digest(records(payloads), Durability::Durable, digest)
                 .map_err(EngineError::write);
             drop(pin);
             match result {
