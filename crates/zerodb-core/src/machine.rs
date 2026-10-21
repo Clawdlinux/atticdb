@@ -13,6 +13,10 @@ use zerodb_tape::{
     WriteError,
 };
 
+/// Trailing byte on a cached reply's 8-byte sequence. Only replies carry it. Dedup
+/// entries and checkpoints keep the plain 8-byte form.
+pub(crate) const REPLY_DEDUPLICATED: u8 = 1;
+
 pub(crate) struct Machine {
     state: Arc<Mutex<State>>,
     io: Arc<dyn Io>,
@@ -121,7 +125,10 @@ impl Machine {
         if let Some(entry) =
             dedup_key.as_ref().and_then(|key| self.dedup.get(key).or_else(|| state.dedup.get(key)))
         {
-            return entry.resolve(digest).map(Prepare::Reply);
+            let Committed::Durable { txn, first_lsn, last_lsn, mut reply } =
+                entry.resolve(digest)?;
+            reply.push(REPLY_DEDUPLICATED);
+            return Ok(Prepare::Reply(Committed::Durable { txn, first_lsn, last_lsn, reply }));
         }
         if dedup_key.is_some() && !self.dedup.can_stage(tenant) {
             return Err(EngineError::rejected(ErrorKind::ResourceExhausted("prepared_dedup")));
@@ -638,7 +645,12 @@ mod tests {
                 assert_eq!(entry.reserved, 1);
                 assert_eq!(entry.len, 0);
             } else {
-                assert_eq!(results[0].as_ref().unwrap(), results[1].as_ref().unwrap());
+                let Committed::Durable { txn, first_lsn, last_lsn, mut reply } =
+                    results[0].clone().unwrap();
+                assert_eq!(reply.len(), 8, "a fresh reply is the bare sequence");
+                reply.push(REPLY_DEDUPLICATED);
+                let cached = Committed::Durable { txn, first_lsn, last_lsn, reply };
+                assert_eq!(results[1].as_ref().unwrap(), &cached);
                 assert_eq!(core.durable_lsn(), 2);
                 assert_eq!(state.lock().unwrap().dedup.entries.len(), 1);
             }

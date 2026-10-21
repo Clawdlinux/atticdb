@@ -30,6 +30,11 @@ Sequences start at 1. `Since { seq, limit }` includes `seq`. Sequence 0 starts a
 `Last(0)` returns nothing. An unknown scope also returns nothing.
 Windows pin a durable LSN and read each returned turn once.
 The `window_reads` metric counts those `Tape::read` calls.
+`window_budget(scope, query, max_bytes)` caps the sum of `content` and `meta` bytes.
+`Last` keeps the newest turns that fit. `Since` keeps the oldest. Turns come back in sequence order.
+Turns are never cut. A first turn over the budget returns no turns.
+`Window::truncated` is true when the budget, not the query, ended the window.
+A cut window costs 1 extra read for the turn it left out.
 
 Append receipts cover turn LSNs, excluding any preceding tenant record.
 The writer assigns sequences during preparation. Publication installs slots before replying.
@@ -46,6 +51,8 @@ Preparation and publication parse borrowed payload views without copying turn co
 Location-bound frame CRCs cover every payload, including assigned sequences.
 Changing an agent, role, metadata, content, or batch boundary produces a conflict.
 Retries return the original transaction, turn LSNs, and sequences.
+They set `Appended::deduplicated`. Fresh commits leave it false.
+Cached writer replies carry 1 marker byte after the 8-byte sequence. Dedup entries and checkpoints keep 8 bytes.
 Keys outside the count window are new requests.
 `dedup_window_effective` reports the smallest retained count among tenants with retained keys.
 

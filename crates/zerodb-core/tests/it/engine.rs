@@ -5,7 +5,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 use std::time::Duration;
-use zerodb_core::{Engine, EngineOptions, ErrorKind, Health, Outcome, WindowQuery};
+use zerodb_core::{
+    Appended, Engine, EngineOptions, ErrorKind, Health, NewTurn, Outcome, WindowQuery,
+};
 use zerodb_tape::sim::SimClock;
 use zerodb_tape::{Io, Kind, SimDisk, Tape};
 
@@ -46,6 +48,32 @@ fn windows_are_dense_and_read_cost_depends_only_on_returned_turns() {
             vec![]
         );
     }
+    // Byte budgets count content plus meta. Every turn in "s" costs 8 bytes, in "meta" 16.
+    let meta = support::sessions::scope("meta");
+    let turns = (1..=3).map(|value| NewTurn { meta: vec![0; 8], ..turn(value) }).collect();
+    engine.append(&meta, turns, None).unwrap();
+    for (case, scope, query, max_bytes, seqs, truncated) in [
+        ("fits all", &scope, WindowQuery::Last(4), 32, &[4997, 4998, 4999, 5000][..], false),
+        ("fits some", &scope, WindowQuery::Last(4), 20, &[4999, 5000][..], true),
+        ("newest alone too large", &scope, WindowQuery::Last(4), 7, &[][..], true),
+        (
+            "since with a budget",
+            &scope,
+            WindowQuery::Since { seq: 10, limit: 5 },
+            24,
+            &[10, 11, 12][..],
+            true,
+        ),
+        ("meta counts", &meta, WindowQuery::Last(3), 40, &[2, 3][..], true),
+    ] {
+        let before = engine.metrics().unwrap().window_reads;
+        let window = engine.window_budget(scope, query, max_bytes).unwrap();
+        let got: Vec<_> = window.turns.iter().map(|turn| turn.seq).collect();
+        assert_eq!(got, seqs, "case: {case}");
+        assert_eq!(window.truncated, truncated, "case: {case}");
+        let reads = engine.metrics().unwrap().window_reads - before;
+        assert_eq!(reads, got.len() as u64 + u64::from(truncated), "case: {case}");
+    }
 }
 
 #[test]
@@ -54,8 +82,13 @@ fn retries_conflicts_scope_isolation_and_replay() {
     let engine = open(disk.clone(), options());
     let s = scope("s");
     let first = engine.append(&s, vec![turn(1), turn(2)], Some("key")).unwrap();
+    assert!(!first.deduplicated, "a fresh commit is not deduplicated");
     let durable = engine.metrics().unwrap().durable_lsn;
-    assert_eq!(engine.append(&s, vec![turn(1), turn(2)], Some("key")).unwrap(), first);
+    let retried = |engine: &Engine, case: &str| {
+        let receipt = engine.append(&s, vec![turn(1), turn(2)], Some("key")).unwrap();
+        assert_deduplicated(receipt, &first, case);
+    };
+    retried(&engine, "fast-path retry");
     assert_eq!(engine.metrics().unwrap().durable_lsn, durable);
     let error = engine.append(&s, vec![turn(9)], Some("key")).unwrap_err();
     assert!(matches!(error.kind, ErrorKind::IdempotencyConflict));
@@ -71,12 +104,12 @@ fn retries_conflicts_scope_isolation_and_replay() {
     engine.append(&other, vec![turn(9)], Some("key")).unwrap();
     drop(engine);
     let engine = open(disk.clone(), options());
-    assert_eq!(engine.append(&s, vec![turn(1), turn(2)], Some("key")).unwrap(), first);
+    retried(&engine, "retry after reopen with replay");
     engine.checkpoint().unwrap();
     drop(engine);
     let engine = open(disk, options());
     assert_eq!(engine.metrics().unwrap().replayed_records, 0);
-    assert_eq!(engine.append(&s, vec![turn(1), turn(2)], Some("key")).unwrap(), first);
+    retried(&engine, "retry after reopen from a checkpoint");
 }
 
 #[test]
@@ -419,10 +452,10 @@ fn write_outages_report_health_preserve_reads_and_retry_keys() {
                 );
                 assert_eq!(engine.health(), health, "{case}");
                 if !matches!(fault, Fault::Sync) {
-                    assert_eq!(
+                    assert_deduplicated(
                         engine.append(&s, vec![turn(1); history], Some("original")).unwrap(),
-                        original,
-                        "{case}: committed retries keep their durable receipt"
+                        &original,
+                        &format!("{case}: committed retries keep their durable receipt"),
                     );
                     let conflict = engine.append(&s, vec![turn(2)], Some("original")).unwrap_err();
                     assert!(matches!(conflict.kind, ErrorKind::IdempotencyConflict), "{case}");
@@ -506,7 +539,16 @@ fn write_outages_report_health_preserve_reads_and_retry_keys() {
             assert_eq!(retried.txn, original.txn + 1, "{case}");
             assert_eq!(retried.first_lsn, original.last_lsn + 1, "{case}");
             assert_eq!(retried.last_lsn, retried.first_lsn, "{case}");
-            assert_eq!(engine.append(&s, vec![turn(2)], Some("retry")).unwrap(), retried, "{case}");
+            // An ambiguous first attempt may already be durable, so only rejections must be fresh.
+            if !matches!(fault, Fault::Sync) {
+                assert!(!retried.deduplicated, "{case}: a rejected key writes on retry");
+            }
+            let retried = Appended { deduplicated: false, ..retried };
+            assert_deduplicated(
+                engine.append(&s, vec![turn(2)], Some("retry")).unwrap(),
+                &retried,
+                case,
+            );
             assert_eq!(engine.metrics().unwrap().durable_lsn, retried.last_lsn, "{case}");
             assert_eq!(engine.metrics().unwrap().dedup_entries, before.dedup_entries + 1, "{case}");
             let window = engine.window(&s, WindowQuery::Last(10)).unwrap();
@@ -521,24 +563,24 @@ fn write_outages_report_health_preserve_reads_and_retry_keys() {
                 "{case}"
             );
             assert_eq!(window.last().unwrap().content, turn(2).content, "{case}");
-            assert_eq!(
+            assert_deduplicated(
                 engine.append(&s, vec![turn(1); history], Some("original")).unwrap(),
-                original,
-                "{case}"
+                &original,
+                case,
             );
             if !matches!(fault, Fault::Sync) {
                 drop(engine);
                 let engine = open(Arc::new(io.disk.crash().unwrap()), opts);
                 assert_eq!(engine.health(), Health::Ok, "{case}");
-                assert_eq!(
+                assert_deduplicated(
                     engine.append(&s, vec![turn(1); history], Some("original")).unwrap(),
-                    original,
-                    "{case}"
+                    &original,
+                    case,
                 );
-                assert_eq!(
+                assert_deduplicated(
                     engine.append(&s, vec![turn(2)], Some("retry")).unwrap(),
-                    retried,
-                    "{case}"
+                    &retried,
+                    case,
                 );
                 assert_eq!(engine.window(&s, WindowQuery::Last(10)).unwrap(), window, "{case}");
             }
@@ -559,7 +601,11 @@ fn concurrent_same_key_writes_once() {
             }));
         }
         let receipts: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
-        assert!(receipts.iter().all(|r| r == &receipts[0]));
+        let fresh: Vec<_> = receipts.iter().filter(|r| !r.deduplicated).collect();
+        assert_eq!(fresh.len(), 1, "exactly one caller commits");
+        for receipt in &receipts {
+            assert_eq!(Appended { deduplicated: false, ..receipt.clone() }, *fresh[0]);
+        }
     });
     assert_eq!(engine.window(&scope("s"), WindowQuery::Last(100)).unwrap().len(), 2);
     assert_eq!(engine.metrics().unwrap().durable_lsn, 3);
@@ -685,7 +731,11 @@ fn receipts_need_no_reads_and_checkpoint_io_uses_worker() {
     io.fail_read.store(true, Ordering::SeqCst);
     let receipt = engine.append(&scope("s"), vec![turn(1)], Some("key")).unwrap();
     assert_eq!(receipt.seqs, vec![1]);
-    assert_eq!(engine.append(&scope("s"), vec![turn(1)], Some("key")).unwrap(), receipt);
+    assert_deduplicated(
+        engine.append(&scope("s"), vec![turn(1)], Some("key")).unwrap(),
+        &receipt,
+        "retry",
+    );
     assert!(io.fail_read.swap(false, Ordering::SeqCst), "append and retry must not read");
     assert_eq!(engine.window(&scope("s"), WindowQuery::Last(1)).unwrap()[0].seq, 1);
     assert_eq!(engine.append(&scope("s"), vec![turn(1)], Some("key")).unwrap().seqs, vec![1]);
@@ -793,7 +843,11 @@ fn failed_sync_with_a_full_dedup_window_cannot_checkpoint_tentative_eviction() {
     let engine = open(Arc::new(disk.crash().unwrap()), opts);
     let window = engine.window(&scope("s"), WindowQuery::Last(10)).unwrap();
     if window.len() == 1 {
-        assert_eq!(engine.append(&scope("s"), vec![turn(1)], Some("original")).unwrap(), receipt);
+        assert_deduplicated(
+            engine.append(&scope("s"), vec![turn(1)], Some("original")).unwrap(),
+            &receipt,
+            "retry",
+        );
     } else {
         assert_eq!(
             engine.append(&scope("s"), vec![turn(2)], Some("unknown")).unwrap().seqs,

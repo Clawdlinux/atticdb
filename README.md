@@ -73,6 +73,8 @@ CLI wiring arrives with the server binary in S3.
 
 The writer assigns dense session sequences. Windows cost O(returned), not O(history).
 Retry keys return original receipts within bounded tenant and global windows.
+Receipts set `deduplicated` when a retry key returned an earlier commit, including after reopen.
+`Engine::window_budget` caps a window by content and meta bytes. It never cuts a turn and reports `truncated`.
 Session pages use a resident-memory budget. Cold pages reload from checkpoints.
 A bad checkpoint triggers full replay with a warning.
 
