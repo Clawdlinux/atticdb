@@ -413,6 +413,8 @@ fn replay_probe(iterations: usize, batch: usize, n: usize, reps: usize) {
 fn main() {
     let n = env_number("G1_TURNS", 1_000_000);
     let batch = env_number("G1_BATCH", 4);
+    // Parse before the run so a bad value fails fast, not after a 1M-turn run.
+    let nvme = env_number("G1_NVME", 0) != 0;
     assert!((1..=256).contains(&batch), "G1_BATCH must be in 1..=256");
     assert!(
         n >= WRITERS * batch && n.is_multiple_of(WRITERS * batch),
@@ -467,5 +469,20 @@ fn main() {
     if env_number("G1_HISTORY", 1) != 0 {
         history_windows();
     }
-    println!("macOS local 1.5x verdict: {} (median ratio={ratio:.3}). Linux NVMe and nightly LazyFS remain pending. Append-only trace.", if ratio <= 1.5 { "PASS" } else { "FAIL" });
+    // Only a Linux NVMe run may print the release verdict. G1_NVME=1 marks that run.
+    if std::env::consts::OS == "linux" && nvme {
+        println!(
+            "Linux NVMe 1.5x verdict: {} (median ratio={ratio:.3}). Nightly LazyFS remains pending. Append-only trace.",
+            if ratio <= 1.5 { "PASS" } else { "FAIL" }
+        );
+    } else {
+        let platform = match std::env::consts::OS {
+            "macos" => "macOS",
+            "linux" => "Linux",
+            other => other,
+        };
+        println!(
+            "{platform} local measurement: median ratio={ratio:.3} (1.5x target). Not the release verdict. Linux NVMe verdict pending: rerun on Linux NVMe with G1_NVME=1."
+        );
+    }
 }

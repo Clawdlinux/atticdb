@@ -649,8 +649,9 @@ fn corrupt_checkpoint_full_replay_can_spill_with_a_one_page_budget() {
 
 #[test]
 fn long_session_evicts_its_own_old_pages() {
-    let engine =
-        open(Arc::new(SimDisk::new(14)), EngineOptions { hot_page_bytes: 32768, ..options() });
+    let disk = Arc::new(SimDisk::new(14));
+    let opts = EngineOptions { hot_page_bytes: 32768, ..options() };
+    let engine = open(disk.clone(), opts.clone());
     let s = scope("long");
     for i in 0..6000 {
         engine.append(&s, vec![turn(i)], None).unwrap();
@@ -661,6 +662,17 @@ fn long_session_evicts_its_own_old_pages() {
     assert_eq!(engine.window(&s, WindowQuery::Last(3)).unwrap()[0].seq, 5998);
     assert_eq!(engine.window(&s, WindowQuery::Since { seq: 1, limit: 3 }).unwrap()[0].seq, 1);
     assert!(engine.metrics().unwrap().hot_page_bytes <= 32768);
+    drop(engine);
+    // This budget makes some appends hit a hot-page rejection and resubmit. A resubmitted turn
+    // must store the same bytes as a first-try append of that turn.
+    let (tape, _) = Tape::open(disk, Arc::new(SimClock::default()), "db", opts.tape).unwrap();
+    let mut seq = 0;
+    for record in tape.scan(0).map(Result::unwrap).filter(|record| record.kind == Kind::Turn) {
+        seq += 1;
+        let expected = zerodb_core::turn::encode("agent", "long", seq, &turn(seq - 1), None);
+        assert_eq!(record.payload.as_ref(), expected.unwrap(), "seq={seq}");
+    }
+    assert_eq!(seq, 6000);
 }
 
 #[test]
