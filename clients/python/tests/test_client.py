@@ -73,7 +73,8 @@ def test_retry_survives_server_restart(server):
         wait_for(lambda: contents(client, "s") == ["once"], "the turn in the window")
         server.kill()
     # Every connect fails, so nothing was sent: not_committed, and nothing appears later.
-    with pytest.raises(NotCommitted, match="connect failed"):
+    # The last reason is "connect failed" or the 2 s reserve, depending on runner speed.
+    with pytest.raises(NotCommitted, match="nothing was written"):
         Client(server.url["unix"], TOKEN, retry_deadline=2.5).append("a", "s", turns("never"))
 
     with ThreadPoolExecutor(1) as pool:
