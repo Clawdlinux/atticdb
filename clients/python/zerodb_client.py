@@ -30,7 +30,7 @@ class NotCommitted(Error):
 
 
 class OutcomeUnknown(Error):
-    """The write may be saved. Call again with `idem_key` to settle it without a copy."""
+    """The write may be saved. Call again with `resume=` this error to settle it."""
 
 
 def _left(deadline):
@@ -49,6 +49,17 @@ def _connect(family, address, deadline):
         sock.close()
         raise
     return sock
+
+
+def _connect_tcp(host, port, deadline):
+    """Tries each address in turn, each with only what is left of one connect budget."""
+    error = OSError(f"{host} has no address")
+    for family, _, _, _, address in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM):
+        try:
+            return _connect(family, address, deadline)
+        except OSError as failed:
+            error = failed
+    raise error
 
 
 def _recv(sock, deadline):
@@ -85,8 +96,8 @@ class Client:
             self._connect = lambda deadline: _connect(socket.AF_VSOCK, address, deadline)
         elif parts.scheme == "http" and parts.hostname in ("127.0.0.1", "localhost", "::1"):
             # The token travels in cleartext, so http takes loopback only.
-            address = (parts.hostname, parts.port or 80)
-            self._connect = lambda deadline: socket.create_connection(address, _left(deadline))
+            host, port = parts.hostname, parts.port or 80
+            self._connect = lambda deadline: _connect_tcp(host, port, deadline)
         else:
             raise ValueError(
                 "url must be unix:///path, vsock://<cid>:<port> or "
@@ -97,14 +108,19 @@ class Client:
     def __repr__(self):
         return f"Client({self._url!r})"
 
-    def append(self, agent, session, turns, idem_key=None):
+    def append(self, agent, session, turns, idem_key=None, resume=None):
         """Appends turns as one batch. Returns the receipt, with `receipt_missing` true
-        when the write is durable but the server could not rebuild its receipt."""
-        key = idem_key or secrets.token_hex(16)
+        when the write is durable but the server could not rebuild its receipt.
+
+        `resume` takes an `OutcomeUnknown` from an earlier call with the same turns. Its
+        key replaces `idem_key`, and the call starts at unknown: only `committed`
+        settles it, never `not_committed`."""
+        key = secrets.token_hex(16) if idem_key is None else idem_key
+        key = resume.idem_key if resume else key
         body = {"agent": agent, "session": session, "idem_key": key, "turns": turns}
         body = json.dumps(body).encode()
         deadline = time.monotonic() + self.retry_deadline
-        state, backoff = None, FIRST_BACKOFF
+        state, backoff = "unknown" if resume else None, FIRST_BACKOFF
         while True:
             sent, _, reply, detail = self._attempt("POST", "/v1/append", body, deadline)
             # A failed connect sent nothing. A transport error or a malformed reply is unclear.

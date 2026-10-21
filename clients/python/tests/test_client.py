@@ -37,6 +37,10 @@ def test_append_retry_and_window(server, listener):
         window = client.window("a", "s", last=10, max_bytes=max_bytes)
         assert [t["content"] for t in window["turns"]] == expect, max_bytes
         assert window["truncated"] is truncated, max_bytes
+    # Only None makes a key. An empty one reaches the server, which refuses it.
+    with pytest.raises(NotCommitted, match="idem_key must be 1 to 128 bytes"):
+        client.append("a", "empty-key", turns("x"), idem_key="")
+    assert contents(client, "empty-key") == []
     since = client.window("a", "s", since_seq=first["seqs"][1], limit=1)["turns"]
     assert [t["seq"] for t in since] == first["seqs"][1:2]
     for url in ("http://10.0.0.1:80", "http://127.0.0.1.evil:1", "https://127.0.0.1:1"):
@@ -89,15 +93,23 @@ def test_unknown_outcome_never_downgrades(server, restart):
         call = pool.submit(client.append, "a", "s", turns("maybe"))
         wait_for(lambda: "POST /v1/append 503" in server.log(), "a not_committed retry")
         assert "POST /v1/append 500" in server.log(), "first answer unknown"
-        if not restart:
+        if restart:
+            time.sleep(1)
+            server.kill()
+            server.start()
+            receipt = call.result()
+        else:
             with pytest.raises(OutcomeUnknown, match="unknown: the write may be saved") as e:
                 call.result()
             assert len(e.value.idem_key) == 32 and TOKEN not in str(e.value)
-            return
-        time.sleep(1)
-        server.kill()
-        server.start()
-        receipt = call.result()
+            # Resuming keeps the uncertainty: the poisoned server's not_committed cannot
+            # clear it. After a restart the same key settles it, from any client.
+            with pytest.raises(OutcomeUnknown):
+                client.append("a", "s", turns("maybe"), resume=e.value)
+            server.kill()
+            server.start()
+            resumed = Client(server.url["unix"], TOKEN)
+            receipt = resumed.append("a", "s", turns("maybe"), resume=e.value)
     assert receipt["outcome"] == "committed" and receipt["deduplicated"] is True
     assert contents(client, "s") == ["maybe"]
 
@@ -110,3 +122,32 @@ def test_deadline_bounds_a_slow_response(server):
         with pytest.raises(OutcomeUnknown, match="unknown: the write may be saved"):
             Client(f"unix://{path}", TOKEN, retry_deadline=2.5).append("a", "s", turns("x"))
         assert time.monotonic() - started < 4
+
+
+def test_connect_budget_spans_every_address(monkeypatch):
+    # localhost resolves to two addresses that never answer. Together they get one
+    # connect budget: the deadline minus the 2 s reserve, 0.5 s here.
+    waits = []
+
+    class Blackhole:
+        def __init__(self, *args):
+            self.timeout = None
+
+        def settimeout(self, timeout):
+            self.timeout = timeout
+
+        def connect(self, address):
+            waits.append(self.timeout)
+            time.sleep(self.timeout)
+            raise TimeoutError("timed out")
+
+        def close(self):
+            pass
+
+    addresses = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (f"192.0.2.{i}", 1)) for i in (1, 2)]
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *args, **kwargs: addresses)
+    monkeypatch.setattr(socket, "socket", Blackhole)
+    started = time.monotonic()
+    with pytest.raises(NotCommitted, match="connect failed"):
+        Client("http://localhost:1", TOKEN, retry_deadline=2.5).append("a", "s", turns("x"))
+    assert time.monotonic() - started < 0.8 and sum(waits) <= 0.5, waits

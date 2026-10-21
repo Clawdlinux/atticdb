@@ -24,7 +24,8 @@ print(client.health())
 - It retries with the same `idem_key` until `retry_deadline` (30 s by default). The deadline bounds connect, send and every read.
 - An attempt sends nothing when connect fails or under 2 s are left, the first attempt included. So a `retry_deadline` under 2 s sends nothing and raises `NotCommitted`.
 - `NotCommitted` means nothing was written. Calling again is safe.
-- `OutcomeUnknown` means the write may be saved. Call again with `error.idem_key` to settle it without a second copy.
+- `OutcomeUnknown` means the write may be saved. Settle it with `client.append(agent, session, turns, resume=error)`, from any `Client`. It reuses the key and stays unknown until a `committed` answer, so it never reports `not_committed` and never writes a second copy.
+- `idem_key=None` makes a new key per call. Any other value, `""` included, is sent as is.
 
 Reads do not retry. Errors and `repr` never show the token.
 
