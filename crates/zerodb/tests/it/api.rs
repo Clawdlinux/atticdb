@@ -273,6 +273,10 @@ fn health_tracks_engine_state() {
         ["x", "y"].map(|c| json!({"role": "user", "content": c.repeat(2_200_000)})).into();
     let too_large = json!({"outcome": "not_committed", "error": "too_large"});
     assert_eq!(unix.a("POST", "/v1/append", Some(&big)), (413, too_large.clone()));
+    // More than 1,024 turns is rejected before the engine encodes them.
+    let mut many = append_body("s", "many", "");
+    many["turns"] = vec![json!({"role": "user", "content": ""}); 1025].into();
+    assert_eq!(unix.a("POST", "/v1/append", Some(&many)), (413, too_large.clone()));
     let head = format!(
         "POST /v1/append HTTP/1.1\r\nAuthorization: Bearer {TOKEN_A}\r\nContent-Length: {}\r\n\r\n",
         (8 << 20) + 1

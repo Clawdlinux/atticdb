@@ -106,9 +106,13 @@ impl Drop for Parsing {
 /// `POST /v1/append`. The raw body is dropped once parsed.
 pub fn append(engine: &Engine, tenant: &str, body: Vec<u8>) -> Response {
     let slot = Parsing::wait();
-    let parsed = serde_json::from_slice(&body)
-        .map_err(|_| "body must be JSON".to_owned())
-        .and_then(parse_append);
+    let value: Result<Value, _> = serde_json::from_slice(&body);
+    // The tape takes at most 1,024 records per batch. Reject more before encoding, which
+    // copies the agent, session and key into every turn outside the parse limit.
+    if value.as_ref().is_ok_and(|v| v["turns"].as_array().is_some_and(|t| t.len() > 1024)) {
+        return Response::json(413, &json!({"outcome": "not_committed", "error": "too_large"}));
+    }
+    let parsed = value.map_err(|_| "body must be JSON".to_owned()).and_then(parse_append);
     drop((slot, body));
     match parsed {
         Ok((agent, session, key, turns)) => {
