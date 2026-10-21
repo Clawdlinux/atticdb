@@ -125,8 +125,8 @@ def test_deadline_bounds_a_slow_response(server):
 
 
 def test_connect_budget_spans_every_address(monkeypatch):
-    # localhost resolves to two addresses that never answer. Together they get one
-    # connect budget: the deadline minus the 2 s reserve, 0.5 s here.
+    # localhost resolves to two loopback addresses that never answer. Together they get
+    # one connect budget: the deadline minus the 2 s reserve, 0.5 s here.
     waits = []
 
     class Blackhole:
@@ -144,10 +144,17 @@ def test_connect_budget_spans_every_address(monkeypatch):
         def close(self):
             pass
 
-    addresses = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (f"192.0.2.{i}", 1)) for i in (1, 2)]
+    addresses = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (f"127.0.0.{i}", 1)) for i in (2, 3)]
     monkeypatch.setattr(socket, "getaddrinfo", lambda *args, **kwargs: addresses)
     monkeypatch.setattr(socket, "socket", Blackhole)
+    client = Client("http://localhost:1", TOKEN, retry_deadline=2.5)
     started = time.monotonic()
     with pytest.raises(NotCommitted, match="connect failed"):
-        Client("http://localhost:1", TOKEN, retry_deadline=2.5).append("a", "s", turns("x"))
+        client.append("a", "s", turns("x"))
     assert time.monotonic() - started < 0.8 and sum(waits) <= 0.5, waits
+    # One resolved address off loopback refuses the name before any connect.
+    addresses[1] = (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.1", 1))
+    waits.clear()
+    with pytest.raises(NotCommitted, match="10.0.0.1 is not loopback"):
+        client.append("a", "s", turns("x"))
+    assert waits == []

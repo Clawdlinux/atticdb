@@ -5,6 +5,7 @@ Writes follow the outcome rule: a call returns a `committed` receipt, raises
 be saved. Only `committed` replaces `unknown`, as in `crates/zerodb/src/outcome.rs`.
 """
 
+import ipaddress
 import json
 import random
 import secrets
@@ -52,9 +53,14 @@ def _connect(family, address, deadline):
 
 
 def _connect_tcp(host, port, deadline):
-    """Tries each address in turn, each with only what is left of one connect budget."""
+    """Tries each address in turn, each with only what is left of one connect budget.
+    Every resolved address must be loopback: the token travels in cleartext."""
     error = OSError(f"{host} has no address")
-    for family, _, _, _, address in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM):
+    infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    for *_, address in infos:
+        if not ipaddress.ip_address(address[0]).is_loopback:
+            raise OSError(f"{address[0]} is not loopback; http sends the token in cleartext")
+    for family, _, _, _, address in infos:
         try:
             return _connect(family, address, deadline)
         except OSError as failed:

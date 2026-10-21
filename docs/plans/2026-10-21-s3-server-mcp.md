@@ -102,7 +102,7 @@ The server needs two facts the engine does not expose yet.
   - JSON file: `{"data_dir": "...", "listen": "127.0.0.1:<port>" or "none", "unix_socket": "...", "unix_socket_group": "...", "tenants": [{"name": "<name>", "token": "<token>"}]}`. Flags override fields. `tenants` is an array, so a duplicate name fails instead of the last JSON key silently winning.
   - Open the file once. Open with `O_NONBLOCK`, so a FIFO cannot block the open. Check the opened handle with `File::metadata` (an `fstat`, so no race with a rename): a regular file, owned by `geteuid()`, no group or other bits (mode & 0o077 == 0). Read the content from that same handle. A failed check names the path and the mode, never any content.
   - `--token-file` for `zerodb mcp` uses the same open-then-fstat check.
-  - Tenant names follow the engine limit (1 to 255 UTF-8 bytes). Tokens are at least 32 bytes. Duplicate tokens fail.
+  - Tenant names follow the engine limit (1 to 255 UTF-8 bytes). Tokens are 32 to 1024 bytes, so the `Authorization` header fits the 16 KiB head (final review correction). Duplicate tokens fail.
   - `Debug` for the config redacts tokens.
   - `zerodb init --config <path> --tenant <name>` writes a new 0600 file (create-new, never overwrite) with one random 32-byte hex token, and prints the token once to stdout.
 - `auth`: the Bearer scheme in the `Authorization` header. Hash the presented token with BLAKE3 and compare against every tenant's hash with `blake3::Hash` equality, visiting all tenants. The tenant comes only from the match. A missing or bad token returns 401 with the same body either way.

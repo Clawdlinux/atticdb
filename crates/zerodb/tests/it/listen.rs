@@ -140,7 +140,7 @@ fn startup_checks() {
                 c.write_config(r#"{"tenants": [{"name": "a", "token": "secret-token"}]}"#, 0o600);
                 vec![]
             },
-            Expect::Fails(1, "at least 32 bytes"),
+            Expect::Fails(1, "32 to 1024 bytes"),
         ),
         (
             "tenants as a map",

@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 
 /// Shortest accepted token, in bytes.
 pub const MIN_TOKEN_BYTES: usize = 32;
+/// Longest accepted token, in bytes. Its `Authorization` header fits the 16 KiB head.
+pub const MAX_TOKEN_BYTES: usize = 1024;
 /// Longest tenant name, in UTF-8 bytes. The engine's limit.
 pub const MAX_TENANT_BYTES: usize = 255;
 const MAX_FILE_BYTES: u64 = 1 << 20;
@@ -23,10 +25,10 @@ const FIELDS: &str = "data_dir, listen, unix_socket, unix_socket_group, tenants"
 pub struct Token(String);
 
 impl Token {
-    /// Accepts at least 32 visible ASCII bytes, which fit an `Authorization` header as is.
+    /// Accepts 32 to 1024 visible ASCII bytes, which fit an `Authorization` header as is.
     pub fn new(text: String) -> Result<Self, &'static str> {
-        if text.len() < MIN_TOKEN_BYTES {
-            return Err("token must be at least 32 bytes");
+        if !(MIN_TOKEN_BYTES..=MAX_TOKEN_BYTES).contains(&text.len()) {
+            return Err("token must be 32 to 1024 bytes");
         }
         if !text.bytes().all(|byte| byte.is_ascii_graphic()) {
             return Err("token must be visible ASCII without spaces");
@@ -259,5 +261,16 @@ mod tests {
         let secret = "secret-token-0123456789abcdefghijkl";
         let config = parse(&format!(r#"{{"tenants": [{{"name": "a", "token": "{secret}"}}]}}"#));
         assert!(!format!("{:?}", config.unwrap()).contains(secret), "Debug redacts tokens");
+        for (bytes, ok) in [(31, false), (32, true), (1024, true), (1025, false)] {
+            let token = "t".repeat(bytes);
+            let config = parse(&format!(r#"{{"tenants": [{{"name": "a", "token": "{token}"}}]}}"#));
+            match config {
+                Ok(_) => assert!(ok, "{bytes}-byte token accepted"),
+                Err(error) => {
+                    assert!(!ok && error.contains("32 to 1024 bytes"), "{bytes}: {error}");
+                    assert!(!error.contains(&token), "{bytes}: the error echoes the token");
+                }
+            }
+        }
     }
 }

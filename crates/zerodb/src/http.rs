@@ -630,11 +630,15 @@ mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
     use proptest::prelude::*;
+    use std::sync::{Arc, Mutex};
     use std::thread;
 
     enum Step {
         Send(Vec<u8>),
         Sleep(u64),
+        /// Waits until the client has read this text, as a real client waits for
+        /// `100 Continue` before it sends the body.
+        Await(&'static str),
     }
 
     struct Run {
@@ -661,25 +665,36 @@ mod tests {
         client_reads: bool,
     ) -> Run {
         let (server, client) = UnixStream::pair().unwrap();
-        let mut writer = client.try_clone().unwrap();
+        let wire = Arc::new(Mutex::new(Vec::new()));
+        let (mut writer, seen) = (client.try_clone().unwrap(), wire.clone());
         let writer = thread::spawn(move || {
             for step in steps {
                 match step {
                     Step::Send(bytes) if writer.write_all(&bytes).is_err() => return,
                     Step::Send(_) => {}
                     Step::Sleep(ms) => thread::sleep(Duration::from_millis(ms)),
+                    Step::Await(text) => {
+                        // Bounded, so a server that never sends it fails the case, not hangs.
+                        let until = Instant::now() + Duration::from_secs(10);
+                        while !String::from_utf8_lossy(&seen.lock().unwrap()).contains(text)
+                            && Instant::now() < until
+                        {
+                            thread::sleep(Duration::from_millis(1));
+                        }
+                    }
                 }
             }
             let _ = writer.shutdown(Shutdown::Write);
         });
-        let read_all = |mut stream: UnixStream| {
-            let mut wire = Vec::new();
-            let _ = stream.read_to_end(&mut wire);
-            wire
+        let read_all = |mut stream: UnixStream, wire: Arc<Mutex<Vec<u8>>>| {
+            let mut chunk = [0; 8192];
+            while let Ok(n @ 1..) = stream.read(&mut chunk) {
+                wire.lock().unwrap().extend_from_slice(&chunk[..n]);
+            }
         };
         let reader = client_reads.then(|| {
-            let stream = client.try_clone().unwrap();
-            thread::spawn(move || read_all(stream))
+            let (stream, wire) = (client.try_clone().unwrap(), wire.clone());
+            thread::spawn(move || read_all(stream, wire))
         });
         let start = Instant::now();
         let mut conn = ServerConn::new(server, limits);
@@ -695,12 +710,13 @@ mod tests {
         }
         let elapsed = start.elapsed();
         drop(conn);
-        let wire = match reader {
+        match reader {
             Some(reader) => reader.join().unwrap(),
-            None => read_all(client),
-        };
+            None => read_all(client, wire.clone()),
+        }
         writer.join().unwrap();
-        Run { bodies, wire: String::from_utf8_lossy(&wire).into_owned(), elapsed, write_errors }
+        let wire = String::from_utf8_lossy(&wire.lock().unwrap()).into_owned();
+        Run { bodies, wire, elapsed, write_errors }
     }
 
     fn statuses(wire: &str) -> Vec<u16> {
@@ -725,6 +741,7 @@ mod tests {
     struct Case {
         name: &'static str,
         input: fn() -> Vec<Step>,
+        limits: fn() -> Limits,
         check: fn(&Head) -> Result<(), Response>,
         reply_bytes: usize,
         client_reads: bool,
@@ -738,6 +755,7 @@ mod tests {
     const BASE: Case = Case {
         name: "",
         input: Vec::new,
+        limits: relaxed,
         check: accept,
         reply_bytes: 2,
         client_reads: true,
@@ -798,7 +816,7 @@ mod tests {
             input: || {
                 let mut steps =
                     send("POST / HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 4\r\n\r\n");
-                steps.extend([Step::Sleep(20), Step::Send(b"body".to_vec())]);
+                steps.extend([Step::Await("100 Continue"), Step::Send(b"body".to_vec())]);
                 steps
             },
             bodies: &[b"body"],
@@ -991,6 +1009,7 @@ mod tests {
         },
         Case {
             name: "slow head hits the total head deadline",
+            limits: || Limits { head_timeout: SHORT, ..relaxed() },
             input: || {
                 trickle(
                     "GET / HTTP/1.1\r\nHost: localhost\r\nX-Slow: aaaaaaaaaaaaaaaaaaaa\r\n\r\n",
@@ -1002,6 +1021,7 @@ mod tests {
         },
         Case {
             name: "slow body hits the total body deadline",
+            limits: || Limits { body_timeout: SHORT, ..relaxed() },
             input: || {
                 let mut steps = send("POST / HTTP/1.1\r\nContent-Length: 60\r\n\r\n");
                 steps.extend(trickle(&"b".repeat(60), 10));
@@ -1012,6 +1032,7 @@ mod tests {
         },
         Case {
             name: "idle keep-alive hits the idle deadline",
+            limits: || Limits { idle_timeout: SHORT, ..relaxed() },
             input: || {
                 let mut steps = send("GET / HTTP/1.1\r\n\r\n");
                 steps.push(Step::Sleep(800));
@@ -1024,6 +1045,7 @@ mod tests {
         },
         Case {
             name: "unread response hits the write deadline",
+            limits: || Limits { write_timeout: SHORT, ..relaxed() },
             input: || send("GET / HTTP/1.1\r\n\r\n"),
             reply_bytes: 4 << 20,
             client_reads: false,
@@ -1035,18 +1057,13 @@ mod tests {
         },
     ];
 
-    fn test_limits() -> Limits {
-        let short = Duration::from_millis(150);
-        Limits {
-            body_bytes: 64,
-            head_timeout: short,
-            body_timeout: short,
-            idle_timeout: short,
-            write_timeout: short,
-            linger: Duration::from_millis(20),
-            ..Limits::default()
-        }
+    /// The published deadlines. A case about one deadline shortens only that one to
+    /// [`SHORT`], so a thread delayed under load cannot fail it on another deadline.
+    fn relaxed() -> Limits {
+        Limits { body_bytes: 64, linger: Duration::from_millis(20), ..Limits::default() }
     }
+
+    const SHORT: Duration = Duration::from_millis(150);
 
     #[test]
     fn framing_accepts_and_rejects() {
@@ -1067,8 +1084,13 @@ mod tests {
             "published deadlines"
         );
         for case in CASES {
-            let run =
-                run(test_limits(), (case.input)(), case.check, case.reply_bytes, case.client_reads);
+            let run = run(
+                (case.limits)(),
+                (case.input)(),
+                case.check,
+                case.reply_bytes,
+                case.client_reads,
+            );
             let bodies: Vec<&[u8]> = run.bodies.iter().map(Vec::as_slice).collect();
             assert_eq!(bodies, case.bodies, "{}: bodies", case.name);
             assert_eq!(statuses(&run.wire), case.statuses, "{}: statuses", case.name);
@@ -1089,7 +1111,7 @@ mod tests {
     fn client_reads_one_response_over_a_socket() {
         let (mut client, server) = UnixStream::pair().unwrap();
         let server = thread::spawn(move || {
-            let mut conn = ServerConn::new(server, test_limits());
+            let mut conn = ServerConn::new(server, relaxed());
             let (request, ()) = conn.next_request(accept).unwrap();
             let reply = json!({"echo": String::from_utf8(request.body).unwrap()});
             conn.respond(&Response::json(200, &reply)).unwrap();

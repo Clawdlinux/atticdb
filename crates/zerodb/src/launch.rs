@@ -9,7 +9,7 @@ use crate::http::{self, Stream};
 use serde_json::Value;
 use std::fs::OpenOptions;
 use std::io::{self, ErrorKind, Read};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
@@ -159,13 +159,25 @@ impl Launch {
 
 fn connect_tcp(authority: &str, deadline: Instant) -> io::Result<TcpStream> {
     let mut error = io::Error::new(ErrorKind::NotFound, format!("{authority} has no address"));
-    for addr in authority.to_socket_addrs()? {
+    for addr in loopback(authority.to_socket_addrs()?.collect())? {
         match TcpStream::connect_timeout(&addr, http::remaining(deadline)?) {
             Ok(stream) => return Ok(stream),
             Err(next) => error = next,
         }
     }
     Err(error)
+}
+
+/// The resolved addresses of an `http` URL, refused unless all are loopback: the token
+/// travels in cleartext, and a name such as `localhost` could resolve anywhere.
+fn loopback(addrs: Vec<SocketAddr>) -> io::Result<Vec<SocketAddr>> {
+    match addrs.iter().find(|addr| !addr.ip().is_loopback()) {
+        Some(addr) => Err(io::Error::new(
+            ErrorKind::PermissionDenied,
+            format!("{addr} is not loopback; http sends the token in cleartext"),
+        )),
+        None => Ok(addrs),
+    }
 }
 
 /// Connects by `deadline`. A blocking connect waits while the listen backlog is full;
@@ -243,5 +255,23 @@ fn discover(dir: &Path, deadline: Instant) -> Result<UnixStream, String> {
         Ok(stream)
     } else {
         Err(format!("{} is not instance {instance} from LOCK", socket.display()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    #[test]
+    fn http_connects_only_to_loopback_addresses() {
+        for (addrs, ok) in [
+            (&["127.0.0.1:1", "[::1]:1"][..], true),
+            (&["127.0.0.1:1", "10.0.0.1:1"][..], false),
+            (&["[::ffff:192.0.2.1]:1"][..], false),
+        ] {
+            let parsed = addrs.iter().map(|addr| addr.parse().unwrap()).collect();
+            let result = super::loopback(parsed);
+            assert_eq!(result.is_ok(), ok, "{addrs:?}: {result:?}");
+        }
     }
 }

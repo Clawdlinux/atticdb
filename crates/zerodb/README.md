@@ -12,7 +12,7 @@ zerodb recover --truncate-at <lsn> --data-dir ./data
 
 The config is JSON: `{"data_dir", "listen", "unix_socket", "unix_socket_group", "tenants": [{"name", "token"}]}`.
 Flags override fields. It must be a regular file owned by you with no group or other bits.
-Tenant names are 1 to 255 bytes. Tokens are at least 32 bytes. Duplicate names or tokens fail.
+Tenant names are 1 to 255 bytes. Tokens are 32 to 1024 bytes of visible ASCII, so the `Authorization` header fits the 16 KiB request head. Duplicate names or tokens fail.
 
 ## `zerodb serve`
 
