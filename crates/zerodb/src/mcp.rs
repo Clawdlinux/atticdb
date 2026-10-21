@@ -302,17 +302,17 @@ fn describe(reply: &Value) -> String {
     }
 }
 
+/// One `structuredContent` shape. Receipt fields are null when the server had no receipt.
 fn committed(reply: &Value) -> Value {
-    let (text, structured) = match reply["seqs"].get(0) {
-        Some(seq) => (
-            format!("committed seq={seq}"),
-            json!({"seq": seq, "lsn": reply["last_lsn"], "deduplicated": reply["deduplicated"]}),
-        ),
-        None => (
-            "committed, receipt unavailable".into(),
-            json!({"committed": true, "seq": null, "lsn": null, "deduplicated": null}),
-        ),
+    let seq = &reply["seqs"][0];
+    let text = if seq.is_null() {
+        "committed, receipt unavailable".into()
+    } else {
+        format!("committed seq={seq}")
     };
+    let (lsn, deduplicated) = (&reply["last_lsn"], &reply["deduplicated"]);
+    let structured =
+        json!({"committed": true, "seq": seq, "lsn": lsn, "deduplicated": deduplicated});
     json!({"content": [{"type": "text", "text": text}], "structuredContent": structured})
 }
 

@@ -376,7 +376,9 @@ pub fn recover(dir: &Path, lsn: u64) -> u8 {
             0
         }
         Err(error) => {
-            eprintln!("zerodb: recover {}: {}", dir.display(), error.to_string().trim_end());
+            let text = error.to_string();
+            let _ =
+                writeln!(io::stderr(), "zerodb: recover {}: {}", dir.display(), text.trim_end());
             if matches!(error, Error::DataDirLocked { .. }) {
                 EXIT_LOCKED
             } else {

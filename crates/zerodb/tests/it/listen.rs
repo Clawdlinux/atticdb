@@ -67,8 +67,8 @@ impl Ctx {
 enum Expect {
     /// Exit code and a fragment of stderr.
     Fails(i32, &'static str),
-    /// Serves, and the staging directories of these other socket names still exist.
-    Serves(&'static [&'static str]),
+    /// Serves, and leaves no staging directory behind.
+    Serves,
     /// `zerodb recover` refuses while the server runs, then cuts after the first write.
     Recovers,
     /// Two servers start at once with one socket path: one serves, the other fails.
@@ -81,11 +81,6 @@ enum Expect {
 
 const TENANT: &str = r#"{"name": "a", "token": "secret-token-0123456789abcdefghijkl"}"#;
 const TENANT_B: &str = r#"{"name": "b", "token": "secret-token-0123456789abcdefghijkX"}"#;
-
-/// A staging directory name as an earlier scheme derived it from the socket file name.
-fn staging(socket: &str) -> String {
-    format!(".zs.{}", &blake3::hash(socket.as_bytes()).to_hex()[..8])
-}
 
 /// Drives the real binary through startup. Every row starts from a fresh directory with
 /// a config made by `zerodb init`, and a data directory the server creates.
@@ -189,12 +184,17 @@ fn startup_checks() {
             Expect::Fails(1, "http sends the token in cleartext"),
         ),
         (
+            "mcp url without a port",
+            |_| ["mcp", "--url", "http://127.0.0.1"].map(Into::into).into(),
+            Expect::Fails(1, "needs an explicit :<port>"),
+        ),
+        (
             "non-loopback tcp",
             |_| vec!["--listen".into(), "0.0.0.0:0".into()],
             Expect::Fails(1, zerodb::listen::NEEDS_TLS),
         ),
-        ("socket mode 0600", |_| vec![], Expect::Serves(&[])),
-        ("no tcp", |_| vec!["--listen".into(), "none".into()], Expect::Serves(&[])),
+        ("socket mode 0600", |_| vec![], Expect::Serves),
+        ("no tcp", |_| vec!["--listen".into(), "none".into()], Expect::Serves),
         (
             "two tenants",
             |c| {
@@ -202,7 +202,7 @@ fn startup_checks() {
                 c.write_config(&format!(r#"{{"tenants": [{tenant}, {TENANT_B}]}}"#), 0o600);
                 vec![]
             },
-            Expect::Serves(&[]),
+            Expect::Serves,
         ),
         (
             "socket group 0660",
@@ -210,7 +210,7 @@ fn startup_checks() {
                 let gid = std::fs::metadata(&c.dir.0).unwrap().gid();
                 vec!["--unix-socket-group".into(), gid.to_string()]
             },
-            Expect::Serves(&[]),
+            Expect::Serves,
         ),
         (
             "stale socket from a killed server",
@@ -218,7 +218,7 @@ fn startup_checks() {
                 c.stale_socket();
                 vec![]
             },
-            Expect::Serves(&[]),
+            Expect::Serves,
         ),
         (
             "live socket of another server",
@@ -285,20 +285,6 @@ fn startup_checks() {
                 vec!["--unix-socket".into(), c.socket.to_str().unwrap().into()]
             },
             Expect::Fails(1, "sun_path limit; set --unix-socket to a shorter path"),
-        ),
-        (
-            "leftover staging directories",
-            |c| {
-                c.private_data_dir(0o700);
-                // Left by killed servers. Staging names are per start, so none is ours to
-                // delete: it may belong to a server starting on another data directory.
-                for name in [staging("zerodb.sock"), staging("other.sock")] {
-                    std::fs::create_dir(c.data.join(&name)).unwrap();
-                    std::fs::write(c.data.join(name).join("s"), "").unwrap();
-                }
-                vec![]
-            },
-            Expect::Serves(&["zerodb.sock", "other.sock"]),
         ),
         (
             "second serve on a locked data dir",
@@ -374,7 +360,7 @@ fn startup_checks() {
                 let health = json!({"status": "ok", "instance": instance});
                 assert_eq!(unix.call(None, None, "GET", "/healthz", None), (200, health), "{case}");
             }
-            Expect::Serves(kept) => {
+            Expect::Serves => {
                 let (instance, tcp) = server.ready();
                 let data = std::fs::metadata(&ctx.data).unwrap();
                 assert_eq!(data.mode() & 0o777, 0o700, "{case}: data directory mode");
@@ -394,15 +380,13 @@ fn startup_checks() {
                 assert_eq!(unix.call(None, None, "GET", "/healthz", None), (200, health), "{case}");
                 let via = tcp.map_or(unix.clone(), Via::Tcp);
                 assert_eq!(ctx.append(&via, "k").0, 200, "{case}: the init token works");
-                let mut left: Vec<String> = std::fs::read_dir(&ctx.data)
+                let left: Vec<String> = std::fs::read_dir(&ctx.data)
                     .unwrap()
                     .flatten()
                     .map(|entry| entry.file_name().to_string_lossy().into_owned())
                     .filter(|name| name.starts_with(".zs."))
                     .collect();
-                left.sort();
-                let kept: Vec<String> = kept.iter().map(|name| staging(name)).collect();
-                assert_eq!(left, kept, "{case}: staging directories");
+                assert!(left.is_empty(), "{case}: staging directories {left:?}");
             }
             Expect::Recovers => {
                 server.ready();
@@ -433,7 +417,7 @@ fn startup_checks() {
                     std::fs::remove_file(&ctx.socket).unwrap();
                     std::os::unix::net::UnixListener::bind(&ctx.socket).unwrap()
                 });
-                std::fs::write(ctx.data.join("FAULT-SYNC-ONCE"), "").unwrap();
+                std::fs::write(ctx.data.join(zerodb::fault::TRIGGER), "").unwrap();
                 let unknown = json!({"outcome": "unknown", "error": "storage"});
                 assert_eq!(ctx.append(&Via::Tcp(tcp.unwrap()), "poison"), (500, unknown), "{case}");
                 let (status, stderr) = server.wait();

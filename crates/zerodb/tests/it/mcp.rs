@@ -23,6 +23,9 @@ fn assert_committed(result: &Value, case: &str) -> u64 {
         result["structuredContent"]["seq"].as_u64().unwrap_or_else(|| panic!("{case}: {result}"));
     assert_eq!(text(result), format!("committed seq={seq}"), "{case}");
     assert!(result["structuredContent"]["lsn"].is_u64() && result["isError"].is_null(), "{case}");
+    let mut keys: Vec<&String> = result["structuredContent"].as_object().unwrap().keys().collect();
+    keys.sort();
+    assert_eq!(keys, ["committed", "deduplicated", "lsn", "seq"], "{case}: one shape");
     seq
 }
 
@@ -302,9 +305,9 @@ fn launch_race_starts_one_server() {
         ),
         (
             "a killed server's stale socket and leftover staging directory",
-            |_, data, _| {
-                let name = zerodb::listen::SOCKET_NAME.as_bytes();
-                let staging = data.join(format!(".zs.{}", &blake3::hash(name).to_hex()[..8]));
+            |_, data, instance| {
+                // A start killed while installing leaves `.zs.<first 8 hex of its instance>`.
+                let staging = data.join(format!(".zs.{}", &instance[..8]));
                 std::fs::create_dir(&staging).unwrap();
                 std::fs::write(staging.join("s"), "").unwrap();
                 (None, vec![])
@@ -353,7 +356,7 @@ fn launch_race_starts_one_server() {
         let target = "/v1/window?agent=x&session=big&last=1&max_bytes=8388608";
         write!(slow, "GET {target} HTTP/1.1\r\nAuthorization: Bearer {token}\r\n\r\n").unwrap();
         slow.read_exact(&mut [0]).unwrap();
-        std::fs::write(data.join("FAULT-SYNC-ONCE"), "").unwrap();
+        std::fs::write(data.join(zerodb::fault::TRIGGER), "").unwrap();
         let poison = support::append_body("s", "poison", "p");
         let unknown = json!({"outcome": "unknown", "error": "storage"});
         assert_eq!(
@@ -400,7 +403,7 @@ fn unknown_outcome_never_downgrades() {
         Mcp::start(&dir.0, &["--config", "c.json", "--tenant", "a", "--data-dir", "d"], None);
     mcp.handshake();
     assert_committed(&mcp.call("memory_append", json!({"content": "warm"})), "warm");
-    std::fs::write(data.join("FAULT-SYNC-ONCE"), "").unwrap();
+    std::fs::write(data.join(zerodb::fault::TRIGGER), "").unwrap();
     let result = mcp.call("memory_append", json!({"content": "x"}));
     assert_committed(&result, "after the poison exit");
     assert_eq!(result["structuredContent"]["deduplicated"], true, "{result}");
@@ -423,7 +426,7 @@ fn unknown_outcome_never_downgrades() {
         let args = ["--url", &url, "--retry-deadline", deadline];
         let mut mcp = Mcp::start(&dir.0, &args, Some(&token));
         mcp.handshake();
-        std::fs::write(data.join("FAULT-SYNC-ONCE"), "").unwrap();
+        std::fs::write(data.join(zerodb::fault::TRIGGER), "").unwrap();
         mcp.post_call("memory_append", json!({"content": case}));
         let (unknown, rejected) = ("POST /v1/append 500", "POST /v1/append 503");
         wait_for("a retry gets not_committed", || server.stderr().contains(rejected));

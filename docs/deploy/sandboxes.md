@@ -20,11 +20,17 @@ zerodb serve --config /etc/zerodb/zerodb.json --data-dir /var/lib/zerodb \
 The socket's directory must be owned by the server's user and not writable by group or others.
 The socket is mode 0600. With `--unix-socket-group` it is 0660 with that group.
 A client process needs the server's uid, or membership in that group.
+Give sandboxes their own uid and the socket group, not the server's uid.
 Group names come from `/etc/group`. For LDAP or other NSS groups, pass the numeric gid.
 
 Share the directory, never the socket file.
 A restarted server installs a new socket file at the same path.
 A hard link or a file bind mount keeps pointing at the old, dead one.
+
+Mount the directory read-only in every sandbox.
+With a writable mount and the server's uid, a sandbox process can unlink the socket and bind its own.
+It can then copy the public instance id and collect other clients' tokens.
+A read-only mount still allows `connect(2)`, and the host still replaces the socket on restart.
 
 ## Firecracker
 
@@ -58,6 +64,7 @@ Per VM, before you start its jailer:
 root=/srv/jailer/firecracker/vm1/root
 mkdir -p "$root/zerodb"
 mount --bind /run/zerodb "$root/zerodb"
+mount -o remount,bind,ro "$root/zerodb"
 ln -s /zerodb/zerodb.sock "$root/v.sock_5252"   # the VM's uds_path is /v.sock
 ```
 
@@ -82,18 +89,18 @@ With `--url`, `zerodb mcp` never starts a server and skips the `LOCK` instance c
 
 ## Containers (runc)
 
-A container shares the host kernel. Mount the socket directory and use `unix://`:
+A container shares the host kernel. Mount the socket directory read-only and use `unix://`:
 
 ```sh
-docker run -v /run/zerodb:/run/zerodb <your agent image>
+docker run -v /run/zerodb:/run/zerodb:ro --user <agent uid> --group-add <agents gid> <your agent image>
 # inside: zerodb mcp --url unix:///run/zerodb/zerodb.sock
 ```
 
-Run the process as the server's uid, or with the socket group.
+Run the process with its own uid and the socket group.
 
 ## gVisor
 
-Mount the socket directory as for runc. Also start `runsc` with `--host-uds=open`.
+Mount the socket directory read-only as for runc. Also start `runsc` with `--host-uds=open`.
 The default is `none`, which blocks `connect(2)` to host Unix sockets.
 Source: [runsc/config/flags.go](https://github.com/google/gvisor/blob/master/runsc/config/flags.go) and [config.go](https://github.com/google/gvisor/blob/master/runsc/config/config.go), `HostUDS`.
 

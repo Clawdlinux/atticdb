@@ -40,6 +40,10 @@ impl Url {
         }
         match text.strip_prefix("http://").map(|rest| rest.trim_end_matches('/')) {
             Some(authority) if crate::api::loopback_host(authority.as_bytes()) => {
+                // Without a port every connect would fail until the deadline.
+                if !authority.trim_start_matches("[::1]").contains(':') {
+                    return Err(format!("url {text} needs an explicit :<port>"));
+                }
                 Ok(Self::Tcp(authority.into()))
             }
             _ => Err("url must be unix:///path or http://<127.0.0.1, localhost or [::1]>:<port>; \
