@@ -876,19 +876,38 @@ fn checkpoints_advance_while_tiny_budget_writers_append_continuously() {
     let barrier = Barrier::new(5);
     let active = std::sync::atomic::AtomicUsize::new(4);
     let acked = AtomicU64::new(0);
+    let retries = AtomicU64::new(0);
     std::thread::scope(|threads| {
         for thread in 0..4 {
             let engine = &engine;
             let barrier = &barrier;
             let active = &active;
             let acked = &acked;
+            let retries = &retries;
             threads.spawn(move || {
                 barrier.wait();
+                // Other writers can refill the 2 KiB budget between the engine's flush and its
+                // one retry. That rejection is documented back-pressure, so retry it like a client.
                 let result = (|| -> Result<(), zerodb_core::EngineError> {
                     for i in 0..128 {
                         let session = format!("{thread}-{i}");
-                        let receipt =
-                            engine.append(&scope(&session), vec![turn(i)], Some("key"))?;
+                        let mut attempts = 0;
+                        let receipt = loop {
+                            match engine.append(&scope(&session), vec![turn(i)], Some("key")) {
+                                Err(error)
+                                    if matches!(
+                                        error.kind,
+                                        ErrorKind::ResourceExhausted("hot_pages")
+                                    ) && attempts < 32 =>
+                                {
+                                    assert_eq!(error.outcome, Outcome::NotCommitted);
+                                    attempts += 1;
+                                    retries.fetch_add(1, Ordering::Relaxed);
+                                    std::thread::yield_now();
+                                }
+                                result => break result?,
+                            }
+                        };
                         acked.fetch_max(receipt.last_lsn, Ordering::Release);
                     }
                     Ok(())
@@ -917,6 +936,7 @@ fn checkpoints_advance_while_tiny_budget_writers_append_continuously() {
             assert!(advances > 1, "checkpoints did not advance under load");
         });
     });
+    eprintln!("hot_pages retries: {}", retries.load(Ordering::Relaxed));
     assert_eq!(engine.checkpoint().unwrap(), acked.load(Ordering::Acquire));
     for thread in 0..4 {
         for i in 0..128 {
