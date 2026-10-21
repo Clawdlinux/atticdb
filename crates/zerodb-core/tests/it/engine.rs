@@ -14,7 +14,7 @@ use zerodb_tape::{Io, Kind, SimDisk, Tape};
 #[test]
 fn windows_are_dense_and_read_cost_depends_only_on_returned_turns() {
     let disk = Arc::new(SimDisk::new(1));
-    let engine = open(disk, options());
+    let engine = open(disk.clone(), options());
     let scope = scope("s");
     let mut written = 0;
     for boundary in [1, 16, 17, 5000] {
@@ -74,6 +74,17 @@ fn windows_are_dense_and_read_cost_depends_only_on_returned_turns() {
         let reads = engine.metrics().unwrap().window_reads - before;
         assert_eq!(reads, got.len() as u64 + u64::from(truncated), "case: {case}");
     }
+    // A huge `last` with no budget after a reopen reads one turn and loads only the
+    // newest index page, not one slot per requested turn.
+    engine.checkpoint().unwrap();
+    drop(engine);
+    let engine = open(disk, options());
+    let before = engine.metrics().unwrap();
+    let window = engine.window_budget(&scope, WindowQuery::Last(1_000_000), 0).unwrap();
+    assert!(window.turns.is_empty() && window.truncated);
+    let after = engine.metrics().unwrap();
+    assert_eq!(after.window_reads - before.window_reads, 1, "one tape read");
+    assert!(after.hot_page_bytes - before.hot_page_bytes <= 4096 * 8, "{after:?}");
 }
 
 #[test]

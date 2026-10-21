@@ -539,34 +539,27 @@ impl Engine {
             }
         };
         drop(state);
-        let mut slots = Vec::new();
-        let mut seq = start;
-        while seq < end {
-            let (page, offset) = address(seq);
-            let loaded = self.load_page(&key, page)?;
-            let available = loaded
-                .len()
-                .checked_sub(offset)
-                .ok_or_else(|| EngineError::rejected(ErrorKind::CorruptIndex))?;
-            let count = (end - seq).min(available as u64) as usize;
-            if count == 0 {
-                return Err(EngineError::rejected(ErrorKind::CorruptIndex));
-            }
-            slots.extend_from_slice(&loaded[offset..offset + count]);
-            seq += count as u64;
-        }
-        // Session LSNs grow with seq, so turns past the snapshot form a suffix.
-        let visible = slots.iter().position(|&lsn| lsn > snapshot).unwrap_or(slots.len());
-        slots.truncate(visible);
-        let order: Box<dyn Iterator<Item = usize>> = match query {
-            WindowQuery::Last(_) => Box::new((0..slots.len()).rev()),
-            WindowQuery::Since { .. } => Box::new(0..slots.len()),
+        // Lazy, in query order: a budget stop loads no further pages and reads no more turns.
+        let seqs: Box<dyn Iterator<Item = u64>> = match query {
+            WindowQuery::Last(_) => Box::new((start..end).rev()),
+            WindowQuery::Since { .. } => Box::new(start..end),
         };
-        let mut turns = Vec::with_capacity(slots.len());
+        let mut turns = Vec::with_capacity((end - start).min(64) as usize);
         let mut bytes = 0usize;
         let mut truncated = false;
-        for offset in order {
-            let lsn = slots[offset];
+        for seq in seqs {
+            let (page, offset) = address(seq);
+            let lsn = *self
+                .load_page(&key, page)?
+                .get(offset)
+                .ok_or_else(|| EngineError::rejected(ErrorKind::CorruptIndex))?;
+            // Session LSNs grow with seq, so turns past the snapshot form a suffix.
+            if lsn > snapshot {
+                match query {
+                    WindowQuery::Last(_) => continue,
+                    WindowQuery::Since { .. } => break,
+                }
+            }
             self.reads.fetch_add(1, Ordering::Relaxed);
             let frame = self
                 .tape
@@ -578,7 +571,7 @@ impl Engine {
                 || frame.header.tenant_id != tenant
                 || decoded.agent_id != scope.agent
                 || decoded.session_id != scope.session
-                || decoded.seq != start + offset as u64
+                || decoded.seq != seq
             {
                 return Err(EngineError::rejected(ErrorKind::CorruptIndex));
             }
