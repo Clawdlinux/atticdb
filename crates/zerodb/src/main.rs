@@ -14,6 +14,8 @@ const USAGE: &str = "usage:
                [--unix-socket-group <gid or name>] [--exit-on-poison]
   zerodb recover --truncate-at <lsn> --data-dir <dir>
   zerodb stats --url unix:///path | --data-dir <dir>
+  zerodb load --url unix:///path|http://127.0.0.1:<port> [--token-file <path>] [--writers <n>]
+              [--turns <n>] [--batch <n>] [--size <bytes>]
   zerodb mcp [--url unix:///path|http://127.0.0.1:<port>] [--data-dir <dir>] [--config <path>]
              [--tenant <name>] [--token-file <path>] [--agent <name>] [--session <name>]
              [--retry-deadline <n>s|<n>ms]
@@ -32,6 +34,10 @@ fn main() -> ExitCode {
             .and_then(serve),
             "recover" => flags(rest, &["--truncate-at", "--data-dir"], &[]).and_then(recover),
             "stats" => flags(rest, &["--url", "--data-dir"], &[]).and_then(stats),
+            "load" => {
+                let valued = ["--url", "--token-file", "--writers", "--turns", "--batch", "--size"];
+                flags(rest, &valued, &[]).and_then(load)
+            }
             "mcp" => {
                 let valued = ["--url", "--data-dir", "--config", "--tenant", "--token-file"];
                 let more = ["--agent", "--session", "--retry-deadline"];
@@ -119,4 +125,33 @@ fn stats(mut flags: HashMap<String, String>) -> Option<u8> {
 fn usage(message: &str) -> u8 {
     eprintln!("zerodb: {message}");
     2
+}
+
+fn load(mut flags: HashMap<String, String>) -> Option<u8> {
+    let mut number = |name: &str, default: usize| match flags.remove(name) {
+        Some(text) => text.parse().ok().filter(|n| *n > 0),
+        None => Some(default),
+    };
+    let (writers, turns) = (number("--writers", 1)?, number("--turns", 10_000)?);
+    let (batch, size) = (number("--batch", 1)?, number("--size", 256)?);
+    // At most the server's connection cap and the tape's batch cap.
+    let split = writers.checked_mul(batch).filter(|n| turns % n == 0);
+    if writers > zerodb::serve::MAX_CONNECTIONS || batch > 1024 || split.is_none() {
+        let rule = "--turns must divide by --writers * --batch; writers <= 256, batch <= 1024";
+        return Some(usage(rule));
+    }
+    let url = match Url::parse(&flags.remove("--url")?) {
+        Ok(url) => url,
+        Err(error) => return Some(usage(&error)),
+    };
+    let token = match flags.remove("--token-file") {
+        Some(path) => zerodb::config::read_token_file(Path::new(&path)),
+        None => std::env::var(zerodb::mcp::TOKEN_ENV)
+            .map_err(|_| format!("set {} or --token-file", zerodb::mcp::TOKEN_ENV))
+            .and_then(|text| zerodb::config::Token::new(text).map_err(str::to_owned)),
+    };
+    match token {
+        Ok(token) => Some(zerodb::ops::load(url, &token, writers, turns, batch, size)),
+        Err(error) => Some(usage(&error)),
+    }
 }

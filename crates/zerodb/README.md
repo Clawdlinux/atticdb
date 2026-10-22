@@ -48,6 +48,7 @@ Send `Authorization: Bearer <token>`. The token picks the tenant. On TCP the `Ho
 | `GET /v1/stats` | Unix socket only, no token | One flat object: `instance`, `health`, `durable_lsn`, tenant and fact counts, writer groups, checkpoint and lock timings, tape-index memory. Counters cover this open |
 
 `/v1/stats` counts activity across every tenant, so no tenant token can read it. Whoever can open the socket can, which the socket's mode and `--unix-socket-group` decide. On TCP it is 404 behind the token.
+`zerodb load --url <unix or http url> --token-file <path> --writers W --turns N [--batch B] [--size S]` measures the server the way agents write. Each writer keeps one connection and waits for each ack before the next append, to its own session. It prints turns/s and p50, p99, p99.9 and max ack latency as `key=value` lines. Defaults: 1 writer, 10,000 turns, batch 1, 256-byte turns. The token can also come from `ZERODB_TOKEN`. `--turns` must divide by `--writers * --batch`. Exit 0, 1 on a failed append, 2 on bad flags.
 `zerodb stats --data-dir <dir>` or `--url unix:///path` prints it as sorted `key=value` lines for grep. It connects once and never starts a server. Exit 0, 1 when no server answers, 2 on bad flags.
 
 - `role` is `system`, `user`, `assistant` or `tool`. `meta` is a JSON object, at most 64 KiB. `idem_key` is required, 1 to 128 bytes.

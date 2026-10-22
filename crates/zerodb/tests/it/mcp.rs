@@ -1,9 +1,10 @@
-use crate::support::{self, init, init_config, kill_holder, text, Dir, Holders, Mcp, TOKEN_A};
+use crate::support::{
+    self, init, init_config, kill_holder, private_file, text, Dir, Holders, Mcp, TOKEN_A,
+};
 use serde_json::{json, Value};
-use std::fs::File;
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -46,13 +47,6 @@ fn wait_for(what: &str, done: impl Fn() -> bool) {
 }
 
 /// Writes a new mode 0600 file in `dir` and returns its path.
-fn private_file(dir: &Dir, name: &str, content: &str) -> String {
-    let path = dir.0.join(name);
-    let mut file = File::options().write(true).create_new(true).mode(0o600).open(&path).unwrap();
-    file.write_all(content.as_bytes()).unwrap();
-    path.to_str().unwrap().to_owned()
-}
-
 fn lock_field(data: &Path, name: &str) -> String {
     let lock = std::fs::read_to_string(data.join("LOCK")).unwrap();
     lock.split(' ').find_map(|field| field.strip_prefix(name)).unwrap().to_owned()
