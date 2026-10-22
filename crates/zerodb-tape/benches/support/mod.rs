@@ -69,6 +69,7 @@ pub struct Bare {
     segment: u64,
     offset: u64,
     dirty: bool,
+    wake: Option<std::sync::mpsc::SyncSender<()>>,
     refill: Option<std::thread::JoinHandle<()>>,
 }
 impl Bare {
@@ -76,7 +77,23 @@ impl Bare {
     pub fn new(dir: &Path) -> Self {
         let file = Self::segment(dir, 0);
         Self::fill(dir);
-        Self { file, dir: dir.to_owned(), segment: 0, offset: 0, dirty: false, refill: None }
+        // One pending wake, like the tape's maintenance worker, so no refill request is lost.
+        let (wake, woken) = std::sync::mpsc::sync_channel(1);
+        let owned = dir.to_owned();
+        let refill = std::thread::spawn(move || {
+            while woken.recv().is_ok() {
+                Self::fill(&owned);
+            }
+        });
+        Self {
+            file,
+            dir: dir.to_owned(),
+            segment: 0,
+            offset: 0,
+            dirty: false,
+            wake: Some(wake),
+            refill: Some(refill),
+        }
     }
     #[track_caller]
     fn fill(dir: &Path) {
@@ -117,12 +134,8 @@ impl Bare {
             self.segment += 1;
             self.file = Self::segment(&self.dir, self.segment);
             self.offset = 0;
-            if self.refill.as_ref().is_none_or(|refill| refill.is_finished()) {
-                if let Some(refill) = self.refill.take() {
-                    refill.join().unwrap();
-                }
-                let dir = self.dir.clone();
-                self.refill = Some(std::thread::spawn(move || Self::fill(&dir)));
+            if let Some(wake) = &self.wake {
+                let _ = wake.try_send(());
             }
         }
         self.file.write_all(bytes).unwrap();
@@ -139,6 +152,7 @@ impl Bare {
 }
 impl Drop for Bare {
     fn drop(&mut self) {
+        self.wake.take();
         if let Some(refill) = self.refill.take() {
             let _ = refill.join();
         }
