@@ -496,9 +496,7 @@ fn facts(reply: &Value) -> Value {
         .collect();
     let next = reply["next"].as_str();
     if text.is_empty() {
-        let empty =
-            if next.is_some() { "no current facts in this page" } else { "no current facts" };
-        text.push(empty.into());
+        text.push("no current facts".into());
     }
     if let Some(next) = next {
         text.push(format!("more: call again with after={next}"));

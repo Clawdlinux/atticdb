@@ -67,32 +67,21 @@ def test_append_retry_and_window(server, listener):
 
 @pytest.mark.parametrize("listener", ["http", "unix"])
 def test_fact_retry_conflict_and_list(server, listener):
+    # Client wiring only. The HTTP tests cover history shapes and paging.
     client = Client(server.url[listener], TOKEN)
     key = "repo/a b+\u00e9"
     put = lambda: client.fact_put(key, "one", meta={"k": 1}, agent="py", idem_key="p1")
-    first = put()
-    assert first["outcome"] == "committed" and first["deduplicated"] is False
-    assert first["receipt_missing"] is False and first["lsn"] > 0
-    again = put()
-    assert again["deduplicated"] is True and again["receipt_missing"] is False
+    first, again = put(), put()
+    assert first["deduplicated"] is False and again["deduplicated"] is True
+    assert first["receipt_missing"] is False and again["receipt_missing"] is False
     assert [again[k] for k in ("txn", "lsn")] == [first[k] for k in ("txn", "lsn")]
     with pytest.raises(Conflict, match=r"\(409 conflict\)"):
         client.fact_put(key, "two", if_lsn=first["lsn"] - 1)
-    second = client.fact_put(key, "two", if_lsn=first["lsn"])
     fact = client.fact_get(key)
-    assert (fact["key"], fact["content"], fact["lsn"]) == (key, "two", second["lsn"])
-    client.fact_delete(key, if_lsn=second["lsn"])
-    assert client.fact_get(key) is None
-    history = client.fact_history(key)
-    shape = [(r["deleted"], r["content"]) for r in history["revisions"]]
-    assert shape == [(True, ""), (False, "two"), (False, "one")] and not history["truncated"]
-    assert history["revisions"][2]["meta"] == {"k": 1} and history["revisions"][2]["agent"] == "py"
-    for other in ("repo/b", "repo/c"):
-        client.fact_put(other, other)
-    page = client.fact_list("repo/", limit=1)
-    assert [f["key"] for f in page["facts"]] == ["repo/b"] and page["next"] == "repo/b"
-    page = client.fact_list("repo/", after=page["next"])
-    assert [f["key"] for f in page["facts"]] == ["repo/c"] and page["next"] is None
+    assert [fact[k] for k in ("key", "content", "meta", "agent")] == [key, "one", {"k": 1}, "py"]
+    client.fact_delete(key, if_lsn=first["lsn"])
+    assert client.fact_get(key) is None and client.fact_history(key)["revisions"][0]["deleted"]
+    assert client.fact_list("repo/", limit=1) == {"facts": [], "next": None}
 
 
 def test_retry_survives_server_restart(server):

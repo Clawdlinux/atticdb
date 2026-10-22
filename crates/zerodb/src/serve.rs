@@ -371,12 +371,10 @@ fn try_start(config: Config, exit_on_poison: bool) -> Result<u8, (u8, String)> {
     let max_connections = MAX_CONNECTIONS;
     let config = ServeConfig { auth, instance, exit_on_poison, max_connections };
     let server = run(Arc::new(engine), listeners, config).map_err(|e| fail(e.to_string()))?;
-    let _ = writeln!(
-        io::stderr(),
-        "zerodb: serving instance={} tcp={tcp_text} unix={}",
-        server.shared.config.instance,
-        socket.display()
-    );
+    // One write, so a reader never sees half of the line.
+    let (instance, socket) = (&server.shared.config.instance, socket.display());
+    let line = format!("zerodb: serving instance={instance} tcp={tcp_text} unix={socket}\n");
+    let _ = io::stderr().write_all(line.as_bytes());
     server.wait();
     let _ = writeln!(io::stderr(), "zerodb: engine poisoned, exiting so a fresh start can recover");
     Ok(EXIT_POISONED)
