@@ -176,33 +176,29 @@ impl Adapter {
         };
         let session = session.unwrap_or_else(|| self.session.clone());
         let body = json!({"agent": self.agent, "session": session, "turns": [turn]});
-        self.write("/v1/append", body, committed)
+        self.write("/v1/append", body)
     }
 
     fn fact_set(&mut self, args: &Value) -> Value {
         let body = (|| {
             let key = string(args, "key")?.ok_or("key is required")?;
             let mut body = json!({"key": key, "agent": self.agent});
-            let delete = match &args["delete"] {
-                Value::Null => false,
-                Value::Bool(delete) => *delete,
-                _ => return Err("delete must be a boolean".to_owned()),
-            };
+            let delete = args["delete"] == true;
             match (string(args, "content")?, delete) {
                 (Some(content), false) => body["content"] = json!(content),
                 (None, true) => {}
-                _ => return Err("pass exactly one of content or delete: true".into()),
+                _ => return Err("pass exactly one of content or delete: true".to_owned()),
             }
             match &args["meta"] {
                 Value::Null => {}
-                meta @ Value::Object(_) => body["meta"] = meta.clone(),
-                _ => return Err("meta must be an object".into()),
+                meta @ Value::Object(_) if !delete => body["meta"] = meta.clone(),
+                _ => return Err("meta must be an object, and only with content".into()),
             }
             Ok((body, delete))
         })();
         match body {
-            Ok((body, true)) => self.write("/v1/facts/delete", body, fact_committed),
-            Ok((body, false)) => self.write("/v1/facts/put", body, fact_committed),
+            Ok((body, true)) => self.write("/v1/facts/delete", body),
+            Ok((body, false)) => self.write("/v1/facts/put", body),
             Err(message) => tool_error(message),
         }
     }
@@ -237,7 +233,7 @@ impl Adapter {
     }
 
     /// Posts a write under one new retry key, judged by the outcome rule across attempts.
-    fn write(&mut self, target: &str, mut body: Value, committed: fn(&Value) -> Value) -> Value {
+    fn write(&mut self, target: &str, mut body: Value) -> Value {
         match crate::random_hex(16) {
             Ok(key) => body["idem_key"] = json!(key),
             Err(error) => return tool_error(format!("cannot read /dev/urandom: {error}")),
@@ -253,7 +249,7 @@ impl Adapter {
             };
             let detail = note(&mut reasons, detail);
             match (merge.record(attempt), reply) {
-                (Some(Outcome::Committed), Ok(reply)) => Ok(committed(&reply)),
+                (Some(Outcome::Committed), Ok(reply)) => Ok(committed(&reply, target)),
                 (Some(outcome), _) => Ok(failed(outcome, &detail)),
                 (None, _) => Err(failed(merge.finish(), &detail)),
             }
@@ -463,32 +459,28 @@ fn describe(reply: &Value) -> String {
     }
 }
 
-/// One `structuredContent` shape. Receipt fields are null when the server had no receipt.
-fn committed(reply: &Value) -> Value {
-    let seq = &reply["seqs"][0];
-    let text = if seq.is_null() {
-        "committed, receipt unavailable".into()
-    } else {
-        format!("committed seq={seq}")
+/// One `structuredContent` shape per tool, `seq` for appends only. Receipt fields are null
+/// when the server had no receipt.
+fn committed(reply: &Value, target: &str) -> Value {
+    let append = target == "/v1/append";
+    let lsn = &reply[if append { "last_lsn" } else { "lsn" }];
+    let mut structured =
+        json!({"committed": true, "lsn": lsn, "deduplicated": reply["deduplicated"]});
+    let (name, number) = if append { ("seq", &reply["seqs"][0]) } else { ("lsn", lsn) };
+    if append {
+        structured["seq"] = number.clone();
+    }
+    let text = match number {
+        Value::Null => "committed, receipt unavailable".into(),
+        number => format!("committed {name}={number}"),
     };
-    let (lsn, deduplicated) = (&reply["last_lsn"], &reply["deduplicated"]);
-    answer(text, json!({"committed": true, "seq": seq, "lsn": lsn, "deduplicated": deduplicated}))
-}
-
-/// One `structuredContent` shape. `lsn` and `deduplicated` are null without a receipt.
-fn fact_committed(reply: &Value) -> Value {
-    let lsn = &reply["lsn"];
-    let text = if lsn.is_null() {
-        "committed, receipt unavailable".into()
-    } else {
-        format!("committed lsn={lsn}")
-    };
-    answer(text, json!({"committed": true, "lsn": lsn, "deduplicated": reply["deduplicated"]}))
+    answer(text, structured)
 }
 
 fn fact(reply: &Value) -> Value {
     let fact = &reply["fact"];
     let text = match fact["content"].as_str() {
+        Some("") => "(empty)".into(),
         Some(content) => content.to_owned(),
         None => "no current value".into(),
     };

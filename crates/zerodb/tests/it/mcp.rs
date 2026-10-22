@@ -249,13 +249,20 @@ fn tool_calls_over_stdio() {
     );
     let page = mcp.call("fact_list", json!({"prefix": "repo/", "after": "repo/b"}));
     assert_eq!((text(&page), &page["structuredContent"]["next"]), ("repo/c: repo/c", &Value::Null));
-    for (case, args) in [
-        ("content and delete", json!({"key": "k", "content": "x", "delete": true})),
-        ("neither", json!({"key": "k"})),
+    assert_fact_committed(&mcp.call("fact_set", json!({"key": "e", "content": ""})), "empty");
+    assert_eq!(text(&mcp.call("fact_get", json!({"key": "e"}))), "(empty)");
+    let one = "pass exactly one of content or delete: true";
+    for (case, args, expect) in [
+        ("content and delete", json!({"key": "k", "content": "x", "delete": true}), one),
+        ("neither", json!({"key": "k"}), one),
+        (
+            "delete with meta",
+            json!({"key": "k", "delete": true, "meta": {}}),
+            "meta must be an object, and only with content",
+        ),
     ] {
         let rejected = mcp.call("fact_set", args);
-        let expect = (json!(true), "pass exactly one of content or delete: true");
-        assert_eq!((rejected["isError"].clone(), text(&rejected)), expect, "{case}");
+        assert_eq!((rejected["isError"].clone(), text(&rejected)), (json!(true), expect), "{case}");
     }
 
     let rejected = mcp.call("memory_append", json!({"content": "x", "role": "robot"}));

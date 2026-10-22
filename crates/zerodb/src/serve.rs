@@ -150,9 +150,7 @@ impl Shared {
             let _ = conn.respond(&response);
             log(&method, &path, &response, &tenant, started);
             self.tracker.update(|conns| conns.in_flight -= 1);
-            if matches!(route, Route::Append | Route::FactPut | Route::FactDelete) {
-                self.exit_on_poison();
-            }
+            self.exit_on_poison();
             if self.stopping.load(Ordering::Acquire) {
                 break;
             }

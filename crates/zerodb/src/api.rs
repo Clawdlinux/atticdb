@@ -191,6 +191,9 @@ fn parse_fact(value: Value, delete: bool) -> Result<(NewFact, String, Option<u64
     };
     let key = string(&mut fields, "key")?;
     let idem = idem_key(&mut fields)?;
+    if fields.remove("source_refs").is_some_and(|refs| refs != json!([])) {
+        return Err("source_refs must be empty".into());
+    }
     let agent =
         if fields.contains_key("agent") { string(&mut fields, "agent")? } else { String::new() };
     let if_lsn =
@@ -328,19 +331,20 @@ fn send<T>(result: Result<T, EngineError>, build: impl FnOnce(T) -> Value) -> Re
 /// `GET /v1/facts/list?prefix=&after=&limit=&max_bytes=`.
 pub fn fact_read(engine: &Engine, tenant: &str, route: Route, target: &str) -> Response {
     let answer = (|| {
-        let mut params = params(target)?;
-        let allowed: &[&str] = match route {
-            Route::FactGet => &["key"],
-            Route::FactHistory => &["key", "max_bytes"],
-            _ => &["prefix", "after", "limit", "max_bytes"],
+        let (mut params, list) = (params(target)?, route == Route::FactList);
+        let key = if list { None } else { params.remove("key") };
+        let max_bytes = if route == Route::FactGet { None } else { params.remove("max_bytes") };
+        let [prefix, after, limit] = match list {
+            true => ["prefix", "after", "limit"].map(|name| params.remove(name)),
+            false => [None, None, None],
         };
-        if params.keys().any(|name| !allowed.contains(&name.as_str())) {
+        if !params.is_empty() {
             return Err("unknown query parameter".to_owned());
         }
-        let max_bytes = number(params.remove("max_bytes"), "max_bytes")?;
+        let max_bytes = number(max_bytes, "max_bytes")?;
         let max_bytes =
             max_bytes.map_or(DEFAULT_WINDOW_BYTES, |bytes| cap(bytes, MAX_WINDOW_BYTES));
-        let key = params.remove("key").ok_or_else(|| "key is required".to_owned());
+        let key = key.ok_or_else(|| "key is required".to_owned());
         Ok(match route {
             Route::FactGet => {
                 send(engine.fact_get(tenant, &key?), |fact| json!({"fact": fact.map(fact_json)}))
@@ -350,10 +354,9 @@ pub fn fact_read(engine: &Engine, tenant: &str, route: Route, target: &str) -> R
                 json!({"revisions": revisions, "truncated": history.truncated})
             }),
             _ => {
-                let limit = number(params.remove("limit"), "limit")?;
+                let limit = number(limit, "limit")?;
                 let limit = limit.map_or(100, |limit| cap(limit, MAX_WINDOW_TURNS));
-                let (prefix, after) =
-                    (params.remove("prefix").unwrap_or_default(), params.remove("after"));
+                let prefix = prefix.unwrap_or_default();
                 if prefix.len() > 1024 || after.as_ref().is_some_and(|after| after.len() > 1024) {
                     return Err("prefix and after are at most 1024 bytes".into());
                 }

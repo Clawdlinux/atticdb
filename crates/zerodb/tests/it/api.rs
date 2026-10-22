@@ -245,6 +245,10 @@ fn facts_over_http() {
         for (case, body) in [
             ("1025-byte key", fact_body(&"k".repeat(1025), "v", "long")),
             ("content as a number", json!({"key": "n", "content": 1, "idem_key": "n"})),
+            (
+                "source refs",
+                json!({"key": "n", "content": "v", "idem_key": "r", "source_refs": [1]}),
+            ),
         ] {
             let (status, rejected) = put(&body);
             assert_eq!(
