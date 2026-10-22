@@ -1,4 +1,7 @@
-//! HTTP routes: `POST /v1/append`, `GET /v1/window` and `GET /healthz`.
+//! HTTP routes: `POST /v1/append`, `GET /v1/window`, `GET /healthz`, and the fact routes
+//! `POST /v1/facts/put`, `POST /v1/facts/delete`, `GET /v1/facts/get`,
+//! `GET /v1/facts/history` and `GET /v1/facts/list`. Fact keys travel in bodies and query
+//! strings, never in paths.
 
 use crate::auth::{self, Auth};
 use crate::http::{Budget, Head, Response};
@@ -6,7 +9,8 @@ use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::time::Duration;
 use zerodb_core::{
-    Appended, Engine, EngineError, ErrorKind, Health, NewTurn, Role, Scope, Turn, WindowQuery,
+    Appended, Engine, EngineError, ErrorKind, FactQuery, FactWritten, Health, NewFact, NewTurn,
+    Revision, Role, Scope, StoredFact, Turn, WindowQuery,
 };
 use zerodb_tape::{Error, Outcome};
 
@@ -33,7 +37,28 @@ pub enum Route {
     Append,
     /// `GET /v1/window`.
     Window,
+    /// `POST /v1/facts/put`.
+    FactPut,
+    /// `POST /v1/facts/delete`.
+    FactDelete,
+    /// `GET /v1/facts/get`.
+    FactGet,
+    /// `GET /v1/facts/history`.
+    FactHistory,
+    /// `GET /v1/facts/list`.
+    FactList,
 }
+
+const ROUTES: [(&str, &str, Route); 8] = [
+    ("GET", "/healthz", Route::Health),
+    ("POST", "/v1/append", Route::Append),
+    ("GET", "/v1/window", Route::Window),
+    ("POST", "/v1/facts/put", Route::FactPut),
+    ("POST", "/v1/facts/delete", Route::FactDelete),
+    ("GET", "/v1/facts/get", Route::FactGet),
+    ("GET", "/v1/facts/history", Route::FactHistory),
+    ("GET", "/v1/facts/list", Route::FactList),
+];
 
 /// Checks a head before its body is read: `Host` on TCP, then the token. Returns the
 /// route and the tenant, which comes only from the token.
@@ -45,13 +70,10 @@ pub fn check(auth: &Auth, head: &Head, tcp: bool) -> Result<(Route, Option<Strin
         return Ok((Route::Health, None));
     }
     let tenant = auth.tenant(head).ok_or_else(auth::unauthorized)?.to_owned();
-    match (head.method.as_str(), head.path()) {
-        ("POST", "/v1/append") => Ok((Route::Append, Some(tenant))),
-        ("GET", "/v1/window") => Ok((Route::Window, Some(tenant))),
-        (_, "/v1/append" | "/v1/window" | "/healthz") => {
-            Err(Response::error(405, "method_not_allowed", None))
-        }
-        _ => Err(Response::error(404, "not_found", None)),
+    match ROUTES.iter().find(|(_, path, _)| *path == head.path()) {
+        Some((method, _, route)) if *method == head.method => Ok((*route, Some(tenant))),
+        Some(_) => Err(Response::error(405, "method_not_allowed", None)),
+        None => Err(Response::error(404, "not_found", None)),
     }
 }
 
@@ -109,10 +131,7 @@ pub fn append(engine: &Engine, tenant: &str, body: Vec<u8>) -> Response {
             let scope = Scope { tenant: tenant.to_owned(), agent, session };
             append_response(engine.append(&scope, turns, Some(&key)))
         }
-        Err(message) => Response::json(
-            400,
-            &json!({"outcome": "not_committed", "error": "invalid_input", "message": message}),
-        ),
+        Err(message) => invalid(message),
     }
 }
 
@@ -123,16 +142,74 @@ fn string(fields: &mut Map<String, Value>, name: &str) -> Result<String, String>
     }
 }
 
+fn meta(fields: &mut Map<String, Value>) -> Result<Vec<u8>, String> {
+    match fields.remove("meta") {
+        None => Ok(Vec::new()),
+        Some(meta @ Value::Object(_)) => Ok(meta.to_string().into_bytes()),
+        Some(_) => Err("meta must be an object".into()),
+    }
+}
+
+fn idem_key(fields: &mut Map<String, Value>) -> Result<String, String> {
+    let key = string(fields, "idem_key")?;
+    if !(1..=128).contains(&key.len()) {
+        return Err("idem_key must be 1 to 128 bytes".into());
+    }
+    Ok(key)
+}
+
+/// `POST /v1/facts/put` and `POST /v1/facts/delete`. The raw body is dropped once parsed.
+pub fn fact_write(engine: &Engine, tenant: &str, body: Vec<u8>, delete: bool) -> Response {
+    let Some(slot) = PARSERS.take(1, Duration::MAX) else { return busy() };
+    let value = serde_json::from_slice(&body).map_err(|_| "body must be JSON".to_owned());
+    let parsed = value.and_then(|value| parse_fact(value, delete));
+    drop((slot, body));
+    let (fact, key, if_lsn) = match parsed {
+        Ok(parsed) => parsed,
+        Err(message) => return invalid(message),
+    };
+    let result = if delete {
+        engine.fact_delete(tenant, &fact.key, &fact.agent, Some(&key), if_lsn)
+    } else {
+        engine.fact_put(tenant, fact, Some(&key), if_lsn)
+    };
+    let receipt =
+        |w: FactWritten| json!({"deduplicated": w.deduplicated, "txn": w.txn, "lsn": w.lsn});
+    write_response(result.map(receipt), FACT_LIMITS)
+}
+
+fn invalid(message: String) -> Response {
+    Response::json(
+        400,
+        &json!({"outcome": "not_committed", "error": "invalid_input", "message": message}),
+    )
+}
+
+fn parse_fact(value: Value, delete: bool) -> Result<(NewFact, String, Option<u64>), String> {
+    let Value::Object(mut fields) = value else {
+        return Err("body must be a JSON object".into());
+    };
+    let key = string(&mut fields, "key")?;
+    let idem = idem_key(&mut fields)?;
+    let agent =
+        if fields.contains_key("agent") { string(&mut fields, "agent")? } else { String::new() };
+    let if_lsn =
+        fields.remove("if_lsn").map(|lsn| lsn.as_u64().ok_or("if_lsn must be a whole number"));
+    let if_lsn = if_lsn.transpose()?;
+    let (content, meta) = match delete {
+        true => (Vec::new(), Vec::new()),
+        false => (string(&mut fields, "content")?.into_bytes(), meta(&mut fields)?),
+    };
+    Ok((NewFact { key, content, meta, agent }, idem, if_lsn))
+}
+
 fn parse_append(value: Value) -> Result<(String, String, String, Vec<NewTurn>), String> {
     let Value::Object(mut fields) = value else {
         return Err("body must be a JSON object".into());
     };
     let agent = string(&mut fields, "agent")?;
     let session = string(&mut fields, "session")?;
-    let key = string(&mut fields, "idem_key")?;
-    if !(1..=128).contains(&key.len()) {
-        return Err("idem_key must be 1 to 128 bytes".into());
-    }
+    let key = idem_key(&mut fields)?;
     let Some(Value::Array(items)) = fields.remove("turns") else {
         return Err("turns must be an array".into());
     };
@@ -147,12 +224,7 @@ fn parse_append(value: Value) -> Result<(String, String, String, Vec<NewTurn>), 
                 return Err("role must be system, user, assistant or tool".into());
             };
             let content = string(&mut turn, "content")?.into_bytes();
-            let meta = match turn.remove("meta") {
-                None => Vec::new(),
-                Some(meta @ Value::Object(_)) => meta.to_string().into_bytes(),
-                Some(_) => return Err("meta must be an object".into()),
-            };
-            Ok(NewTurn { role, content, meta })
+            Ok(NewTurn { role, content, meta: meta(&mut turn)? })
         })
         .collect::<Result<_, _>>()?;
     Ok((agent, session, key, turns))
@@ -162,19 +234,23 @@ fn parse_append(value: Value) -> Result<(String, String, String, Vec<NewTurn>), 
 /// first, so a durable write is always 200, with `receipt: null` when the engine
 /// failed after the commit.
 pub fn append_response(result: Result<Appended, EngineError>) -> Response {
+    let receipt = |receipt: Appended| {
+        json!({
+            "deduplicated": receipt.deduplicated,
+            "txn": receipt.txn,
+            "first_lsn": receipt.first_lsn,
+            "last_lsn": receipt.last_lsn,
+            "seqs": receipt.seqs,
+        })
+    };
+    write_response(result.map(receipt), LIMITS)
+}
+
+fn write_response(result: Result<Value, EngineError>, limits: &str) -> Response {
     let error = match result {
-        Ok(receipt) => {
-            return Response::json(
-                200,
-                &json!({
-                    "outcome": "committed",
-                    "deduplicated": receipt.deduplicated,
-                    "txn": receipt.txn,
-                    "first_lsn": receipt.first_lsn,
-                    "last_lsn": receipt.last_lsn,
-                    "seqs": receipt.seqs,
-                }),
-            )
+        Ok(mut receipt) => {
+            receipt["outcome"] = json!("committed");
+            return Response::json(200, &receipt);
         }
         Err(error) => error,
     };
@@ -188,7 +264,7 @@ pub fn append_response(result: Result<Appended, EngineError>) -> Response {
     let mut body = json!({"outcome": crate::outcome::name(error.outcome), "error": name});
     match error.kind {
         ErrorKind::ResourceExhausted(resource) => body["resource"] = json!(resource),
-        ErrorKind::InvalidInput => body["message"] = json!(LIMITS),
+        ErrorKind::InvalidInput => body["message"] = json!(limits),
         _ => {}
     }
     Response::json(status, &body)
@@ -196,6 +272,8 @@ pub fn append_response(result: Result<Appended, EngineError>) -> Response {
 
 const LIMITS: &str = "turns must not be empty; content is at most 4 MiB, meta at most 64 KiB, \
                       agent and session at most 255 bytes each";
+const FACT_LIMITS: &str = "key is 1 to 1024 bytes; content is at most 4 MiB, meta at most 64 KiB, \
+                           agent at most 255 bytes";
 
 fn classify(kind: &ErrorKind) -> (u16, &'static str) {
     match kind {
@@ -220,51 +298,88 @@ pub fn window(engine: &Engine, tenant: &str, target: &str) -> Response {
             return Response::json(400, &json!({"error": "invalid_input", "message": message}))
         }
     };
-    match engine.window_budget(&scope, query, max_bytes) {
-        Ok(window) => {
-            // Meta is reparsed into trees, so the JSON is built under the tree limit. The
-            // send budget is taken there too, so at most 2 built bodies wait for it.
-            let Some(_slot) = PARSERS.take(1, Duration::MAX) else { return busy() };
-            let mut body = json!({"truncated": window.truncated});
-            body["turns"] = window.turns.into_iter().map(turn_json).collect();
-            let response = Response::json(200, &body);
-            drop(body);
-            match SENDING.take(response.body.len(), SEND_WAIT) {
-                Some(held) => Response { _held: Some(held), ..response },
-                None => busy(),
-            }
-        }
+    send(engine.window_budget(&scope, query, max_bytes), |window| {
+        let turns: Vec<_> = window.turns.into_iter().map(turn_json).collect();
+        json!({"truncated": window.truncated, "turns": turns})
+    })
+}
+
+/// A read's answer. Meta is reparsed into trees, so the JSON is built under the tree
+/// limit. The send budget is taken there too, so at most 2 built bodies wait for it.
+fn send<T>(result: Result<T, EngineError>, build: impl FnOnce(T) -> Value) -> Response {
+    let read = match result {
+        Ok(read) => read,
         Err(error) => {
             let (status, name) = classify(&error.kind);
-            Response::json(status, &json!({"error": name}))
+            return Response::json(status, &json!({"error": name}));
         }
+    };
+    let Some(_slot) = PARSERS.take(1, Duration::MAX) else { return busy() };
+    let body = build(read);
+    let response = Response::json(200, &body);
+    drop(body);
+    match SENDING.take(response.body.len(), SEND_WAIT) {
+        Some(held) => Response { _held: Some(held), ..response },
+        None => busy(),
     }
 }
 
-fn parse_window(tenant: &str, target: &str) -> Result<(Scope, WindowQuery, usize), String> {
-    let mut params = BTreeMap::new();
-    let query = target.split_once('?').map_or("", |(_, query)| query);
-    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
-        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
-        let (Some(name), Some(value)) = (decode(name), decode(value)) else {
-            return Err("query must be percent-encoded UTF-8".into());
+/// `GET /v1/facts/get?key=`, `GET /v1/facts/history?key=&max_bytes=` and
+/// `GET /v1/facts/list?prefix=&after=&limit=&max_bytes=`.
+pub fn fact_read(engine: &Engine, tenant: &str, route: Route, target: &str) -> Response {
+    let answer = (|| {
+        let mut params = params(target)?;
+        let allowed: &[&str] = match route {
+            Route::FactGet => &["key"],
+            Route::FactHistory => &["key", "max_bytes"],
+            _ => &["prefix", "after", "limit", "max_bytes"],
         };
-        if params.insert(name, value).is_some() {
-            return Err("a query parameter is repeated".into());
+        if params.keys().any(|name| !allowed.contains(&name.as_str())) {
+            return Err("unknown query parameter".to_owned());
         }
-    }
+        let max_bytes = number(params.remove("max_bytes"), "max_bytes")?;
+        let max_bytes =
+            max_bytes.map_or(DEFAULT_WINDOW_BYTES, |bytes| cap(bytes, MAX_WINDOW_BYTES));
+        let key = params.remove("key").ok_or_else(|| "key is required".to_owned());
+        Ok(match route {
+            Route::FactGet => {
+                send(engine.fact_get(tenant, &key?), |fact| json!({"fact": fact.map(fact_json)}))
+            }
+            Route::FactHistory => send(engine.fact_history(tenant, &key?, max_bytes), |history| {
+                let revisions: Vec<_> = history.revisions.into_iter().map(revision_json).collect();
+                json!({"revisions": revisions, "truncated": history.truncated})
+            }),
+            _ => {
+                let limit = number(params.remove("limit"), "limit")?;
+                let limit = limit.map_or(100, |limit| cap(limit, MAX_WINDOW_TURNS));
+                let (prefix, after) =
+                    (params.remove("prefix").unwrap_or_default(), params.remove("after"));
+                if prefix.len() > 1024 || after.as_ref().is_some_and(|after| after.len() > 1024) {
+                    return Err("prefix and after are at most 1024 bytes".into());
+                }
+                let query = FactQuery { prefix, after, limit, max_bytes };
+                send(engine.fact_list(tenant, query), |page| {
+                    let facts: Vec<_> = page.facts.into_iter().map(fact_json).collect();
+                    json!({"facts": facts, "next": page.next})
+                })
+            }
+        })
+    })();
+    answer.unwrap_or_else(|message| {
+        Response::json(400, &json!({"error": "invalid_input", "message": message}))
+    })
+}
+
+fn parse_window(tenant: &str, target: &str) -> Result<(Scope, WindowQuery, usize), String> {
+    let mut params = params(target)?;
     let mut take = |name: &str| params.remove(name);
-    let number = |value: Option<String>, name: &str| {
-        value.map(|text| text.parse::<u64>().map_err(|_| format!("{name} must be a number")))
-    };
     let (Some(agent), Some(session)) = (take("agent"), take("session")) else {
         return Err("agent and session are required".into());
     };
-    let cap = |value: u64, max: usize| usize::try_from(value).unwrap_or(max).min(max);
-    let last = number(take("last"), "last").transpose()?;
-    let since = number(take("since_seq"), "since_seq").transpose()?;
-    let limit = number(take("limit"), "limit").transpose()?;
-    let max_bytes = number(take("max_bytes"), "max_bytes").transpose()?;
+    let last = number(take("last"), "last")?;
+    let since = number(take("since_seq"), "since_seq")?;
+    let limit = number(take("limit"), "limit")?;
+    let max_bytes = number(take("max_bytes"), "max_bytes")?;
     let query = match (last, since, limit) {
         (Some(last), None, None) => WindowQuery::Last(cap(last, MAX_WINDOW_TURNS)),
         (None, Some(seq), limit) => WindowQuery::Since {
@@ -278,6 +393,31 @@ fn parse_window(tenant: &str, target: &str) -> Result<(Scope, WindowQuery, usize
     }
     let max_bytes = max_bytes.map_or(DEFAULT_WINDOW_BYTES, |bytes| cap(bytes, MAX_WINDOW_BYTES));
     Ok((Scope { tenant: tenant.to_owned(), agent, session }, query, max_bytes))
+}
+
+/// The percent-decoded query parameters. A repeated name is an error.
+fn params(target: &str) -> Result<BTreeMap<String, String>, String> {
+    let mut params = BTreeMap::new();
+    let query = target.split_once('?').map_or("", |(_, query)| query);
+    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+        let (Some(name), Some(value)) = (decode(name), decode(value)) else {
+            return Err("query must be percent-encoded UTF-8".into());
+        };
+        if params.insert(name, value).is_some() {
+            return Err("a query parameter is repeated".into());
+        }
+    }
+    Ok(params)
+}
+
+fn number(value: Option<String>, name: &str) -> Result<Option<u64>, String> {
+    let parse = |text: String| text.parse::<u64>().map_err(|_| format!("{name} must be a number"));
+    value.map(parse).transpose()
+}
+
+fn cap(value: u64, max: usize) -> usize {
+    usize::try_from(value).unwrap_or(max).min(max)
 }
 
 /// Percent-decoding, with `+` as a space.
@@ -300,9 +440,10 @@ fn decode(text: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
-/// Content that is not UTF-8, only possible from direct Rust API writes, comes back
-/// with U+FFFD and `"lossy": true`. Meta is the stored JSON object, or `null`.
-fn turn_json(turn: Turn) -> Value {
+/// Adds `content` and `meta`. Content that is not UTF-8, only possible from direct Rust
+/// API writes, comes back with U+FFFD and `"lossy": true`. Meta is the stored JSON object,
+/// or `null`.
+fn blobs(mut out: Value, content: Vec<u8>, meta: Vec<u8>) -> Value {
     let mut lossy = false;
     let mut text = |bytes: Vec<u8>| {
         String::from_utf8(bytes).unwrap_or_else(|error| {
@@ -310,22 +451,37 @@ fn turn_json(turn: Turn) -> Value {
             String::from_utf8_lossy(error.as_bytes()).into_owned()
         })
     };
-    let meta = match serde_json::from_slice(&turn.meta) {
-        _ if turn.meta.is_empty() => Value::Null,
+    out["meta"] = match serde_json::from_slice(&meta) {
+        _ if meta.is_empty() => Value::Null,
         Ok(meta) => meta,
-        Err(_) => Value::String(text(turn.meta)),
+        Err(_) => Value::String(text(meta)),
     };
-    let role = ROLES.iter().find(|(role, _)| *role == turn.role).map_or("", |(_, name)| *name);
-    let mut out = json!({
-        "seq": turn.seq,
-        "lsn": turn.lsn,
-        "commit_time_ns": turn.commit_time_ns,
-        "role": role,
-        "content": text(turn.content),
-        "meta": meta,
-    });
+    out["content"] = Value::String(text(content));
     if lossy {
         out["lossy"] = json!(true);
     }
     out
+}
+
+fn turn_json(turn: Turn) -> Value {
+    let role = ROLES.iter().find(|(role, _)| *role == turn.role).map_or("", |(_, name)| *name);
+    let (seq, lsn, commit_time_ns) = (turn.seq, turn.lsn, turn.commit_time_ns);
+    let head = json!({"seq": seq, "lsn": lsn, "commit_time_ns": commit_time_ns, "role": role});
+    blobs(head, turn.content, turn.meta)
+}
+
+fn fact_json(fact: StoredFact) -> Value {
+    let StoredFact { key, lsn, commit_time_ns, agent, content, meta } = fact;
+    blobs(
+        json!({"key": key, "lsn": lsn, "commit_time_ns": commit_time_ns, "agent": agent}),
+        content,
+        meta,
+    )
+}
+
+fn revision_json(revision: Revision) -> Value {
+    let Revision { lsn, commit_time_ns, agent, deleted, content, meta } = revision;
+    let head =
+        json!({"lsn": lsn, "commit_time_ns": commit_time_ns, "agent": agent, "deleted": deleted});
+    blobs(head, content, meta)
 }

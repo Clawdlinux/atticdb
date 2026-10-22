@@ -76,15 +76,22 @@ impl Drop for Dir {
 }
 
 pub fn sim_engine(disk: &SimDisk, floor: Option<u64>, max_sessions: usize) -> Arc<Engine> {
+    open_sim(disk, sim_options(floor, max_sessions))
+}
+
+pub fn sim_options(floor: Option<u64>, max_sessions: usize) -> EngineOptions {
     let tape =
         TapeOptions { segment_size: 1 << 20, free_space_floor: floor, ..TapeOptions::default() };
-    let opts = EngineOptions {
+    EngineOptions {
         tape,
         checkpoint_interval: Duration::from_secs(3600),
         checkpoint_bytes: u64::MAX,
         max_sessions,
         ..EngineOptions::default()
-    };
+    }
+}
+
+pub fn open_sim(disk: &SimDisk, opts: EngineOptions) -> Arc<Engine> {
     let disk = Arc::new(disk.clone());
     Arc::new(Engine::open_with(disk, Arc::new(SystemClock), "db", opts).unwrap())
 }

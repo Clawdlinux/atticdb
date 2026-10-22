@@ -140,11 +140,17 @@ impl Shared {
                 Route::Health => api::health(&self.engine, &self.config.instance),
                 Route::Append => api::append(&self.engine, &tenant, request.body),
                 Route::Window => api::window(&self.engine, &tenant, &request.head.target),
+                Route::FactPut | Route::FactDelete => {
+                    api::fact_write(&self.engine, &tenant, request.body, route == Route::FactDelete)
+                }
+                Route::FactGet | Route::FactHistory | Route::FactList => {
+                    api::fact_read(&self.engine, &tenant, route, &request.head.target)
+                }
             };
             let _ = conn.respond(&response);
             log(&method, &path, &response, &tenant, started);
             self.tracker.update(|conns| conns.in_flight -= 1);
-            if route == Route::Append {
+            if matches!(route, Route::Append | Route::FactPut | Route::FactDelete) {
                 self.exit_on_poison();
             }
             if self.stopping.load(Ordering::Acquire) {
