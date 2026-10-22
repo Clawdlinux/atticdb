@@ -1,8 +1,9 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use zerodb_tape::sim::frame::{self, Footer, Frame, Header, Kind, VERSION};
-use zerodb_tape::sim::DEFAULT_SEGMENT_SIZE;
+use zerodb_tape::sim::{make_spare, DEFAULT_SEGMENT_SIZE};
 use zerodb_tape::{Io, RecordInput, StdIo};
 
 mod fs {
@@ -69,8 +70,15 @@ pub struct Bare {
     dirty: bool,
 }
 impl Bare {
+    /// Zero-fills later segments for `bytes` of writes before timing, as the tape's spares are.
     #[track_caller]
-    pub fn new(dir: &Path) -> Self {
+    pub fn new(dir: &Path, bytes: u64) -> Self {
+        let io: Arc<dyn Io> = Arc::new(StdIo::new());
+        for id in 1..=bytes / DEFAULT_SEGMENT_SIZE + 1 {
+            make_spare(io.clone(), dir, DEFAULT_SEGMENT_SIZE, 0).unwrap();
+            io.rename(&dir.join("spare.zdb"), &Self::path(dir, id)).unwrap();
+        }
+        io.sync_dir(dir).unwrap();
         Self {
             file: Self::segment(dir, 0),
             dir: dir.to_owned(),
@@ -90,12 +98,15 @@ impl Bare {
     #[track_caller]
     fn segment(dir: &Path, id: u64) -> File {
         let path = Self::path(dir, id);
-        let io = StdIo::new();
-        let file = io.create(&path).unwrap();
-        io.allocate(file, DEFAULT_SEGMENT_SIZE).unwrap();
-        io.sync_data(file).unwrap();
-        io.close(file).unwrap();
-        io.sync_dir(dir).unwrap();
+        // Like the tape's first segment, and a roll with no spare ready.
+        if !path.exists() {
+            let io = StdIo::new();
+            let file = io.create(&path).unwrap();
+            io.allocate(file, DEFAULT_SEGMENT_SIZE).unwrap();
+            io.sync_data(file).unwrap();
+            io.close(file).unwrap();
+            io.sync_dir(dir).unwrap();
+        }
         OpenOptions::new().write(true).open(path).unwrap()
     }
     #[track_caller]

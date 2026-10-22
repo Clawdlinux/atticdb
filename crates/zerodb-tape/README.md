@@ -119,6 +119,13 @@ These rejections set `read_only()` without poisoning. A later write's passing sp
 Idle time and health probes never clear read-only, even after space returns.
 Failed allocations remove their segment files.
 Unused prepared segments can serve later groups before shutdown.
+A roll takes the zero-filled `spare.zdb` when one is ready, and preallocates otherwise.
+On ext4, preallocated blocks are unwritten extents, so each sync after a first write also commits the journal.
+Zeroed blocks make each segment sync a data flush only.
+Open fills the first spare before the writer starts. The maintenance thread refills it after each roll.
+It skips the fill when that would leave less than the floor free. The space check counts a ready spare as one prepared segment.
+Open deletes leftover `spare.tmp` and `spare.zdb` files.
+Copy-on-write filesystems such as btrfs, ZFS and APFS gain nothing from zero-fill and pay one extra segment write.
 Recovery accepts fully zero, full-sized trailing reservations as unused, regardless of their size or count.
 It drops surplus reservations without a torn-tail warning and may keep one empty segment as the append target.
 Nonzero fragments and gaps before later data retain corruption checks.

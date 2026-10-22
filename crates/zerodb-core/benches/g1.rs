@@ -210,10 +210,11 @@ fn window_report(label: &str, queries: Queries, mut reads: Vec<Duration>) {
 
 fn bare(iterations: usize, batch: usize, n: usize, symmetric: bool) -> Stats {
     let dir = BenchDir::new();
-    let mut bare = Bare::new(&dir.0);
     let templates = (0..SIZES.len())
         .map(|i| Arc::new(encoded_batch(&records(&scope(0, 0), i, batch))))
         .collect::<Vec<_>>();
+    let bytes = (0..iterations).map(|i| templates[i % SIZES.len()].len() as u64).sum::<u64>();
+    let mut bare = Bare::new(&dir.0, bytes * writer_count() as u64);
     println!(
         "matched encoded batch bytes: {:?}",
         templates.iter().map(|b| b.len()).collect::<Vec<_>>()
