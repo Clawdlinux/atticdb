@@ -793,6 +793,19 @@ impl<S: StateMachine> WriterCore<S> {
         }
         self.checkpoint()
     }
+    /// Runs the maintenance worker's steps inline. Spare failures retry at the next call.
+    #[cfg(any(test, feature = "sim"))]
+    pub fn maintain(&mut self) -> Result<()> {
+        self.update_superblock()?;
+        if !self.is_poisoned() {
+            let _ = crate::dir::make_spare(
+                self.reads.io.clone(),
+                &self.reads.path,
+                self.segments.capacity(),
+            );
+        }
+        Ok(())
+    }
     fn superblock_due(&self) -> bool {
         !self.is_poisoned()
             && !self.read_only()
@@ -996,6 +1009,7 @@ impl<S: StateMachine> Tape<S> {
         let reads = core.reads.clone();
         #[cfg(feature = "sim")]
         if inline {
+            let _ = core.maintain();
             return Ok((
                 Self {
                     sender: None,
@@ -1063,7 +1077,7 @@ impl<S: StateMachine> Tape<S> {
             let (request, receiver) = WriteRequest::new(batch);
             core.enqueue(request);
             core.step();
-            let _ = core.update_superblock();
+            let _ = core.maintain();
             return receiver
                 .recv()
                 .map_err(|_| WriteError { kind: Error::Poisoned, outcome: Outcome::Unknown })?;
@@ -1111,7 +1125,7 @@ impl<S: StateMachine> Tape<S> {
             .ok_or_else(|| Error::Configuration("inline simulation required".into()))?;
         let mut core = lock(core)?;
         core.step();
-        let _ = core.update_superblock();
+        let _ = core.maintain();
         Ok(())
     }
 

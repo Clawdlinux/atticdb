@@ -3,7 +3,7 @@
 #![allow(clippy::unwrap_used)]
 
 pub use crate::crc32c::{crc32c, Crc32c};
-pub use crate::dir::{atomic_install, DataDir};
+pub use crate::dir::{atomic_install, make_spare, DataDir};
 pub use crate::io::SimClock;
 pub use crate::recovery::{recover, Recovered};
 pub use crate::segment::{SegmentWriter, DEFAULT_SEGMENT_SIZE};
@@ -971,7 +971,7 @@ fn run_seed_with_capacity(seed: u64, plan: &CapacityPlan) {
         probe(&mut core, &mut oracle, &mut rng);
         published.verify(core.durable_lsn());
         clock.advance(1_000_000_000);
-        core.update_superblock().unwrap();
+        core.maintain().unwrap();
         if rng.below(3) == 0 {
             let records =
                 vec![RecordInput { tenant_id: 1, kind: Kind::Fact, content: rng.bytes(128) }];
@@ -1035,7 +1035,8 @@ fn run_seed_with_capacity(seed: u64, plan: &CapacityPlan) {
                 break;
             }
             clock.advance(rng.next_u64() % 1_500_000_000);
-            let _ = core.update_superblock();
+            // Cuts here land in the spare fill as well as the superblock install.
+            let _ = core.maintain();
             if io.cut_happened() || core.is_poisoned() {
                 break;
             }
