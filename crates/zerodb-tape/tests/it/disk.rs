@@ -680,7 +680,14 @@ mod segments {
                 let dir = DataDir::open(io.clone(), "db", None, 512).unwrap();
                 let mut writer = SegmentWriter::new(dir, 512, 0).unwrap();
                 if spare {
-                    make_spare(io.clone(), Path::new("db"), 512, 0).unwrap();
+                    let used =
+                        SimDisk::DEFAULT_CAPACITY - io.available_bytes("db".as_ref()).unwrap();
+                    for (room, made) in [(2 * 512 - 1, false), (2 * 512, true)] {
+                        io.set_capacity(used + 100 + room).unwrap();
+                        make_spare(io.clone(), Path::new("db"), 512, 100).unwrap();
+                        assert_eq!(io.exists("db/spare.zdb".as_ref()).unwrap(), made, "{case}");
+                    }
+                    io.set_capacity(SimDisk::DEFAULT_CAPACITY).unwrap();
                 }
                 assert_eq!(writer.write_batch(&[7; 300]).unwrap(), (1, 0));
                 assert_eq!(writer.write_batch(&[8; 300]).unwrap(), (2, 0));

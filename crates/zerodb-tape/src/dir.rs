@@ -44,8 +44,7 @@ pub fn atomic_install(io: Arc<dyn Io>, dir: &Path, name: &str, bytes: &[u8]) -> 
 
 /// Keeps one zero-filled `spare.zdb` for the next roll, built as `spare.tmp`.
 ///
-/// Zeroed blocks make each later segment sync a data flush only. Skips the fill if it would
-/// leave less than `floor` free. Failures retry at the next call.
+/// Zeroed blocks make each later segment sync a data flush only. Failures retry at the next call.
 pub fn make_spare(io: Arc<dyn Io>, dir: &Path, size: u64, floor: u64) -> Result<()> {
     let (tmp, spare) = (dir.join("spare.tmp"), dir.join("spare.zdb"));
     if io.exists(&spare)? {
@@ -54,12 +53,13 @@ pub fn make_spare(io: Arc<dyn Io>, dir: &Path, size: u64, floor: u64) -> Result<
     if io.exists(&tmp)? {
         io.remove(&tmp)?;
     }
-    if io.available_bytes(dir)?.checked_sub(size).is_none_or(|left| left < floor) {
+    // Leave the active segment and a concurrent roll their room above the floor.
+    let room = size.saturating_mul(2).saturating_add(floor);
+    if io.available_bytes(dir)? < room {
         return Ok(());
     }
     let file = Handle::create(io.clone(), &tmp)?;
-    let filled = zero_tail(io.as_ref(), file.id, 0, size)
-        .and_then(|()| io.sync_data(file.id).map_err(|e| Error::SyncFailed(e.to_string())));
+    let filled = fill_zeros(io.as_ref(), file.id, size);
     drop(file);
     if let Err(error) = filled {
         // Free the space now, not at the next call.
@@ -68,6 +68,20 @@ pub fn make_spare(io: Arc<dyn Io>, dir: &Path, size: u64, floor: u64) -> Result<
     }
     io.rename(&tmp, &spare)?;
     io.sync_dir(dir).map_err(|e| Error::SyncFailed(e.to_string()))
+}
+
+/// Claims the space at once, then syncs each MiB so no tape sync waits on a large flush.
+fn fill_zeros(io: &dyn Io, file: FileId, size: u64) -> Result<()> {
+    io.allocate(file, size)?;
+    let zeros = vec![0; 1 << 20];
+    let mut offset = 0;
+    while offset < size {
+        let count = (size - offset).min(zeros.len() as u64) as usize;
+        io.write_at(file, offset, &zeros[..count])?;
+        io.sync_data(file).map_err(|e| Error::SyncFailed(e.to_string()))?;
+        offset += count as u64;
+    }
+    Ok(())
 }
 
 pub(crate) fn zero_tail(io: &dyn Io, file: FileId, from: u64, size: u64) -> Result<()> {
