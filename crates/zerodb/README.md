@@ -7,6 +7,7 @@ The server binary. HTTP/JSON over loopback TCP and a Unix socket, with the same 
 zerodb init --config zerodb.json --tenant me     # writes a 0600 config, prints the token once
 zerodb serve --config zerodb.json --data-dir ./data
 zerodb mcp --config zerodb.json --tenant me --data-dir ./data
+zerodb verify --data-dir ./data                  # checks a stopped data dir on a copy
 zerodb recover --truncate-at <lsn> --data-dir ./data
 ```
 
@@ -35,6 +36,16 @@ Tenant names are 1 to 255 bytes. Tokens are 32 to 1024 bytes of visible ASCII, s
 | 2 | Usage error |
 | 70 | Poisoned, with `--exit-on-poison` |
 | 75 | Another process holds the data directory lock |
+
+## `zerodb verify` and `zerodb dump`
+
+Both check a stopped data directory without changing it. Opening a data directory repairs it, so they never open the original. They take its `LOCK` without creating anything, copy its regular files into a new mode 0700 directory, open the copy, and remove it, also on failure. The lock stops a server from starting during the copy.
+
+- `zerodb verify --data-dir <dir>` runs the same engine open as `zerodb serve`. It prints the `GET /v1/stats` fields except `instance` as sorted `key=value` lines. It exits 1 when the open fails or a checkpoint was rejected. A failed open names the first bad LSN. `zerodb recover --truncate-at` needs a transaction boundary below it; an LSN inside a transaction fails and names the nearest boundaries.
+- `zerodb dump --data-dir <dir> [--from <lsn>] [--limit <n>]` prints one line per durable record from `--from`, default 1: `lsn`, `txn`, `kind`, `tenant`, payload `bytes` and `commit_time_ns`. It never prints content.
+- The copy is `<dir>.verify-<8 hex>`, next to the data directory. `--scratch <dir>` puts it in that directory instead. It needs as much free space as the data directory, unless the filesystem clones files, as APFS, btrfs and XFS can.
+
+Exit 0 on success, 1 when the open fails or the directory has no `LOCK`, 2 on bad flags or a `--scratch` inside the data directory, 75 when a server holds the lock. Copies are mode 0600, so a read-only backup opens too.
 
 ## HTTP API
 

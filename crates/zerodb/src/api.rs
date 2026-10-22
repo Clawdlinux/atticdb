@@ -116,41 +116,46 @@ fn health_status(engine: &Engine) -> (u16, &'static str) {
 
 /// `GET /v1/stats`: health and engine metrics since this open.
 pub fn stats(engine: &Engine, instance: &str) -> Response {
-    let Ok(m) = engine.metrics() else { return Response::error(503, "poisoned", None) };
+    let Some(mut fields) = stats_fields(engine) else {
+        return Response::error(503, "poisoned", None);
+    };
+    fields["instance"] = json!(instance);
+    Response::json(200, &fields)
+}
+
+/// The `GET /v1/stats` fields except `instance`. `None` when the engine is poisoned.
+pub fn stats_fields(engine: &Engine) -> Option<Value> {
+    let m = engine.metrics().ok()?;
     let index = &m.tape_index;
-    Response::json(
-        200,
-        &json!({
-            "instance": instance,
-            "health": health_status(engine).1,
-            "durable_lsn": m.durable_lsn,
-            "tenants": m.tenants,
-            "facts": m.facts,
-            "fact_revisions": m.fact_revisions,
-            "dedup_entries": m.dedup_entries,
-            "dedup_window_effective": m.dedup_window_effective,
-            "hot_page_bytes": m.hot_page_bytes,
-            "writer_groups": m.writer_groups,
-            "writer_group_requests": m.writer_group_requests,
-            "superblock_installs": m.superblock_installs,
-            "replayed_records": m.replayed_records,
-            "window_reads": m.window_reads,
-            "fact_reads": m.fact_reads,
-            "checkpoint_watermark": m.checkpoint_watermark,
-            "checkpoint_files": m.checkpoint_files,
-            "checkpoint_saves": m.checkpoint_saves,
-            "checkpoint_warnings": m.checkpoint_warnings,
-            "checkpoint_pending_bytes": m.checkpoint_pending_bytes,
-            "checkpoint_buffer_peak_bytes": m.checkpoint_buffer_peak_bytes,
-            "checkpoint_snapshot_lock_ns": m.checkpoint_snapshot_lock_ns,
-            "checkpoint_state_lock_ns": m.checkpoint_state_lock_ns,
-            "tape_index_resident_bytes": index.resident_bytes,
-            "tape_index_budget_bytes": index.budget_bytes,
-            "tape_index_page_reloads": index.page_reloads,
-            "tape_index_page_evictions": index.page_evictions,
-            "tape_index_dirty_page_evictions": index.dirty_page_evictions,
-        }),
-    )
+    Some(json!({
+        "health": health_status(engine).1,
+        "durable_lsn": m.durable_lsn,
+        "tenants": m.tenants,
+        "facts": m.facts,
+        "fact_revisions": m.fact_revisions,
+        "dedup_entries": m.dedup_entries,
+        "dedup_window_effective": m.dedup_window_effective,
+        "hot_page_bytes": m.hot_page_bytes,
+        "writer_groups": m.writer_groups,
+        "writer_group_requests": m.writer_group_requests,
+        "superblock_installs": m.superblock_installs,
+        "replayed_records": m.replayed_records,
+        "window_reads": m.window_reads,
+        "fact_reads": m.fact_reads,
+        "checkpoint_watermark": m.checkpoint_watermark,
+        "checkpoint_files": m.checkpoint_files,
+        "checkpoint_saves": m.checkpoint_saves,
+        "checkpoint_warnings": m.checkpoint_warnings,
+        "checkpoint_pending_bytes": m.checkpoint_pending_bytes,
+        "checkpoint_buffer_peak_bytes": m.checkpoint_buffer_peak_bytes,
+        "checkpoint_snapshot_lock_ns": m.checkpoint_snapshot_lock_ns,
+        "checkpoint_state_lock_ns": m.checkpoint_state_lock_ns,
+        "tape_index_resident_bytes": index.resident_bytes,
+        "tape_index_budget_bytes": index.budget_bytes,
+        "tape_index_page_reloads": index.page_reloads,
+        "tape_index_page_evictions": index.page_evictions,
+        "tape_index_dirty_page_evictions": index.dirty_page_evictions,
+    }))
 }
 
 /// JSON trees in memory at once: request parses and window builds. An 8 MiB body like

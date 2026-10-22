@@ -1,7 +1,7 @@
 use crate::support::{self, append_body, Dir, Process, Via};
 use serde_json::{json, Value};
 use std::os::fd::OwnedFd;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, FileExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 struct Ctx {
@@ -450,15 +450,50 @@ fn startup_checks() {
                 }
                 let (status, stats) = ctx.run(&["stats", "--data-dir", data]).wait();
                 assert!(status.success(), "{case}: {stats}");
-                let durable = format!("durable_lsn={}", second["last_lsn"].as_u64().unwrap() + 4);
+                let last = second["last_lsn"].as_u64().unwrap() + 4;
+                let durable = format!("durable_lsn={last}");
                 for line in ["health=ok", &durable] {
                     assert!(stats.lines().any(|got| got == line), "{case}: {line} in {stats}");
                 }
                 let recover = ["recover", "--truncate-at", &cut, "--data-dir", data];
                 let (status, stderr) = ctx.run(&recover).wait();
                 assert_eq!(status.code(), Some(75), "{case}: refused under the lock: {stderr}");
+                let verify = ["verify", "--data-dir", data];
+                let (status, stderr) = ctx.run(&verify).wait();
+                assert_eq!(status.code(), Some(75), "{case}: verify under the lock: {stderr}");
                 server.child.kill().unwrap();
                 server.wait();
+                // A read-only backup must still verify.
+                let modes = |mode| {
+                    for name in support::files(&ctx.data).into_keys() {
+                        let perms = std::fs::Permissions::from_mode(mode);
+                        std::fs::set_permissions(ctx.data.join(name), perms).unwrap();
+                    }
+                };
+                modes(0o400);
+                let before = support::files(&ctx.data);
+                let inside = ["--scratch", data];
+                let (status, out) = ctx.run(&[&verify[..], &inside].concat()).wait();
+                assert_eq!(status.code(), Some(2), "{case}: scratch inside the data dir: {out}");
+                let (status, out) = ctx.run(&verify).wait();
+                assert!(status.success(), "{case}: {out}");
+                for line in ["health=ok", &durable] {
+                    assert!(out.lines().any(|got| got == line), "{case}: {line} in {out}");
+                }
+                assert_eq!(support::files(&ctx.data), before, "{case}: verify wrote the data dir");
+                let left =
+                    support::files(&ctx.dir.0).into_keys().filter(|n| n.contains(".verify-"));
+                assert_eq!(left.count(), 0, "{case}: verify left its copy");
+                modes(0o600);
+                let from = first["first_lsn"].as_u64().unwrap();
+                let dump = ["dump", "--data-dir", data, "--from", &from.to_string()];
+                let (status, out) = ctx.run(&dump).wait();
+                assert!(status.success() && !out.contains("two"), "{case}: no content: {out}");
+                let lsns: Vec<&str> = out.lines().map(|l| l.split(' ').next().unwrap()).collect();
+                let acked: Vec<String> = (from..=last).map(|l| format!("lsn={l}")).collect();
+                assert_eq!(lsns, acked, "{case}: acked records in LSN order: {out}");
+                let (status, out) = ctx.run(&[&dump[..], &["--limit", "1"]].concat()).wait();
+                assert!(status.success() && out.lines().count() == 1, "{case}: limit 1: {out}");
                 let (status, stats) = ctx.run(&["stats", "--data-dir", data]).wait();
                 assert_eq!(status.code(), Some(1), "{case}: no server: {stats}");
                 for url in ["http://127.0.0.1:7425", "not-a-url"] {
@@ -474,6 +509,30 @@ fn startup_checks() {
                 let contents: Vec<&Value> =
                     window["turns"].as_array().unwrap().iter().map(|t| &t["content"]).collect();
                 assert_eq!(contents, [&json!("one")], "{case}: only turns at or below the cut");
+                restarted.child.kill().unwrap();
+                restarted.wait();
+                // Replay hides a bad checkpoint from the open, so verify reports it.
+                let checkpoint = ctx.data.join("CHECKPOINT");
+                std::fs::write(&checkpoint, "garbage").unwrap();
+                let (status, out) = ctx.run(&verify).wait();
+                assert_eq!(status.code(), Some(1), "{case}: rejected checkpoint: {out}");
+                assert!(out.contains("checkpoint"), "{case}: {out}");
+                std::fs::remove_file(&checkpoint).unwrap();
+                // A symlink is refused, never skipped into an incomplete copy.
+                std::os::unix::fs::symlink("elsewhere", &checkpoint).unwrap();
+                let (status, out) = ctx.run(&verify).wait();
+                assert_eq!(status.code(), Some(1), "{case}: symlinked checkpoint: {out}");
+                assert!(out.contains("not a regular file"), "{case}: {out}");
+                std::fs::remove_file(checkpoint).unwrap();
+                // The restart put the superblock above LSN 1, so this is corruption, not a torn tail.
+                let segment = ctx.data.join("seg-0000000000000001.zdb");
+                let file = std::fs::OpenOptions::new().read(true).write(true).open(segment);
+                let (file, mut byte) = (file.unwrap(), [0]);
+                file.read_exact_at(&mut byte, 40).unwrap();
+                file.write_all_at(&[!byte[0]], 40).unwrap();
+                let (status, out) = ctx.run(&verify).wait();
+                assert_eq!(status.code(), Some(1), "{case}: corrupt first frame: {out}");
+                assert!(out.contains("at LSN 1,"), "{case}: names the LSN: {out}");
             }
             #[cfg(feature = "fault-inject")]
             Expect::ExitsOnPoison(replaced) => {
