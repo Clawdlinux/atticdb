@@ -65,7 +65,7 @@ fn append(c: &mut Criterion) {
         group.throughput(Throughput::Elements(1));
         {
             let dir = BenchDir::new();
-            let mut bare = Bare::new(&dir.0, 0);
+            let mut bare = Bare::new(&dir.0);
             let bytes = encoded_batch(&[record(size)]);
             let samples = (0..1024)
                 .map(|_| {

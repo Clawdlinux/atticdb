@@ -251,6 +251,10 @@ struct ReadState {
     groups: AtomicU64,
     grouped_requests: AtomicU64,
     superblock_installs: AtomicU64,
+    /// Held while checking and claiming disk space.
+    space: Mutex<()>,
+    /// The resolved free-space floor, or `u64::MAX` while unknown.
+    floor: AtomicU64,
 }
 
 impl ReadState {
@@ -405,6 +409,8 @@ impl<S: StateMachine> WriterCore<S> {
             groups: AtomicU64::new(0),
             grouped_requests: AtomicU64::new(0),
             superblock_installs: AtomicU64::new(0),
+            space: Mutex::new(()),
+            floor: AtomicU64::new(free_space_floor.unwrap_or(u64::MAX)),
         });
         if let Some(from) = opts.replay_from_lsn.checked_add(1) {
             for record in reads.scan(from) {
@@ -615,12 +621,22 @@ impl<S: StateMachine> WriterCore<S> {
                 }
             });
             if !self.queue.is_empty() {
+                let reads = self.reads.clone();
+                // The spare fill checks and claims space under the same lock.
+                let _space = match lock(&reads.space) {
+                    Ok(guard) => guard,
+                    Err(error) => {
+                        self.reject_storage_group(error);
+                        return;
+                    }
+                };
                 let floor = match self.free_space_floor {
                     Some(floor) => floor,
                     None => match self.reads.io.total_bytes(&self.reads.path) {
                         Ok(capacity) => {
                             let floor = (capacity / 20).min(1 << 30);
                             self.free_space_floor = Some(floor);
+                            self.reads.floor.store(floor, Ordering::Release);
                             floor
                         }
                         Err(error) => {
@@ -803,13 +819,14 @@ impl<S: StateMachine> WriterCore<S> {
         Ok(())
     }
     fn make_spare(&self) -> Result<()> {
-        // Without a floor the writer is read-only, so skip the fill.
-        let floor = self.free_space_floor.unwrap_or(u64::MAX);
+        let reads = &self.reads;
+        let floor = reads.floor.load(Ordering::Acquire);
         crate::dir::make_spare(
-            self.reads.io.clone(),
-            &self.reads.path,
+            reads.io.clone(),
+            &reads.path,
             self.segments.capacity(),
             floor,
+            &reads.space,
         )
     }
     fn superblock_due(&self) -> bool {
@@ -915,7 +932,6 @@ impl MaintenanceWorker {
         let io = reads.io.clone();
         let path = reads.path.clone();
         let size = core.segments.capacity();
-        let floor = core.free_space_floor.unwrap_or(u64::MAX);
         let mut installed = core.segments.dir.superblock();
         let (sender, receiver) = mpsc::sync_channel(1);
         let thread =
@@ -936,7 +952,10 @@ impl MaintenanceWorker {
                         installed = boundary;
                         reads.superblock_installs.fetch_add(1, Ordering::Relaxed);
                     }
-                    if let Err(error) = crate::dir::make_spare(io.clone(), &path, size, floor) {
+                    let floor = reads.floor.load(Ordering::Acquire);
+                    let spare =
+                        crate::dir::make_spare(io.clone(), &path, size, floor, &reads.space);
+                    if let Err(error) = spare {
                         eprintln!("zerodb: spare segment fill failed: {error}");
                     }
                 }

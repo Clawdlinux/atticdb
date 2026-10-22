@@ -83,7 +83,11 @@ fn space_fault(case: &str, fault: Fault, expect_read_only: bool, expect_poisoned
     };
     let (io, mut core, prepares) = primed_writer(floor, capacity, boundary, segment);
     if matches!(fault, Spare) {
-        make_spare(io.clone(), Path::new("db"), segment, 0).unwrap();
+        // A failed rename frees the filled space at once.
+        io.fail_next_rename.store(true, Ordering::SeqCst);
+        assert!(make_spare(io.clone(), Path::new("db"), segment, 0, &Default::default()).is_err());
+        assert!(!io.disk.exists(Path::new("db/spare.tmp")).unwrap(), "{case}: spare.tmp removed");
+        make_spare(io.clone(), Path::new("db"), segment, 0, &Default::default()).unwrap();
     }
     let before_prepares = prepares.load(Ordering::SeqCst);
     let before_manifest = manifest(&io.disk);
@@ -684,7 +688,8 @@ mod segments {
                         SimDisk::DEFAULT_CAPACITY - io.available_bytes("db".as_ref()).unwrap();
                     for (room, made) in [(2 * 512 - 1, false), (2 * 512, true)] {
                         io.set_capacity(used + 100 + room).unwrap();
-                        make_spare(io.clone(), Path::new("db"), 512, 100).unwrap();
+                        make_spare(io.clone(), Path::new("db"), 512, 100, &Default::default())
+                            .unwrap();
                         assert_eq!(io.exists("db/spare.zdb".as_ref()).unwrap(), made, "{case}");
                     }
                     io.set_capacity(SimDisk::DEFAULT_CAPACITY).unwrap();

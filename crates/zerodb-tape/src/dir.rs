@@ -1,10 +1,10 @@
 //! Locked directory metadata and atomic replacements.
 
 use crate::crc32c::crc32c;
-use crate::io::{FileId, Io, LockGuard};
+use crate::io::{lock, FileId, Io, LockGuard};
 use crate::{Error, Result};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 pub(crate) struct Handle {
     pub io: Arc<dyn Io>,
@@ -45,34 +45,47 @@ pub fn atomic_install(io: Arc<dyn Io>, dir: &Path, name: &str, bytes: &[u8]) -> 
 /// Keeps one zero-filled `spare.zdb` for the next roll, built as `spare.tmp`.
 ///
 /// Zeroed blocks make each later segment sync a data flush only. Failures retry at the next call.
-pub fn make_spare(io: Arc<dyn Io>, dir: &Path, size: u64, floor: u64) -> Result<()> {
+pub fn make_spare(
+    io: Arc<dyn Io>,
+    dir: &Path,
+    size: u64,
+    floor: u64,
+    space: &Mutex<()>,
+) -> Result<()> {
     let (tmp, spare) = (dir.join("spare.tmp"), dir.join("spare.zdb"));
-    if io.exists(&spare)? {
-        return Ok(());
-    }
-    if io.exists(&tmp)? {
-        io.remove(&tmp)?;
-    }
-    // Leave the active segment and a concurrent roll their room above the floor.
-    let room = size.saturating_mul(2).saturating_add(floor);
-    if io.available_bytes(dir)? < room {
-        return Ok(());
-    }
-    let file = Handle::create(io.clone(), &tmp)?;
+    let file = {
+        // The writer checks and reserves under the same lock, so both never pass on the same bytes.
+        let _space = lock(space)?;
+        if io.exists(&spare)? {
+            return Ok(());
+        }
+        if io.exists(&tmp)? {
+            io.remove(&tmp)?;
+        }
+        // Leave the active segment and a concurrent roll their room above the floor.
+        if io.available_bytes(dir)? < size.saturating_mul(2).saturating_add(floor) {
+            return Ok(());
+        }
+        let file = Handle::create(io.clone(), &tmp)?;
+        if let Err(error) = io.allocate(file.id, size) {
+            drop(file);
+            io.remove(&tmp)?;
+            return Err(error);
+        }
+        file
+    };
     let filled = fill_zeros(io.as_ref(), file.id, size);
     drop(file);
-    if let Err(error) = filled {
+    if let Err(error) = filled.and_then(|()| io.rename(&tmp, &spare)) {
         // Free the space now, not at the next call.
         io.remove(&tmp)?;
         return Err(error);
     }
-    io.rename(&tmp, &spare)?;
     io.sync_dir(dir).map_err(|e| Error::SyncFailed(e.to_string()))
 }
 
-/// Claims the space at once. Small synced chunks keep tape syncs from queuing behind the fill.
+/// Small synced chunks keep tape syncs from queuing behind the fill.
 fn fill_zeros(io: &dyn Io, file: FileId, size: u64) -> Result<()> {
-    io.allocate(file, size)?;
     let zeros = vec![0; 256 << 10];
     let mut offset = 0;
     while offset < size {

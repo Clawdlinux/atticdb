@@ -272,13 +272,13 @@ mod directory {
                 let mut dir = DataDir::open(io.clone(), db, None, 1024).unwrap();
                 dir.prepare_next_segment(1024).unwrap();
                 if renamed_spare {
-                    make_spare(io.clone(), db, 1024, 0).unwrap();
+                    make_spare(io.clone(), db, 1024, 0, &Default::default()).unwrap();
                 }
                 let id = dir.prepare_next_segment(1024).unwrap();
                 assert!(!io.exists(&db.join("spare.zdb")).unwrap(), "{case}: roll took the spare");
                 dir.install_manifest(&[1]).unwrap();
                 // A crash can also leave a ready spare and a partial fill.
-                make_spare(io.clone(), db, 1024, 0).unwrap();
+                make_spare(io.clone(), db, 1024, 0, &Default::default()).unwrap();
                 io.close(io.create(&db.join("spare.tmp")).unwrap()).unwrap();
                 let leftovers = [dir.segment_path(id), db.join("spare.zdb"), db.join("spare.tmp")];
                 drop(dir);

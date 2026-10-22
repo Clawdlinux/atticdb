@@ -61,6 +61,7 @@ pub fn encoded_batch(inputs: &[RecordInput]) -> Vec<u8> {
     bytes
 }
 
+/// Keeps one zero-filled spare like the tape: filled at open, refilled in the background.
 #[derive(Debug)]
 pub struct Bare {
     file: File,
@@ -68,24 +69,19 @@ pub struct Bare {
     segment: u64,
     offset: u64,
     dirty: bool,
+    refill: Option<std::thread::JoinHandle<()>>,
 }
 impl Bare {
-    /// Zero-fills later segments for `bytes` of writes before timing, as the tape's spares are.
     #[track_caller]
-    pub fn new(dir: &Path, bytes: u64) -> Self {
+    pub fn new(dir: &Path) -> Self {
+        let file = Self::segment(dir, 0);
+        Self::fill(dir);
+        Self { file, dir: dir.to_owned(), segment: 0, offset: 0, dirty: false, refill: None }
+    }
+    #[track_caller]
+    fn fill(dir: &Path) {
         let io: Arc<dyn Io> = Arc::new(StdIo::new());
-        for id in 1..=bytes / DEFAULT_SEGMENT_SIZE + 1 {
-            make_spare(io.clone(), dir, DEFAULT_SEGMENT_SIZE, 0).unwrap();
-            io.rename(&dir.join("spare.zdb"), &Self::path(dir, id)).unwrap();
-        }
-        io.sync_dir(dir).unwrap();
-        Self {
-            file: Self::segment(dir, 0),
-            dir: dir.to_owned(),
-            segment: 0,
-            offset: 0,
-            dirty: false,
-        }
+        make_spare(io, dir, DEFAULT_SEGMENT_SIZE, 0, &Default::default()).unwrap();
     }
     pub fn path(dir: &Path, id: u64) -> PathBuf {
         dir.join(format!("bare-{id}"))
@@ -97,9 +93,12 @@ impl Bare {
     }
     #[track_caller]
     fn segment(dir: &Path, id: u64) -> File {
-        let path = Self::path(dir, id);
-        // Like the tape's first segment, and a roll with no spare ready.
-        if !path.exists() {
+        let (path, spare) = (Self::path(dir, id), dir.join("spare.zdb"));
+        if spare.exists() {
+            std::fs::rename(spare, &path).unwrap();
+            StdIo::new().sync_dir(dir).unwrap();
+        } else {
+            // Like the tape's first segment, and a roll with no spare ready.
             let io = StdIo::new();
             let file = io.create(&path).unwrap();
             io.allocate(file, DEFAULT_SEGMENT_SIZE).unwrap();
@@ -118,6 +117,13 @@ impl Bare {
             self.segment += 1;
             self.file = Self::segment(&self.dir, self.segment);
             self.offset = 0;
+            if self.refill.as_ref().is_none_or(|refill| refill.is_finished()) {
+                if let Some(refill) = self.refill.take() {
+                    refill.join().unwrap();
+                }
+                let dir = self.dir.clone();
+                self.refill = Some(std::thread::spawn(move || Self::fill(&dir)));
+            }
         }
         self.file.write_all(bytes).unwrap();
         self.offset += bytes.len() as u64;
@@ -128,6 +134,13 @@ impl Bare {
         if self.dirty {
             self.file.sync_data().unwrap();
             self.dirty = false;
+        }
+    }
+}
+impl Drop for Bare {
+    fn drop(&mut self) {
+        if let Some(refill) = self.refill.take() {
+            let _ = refill.join();
         }
     }
 }
