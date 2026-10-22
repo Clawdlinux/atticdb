@@ -1,13 +1,13 @@
 #![cfg(feature = "sim")]
 #![allow(clippy::unwrap_used)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use zerodb_core::{
-    turn::decode, Appended, Engine, EngineOptions, ErrorKind, Health, NewTurn, Outcome, Role,
-    Scope, SimAppend, Turn, WindowQuery,
+    turn::decode, Appended, Engine, EngineError, EngineOptions, ErrorKind, FactQuery, FactWritten,
+    Health, NewFact, NewTurn, Outcome, Role, Scope, SimFact, Turn, WindowQuery,
 };
 use zerodb_tape::sim::{CapacityError, CapacityPlan, PublishPause, SimClock, StorageFullFault};
 use zerodb_tape::{Clock, Error, FileId, Io, Kind, LockGuard, Result, SimDisk, Tape, TapeOptions};
@@ -158,13 +158,30 @@ struct Batch {
     key: Option<String>,
     receipt: Option<Appended>,
     time: u64,
+    fact: Option<FactOp>,
 }
+/// A fact write in the scope's tenant. `content` None deletes. The agent names the batch.
+#[derive(Clone)]
+struct FactOp {
+    key: String,
+    content: Option<Vec<u8>>,
+    if_lsn: Option<u64>,
+}
+/// Eight keys per tenant with shared prefixes.
+const FACT_KEYS: [&str; 8] = ["a", "a/1", "a/2", "a/b/1", "a/b/2", "ab", "b/1", "b/2"];
+type FactKey = (String, String);
+/// Per (tenant, key), every acknowledged revision in LSN order. None is a tombstone.
+type Revisions = Vec<(u64, Option<Vec<u8>>)>;
 #[derive(Clone)]
 struct Oracle {
     scopes: Vec<Scope>,
     history: Vec<Vec<Turn>>,
     batches: Vec<Batch>,
     tenants: BTreeMap<String, u32>,
+    facts: BTreeMap<FactKey, Revisions>,
+    fact_history: usize,
+    /// Commit time of the newest fact. Facts advance the tape's commit clock too.
+    fact_time: u64,
 }
 impl Oracle {
     fn new() -> Self {
@@ -180,12 +197,62 @@ impl Oracle {
             scopes,
             batches: Vec::new(),
             tenants: BTreeMap::new(),
+            facts: BTreeMap::new(),
+            fact_history: EngineOptions::default().fact_history,
+            fact_time: 0,
         }
+    }
+    fn fact_key(&self, index: usize) -> Option<FactKey> {
+        let batch = &self.batches[index];
+        Some((self.scopes[batch.scope].tenant.clone(), batch.fact.as_ref()?.key.clone()))
+    }
+    /// The LSN of the key's current value, or 0 when it has none.
+    fn current(&self, key: &FactKey) -> u64 {
+        let newest = self.facts.get(key).and_then(|revs| revs.last());
+        newest.filter(|(_, content)| content.is_some()).map_or(0, |(lsn, _)| *lsn)
+    }
+    /// A conditional write conflicts only on a stale `if_lsn`, or behind an unresolved
+    /// earlier write to the same key in its group.
+    fn assert_conflict(&self, index: usize, unresolved: &[usize]) {
+        let key = self.fact_key(index).unwrap();
+        let if_lsn = self.batches[index].fact.as_ref().unwrap().if_lsn;
+        assert!(
+            if_lsn.is_some_and(|lsn| lsn != self.current(&key))
+                || unresolved.iter().any(|&i| self.fact_key(i).as_ref() == Some(&key)),
+            "Conflict on a matching if_lsn: batch={index}"
+        );
+    }
+    /// I9: the current value is the newest revision unless it is a tombstone. History shows the
+    /// newest `fact_history` revisions. Reads cost one tape read per returned entry.
+    fn check_fact(&self, engine: &Engine, key: &FactKey) {
+        let revs = self.facts.get(key).map_or(&[][..], Vec::as_slice);
+        let before = engine.metrics().unwrap().fact_reads;
+        let current = revs.last().and_then(|(lsn, content)| Some((*lsn, content.clone()?)));
+        let reads = u64::from(current.is_some()) + revs.len().min(self.fact_history) as u64;
+        let got = engine.fact_get(&key.0, &key.1).unwrap();
+        assert_eq!(got.map(|fact| (fact.lsn, fact.content)), current, "I9: {key:?}");
+        let history = engine.fact_history(&key.0, &key.1, usize::MAX).unwrap();
+        let shown =
+            history.revisions.into_iter().map(|r| (r.lsn, (!r.deleted).then_some(r.content)));
+        let newest = revs.iter().rev().take(self.fact_history).cloned();
+        assert!(shown.eq(newest), "history: {key:?}");
+        assert_eq!(history.truncated, revs.len() > self.fact_history, "truncated: {key:?}");
+        assert_eq!(engine.metrics().unwrap().fact_reads - before, reads, "fact reads: {key:?}");
     }
     fn apply(&mut self, index: usize, receipt: Appended) {
         assert!(!receipt.deduplicated, "an unacknowledged batch must be a fresh commit");
-        let previous =
-            self.history.iter().flatten().map(|turn| turn.commit_time_ns).max().unwrap_or(0);
+        let previous = self.history.iter().flatten().map(|turn| turn.commit_time_ns).max();
+        let previous = previous.unwrap_or(0).max(self.fact_time);
+        if let Some(key) = self.fact_key(index) {
+            self.fact_time = self.batches[index].time.max(previous + 1);
+            let fact = self.batches[index].fact.clone().unwrap();
+            if let Some(if_lsn) = fact.if_lsn {
+                assert_eq!(self.current(&key), if_lsn, "committed on another LSN: batch={index}");
+            }
+            self.facts.entry(key).or_default().push((receipt.last_lsn, fact.content));
+            self.batches[index].receipt = Some(receipt);
+            return;
+        }
         let b = &mut self.batches[index];
         b.time = b.time.max(previous + 1);
         let history = &mut self.history[b.scope];
@@ -225,6 +292,67 @@ impl Oracle {
             assert_eq!(engine.window(scope, WindowQuery::Since { seq, limit }).unwrap(), wanted);
         }
         assert_eq!(engine.metrics().unwrap().tenants, self.tenants.len());
+        for key in self.facts.keys() {
+            self.check_fact(engine, key);
+        }
+        let prefixes: BTreeSet<&str> =
+            FACT_KEYS.iter().flat_map(|key| (0..=key.len().min(3)).map(|n| &key[..n])).collect();
+        for tenant in self.facts.keys().map(|(tenant, _)| tenant).collect::<BTreeSet<_>>() {
+            let live: Vec<_> = self
+                .facts
+                .iter()
+                .filter(|((owner, _), _)| owner == tenant)
+                .filter_map(|((_, key), revs)| {
+                    let (lsn, content) = revs.last()?;
+                    let agent = self.batches.iter().position(|b| {
+                        b.fact.is_some() && b.receipt.as_ref().is_some_and(|r| r.last_lsn == *lsn)
+                    });
+                    Some((key, agent?.to_string(), content.as_ref()?))
+                })
+                .collect();
+            for prefix in &prefixes {
+                let expected: Vec<_> =
+                    live.iter().filter(|(key, ..)| key.starts_with(prefix)).collect();
+                let (limit, max_bytes) =
+                    (1 + rng.below(4), [0, 300, 2000, usize::MAX][rng.below(4)]);
+                let (mut seen, mut after) = (0, None);
+                loop {
+                    let before = engine.metrics().unwrap().fact_reads;
+                    let query = FactQuery { prefix: prefix.to_string(), after, limit, max_bytes };
+                    let page = engine.fact_list(tenant, query).unwrap();
+                    // The first `limit` remaining facts that fit the budget, at least one.
+                    let (mut returned, mut bytes, mut cut) = (0, 0, false);
+                    for (key, agent, content) in expected[seen..].iter().take(limit) {
+                        bytes += key.len() + agent.len() + content.len();
+                        if returned > 0 && bytes > max_bytes {
+                            cut = true;
+                            break;
+                        }
+                        returned += 1;
+                    }
+                    let got: Vec<_> =
+                        page.facts.iter().map(|f| (&f.key, &f.agent, &f.content)).collect();
+                    let expected: Vec<_> = expected
+                        .iter()
+                        .map(|(key, agent, content)| (*key, agent, *content))
+                        .collect();
+                    let case = format!(
+                        "tenant={tenant} prefix={prefix:?} limit={limit} max_bytes={max_bytes}"
+                    );
+                    assert_eq!(got, &expected[seen..seen + returned], "{case}");
+                    let reads = engine.metrics().unwrap().fact_reads - before;
+                    assert_eq!(reads, (returned + usize::from(cut)) as u64, "{case}");
+                    seen += returned;
+                    match page.next {
+                        Some(next) if returned > 0 => after = Some(next),
+                        next => {
+                            assert_eq!((next, seen), (None, expected.len()), "{case}");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
     }
     // Only the unresolved batch may extend the acknowledged prefix, and only as a whole.
     fn recover(
@@ -238,6 +366,7 @@ impl Oracle {
         let mut actual = vec![Vec::new(); self.scopes.len()];
         let mut transactions: BTreeMap<u64, Vec<(u64, u64)>> = BTreeMap::new();
         let mut tenant_names = BTreeMap::new();
+        let mut facts: BTreeMap<FactKey, Revisions> = BTreeMap::new();
         let mut records = 0;
         for record in tape.scan(0) {
             let record = record.unwrap();
@@ -249,6 +378,22 @@ impl Oracle {
                 }
                 assert!(tenant_names.insert(record.tenant_id, name.clone()).is_none());
                 self.tenants.insert(name, record.tenant_id);
+                continue;
+            }
+            if record.kind == Kind::Fact {
+                let fact = zerodb_core::fact::decode(&record.payload).unwrap();
+                let index: usize = fact.agent.parse().unwrap();
+                let key = (tenant_names[&record.tenant_id].clone(), fact.key);
+                let content = (!fact.tombstone).then_some(fact.content);
+                let op = self.batches[index].fact.as_ref().unwrap();
+                assert_eq!(self.fact_key(index).unwrap(), key);
+                assert_eq!((&op.content, &self.batches[index].key), (&content, &fact.idem_key));
+                assert!(
+                    self.batches[index].receipt.is_some() || pending.contains(&index),
+                    "NotCommitted or unwritten fact recovered: batch={index}"
+                );
+                transactions.entry(record.txn).or_default().push((index as u64, record.lsn));
+                facts.entry(key).or_default().push((record.lsn, content));
                 continue;
             }
             assert_eq!(record.kind, Kind::Turn);
@@ -287,7 +432,7 @@ impl Oracle {
             let index = turns[0].0 as usize;
             assert!(turns.iter().all(|&(b, _)| b as usize == index));
             let batch = &self.batches[index];
-            assert_eq!(turns.len(), batch.turns.len(), "partial transaction");
+            assert_eq!(turns.len(), batch.turns.len().max(1), "partial transaction");
             let receipt = Appended {
                 txn,
                 first_lsn: turns[0].1,
@@ -307,6 +452,7 @@ impl Oracle {
             }
         }
         assert_eq!(actual, self.history, "acknowledged data lost or unexpected turns recovered");
+        assert_eq!(facts, self.facts, "acknowledged facts lost or unexpected facts recovered");
         records
     }
 }
@@ -323,16 +469,26 @@ fn open(io: Arc<FaultIo>, clock: Arc<SimClock>, opts: &EngineOptions) -> Engine 
 }
 
 fn retry(engine: &Engine, oracle: &mut Oracle, index: usize) {
-    let batch = &oracle.batches[index];
     let before = engine.metrics().unwrap().durable_lsn;
-    let receipt = engine
-        .append(&oracle.scopes[batch.scope], batch.turns.clone(), batch.key.as_deref())
-        .unwrap();
-    if let Some(expected) = &batch.receipt {
-        assert_deduplicated(expected, &receipt);
-        assert_eq!(engine.metrics().unwrap().durable_lsn, before);
-    } else {
-        oracle.apply(index, receipt);
+    match write(engine, oracle, index, false) {
+        Err(error) if matches!(error.kind, ErrorKind::Conflict) => {
+            assert!(oracle.batches[index].receipt.is_none(), "a committed retry key conflicted");
+            assert_eq!(error.outcome, Outcome::NotCommitted);
+            oracle.assert_conflict(index, &[]);
+        }
+        result => {
+            let receipt = result.unwrap();
+            if let Some(expected) = &oracle.batches[index].receipt {
+                assert_deduplicated(expected, &receipt);
+                assert_eq!(engine.metrics().unwrap().durable_lsn, before);
+            } else {
+                oracle.apply(index, receipt);
+            }
+        }
+    }
+    if let Some(key) = oracle.fact_key(index) {
+        oracle.check_fact(engine, &key);
+        return;
     }
     let scope = oracle.batches[index].scope;
     assert_eq!(
@@ -342,7 +498,81 @@ fn retry(engine: &Engine, oracle: &mut Oracle, index: usize) {
     );
 }
 
-fn random_batch(rng: &mut Rng, index: usize, scope: usize, time: u64) -> Batch {
+/// The fact write a batch names. `changed` alters the payload but keeps the retry key.
+fn new_fact(op: &FactOp, index: usize, changed: bool) -> NewFact {
+    let agent = if changed { format!("{index}!") } else { index.to_string() };
+    let content = op.content.clone().unwrap_or_default();
+    NewFact { key: op.key.clone(), content, meta: vec![], agent }
+}
+
+fn fact_receipt(written: FactWritten) -> Appended {
+    let FactWritten { txn, lsn, deduplicated } = written;
+    Appended { txn, first_lsn: lsn, last_lsn: lsn, seqs: vec![], deduplicated }
+}
+
+/// Runs a batch as a turn append or a fact write.
+fn write(
+    engine: &Engine,
+    oracle: &Oracle,
+    index: usize,
+    changed: bool,
+) -> std::result::Result<Appended, EngineError> {
+    let batch = &oracle.batches[index];
+    let (scope, key) = (&oracle.scopes[batch.scope], batch.key.as_deref());
+    let Some(op) = &batch.fact else {
+        let mut turns = batch.turns.clone();
+        if changed {
+            turns[0].content.push(0xff);
+        }
+        return engine.append(scope, turns, key);
+    };
+    let fact = new_fact(op, index, changed);
+    match op.content {
+        Some(_) => engine.fact_put(&scope.tenant, fact, key, op.if_lsn),
+        None => engine.fact_delete(&scope.tenant, &fact.key, &fact.agent, key, op.if_lsn),
+    }
+    .map(fact_receipt)
+}
+
+type Queued<'a> = Box<dyn FnOnce() -> std::result::Result<Appended, EngineError> + 'a>;
+
+/// Queues a batch for the next inline step. Its tenant must exist.
+fn enqueue<'a>(engine: &'a Engine, oracle: &Oracle, index: usize, changed: bool) -> Queued<'a> {
+    let batch = &oracle.batches[index];
+    let (scope, key) = (&oracle.scopes[batch.scope], batch.key.as_deref());
+    let Some(op) = &batch.fact else {
+        let mut turns = batch.turns.clone();
+        if changed {
+            turns[0].content.push(0xff);
+        }
+        let reply = engine.enqueue_sim(scope, turns, key).unwrap();
+        return Box::new(move || reply.finish());
+    };
+    let fact = new_fact(op, index, changed);
+    let reply =
+        engine.enqueue_fact_sim(&scope.tenant, fact, op.content.is_none(), key, op.if_lsn).unwrap();
+    Box::new(move || reply.finish().map(fact_receipt))
+}
+
+/// A turn batch, or with `facts` a fact put, delete or conditional put one time in three.
+fn random_batch(
+    rng: &mut Rng,
+    index: usize,
+    scope: usize,
+    time: u64,
+    facts: Option<&Oracle>,
+) -> Batch {
+    let key = if rng.below(3) == 0 { None } else { Some(format!("key-{index}")) };
+    if let Some(oracle) = facts.filter(|_| rng.below(3) == 0) {
+        let fact_key = FACT_KEYS[rng.below(FACT_KEYS.len())].to_owned();
+        let current = oracle.current(&(oracle.scopes[scope].tenant.clone(), fact_key.clone()));
+        let size = [0, 1, 31, 256, 1024][rng.below(5)];
+        let content = (rng.below(4) > 0).then(|| rng.bytes(size));
+        let stale = Some(rng.below(current as usize + 2) as u64);
+        let if_lsn = [None, Some(current), stale][rng.below(3)];
+        let fact = Some(FactOp { key: fact_key, content, if_lsn });
+        return Batch { scope, turns: vec![], key, receipt: None, time, fact };
+    }
     let turns = (0..1 + rng.below(4))
         .map(|_| {
             let size = [0, 1, 31, 256, 1024, 8192][rng.below(6)];
@@ -356,13 +586,7 @@ fn random_batch(rng: &mut Rng, index: usize, scope: usize, time: u64) -> Batch {
             }
         })
         .collect();
-    Batch {
-        scope,
-        turns,
-        key: if rng.below(3) == 0 { None } else { Some(format!("key-{index}")) },
-        receipt: None,
-        time,
-    }
+    Batch { scope, turns, key, receipt: None, time, fact: None }
 }
 
 fn corrupt_page_checksum(disk: &SimDisk, rng: &mut Rng) {
@@ -379,7 +603,7 @@ fn corrupt_page_checksum(disk: &SimDisk, rng: &mut Rng) {
             let mut header = [0; 9];
             assert_eq!(disk.read_at(file, offset, &mut header).unwrap(), header.len());
             let len = u32::from_le_bytes(header[4..8].try_into().unwrap());
-            if header[8] == 2 {
+            if matches!(header[8], 2 | 4 | 5) {
                 pages.push((path.clone(), offset));
             }
             offset += u64::from(len);
@@ -415,12 +639,14 @@ fn run_seed_with_capacity(seed: u64, plan: &CapacityPlan) -> Vec<Vec<Turn>> {
         },
         hot_page_bytes: if seed.is_multiple_of(2) { 4096 } else { 1024 * 1024 },
         checkpoint_bytes: 4096,
+        fact_history: 1 + (seed % 3) as usize,
         ..EngineOptions::default()
     };
     let clock = Arc::new(SimClock::default());
     let mut io = Arc::new(FaultIo::new(SimDisk::new(seed)));
     let mut engine = open(io.clone(), clock.clone(), &opts);
     let mut oracle = Oracle::new();
+    oracle.fact_history = opts.fact_history;
     for generation in 0..3 {
         for step in 0..40 {
             clock.advance(1 + rng.below(2_000_000_000) as u64);
@@ -432,13 +658,8 @@ fn run_seed_with_capacity(seed: u64, plan: &CapacityPlan) -> Vec<Vec<Turn>> {
                 let index = rng.below(oracle.batches.len());
                 if oracle.batches[index].receipt.is_some() && oracle.batches[index].key.is_some() {
                     retry(&engine, &mut oracle, index);
-                    let batch = &oracle.batches[index];
-                    let mut changed = batch.turns.clone();
-                    changed[0].content.push(0xff);
                     let before = engine.metrics().unwrap().durable_lsn;
-                    let error = engine
-                        .append(&oracle.scopes[batch.scope], changed, batch.key.as_deref())
-                        .unwrap_err();
+                    let error = write(&engine, &oracle, index, true).unwrap_err();
                     assert_eq!(error.outcome, Outcome::NotCommitted);
                     assert!(matches!(error.kind, ErrorKind::IdempotencyConflict));
                     assert_eq!(before, engine.metrics().unwrap().durable_lsn);
@@ -446,7 +667,8 @@ fn run_seed_with_capacity(seed: u64, plan: &CapacityPlan) -> Vec<Vec<Turn>> {
             }
             let scope = if rng.below(3) == 0 { 0 } else { rng.below(oracle.scopes.len()) };
             let index = oracle.batches.len();
-            let batch = random_batch(&mut rng, index, scope, clock.now_ns());
+            let batch = random_batch(&mut rng, index, scope, clock.now_ns(), Some(&oracle));
+            oracle.batches.push(batch);
             // Every seed covers failed sync before and after persistence, plus live reopen.
             let fault = step == 12 || step == 28;
             if fault {
@@ -460,9 +682,7 @@ fn run_seed_with_capacity(seed: u64, plan: &CapacityPlan) -> Vec<Vec<Turn>> {
             if cut {
                 io.cut.store(1 + rng.below(6), Ordering::SeqCst);
             }
-            let result =
-                engine.append(&oracle.scopes[scope], batch.turns.clone(), batch.key.as_deref());
-            oracle.batches.push(batch);
+            let result = write(&engine, &oracle, index, false);
             let image = io.image.lock().unwrap().take();
             if image.is_some() {
                 if let Ok(receipt) = &result {
@@ -480,6 +700,10 @@ fn run_seed_with_capacity(seed: u64, plan: &CapacityPlan) -> Vec<Vec<Turn>> {
                 match result {
                     Ok(receipt) => oracle.apply(index, receipt),
                     Err(error) if error.outcome == Outcome::Unknown => pending.push(index),
+                    Err(error) if matches!(error.kind, ErrorKind::Conflict) => {
+                        assert_eq!(error.outcome, Outcome::NotCommitted);
+                        oracle.assert_conflict(index, &[]);
+                    }
                     Err(error) => {
                         assert_eq!(error.outcome, Outcome::NotCommitted);
                         assert!(matches!(
@@ -565,24 +789,25 @@ fn run_seed_with_capacity(seed: u64, plan: &CapacityPlan) -> Vec<Vec<Turn>> {
     history
 }
 
+/// One keyed turn or unconditional fact put, 512 to 2559 content bytes.
 fn enqueue_keyed_batch<'a>(
     engine: &'a Engine,
     oracle: &mut Oracle,
     rng: &mut Rng,
     clock: &SimClock,
-) -> (usize, SimAppend<'a>) {
+) -> (usize, Queued<'a>) {
     let index = oracle.batches.len();
     let scope = rng.below(4);
-    let mut batch = random_batch(rng, index, scope, clock.now_ns());
-    batch.turns.truncate(1);
+    let mut batch = random_batch(rng, index, scope, clock.now_ns(), Some(oracle));
     let len = 512 + rng.below(2048);
-    batch.turns[0].content = rng.bytes(len);
+    let content = rng.bytes(len);
+    match &mut batch.fact {
+        Some(fact) => (fact.content, fact.if_lsn) = (Some(content), None),
+        None => batch.turns = vec![NewTurn { content, ..batch.turns[0].clone() }],
+    }
     batch.key = Some(format!("key-{index}"));
-    let reply = engine
-        .enqueue_sim(&oracle.scopes[scope], batch.turns.clone(), batch.key.as_deref())
-        .unwrap();
     oracle.batches.push(batch);
-    (index, reply)
+    (index, enqueue(engine, oracle, index, false))
 }
 
 fn capacity_faults(
@@ -605,6 +830,7 @@ fn capacity_faults(
             metrics.tenants,
             metrics.dedup_entries,
             metrics.dedup_window_effective,
+            (metrics.facts, metrics.fact_revisions),
             turns,
         )
     };
@@ -625,7 +851,7 @@ fn capacity_faults(
     io.watch_segment_writes.store(false, Ordering::SeqCst);
     assert_eq!(io.segment_writes.load(Ordering::SeqCst), 0, "a floor rejection wrote to a segment");
     for reply in queued {
-        let error = reply.finish().unwrap_err();
+        let error = reply().unwrap_err();
         assert!(matches!(error.kind, ErrorKind::Storage(Error::DiskFull)));
         assert_eq!(error.outcome, Outcome::NotCommitted);
     }
@@ -653,6 +879,9 @@ fn capacity_faults(
             engine.metrics().unwrap().tape_index.page_reloads > reloads,
             "sampled a cold index page"
         );
+    }
+    for key in oracle.facts.keys() {
+        oracle.check_fact(&engine, key);
     }
     assert_eq!(io.disk.available_bytes(Path::new("db")).unwrap(), 0);
     assert_eq!(engine.health(), Health::ReadOnly, "cold reads must not clear read-only");
@@ -707,7 +936,7 @@ fn capacity_faults(
     let mut pending = Vec::new();
     let mut post_return_pending = Vec::new();
     for (position, (index, reply)) in queued.into_iter().enumerate() {
-        let error = reply.finish().unwrap_err();
+        let error = reply().unwrap_err();
         let (class, outcomes) = plan.expected(position);
         assert!(
             match &error.kind {
@@ -769,7 +998,7 @@ fn grouped_seed(seed: u64, plan: &CapacityPlan) -> Vec<Vec<Turn>> {
     let mut oracle = Oracle::new();
     for scope in 0..4 {
         let index = oracle.batches.len();
-        let mut batch = random_batch(&mut rng, index, scope, clock.now_ns());
+        let mut batch = random_batch(&mut rng, index, scope, clock.now_ns(), None);
         batch.turns.truncate(1);
         let receipt = engine
             .append(&oracle.scopes[scope], batch.turns.clone(), batch.key.as_deref())
@@ -857,44 +1086,18 @@ fn grouped_seed(seed: u64, plan: &CapacityPlan) -> Vec<Vec<Turn>> {
             for position in 0..count {
                 let index = oracle.batches.len();
                 let scope = rng.below(oracle.scopes.len());
-                let mut batch = random_batch(&mut rng, index, scope, clock.now_ns());
+                // Position 0 stays a turn batch: its duplicate and changed copies follow it.
+                let facts = (position > 0).then_some(&oracle);
+                let mut batch = random_batch(&mut rng, index, scope, clock.now_ns(), facts);
                 if position == 0 {
                     batch.key = Some(format!("key-{index}"));
                 }
-                queued.push((
-                    index,
-                    false,
-                    engine
-                        .enqueue_sim(
-                            &oracle.scopes[scope],
-                            batch.turns.clone(),
-                            batch.key.as_deref(),
-                        )
-                        .unwrap(),
-                ));
-                if position == 0 {
-                    queued.push((
-                        index,
-                        false,
-                        engine
-                            .enqueue_sim(
-                                &oracle.scopes[scope],
-                                batch.turns.clone(),
-                                batch.key.as_deref(),
-                            )
-                            .unwrap(),
-                    ));
-                    let mut conflict = batch.turns.clone();
-                    conflict[0].content.push(0xff);
-                    queued.push((
-                        index,
-                        true,
-                        engine
-                            .enqueue_sim(&oracle.scopes[scope], conflict, batch.key.as_deref())
-                            .unwrap(),
-                    ));
-                }
                 oracle.batches.push(batch);
+                queued.push((index, false, enqueue(&engine, &oracle, index, false)));
+                if position == 0 {
+                    queued.push((index, false, enqueue(&engine, &oracle, index, false)));
+                    queued.push((index, true, enqueue(&engine, &oracle, index, true)));
+                }
             }
             let fault = group == 6;
             let cut = group == 7;
@@ -918,7 +1121,14 @@ fn grouped_seed(seed: u64, plan: &CapacityPlan) -> Vec<Vec<Turn>> {
                     }
                     fired.store(true, Ordering::SeqCst);
                 }));
-                io.checkpoint_at.store(1 + rng.below(count), Ordering::SeqCst);
+                // A conditional fact can conflict and write nothing.
+                let conditional = queued
+                    .iter()
+                    .filter(|(i, _, _)| {
+                        oracle.batches[*i].fact.as_ref().is_some_and(|f| f.if_lsn.is_some())
+                    })
+                    .count();
+                io.checkpoint_at.store(1 + rng.below(count - conditional), Ordering::SeqCst);
             } else if fault {
                 if generation % 2 == 0 {
                     io.fail_before.store(true, Ordering::SeqCst);
@@ -936,7 +1146,7 @@ fn grouped_seed(seed: u64, plan: &CapacityPlan) -> Vec<Vec<Turn>> {
             }
             let results = queued
                 .into_iter()
-                .map(|(index, conflict, reply)| (index, conflict, reply.finish()))
+                .map(|(index, conflict, reply)| (index, conflict, reply()))
                 .collect::<Vec<_>>();
             if !fault && !cut {
                 assert!(checkpoint_fired.load(Ordering::SeqCst));
@@ -987,7 +1197,12 @@ fn grouped_seed(seed: u64, plan: &CapacityPlan) -> Vec<Vec<Turn>> {
                     }
                     Ok(_) => pending.push(index),
                     Err(error) if error.outcome == Outcome::Unknown => pending.push(index),
-                    Err(error) => assert_eq!(error.outcome, Outcome::NotCommitted),
+                    Err(error) => {
+                        assert_eq!(error.outcome, Outcome::NotCommitted);
+                        if matches!(error.kind, ErrorKind::Conflict) {
+                            oracle.assert_conflict(index, &pending);
+                        }
+                    }
                 }
             }
             pending.sort_unstable();
@@ -1029,6 +1244,7 @@ fn inline_group_publishes_once_and_replies_with_original_sequences() {
             publish_pause: Some(pause.clone()),
             ..TapeOptions::default()
         },
+        fact_history: 1,
         ..EngineOptions::default()
     };
     let engine = open(io.clone(), Arc::new(SimClock::default()), &opts);
@@ -1087,6 +1303,94 @@ fn inline_group_publishes_once_and_replies_with_original_sequences() {
     assert_eq!(after.writer_groups - before.writer_groups, 2);
     assert_eq!(after.writer_group_requests - before.writer_group_requests, 4);
     assert_eq!(engine.window(&scope, WindowQuery::Last(10)).unwrap().len(), 3);
+
+    // One inline group of fact writes, held between publication and the durable watermark.
+    let fact = |key: &str, value: Option<u8>| NewFact {
+        key: key.into(),
+        content: value.map(|v| vec![v]).unwrap_or_default(),
+        meta: vec![],
+        agent: "a".into(),
+    };
+    let put = |key, value| engine.fact_put("t", fact(key, Some(value)), None, None).unwrap();
+    put("k", 1);
+    let (k, c, d) = (put("k", 2), put("c", 0), put("d", 0));
+    let old = engine.fact_history("t", "k", usize::MAX).unwrap();
+    assert!(old.truncated && old.revisions.len() == 1);
+    let d_old = engine.fact_history("t", "d", usize::MAX).unwrap();
+    assert!(!d_old.truncated && d_old.revisions.len() == 1);
+    let queue = |key, value: Option<u8>, idem, if_lsn| {
+        engine.enqueue_fact_sim("t", fact(key, value), value.is_none(), idem, if_lsn).unwrap()
+    };
+    let queued = [
+        queue("k", Some(3), None, None),
+        queue("c", Some(1), Some("c1"), Some(c.lsn)),
+        queue("c", Some(2), None, Some(c.lsn)),
+        queue("d", Some(1), None, None),
+        queue("d", Some(2), None, None),
+        queue("d", None, None, None),
+        queue("c", Some(1), Some("c1"), Some(c.lsn)),
+    ];
+    std::thread::scope(|threads| {
+        let (arrived, release) = pause.arm();
+        let stepping = threads.spawn(|| engine.step_sim().unwrap());
+        arrived.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        // Truncation drops `k`'s first revision while readers still see the old watermark.
+        let parked = engine.fact_history("t", "k", usize::MAX).unwrap();
+        assert_eq!(parked, old, "truncated holds at the old watermark");
+        // Three `d` writes drop a revision of this group only. Nothing older exists.
+        let parked = engine.fact_history("t", "d", usize::MAX).unwrap();
+        assert_eq!(parked, d_old, "no truncation at the old watermark");
+        for (key, lsn) in [("k", k.lsn), ("c", c.lsn), ("d", d.lsn)] {
+            let value = engine.fact_get("t", key).unwrap().map(|fact| fact.lsn);
+            assert_eq!(value, Some(lsn), "{key}: the pre-group value, never a group one or none");
+        }
+        release.send(()).unwrap();
+        stepping.join().unwrap();
+    });
+    let [k3, c1, c2, d1, d2, d3, retried] = queued.map(SimFact::finish);
+    let (k3, c1) = (k3.unwrap(), c1.unwrap());
+    let error = c2.unwrap_err();
+    assert!(matches!(error.kind, ErrorKind::Conflict), "the same if_lsn twice in one group");
+    assert_eq!(error.outcome, Outcome::NotCommitted);
+    let lsns = [d1, d2, d3].map(|written| written.unwrap().lsn);
+    assert!(lsns.is_sorted(), "{lsns:?}");
+    assert_eq!(engine.fact_get("t", "d").unwrap(), None, "put then delete in one group");
+    let retried = retried.unwrap();
+    assert!(retried.deduplicated && (retried.txn, retried.lsn) == (c1.txn, c1.lsn));
+    assert_eq!(engine.fact_get("t", "c").unwrap().unwrap().lsn, c1.lsn);
+    assert_eq!(engine.fact_get("t", "k").unwrap().unwrap().lsn, k3.lsn);
+}
+
+#[test]
+fn fact_groups_keep_retained_pointers_bounded() {
+    let io = Arc::new(FaultIo::new(SimDisk::new(37)));
+    let clock = Arc::new(SimClock::default());
+    let opts = EngineOptions {
+        tape: TapeOptions { segment_size: 64 * 1024, inline_sim: true, ..TapeOptions::default() },
+        fact_history: 1,
+        ..EngineOptions::default()
+    };
+    let engine = open(io.clone(), clock.clone(), &opts);
+    let fact = |key: String| NewFact { key, content: vec![1], meta: vec![], agent: "a".into() };
+    engine.fact_put("t", fact("hot".into()), None, None).unwrap();
+    let bounded = |engine: &Engine, per_key: usize| {
+        let metrics = engine.metrics().unwrap();
+        assert!(metrics.fact_revisions <= metrics.facts * per_key, "{metrics:?}");
+    };
+    // Two groups of ten writes to one key, then groups that write only distinct other keys.
+    for group in 0..4 {
+        let queued: Vec<_> = (0..10)
+            .map(|i| {
+                let key = if group < 2 { "hot".into() } else { format!("{group}-{i}") };
+                engine.enqueue_fact_sim("t", fact(key), false, None, None).unwrap()
+            })
+            .collect();
+        engine.step_sim().unwrap();
+        queued.into_iter().for_each(|reply| assert!(reply.finish().is_ok()));
+        bounded(&engine, opts.fact_history + 2);
+    }
+    drop(engine);
+    bounded(&open(io, clock, &opts), opts.fact_history + 1);
 }
 
 #[test]
@@ -1100,8 +1404,13 @@ fn publish_during_checkpoint_keeps_the_new_page_dirty() {
     let engine = Arc::new(open(io.clone(), clock.clone(), &opts));
     let scope = Scope { tenant: "t".into(), agent: "a".into(), session: "s".into() };
     let turn = |value| NewTurn { role: Role::User, content: vec![value], meta: vec![] };
-    let before = engine.append(&scope, vec![turn(1), turn(2)], None).unwrap();
+    engine.append(&scope, vec![turn(1), turn(2)], None).unwrap();
+    let fact =
+        |value| NewFact { key: "k".into(), content: vec![value], meta: vec![], agent: "a".into() };
+    let first = engine.fact_put("t", fact(1), None, None).unwrap();
     let queued = engine.enqueue_sim(&scope, vec![turn(3)], None).unwrap();
+    // A write to a key the snapshot holds, published before the install.
+    let later = engine.enqueue_fact_sim("t", fact(2), false, None, None).unwrap();
     let weak = Arc::downgrade(&engine);
     let fired = Arc::new(AtomicBool::new(false));
     let completed = fired.clone();
@@ -1110,13 +1419,16 @@ fn publish_during_checkpoint_keeps_the_new_page_dirty() {
         completed.store(true, Ordering::SeqCst);
     }));
     io.checkpoint_at.store(2, Ordering::SeqCst);
-    assert_eq!(engine.checkpoint().unwrap(), before.last_lsn);
+    assert_eq!(engine.checkpoint().unwrap(), first.lsn);
     assert!(fired.load(Ordering::SeqCst));
     let receipt = queued.finish().unwrap();
     assert_eq!(receipt.seqs, vec![3]);
-    assert_eq!(engine.checkpoint().unwrap(), receipt.last_lsn);
+    let later = later.finish().unwrap();
+    assert_eq!(engine.checkpoint().unwrap(), later.lsn);
     drop(engine);
-    let engine = open(io, clock, &opts);
+    let engine = open(Arc::new(FaultIo::new(io.disk.crash().unwrap())), clock, &opts);
+    let value = engine.fact_get("t", "k").unwrap().map(|fact| fact.lsn);
+    assert_eq!(value, Some(later.lsn), "the key stayed dirty, so the next checkpoint wrote it");
     let window = engine.window(&scope, WindowQuery::Last(10)).unwrap();
     assert_eq!(window.iter().map(|t| t.seq).collect::<Vec<_>>(), vec![1, 2, 3]);
     assert_eq!(

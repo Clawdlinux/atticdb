@@ -254,27 +254,37 @@ fn append(
     content: &str,
     gate: Option<(Sender<()>, Receiver<()>)>,
 ) -> Call {
+    let body = append_body("s", content, content);
+    let (outcome, reply) = post(socket, token, "/v1/append", &body, gate);
+    (content.into(), outcome, reply["seqs"][0].as_u64())
+}
+
+/// One write attempt: its outcome, and the reply when one was read.
+fn post(
+    socket: &Path,
+    token: &str,
+    target: &str,
+    body: &Value,
+    gate: Option<(Sender<()>, Receiver<()>)>,
+) -> (Outcome, Value) {
     let Ok(stream) = UnixStream::connect(socket) else {
-        return (content.into(), Outcome::NotCommitted, None);
+        return (Outcome::NotCommitted, Value::Null);
     };
-    let (auth, body) = (format!("Bearer {token}"), append_body("s", content, content));
+    let auth = format!("Bearer {token}");
     let deadline = Instant::now() + Duration::from_secs(30);
     let headers = [("Authorization", auth.as_str())];
     let reply = zerodb::http::exchange(
         &mut Gate(stream, gate),
         "POST",
-        "/v1/append",
+        target,
         &headers,
         body.to_string().as_bytes(),
         deadline,
         1 << 20,
     );
     match reply.map(|reply| serde_json::from_slice::<Value>(&reply.body).unwrap()) {
-        Ok(reply) => {
-            let outcome = parse(reply["outcome"].as_str().unwrap()).unwrap();
-            (content.into(), outcome, reply["seqs"][0].as_u64())
-        }
-        Err(_) => (content.into(), Outcome::Unknown, None),
+        Ok(reply) => (parse(reply["outcome"].as_str().unwrap()).unwrap(), reply),
+        Err(_) => (Outcome::Unknown, Value::Null),
     }
 }
 
@@ -292,23 +302,31 @@ fn killed_server_restarts_with_every_acknowledged_write() {
     let ((written, wrote), (killed, kill)) = (channel(), channel());
     let mut gate = Some((written, kill));
 
-    // Each thread writes until an append is not committed. Thread 0's request number
-    // `gated` is written, then the server is killed before the thread reads the reply.
-    let calls: Vec<Call> = std::thread::scope(|scope| {
+    // Each thread writes until a write is not committed. After each committed append it
+    // puts the same content to its key `t<i>/rule`. Thread 0's append number `gated` is
+    // written, then the server is killed before the thread reads the reply.
+    type Puts = Vec<(String, Outcome)>;
+    let (calls, puts): (Vec<Vec<Call>>, Vec<Puts>) = std::thread::scope(|scope| {
         let threads: Vec<_> = (0..8)
             .map(|t| {
                 let (socket, token, mut gate) =
                     (&socket, &token, if t == 0 { gate.take() } else { None });
                 scope.spawn(move || {
-                    let mut calls = Vec::new();
+                    let (mut calls, mut puts) = (Vec::new(), Vec::new());
                     for n in 0.. {
+                        let (content, key) = (format!("{t}-{n}"), format!("t{t}/rule"));
                         let gate = if n == gated { gate.take() } else { None };
-                        calls.push(append(socket, token, &format!("{t}-{n}"), gate));
+                        calls.push(append(socket, token, &content, gate));
                         if calls[n as usize].1 != Outcome::Committed {
-                            return calls;
+                            break;
+                        }
+                        let put = json!({"key": key, "content": content, "idem_key": content});
+                        puts.push((content, post(socket, token, "/v1/facts/put", &put, None).0));
+                        if puts[n as usize].1 != Outcome::Committed {
+                            break;
                         }
                     }
-                    calls
+                    (calls, puts)
                 })
             })
             .collect();
@@ -318,10 +336,24 @@ fn killed_server_restarts_with_every_acknowledged_write() {
         assert_eq!(status.signal(), Some(9), "{output}");
         let _ = killed.send(());
         assert!(reached, "thread 0 reached request {gated}");
-        threads.into_iter().flat_map(|thread| thread.join().unwrap()).collect()
+        threads.into_iter().map(|thread| thread.join().unwrap()).unzip()
     });
 
     let mut server = Process::spawn(&dir.0, &serve);
     server.ready();
-    check("8 writers", &calls, &read_back(&Via::Unix(socket), &token, "a", "s"));
+    let via = Via::Unix(socket);
+    check("8 writers", &calls.concat(), &read_back(&via, &token, "a", "s"));
+    // I1 and I9 across SIGKILL: each key holds its last committed put, or a later put whose
+    // outcome is unknown. Never an older value, never a put that was not committed.
+    for (t, puts) in puts.iter().enumerate() {
+        let target = format!("/v1/facts/get?key=t{t}/rule");
+        let got = via.call(None, Some(&token), "GET", &target, None).1["fact"]["content"].clone();
+        let committed = puts.iter().rposition(|put| put.1 == Outcome::Committed);
+        let later = &puts[committed.map_or(0, |i| i + 1)..];
+        let held = |content: &str| got == json!(content);
+        let allowed = committed.map_or(got.is_null(), |i| held(&puts[i].0))
+            || later.iter().any(|put| put.1 == Outcome::Unknown && held(&put.0));
+        assert!(allowed, "t{t}/rule holds {got} after {puts:?}");
+    }
+    eprintln!("8 fact keys: {} puts", puts.concat().len());
 }

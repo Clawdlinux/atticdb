@@ -1,4 +1,5 @@
 use crate::dedup::Dedup;
+use crate::facts::Facts;
 use crate::session::{Index, Key};
 use crate::tenant::Registry;
 use crate::{EngineError, EngineOptions};
@@ -11,6 +12,7 @@ pub(crate) struct State {
     pub(crate) tenants: Registry,
     pub(crate) index: Index,
     pub(crate) dedup: Dedup,
+    pub(crate) facts: Facts,
     pub(crate) dirty: BTreeSet<(Key, usize)>,
     pub(crate) published_lsn: u64,
     pub(crate) txn: u64,
@@ -37,6 +39,7 @@ impl State {
             tenants: Registry::default(),
             index: Index::new(opts.hot_page_bytes, opts.max_sessions, opts.max_pages),
             dedup: Dedup::new(opts.dedup_per_tenant, opts.dedup_global),
+            facts: Facts::new(opts.max_facts, opts.fact_history),
             dirty: BTreeSet::new(),
             published_lsn: 0,
             txn: 0,

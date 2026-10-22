@@ -174,7 +174,22 @@ pub(crate) mod sessions {
 
 pub(crate) mod facts {
 
-    use zerodb_core::fact;
+    use zerodb_core::{fact, FactQuery, NewFact};
+
+    #[track_caller]
+    pub(crate) fn query(prefix: &str, limit: usize, max_bytes: usize) -> FactQuery {
+        FactQuery { prefix: prefix.into(), after: None, limit, max_bytes }
+    }
+
+    #[track_caller]
+    pub(crate) fn new_fact(key: &str, value: u64, agent: &str) -> NewFact {
+        NewFact {
+            key: key.into(),
+            content: value.to_le_bytes().to_vec(),
+            meta: vec![],
+            agent: agent.into(),
+        }
+    }
 
     #[track_caller]
     pub(crate) fn fact() -> fact::Fact {

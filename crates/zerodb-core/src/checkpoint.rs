@@ -1,5 +1,6 @@
-use crate::dedup::{DedupKey, Entry};
+use crate::dedup::{DedupKey, Entry, Scope};
 use crate::error::{lock, Result};
+use crate::facts::{FactKey, Rev, Revs};
 use crate::session::{Backing, Key};
 use crate::state::State;
 use crate::turn::{bytes, Cursor};
@@ -235,15 +236,15 @@ fn load_inner(io: &dyn Io, dir: &Path, opts: &EngineOptions) -> Result<State> {
                         Backing { file: name.clone(), offset: off, len },
                     )?;
                 }
-                3 => {
+                tag @ (3 | 5) => {
                     let tenant = cur.u32()?;
-                    let session = cur.string(255)?;
+                    let scope = cur.string(if tag == 3 { 255 } else { 1024 })?;
                     let key = cur.string(128)?;
                     let digest = cur.take(32)?.try_into().map_err(|_| corrupt())?;
                     let txn = cur.u64()?;
                     let first_lsn = cur.u64()?;
                     let last_lsn = cur.u64()?;
-                    let reply = cur.take(8)?.to_vec();
+                    let reply = if tag == 3 { cur.take(8)?.to_vec() } else { Vec::new() };
                     cur.end()?;
                     if first_lsn == 0
                         || first_lsn > last_lsn
@@ -253,11 +254,40 @@ fn load_inner(io: &dyn Io, dir: &Path, opts: &EngineOptions) -> Result<State> {
                     {
                         return Err(corrupt());
                     }
+                    let scope = if tag == 3 { Scope::Session(scope) } else { Scope::Fact(scope) };
                     state.dedup.insert(Entry {
-                        key: DedupKey(tenant, session, key),
+                        key: DedupKey(tenant, scope, key),
                         digest,
                         committed: Committed::Durable { txn, first_lsn, last_lsn, reply },
                     });
+                }
+                4 => {
+                    let tenant = cur.u32()?;
+                    let key = cur.string(1024)?;
+                    let history = cur.u32()? as usize;
+                    let dropped = cur.byte()?;
+                    let revs = (0..cur.u32()?)
+                        .map(|_| {
+                            let lsn = cur.u64()?;
+                            match cur.byte()? {
+                                deleted @ (0 | 1) => Ok(Rev { lsn, deleted: deleted == 1 }),
+                                _ => Err(corrupt()),
+                            }
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    cur.end()?;
+                    // Written under a smaller fact_history, the entry may lack revisions replay keeps.
+                    if history < opts.fact_history
+                        || dropped > 1
+                        || tenant == 0
+                        || tenant as usize > state.tenants.entries.len()
+                        || revs.is_empty()
+                        || revs.iter().any(|rev| rev.lsn == 0 || rev.lsn > boundary)
+                        || revs.windows(2).any(|w| w[0].lsn >= w[1].lsn)
+                    {
+                        return Err(corrupt());
+                    }
+                    state.facts.restore((tenant, key), revs, dropped == 1)?;
                 }
                 _ => return Err(corrupt()),
             }
@@ -315,6 +345,8 @@ struct Snapshot {
     tenants: Vec<(u32, String, u64)>,
     pages: Vec<PageSnapshot>,
     dedup: Vec<Arc<Entry>>,
+    facts: Vec<(FactKey, Vec<Rev>, bool)>,
+    fact_history: usize,
 }
 fn snapshot(state: &State) -> Snapshot {
     let full = state.chain.len() >= 8;
@@ -348,6 +380,13 @@ fn snapshot(state: &State) -> Snapshot {
             }
         }
     }
+    // Many dirty keys: walking the map in order is cheaper than a lookup per key.
+    let all = full || state.facts.dirty.len() * 2 >= state.facts.map.len();
+    let facts: Box<dyn Iterator<Item = (&FactKey, &Revs)>> = if all {
+        Box::new(state.facts.map.iter())
+    } else {
+        Box::new(state.facts.dirty.iter().filter_map(|key| state.facts.map.get_key_value(key)))
+    };
     Snapshot {
         lsn: state.published_lsn,
         txn: state.txn,
@@ -370,6 +409,13 @@ fn snapshot(state: &State) -> Snapshot {
             .filter(|e| full || e.age() > state.watermark)
             .cloned()
             .collect(),
+        facts: facts
+            .map(|(key, revs)| {
+                let cut = revs.list.len().saturating_sub(state.facts.history + 1);
+                (key.clone(), revs.list[cut..].to_vec(), revs.dropped || cut > 0)
+            })
+            .collect(),
+        fact_history: state.facts.history,
     }
 }
 const BUFFER_LIMIT: usize = 4 * 1024 * 1024;
@@ -476,16 +522,34 @@ pub(crate) fn save(io: &dyn Io, dir: &Path, shared: &Mutex<State>) -> Result<u64
         locations.push((key, index, revision, Backing { file: name.clone(), offset, len }));
     }
     for entry in snap.dedup {
-        let mut data = vec![3];
+        let (tag, scope) = match &entry.key.1 {
+            Scope::Session(session) => (3, session),
+            Scope::Fact(key) => (5, key),
+        };
+        let mut data = vec![tag];
         data.extend_from_slice(&entry.key.0.to_le_bytes());
-        bytes(&mut data, entry.key.1.as_bytes());
+        bytes(&mut data, scope.as_bytes());
         bytes(&mut data, entry.key.2.as_bytes());
         data.extend_from_slice(&entry.digest);
         let Committed::Durable { txn, first_lsn, last_lsn, ref reply } = entry.committed;
         for value in [txn, first_lsn, last_lsn] {
             data.extend_from_slice(&value.to_le_bytes());
         }
+        // Fact replies are empty.
         data.extend_from_slice(reply);
+        buffer.record(&data)?;
+    }
+    for ((tenant, key), revs, dropped) in &snap.facts {
+        let mut data = vec![4];
+        data.extend_from_slice(&tenant.to_le_bytes());
+        bytes(&mut data, key.as_bytes());
+        data.extend_from_slice(&(snap.fact_history as u32).to_le_bytes());
+        data.push(u8::from(*dropped));
+        data.extend_from_slice(&(revs.len() as u32).to_le_bytes());
+        for rev in revs {
+            data.extend_from_slice(&rev.lsn.to_le_bytes());
+            data.push(u8::from(rev.deleted));
+        }
         buffer.record(&data)?;
     }
     buffer.flush()?;
@@ -525,6 +589,19 @@ pub(crate) fn save(io: &dyn Io, dir: &Path, shared: &Mutex<State>) -> Result<u64
             state.index.clean(key, *page, *revision, backing.clone());
             if state.index.sessions[key].pages[*page].revision == *revision {
                 state.dirty.remove(&(key.clone(), *page));
+            }
+        }
+        state.checkpoint_lock_ns = state
+            .checkpoint_lock_ns
+            .max(start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64);
+    }
+    // A write after the snapshot keeps its key dirty for the next checkpoint.
+    for chunk in snap.facts.chunks(1024) {
+        let mut state = lock(shared)?;
+        let start = std::time::Instant::now();
+        for (key, revs, _) in chunk {
+            if state.facts.map.get(key).and_then(|r| r.list.last()) == revs.last() {
+                state.facts.dirty.remove(key);
             }
         }
         state.checkpoint_lock_ns = state
@@ -1075,7 +1152,11 @@ mod tests {
                 .collect();
             for age in 2..10_002 {
                 state.dedup.insert(Entry {
-                    key: DedupKey(1, format!("{:0128}", (age - 2) / 5000), format!("{age:0128}")),
+                    key: DedupKey(
+                        1,
+                        Scope::Session(format!("{:0128}", (age - 2) / 5000)),
+                        format!("{age:0128}"),
+                    ),
                     digest: [1; 32],
                     committed: Committed::Durable {
                         txn: 1,

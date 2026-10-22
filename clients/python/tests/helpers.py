@@ -61,8 +61,9 @@ class Server:
 
         def serving():
             assert self.process.poll() is None, f"server exited: {self.log()}"
-            lines = self.log()[offset:].splitlines()
-            return next((line for line in lines if line.startswith("zerodb: serving ")), None)
+            lines = self.log()[offset:].splitlines(keepends=True)
+            ready = (line for line in lines if line.startswith("zerodb: serving "))
+            return next((line for line in ready if line.endswith("\n")), None)
 
         fields = dict(f.split("=", 1) for f in wait_for(serving, "serving").split()[2:])
         self.instance = fields["instance"]

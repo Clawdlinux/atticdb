@@ -1,9 +1,11 @@
-use crate::support::{append_body, serve, sim_engine, Dir, Via, TOKEN_A, TOKEN_B};
+use crate::support::{
+    append_body, open_sim, serve, sim_engine, sim_options, Dir, Via, TOKEN_A, TOKEN_B,
+};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use zerodb::outcome::{self, Attempt, Merge};
 use zerodb::serve::MAX_CONNECTIONS;
-use zerodb_core::{EngineError, ErrorKind, NewTurn, Role, Scope};
+use zerodb_core::{EngineError, EngineOptions, ErrorKind, NewTurn, Role, Scope};
 use zerodb_tape::{Error, Outcome, SimDisk};
 
 fn seqs(window: &Value) -> Vec<u64> {
@@ -137,6 +139,141 @@ fn append_window_and_retry_over_both_listeners() {
     running.server.shutdown();
 }
 
+/// A query value: `+` for a space, `/` as is, `%XX` for every other reserved byte.
+fn query_value(text: &str) -> String {
+    let byte = |byte: u8| match byte {
+        b' ' => "+".to_owned(),
+        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+            char::from(byte).to_string()
+        }
+        _ => format!("%{byte:02X}"),
+    };
+    text.bytes().map(byte).collect()
+}
+
+fn fact_body(key: &str, content: &str, idem_key: &str) -> Value {
+    json!({"key": key, "content": content, "idem_key": idem_key})
+}
+
+fn keys(page: &Value) -> Vec<&str> {
+    page["facts"].as_array().unwrap().iter().map(|fact| fact["key"].as_str().unwrap()).collect()
+}
+
+#[test]
+fn facts_over_http() {
+    let disk = SimDisk::new(5);
+    let dir = Dir::new();
+    let opts = EngineOptions { max_facts: 8, ..sim_options(None, 100) };
+    let running = serve(open_sim(&disk, opts.clone()), &dir, MAX_CONNECTIONS);
+    let conflict = |error: &str| (409, json!({"outcome": "not_committed", "error": error}));
+    let mut firsts = Vec::new();
+    for via in &running.vias {
+        let name = via.name();
+        // A `/`, a space, a `+` and a multibyte character, decoded from the query string.
+        let key = format!("{name}/dir/a b+\u{e9}");
+        let get =
+            |key: &str| via.a("GET", &format!("/v1/facts/get?key={}", query_value(key)), None);
+        let put = |body: &Value| via.a("POST", "/v1/facts/put", Some(body));
+        let mut first_body = fact_body(&key, "v1", "p1");
+        first_body["meta"] = json!({"m": 1});
+        first_body["agent"] = json!("x");
+        let (status, first) = put(&first_body);
+        assert_eq!(status, 200, "{name}: {first}");
+        assert_eq!(
+            (&first["outcome"], &first["deduplicated"]),
+            (&json!("committed"), &json!(false))
+        );
+        let (status, got) = get(&key);
+        let fact = &got["fact"];
+        assert_eq!(
+            (status, &fact["key"], &fact["content"]),
+            (200, &json!(key), &json!("v1")),
+            "{name}"
+        );
+        assert_eq!(
+            (&fact["agent"], &fact["meta"], &fact["lsn"]),
+            (&json!("x"), &json!({"m": 1}), &first["lsn"])
+        );
+        assert!(fact["commit_time_ns"].as_u64().unwrap() > 0, "{name}");
+
+        let lsn = first["lsn"].as_u64().unwrap();
+        let mut second = fact_body(&key, "v2", "p2");
+        second["if_lsn"] = json!(lsn - 1);
+        assert_eq!(put(&second), conflict("conflict"), "{name}: stale if_lsn");
+        assert_eq!(
+            put(&fact_body(&key, "changed", "p1")),
+            conflict("idempotency_conflict"),
+            "{name}"
+        );
+        let (status, retry) = put(&first_body);
+        assert_eq!((status, &retry["deduplicated"]), (200, &json!(true)), "{name}: retry");
+        assert_eq!((&retry["txn"], &retry["lsn"]), (&first["txn"], &first["lsn"]), "{name}");
+        second["if_lsn"] = json!(lsn);
+        assert_eq!(put(&second).0, 200, "{name}: current if_lsn");
+        let delete = json!({"key": key, "idem_key": "d1"});
+        let (status, deleted) = via.a("POST", "/v1/facts/delete", Some(&delete));
+        assert_eq!((status, &deleted["outcome"]), (200, &json!("committed")), "{name}");
+        assert_eq!(get(&key), (200, json!({"fact": null})), "{name}: deleted");
+        let history = |max_bytes: usize| {
+            let target =
+                format!("/v1/facts/history?key={}&max_bytes={max_bytes}", query_value(&key));
+            via.a("GET", &target, None).1
+        };
+        let full = history(1000);
+        let revisions = full["revisions"].as_array().unwrap();
+        let shape: Vec<_> = revisions.iter().map(|r| (&r["deleted"], &r["content"])).collect();
+        let (yes, no) = (json!(true), json!(false));
+        let expected = [(&yes, &json!("")), (&no, &json!("v2")), (&no, &json!("v1"))];
+        assert_eq!(shape, expected, "{name}: newest first, the tombstone first");
+        assert_eq!((&full["truncated"], &revisions[0]["lsn"]), (&no, &deleted["lsn"]), "{name}");
+        let cut = history(1);
+        assert_eq!((cut["revisions"].as_array().unwrap().len(), &cut["truncated"]), (1, &yes));
+
+        for n in 1..=3 {
+            assert_eq!(put(&fact_body(&format!("{name}/list/{n}"), "v", &format!("l{n}"))).0, 200);
+        }
+        let list = |query: &str| {
+            via.a("GET", &format!("/v1/facts/list?prefix={name}/list/&{query}"), None).1
+        };
+        let page = list("limit=2");
+        assert_eq!(keys(&page), [format!("{name}/list/1"), format!("{name}/list/2")], "{name}");
+        let page = list(&format!("after={}", query_value(page["next"].as_str().unwrap())));
+        assert_eq!(
+            (keys(&page), &page["next"]),
+            (vec![format!("{name}/list/3").as_str()], &Value::Null)
+        );
+        for (case, body) in [
+            ("1025-byte key", fact_body(&"k".repeat(1025), "v", "long")),
+            ("content as a number", json!({"key": "n", "content": 1, "idem_key": "n"})),
+            (
+                "source refs",
+                json!({"key": "n", "content": "v", "idem_key": "r", "source_refs": [1]}),
+            ),
+        ] {
+            let (status, rejected) = put(&body);
+            assert_eq!(
+                (status, &rejected["error"]),
+                (400, &json!("invalid_input")),
+                "{name} {case}"
+            );
+        }
+        firsts.push((name, first_body, first));
+    }
+    let full =
+        json!({"outcome": "not_committed", "error": "resource_exhausted", "resource": "facts"});
+    let new = fact_body("new", "v", "new");
+    assert_eq!(running.vias[0].a("POST", "/v1/facts/put", Some(&new)), (429, full), "8 keys held");
+    running.server.shutdown();
+
+    let running = serve(open_sim(&disk, opts), &dir, MAX_CONNECTIONS);
+    for (via, (name, body, first)) in running.vias.iter().zip(firsts) {
+        let (status, retry) = via.a("POST", "/v1/facts/put", Some(&body));
+        assert_eq!((status, &retry["deduplicated"]), (200, &json!(true)), "{name}: after reopen");
+        assert_eq!(retry["lsn"], first["lsn"], "{name}: original receipt after reopen");
+    }
+    running.server.shutdown();
+}
+
 #[test]
 fn auth_and_host_rules() {
     let dir = Dir::new();
@@ -216,6 +353,16 @@ fn auth_and_host_rules() {
     assert_eq!((status, &appended["seqs"]), (200, &json!([1])), "tenant B write");
     let (_, a) = tcp.a("GET", window, None);
     assert_eq!(a["turns"].as_array().unwrap().len(), 1, "A still sees only its turn");
+    let rule = json!({"key": "secret/rule", "content": "a-rule", "idem_key": "f"});
+    assert_eq!(tcp.a("POST", "/v1/facts/put", Some(&rule)).0, 200);
+    for (target, nothing) in [
+        ("/v1/facts/get?key=secret/rule", json!({"fact": null})),
+        ("/v1/facts/list?prefix=", json!({"facts": [], "next": null})),
+    ] {
+        let b = tcp.call(Some("127.0.0.1"), Some(TOKEN_B), "GET", target, None);
+        assert_eq!(b, (200, nothing), "tenant B sees nothing of A's facts: {target}");
+    }
+    assert_eq!(tcp.a("GET", "/v1/facts/get?key=secret/rule", None).1["fact"]["content"], "a-rule");
 
     // Auth runs before the body is read: a bad token declaring 8 MiB gets 401 and a
     // closed connection without sending a byte of body.
@@ -287,6 +434,9 @@ fn health_tracks_engine_state() {
 
     // I14: below the floor, writes stop without loss and reads go on.
     assert_eq!(append("first", "one").0, 200);
+    let fact =
+        |content: &str, key: &str| json!({"key": "rule", "content": content, "idem_key": key});
+    assert_eq!(unix.a("POST", "/v1/facts/put", Some(&fact("kept", "f1"))).0, 200);
     let second = append_body("s2", "other", "v");
     let exhausted =
         json!({"outcome": "not_committed", "error": "resource_exhausted", "resource": "sessions"});
@@ -299,7 +449,10 @@ fn health_tracks_engine_state() {
     let free = zerodb_tape::Io::available_bytes(&disk, "db".as_ref()).unwrap();
     disk.set_capacity(capacity - free + 4095).unwrap();
     let disk_full = json!({"outcome": "not_committed", "error": "disk_full"});
-    assert_eq!(append("floor", "two"), (507, disk_full));
+    assert_eq!(append("floor", "two"), (507, disk_full.clone()));
+    assert_eq!(unix.a("POST", "/v1/facts/put", Some(&fact("new", "f2"))), (507, disk_full));
+    let (status, rule) = unix.a("GET", "/v1/facts/get?key=rule", None);
+    assert_eq!((status, &rule["fact"]["content"]), (200, &json!("kept")), "fact reads serve");
     assert_eq!(health(), (200, json!({"status": "read_only", "instance": instance})));
     assert_eq!(contents(), ["one"]);
     disk.set_capacity(capacity).unwrap();

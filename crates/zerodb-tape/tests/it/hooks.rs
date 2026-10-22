@@ -1,7 +1,9 @@
 use crate::support::{opts, record, submit};
-use crate::support::{receipt, Behavior, Machine};
+use crate::support::{receipt, storage, Behavior, Machine};
+use std::path::Path;
 use std::sync::{Arc, Barrier};
 use zerodb_tape::sim::{SimClock, WriterCore};
+use zerodb_tape::Io;
 use zerodb_tape::{
     Committed, Durability, Error, Kind, Outcome, Result, SimDisk, Tape, TapeOptions,
 };
@@ -69,6 +71,10 @@ fn reject_and_cached_reply_write_nothing() {
     let error =
         tape.append(vec![record(Kind::Turn, 7, b"reject")], Durability::Durable).unwrap_err();
     assert_eq!(error.outcome, Outcome::NotCommitted);
+    let error = tape
+        .append_with_digest(vec![record(Kind::Turn, 7, [0; 8])], Durability::Durable, None, Some(1))
+        .unwrap_err();
+    assert_eq!(error.outcome, Outcome::NotCommitted, "the machine sees the unframed argument");
     assert_eq!(
         tape.append(vec![record(Kind::Turn, 7, b"reply")], Durability::Durable).unwrap(),
         receipt(77, 88)
@@ -80,6 +86,37 @@ fn reject_and_cached_reply_write_nothing() {
         tape.append(vec![record(Kind::Turn, 7, [0; 8])], Durability::Durable).unwrap(),
         Committed::Durable { txn: 1, first_lsn: 1, last_lsn: 1, .. }
     ));
+    let images: Vec<_> = [None, Some(7)]
+        .into_iter()
+        .map(|arg| {
+            let disk = Arc::new(SimDisk::new(2));
+            let (tape, _) = Tape::open_with(
+                Machine::new(Behavior::Pass),
+                disk.clone(),
+                Arc::new(SimClock::default()),
+                "db",
+                opts(512),
+            )
+            .unwrap();
+            tape.append_with_digest(
+                vec![record(Kind::Turn, 7, b"same")],
+                Durability::Durable,
+                None,
+                arg,
+            )
+            .unwrap();
+            drop(tape);
+            let mut files = Vec::new();
+            for path in disk.list(Path::new("db")).unwrap() {
+                let file = disk.open(&path).unwrap();
+                files.push((path, storage::bytes(disk.as_ref(), file)));
+                disk.close(file).unwrap();
+            }
+            files
+        })
+        .collect();
+    assert!(!images[0].is_empty());
+    assert_eq!(images[0], images[1], "the argument is never framed");
 }
 
 #[test]

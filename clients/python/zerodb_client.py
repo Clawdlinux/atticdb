@@ -17,9 +17,12 @@ FIRST_BACKOFF = 0.05
 MAX_BACKOFF = 2.0
 # Time kept for the request itself: no attempt connects or sends with less left.
 MIN_ATTEMPT = 2.0
-# A window holds up to 8 MiB of content, and JSON escapes a byte to at most 6.
+# A page holds up to 8 MiB of keys, agents, content and meta, and JSON escapes a byte
+# to at most 6. Fixed fields of up to 4,096 items and a 6 KiB `next` fit in 1 MiB.
 MAX_RESPONSE = 6 * (8 << 20) + (1 << 20)
+# Receipt fields per write. The last one is missing when the server had no receipt.
 RECEIPT = ("deduplicated", "txn", "first_lsn", "last_lsn", "seqs")
+FACT_RECEIPT = ("deduplicated", "lsn", "txn")
 
 
 class Error(Exception):
@@ -30,8 +33,16 @@ class NotCommitted(Error):
     """Nothing was written. Calling again is safe."""
 
 
+class Conflict(NotCommitted):
+    """A fact write's `if_lsn` did not match the key's current LSN. Nothing was written."""
+
+
 class OutcomeUnknown(Error):
     """The write may be saved. Call again with `resume=` this error to settle it."""
+
+
+def _query(**params):
+    return urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
 
 
 def _left(deadline):
@@ -121,21 +132,39 @@ class Client:
         `resume` takes an `OutcomeUnknown` from an earlier call with the same turns. Its
         key replaces `idem_key`, and the call starts at unknown: only `committed`
         settles it, never `not_committed`."""
+        body = {"agent": agent, "session": session, "turns": turns}
+        return self._write("/v1/append", body, idem_key, resume, RECEIPT)
+
+    def fact_put(self, key, content, meta=None, agent=None, if_lsn=None, idem_key=None,
+                 resume=None):
+        """Stores `content` as the key's current value. With `if_lsn` the write happens
+        only if the key's current LSN matches, 0 meaning no current value. A mismatch
+        raises `Conflict`. Retries and `resume` work as for `append`."""
+        body = {"key": key, "content": content, "meta": meta, "agent": agent, "if_lsn": if_lsn}
+        return self._write("/v1/facts/put", body, idem_key, resume, FACT_RECEIPT)
+
+    def fact_delete(self, key, agent=None, if_lsn=None, idem_key=None, resume=None):
+        """Writes a tombstone: the key then has no current value."""
+        body = {"key": key, "agent": agent, "if_lsn": if_lsn}
+        return self._write("/v1/facts/delete", body, idem_key, resume, FACT_RECEIPT)
+
+    def _write(self, target, body, idem_key, resume, receipt):
         key = secrets.token_hex(16) if idem_key is None else idem_key
         key = resume.idem_key if resume else key
-        body = {"agent": agent, "session": session, "idem_key": key, "turns": turns}
+        body = {**{k: v for k, v in body.items() if v is not None}, "idem_key": key}
         body = json.dumps(body).encode()
         deadline = time.monotonic() + self.retry_deadline
         state, backoff, reasons = "unknown" if resume else None, FIRST_BACKOFF, []
         while True:
-            sent, _, reply, detail = self._attempt("POST", "/v1/append", body, deadline)
+            sent, _, reply, detail = self._attempt("POST", target, body, deadline)
             # Every distinct reason, in order: the last alone depends on timing.
             reasons += [] if detail in reasons else [detail]
             detail = "; ".join(reasons)
             # A failed connect sent nothing. A transport error or a malformed reply is unclear.
             outcome = (reply or {}).get("outcome") if sent else "not_committed"
             if outcome == "committed":
-                return {**dict.fromkeys(RECEIPT), **reply, "receipt_missing": "seqs" not in reply}
+                missing = receipt[-1] not in reply
+                return {**dict.fromkeys(receipt), **reply, "receipt_missing": missing}
             unclear = state == "unknown" or outcome != "not_committed"
             state = "unknown" if unclear else "not_committed"
             if (state == "not_committed" and sent) or (
@@ -144,7 +173,8 @@ class Client:
                 if state == "unknown":
                     error = OutcomeUnknown(f"unknown: the write may be saved ({detail})")
                 else:
-                    error = NotCommitted(f"not_committed: nothing was written ({detail})")
+                    kind = Conflict if reply and reply.get("error") == "conflict" else NotCommitted
+                    error = kind(f"not_committed: nothing was written ({detail})")
                 error.idem_key = key
                 raise error
             time.sleep(backoff / 2 + random.uniform(0, backoff / 2))
@@ -152,10 +182,22 @@ class Client:
 
     def window(self, agent, session, last=None, since_seq=None, limit=None, max_bytes=None):
         """Reads a session window: pass `last`, or `since_seq` with an optional `limit`."""
-        params = {"agent": agent, "session": session, "last": last, "since_seq": since_seq}
-        params.update(limit=limit, max_bytes=max_bytes)
-        query = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
+        query = _query(agent=agent, session=session, last=last, since_seq=since_seq,
+                       limit=limit, max_bytes=max_bytes)
         return self._read(f"/v1/window?{query}", (200,))
+
+    def fact_get(self, key):
+        """Returns the key's current value, or None when it has none."""
+        return self._read(f"/v1/facts/get?{_query(key=key)}", (200,))["fact"]
+
+    def fact_history(self, key, max_bytes=None):
+        """Returns `{"revisions", "truncated"}`, newest first, tombstones included."""
+        return self._read(f"/v1/facts/history?{_query(key=key, max_bytes=max_bytes)}", (200,))
+
+    def fact_list(self, prefix="", after=None, limit=None, max_bytes=None):
+        """Returns `{"facts", "next"}` in key order. Pass `next` as `after` until it is None."""
+        query = _query(prefix=prefix, after=after, limit=limit, max_bytes=max_bytes)
+        return self._read(f"/v1/facts/list?{query}", (200,))
 
     def health(self):
         """Returns `{"status", "instance"}`. A poisoned server answers too, with 503."""

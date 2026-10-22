@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from helpers import TOKEN, send_without_reading, trickle, turns, wait_for
-from zerodb_client import Client, NotCommitted, OutcomeUnknown
+from zerodb_client import Client, Conflict, NotCommitted, OutcomeUnknown
 
 
 def contents(client, session):
@@ -65,6 +65,33 @@ def test_append_retry_and_window(server, listener):
     assert contents(client, "late") == []
 
 
+@pytest.mark.parametrize("listener", ["http", "unix"])
+def test_fact_retry_conflict_and_list(server, listener):
+    # Client wiring only. The HTTP tests cover history shapes and paging.
+    client = Client(server.url[listener], TOKEN)
+    key = "repo/a b+\u00e9"
+    put = lambda: client.fact_put(key, "one", meta={"k": 1}, agent="py", idem_key="p1")
+    first, again = put(), put()
+    assert first["deduplicated"] is False and again["deduplicated"] is True
+    assert first["receipt_missing"] is False and again["receipt_missing"] is False
+    assert [again[k] for k in ("txn", "lsn")] == [first[k] for k in ("txn", "lsn")]
+    with pytest.raises(Conflict, match=r"\(409 conflict\)"):
+        client.fact_put(key, "two", if_lsn=first["lsn"] - 1)
+    fact = client.fact_get(key)
+    assert [fact[k] for k in ("key", "content", "meta", "agent")] == [key, "one", {"k": 1}, "py"]
+    client.fact_delete(key, if_lsn=first["lsn"])
+    assert client.fact_get(key) is None and client.fact_history(key)["revisions"][0]["deleted"]
+    assert client.fact_list("repo/", limit=1) == {"facts": [], "next": None}
+
+
+def test_escaped_fact_page_fits_the_response_cap(server):
+    # Keys count toward max_bytes, so a page of escaped NULs fits MAX_RESPONSE.
+    client, nul = Client(server.url["unix"], TOKEN), "\0"
+    for i in range(200):
+        client.fact_put(f"n/{nul * 1018}{i:04}", nul * 41_900, idem_key=f"n{i}")
+    page = client.fact_list("n/", limit=200, max_bytes=8 << 20)
+    assert len(page["facts"]) == 195 and page["next"] == f"n/{nul * 1018}0194"
+
 def test_retry_survives_server_restart(server):
     # The turn is durable but the reply is never read when the server dies.
     client = Client(server.url["unix"], TOKEN)
@@ -84,15 +111,24 @@ def test_retry_survives_server_restart(server):
     assert contents(client, "s") == ["once"]
 
 
+WRITES = {
+    "append": ("/v1/append", lambda client, **kw: client.append("a", "s", turns("maybe"), **kw)),
+    # A conditional put: after an unclear attempt it never reports Conflict either.
+    "fact_put": ("/v1/facts/put", lambda c, **kw: c.fact_put("k", "maybe", if_lsn=0, **kw)),
+}
+
+
+@pytest.mark.parametrize("write", WRITES)
 @pytest.mark.parametrize("restart", [True, False], ids=["restart after 1 s", "no restart"])
-def test_unknown_outcome_never_downgrades(server, restart):
+def test_unknown_outcome_never_downgrades(server, restart, write):
     # The first answer is unknown, retries get not_committed from the poisoned server.
     client = Client(server.url["unix"], TOKEN, retry_deadline=30 if restart else 3)
+    route, call_write = WRITES[write]
     open(os.path.join(server.data, "FAULT-SYNC-ONCE"), "w").close()
     with ThreadPoolExecutor(1) as pool:
-        call = pool.submit(client.append, "a", "s", turns("maybe"))
-        wait_for(lambda: "POST /v1/append 503" in server.log(), "a not_committed retry")
-        assert "POST /v1/append 500" in server.log(), "first answer unknown"
+        call = pool.submit(call_write, client)
+        wait_for(lambda: f"POST {route} 503" in server.log(), "a not_committed retry")
+        assert f"POST {route} 500" in server.log(), "first answer unknown"
         if restart:
             time.sleep(1)
             server.kill()
@@ -105,13 +141,15 @@ def test_unknown_outcome_never_downgrades(server, restart):
             # Resuming keeps the uncertainty: the poisoned server's not_committed cannot
             # clear it. After a restart the same key settles it, from any client.
             with pytest.raises(OutcomeUnknown):
-                client.append("a", "s", turns("maybe"), resume=e.value)
+                call_write(client, resume=e.value)
             server.kill()
             server.start()
-            resumed = Client(server.url["unix"], TOKEN)
-            receipt = resumed.append("a", "s", turns("maybe"), resume=e.value)
+            receipt = call_write(Client(server.url["unix"], TOKEN), resume=e.value)
     assert receipt["outcome"] == "committed" and receipt["deduplicated"] is True
-    assert contents(client, "s") == ["maybe"]
+    if write == "append":
+        assert contents(client, "s") == ["maybe"]
+    else:
+        assert client.fact_get("k")["content"] == "maybe"
 
 
 def test_deadline_bounds_a_slow_response(server):

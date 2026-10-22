@@ -284,6 +284,12 @@ impl StateMachine for Machine {
             }
             Behavior::Sequence => {
                 match batch.records().next().unwrap().content.as_slice() {
+                    _ if batch.application_arg().is_some() => {
+                        return Prepare::Reject(zerodb_tape::WriteError {
+                            kind: Error::InvalidFrame("conditional".into()),
+                            outcome: zerodb_tape::Outcome::NotCommitted,
+                        })
+                    }
                     b"reject" => {
                         return Prepare::Reject(zerodb_tape::WriteError {
                             kind: Error::InvalidFrame("rejected".into()),

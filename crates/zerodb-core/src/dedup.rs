@@ -5,8 +5,25 @@ use zerodb_tape::{Committed, Digest};
 use crate::error::Result;
 use crate::{EngineError, ErrorKind};
 
+/// Retry scope inside a tenant. A session and a fact key with one name never collide.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct DedupKey(pub(crate) u32, pub(crate) String, pub(crate) String);
+pub(crate) enum Scope {
+    Session(String),
+    Fact(String),
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct DedupKey(pub(crate) u32, pub(crate) Scope, pub(crate) String);
+
+/// BLAKE3 over each payload's length and bytes: a request's retry identity.
+pub(crate) fn digest<'a>(payloads: impl IntoIterator<Item = &'a [u8]>) -> Digest {
+    let mut hash = blake3::Hasher::new();
+    for payload in payloads {
+        hash.update(&(payload.len() as u32).to_le_bytes());
+        hash.update(payload);
+    }
+    *hash.finalize().as_bytes()
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct Entry {

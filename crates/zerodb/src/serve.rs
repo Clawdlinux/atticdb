@@ -140,13 +140,17 @@ impl Shared {
                 Route::Health => api::health(&self.engine, &self.config.instance),
                 Route::Append => api::append(&self.engine, &tenant, request.body),
                 Route::Window => api::window(&self.engine, &tenant, &request.head.target),
+                Route::FactPut | Route::FactDelete => {
+                    api::fact_write(&self.engine, &tenant, request.body, route == Route::FactDelete)
+                }
+                Route::FactGet | Route::FactHistory | Route::FactList => {
+                    api::fact_read(&self.engine, &tenant, route, &request.head.target)
+                }
             };
             let _ = conn.respond(&response);
             log(&method, &path, &response, &tenant, started);
             self.tracker.update(|conns| conns.in_flight -= 1);
-            if route == Route::Append {
-                self.exit_on_poison();
-            }
+            self.exit_on_poison();
             if self.stopping.load(Ordering::Acquire) {
                 break;
             }
@@ -367,12 +371,10 @@ fn try_start(config: Config, exit_on_poison: bool) -> Result<u8, (u8, String)> {
     let max_connections = MAX_CONNECTIONS;
     let config = ServeConfig { auth, instance, exit_on_poison, max_connections };
     let server = run(Arc::new(engine), listeners, config).map_err(|e| fail(e.to_string()))?;
-    let _ = writeln!(
-        io::stderr(),
-        "zerodb: serving instance={} tcp={tcp_text} unix={}",
-        server.shared.config.instance,
-        socket.display()
-    );
+    // One write, so a reader never sees half of the line.
+    let (instance, socket) = (&server.shared.config.instance, socket.display());
+    let line = format!("zerodb: serving instance={instance} tcp={tcp_text} unix={socket}\n");
+    let _ = io::stderr().write_all(line.as_bytes());
     server.wait();
     let _ = writeln!(io::stderr(), "zerodb: engine poisoned, exiting so a fresh start can recover");
     Ok(EXIT_POISONED)

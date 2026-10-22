@@ -61,6 +61,67 @@ The first tenant transaction allows 1023 turns. Later transactions allow 1024.
 The tape's 4 MiB encoded batch limit includes headers and the footer.
 That limit can reject content below the codec's independent 4 MiB field limit.
 
+## Facts
+
+```rust,no_run
+use zerodb_core::{Engine, EngineOptions, FactQuery, NewFact};
+
+let engine = Engine::open("memory", EngineOptions::default())?;
+let rule = NewFact {
+    key: "repo/payments/retry-rule".into(),
+    content: b"Retry 3 times.".to_vec(),
+    meta: Vec::new(),
+    agent: "helper".into(),
+};
+let put = engine.fact_put("acme", rule, Some("request-1"), Some(0))?;
+let current = engine.fact_get("acme", "repo/payments/retry-rule")?;
+let page = engine.fact_list(
+    "acme",
+    FactQuery { prefix: "repo/".into(), after: None, limit: 50, max_bytes: 1 << 20 },
+)?;
+engine.fact_delete("acme", "repo/payments/retry-rule", "helper", None, Some(put.lsn))?;
+# Ok::<(), zerodb_core::EngineError>(())
+```
+
+A write carries one fact, after an optional tenant record. Facts never share a batch with turns.
+`source_refs` must be empty. The public API never sets them.
+A key's current value is its newest revision by LSN. A tombstone means it has none.
+Reads never fall back to an older revision.
+`FactWritten` holds `txn`, `lsn` and `deduplicated`. Its `lsn` skips a leading tenant record.
+
+`if_lsn` makes a write conditional on the key's current LSN. `0` means no current value.
+The writer checks it at prepare, after the retry lookup, against writes staged in its group and then the published index.
+A mismatch returns `ErrorKind::Conflict` with `Outcome::NotCommitted`. Nothing is written.
+A write staged earlier in the same group can cause the conflict and then fail its sync.
+An immediate re-read can then show the LSN that conflicted. Read again and retry.
+`if_lsn` is not part of the retry identity. A retry with the same key and payload returns the original receipt.
+Retry keys use `(tenant, fact key, idem_key)`. A session and a fact key with one name never collide.
+
+Readers take the state lock, then the durable LSN, as windows do.
+They use the newest revision at or below that LSN, so a group that is not acknowledged yet stays hidden.
+`fact_history` returns at most `fact_history` revisions, newest first, tombstones included.
+`truncated` is true when older revisions exist, or when `max_bytes` stopped the call.
+`fact_list` walks keys under a byte prefix in key order. It visits at most 1,024 keys per call, tombstones included.
+`next` is the last key the walk finished with. A page can hold no facts and still have a `next`.
+A byte budget always returns the first fact or revision. Later ones stop before `max_bytes` is passed.
+The budget counts key, agent, content and meta bytes, so a JSON page stays under 6 times `max_bytes` plus fixed fields.
+`fact_reads` counts every tape read of a fact read, including the one a budget cut. `facts` counts keys.
+`fact_revisions` counts retained pointers.
+
+`max_facts` caps keys across tenants (default 100,000, at least 1). A new key at the cap returns `ResourceExhausted("facts")`.
+Updates and deletes of existing keys always pass. Tombstones keep their slots, and deleting an unknown key takes one.
+A lowered `max_facts` makes open fail with the same error until the cap is raised, as `max_sessions` does.
+`fact_history` defaults to 16, from 1 to 4,096. A key holds at most `fact_history + 2` pointers.
+One reports `truncated`. One keeps the value readers at the previous durable LSN still see.
+The tape keeps every revision.
+
+Checkpoints write tag 4 fact entries and tag 5 fact retry entries.
+Tag 4 holds the newest `fact_history + 1` revisions, the `fact_history` they were written under, and a bit that says older ones were dropped.
+A larger `fact_history` at open replays the tape. A smaller one trims on load.
+Install clears a key's dirty mark only if its newest LSN did not change after the snapshot.
+When at least half the keys are dirty, the snapshot walks the whole map.
+An S3 binary aborts replay on a `Fact` frame, so it cannot open a directory with facts.
+
 ## Health
 
 `Engine::health()` returns `Health::Ok`, `Health::ReadOnly`, or `Health::Poisoned`.

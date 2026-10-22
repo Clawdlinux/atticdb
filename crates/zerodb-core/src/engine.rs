@@ -1,15 +1,20 @@
 use crate::checkpoint::{self, Worker};
-use crate::dedup::DedupKey;
+use crate::dedup::{self, digest, DedupKey};
 use crate::error::{lock, Result};
+use crate::fact::Fact;
+use crate::facts::{visible, Rev};
 use crate::machine::{Machine, REPLY_DEDUPLICATED};
 use crate::session::{address, Key};
 use crate::state::State;
 use crate::turn::{decode, encode};
 use crate::{EngineError, EngineOptions, ErrorKind, NewTurn, Role};
+use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, TryLockError};
-use zerodb_tape::{Clock, Committed, Durability, Io, Kind, RecordInput, StdIo, SystemClock, Tape};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
+use zerodb_tape::{
+    Clock, Committed, Digest, Durability, Io, Kind, RecordInput, StdIo, SystemClock, Tape,
+};
 
 /// A session's isolation boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -34,6 +39,88 @@ pub struct Appended {
     pub seqs: Vec<u64>,
     /// True when a retry key returned an earlier receipt and nothing new was written.
     pub deduplicated: bool,
+}
+/// A fact revision to store under a tenant-scoped key.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NewFact {
+    /// UTF-8 key, 1 to 1024 bytes. Hierarchy is addressing only.
+    pub key: String,
+    /// Opaque content, at most 4 MiB.
+    pub content: Vec<u8>,
+    /// Opaque metadata, at most 64 KiB.
+    pub meta: Vec<u8>,
+    /// Attribution only, at most 255 bytes. It does not change the key.
+    pub agent: String,
+}
+/// A durable fact write receipt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FactWritten {
+    /// Original transaction, including on retries.
+    pub txn: u64,
+    /// The revision's LSN. A later conditional write passes it as `if_lsn`.
+    pub lsn: u64,
+    /// True when a retry key returned an earlier receipt and nothing new was written.
+    pub deduplicated: bool,
+}
+/// A fact's current value.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredFact {
+    /// Tenant-scoped key.
+    pub key: String,
+    /// The revision's LSN, usable as `if_lsn`.
+    pub lsn: u64,
+    /// Commit timestamp from the tape.
+    pub commit_time_ns: u64,
+    /// Attribution of this revision.
+    pub agent: String,
+    /// Opaque content.
+    pub content: Vec<u8>,
+    /// Opaque metadata.
+    pub meta: Vec<u8>,
+}
+/// One revision of a fact key. A deleted revision has empty content and meta.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Revision {
+    /// The revision's LSN.
+    pub lsn: u64,
+    /// Commit timestamp from the tape.
+    pub commit_time_ns: u64,
+    /// Attribution of this revision.
+    pub agent: String,
+    /// True for a tombstone.
+    pub deleted: bool,
+    /// Opaque content.
+    pub content: Vec<u8>,
+    /// Opaque metadata.
+    pub meta: Vec<u8>,
+}
+/// A key's revisions, newest first, at most `fact_history`.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct FactHistory {
+    /// Whole revisions, newest first.
+    pub revisions: Vec<Revision>,
+    /// True when older revisions exist than the ones returned.
+    pub truncated: bool,
+}
+/// A key-ordered listing of current facts under a byte prefix.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FactQuery {
+    /// Byte prefix. End it with `/` for path semantics.
+    pub prefix: String,
+    /// Exclusive cursor: a previous page's `next`.
+    pub after: Option<String>,
+    /// Maximum facts per page, at least 1.
+    pub limit: usize,
+    /// Key, agent, content and meta bytes per page. The first fact is always returned.
+    pub max_bytes: usize,
+}
+/// One page of current facts in key order.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct FactPage {
+    /// Current facts. Deleted keys are skipped.
+    pub facts: Vec<StoredFact>,
+    /// The last key the walk finished with, returned or skipped. None once it left the prefix.
+    pub next: Option<String>,
 }
 /// A durable turn returned in sequence order.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -115,6 +202,13 @@ pub struct Metrics {
     pub window_reads: u64,
     /// Registered tenants.
     pub tenants: usize,
+    /// Tape::read calls issued by fact reads. A budget-cut call adds 1 read for the entry it
+    /// left out.
+    pub fact_reads: u64,
+    /// Fact keys held, tombstones included.
+    pub facts: usize,
+    /// Revision pointers held, at most `fact_history + 2` per key.
+    pub fact_revisions: usize,
 }
 
 /// Writer availability. Reads retain the last durable view.
@@ -138,6 +232,7 @@ pub struct Engine {
     dir: PathBuf,
     tenant_creation: Mutex<()>,
     reads: AtomicU64,
+    fact_reads: AtomicU64,
 }
 impl std::fmt::Debug for Engine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -187,6 +282,8 @@ impl Engine {
             || opts.dedup_per_tenant == 0
             || opts.dedup_global == 0
             || opts.checkpoint_interval.is_zero()
+            || opts.max_facts == 0
+            || !(1..=4096).contains(&opts.fact_history)
         {
             return Err(EngineError::rejected(ErrorKind::InvalidInput));
         }
@@ -236,6 +333,7 @@ impl Engine {
             dir,
             tenant_creation: Mutex::new(()),
             reads: AtomicU64::new(0),
+            fact_reads: AtomicU64::new(0),
         })
     }
 
@@ -258,41 +356,15 @@ impl Engine {
                 .collect::<std::result::Result<Vec<_>, _>>()
         };
         let payloads = encode_all()?;
-        let digest = idem_key.map(|_| {
-            let mut hash = blake3::Hasher::new();
-            for payload in &payloads {
-                hash.update(&(payload.len() as u32).to_le_bytes());
-                hash.update(payload);
+        let digest = idem_key.map(|_| digest(payloads.iter().map(Vec::as_slice)));
+        let retry = idem_key
+            .zip(digest)
+            .map(|(id, digest)| (dedup::Scope::Session(scope.session.clone()), id, digest));
+        let (tenant, _creation) = match self.start(&scope.tenant, retry)? {
+            Start::Cached(Committed::Durable { txn, last_lsn, reply, .. }) => {
+                return self.receipt(turns.len() as u64, txn, last_lsn, &reply, true);
             }
-            *hash.finalize().as_bytes()
-        });
-        let mut tenant = {
-            let state = lock(&self.state)?;
-            let tenant = state.tenants.get(&scope.tenant);
-            if let (Some(tenant), Some(idem_key), Some(digest)) = (tenant, idem_key, digest) {
-                let key = DedupKey(tenant, scope.session.clone(), idem_key.to_owned());
-                if let Some(entry) = state.dedup.get(&key) {
-                    if let Some(error) = &state.failure {
-                        return Err(error.clone());
-                    }
-                    let Committed::Durable { txn, last_lsn, reply, .. } = entry.resolve(digest)?;
-                    // Read the tape watermark after taking the state lock, like window_snapshot.
-                    // Machine publication releases this lock before the tape advances its watermark.
-                    // Only covered receipts bypass the writer, so the next read cannot lag this ack.
-                    if last_lsn <= self.tape.durable_lsn() {
-                        drop(state);
-                        return self.receipt(turns.len() as u64, txn, last_lsn, &reply, true);
-                    }
-                }
-            }
-            tenant
-        };
-        let _creation = if tenant.is_none() {
-            let guard = lock(&self.tenant_creation)?;
-            tenant = lock(&self.state)?.tenants.get(&scope.tenant);
-            Some(guard)
-        } else {
-            None
+            Start::Write(tenant, creation) => (tenant, creation),
         };
         let records = |payloads: Vec<Vec<u8>>| {
             let mut records = Vec::with_capacity(payloads.len() + 1);
@@ -332,7 +404,7 @@ impl Engine {
             };
             let result = self
                 .tape
-                .append_with_digest(records(payloads), Durability::Durable, digest)
+                .append_with_digest(records(payloads), Durability::Durable, digest, None)
                 .map_err(EngineError::write);
             drop(pin);
             match result {
@@ -350,6 +422,146 @@ impl Engine {
         Err(EngineError::rejected(ErrorKind::ResourceExhausted("hot_pages")))
     }
 
+    /// Answers a covered retry from published state, else resolves the tenant.
+    /// An unknown tenant holds the creation guard until the write returns.
+    fn start(
+        &self,
+        tenant: &str,
+        retry: Option<(dedup::Scope, &str, Digest)>,
+    ) -> Result<Start<'_>> {
+        {
+            let state = lock(&self.state)?;
+            let id = state.tenants.get(tenant);
+            if let (Some(id), Some((scope, idem_key, digest))) = (id, retry) {
+                if let Some(entry) = state.dedup.get(&DedupKey(id, scope, idem_key.to_owned())) {
+                    if let Some(error) = &state.failure {
+                        return Err(error.clone());
+                    }
+                    let committed = entry.resolve(digest)?;
+                    let Committed::Durable { last_lsn, .. } = committed;
+                    // Read the tape watermark after taking the state lock, like window_snapshot.
+                    // Machine publication releases this lock before the tape advances its watermark.
+                    // Only covered receipts bypass the writer, so the next read cannot lag this ack.
+                    if last_lsn <= self.tape.durable_lsn() {
+                        return Ok(Start::Cached(committed));
+                    }
+                }
+            }
+            if id.is_some() {
+                return Ok(Start::Write(id, None));
+            }
+        }
+        let guard = lock(&self.tenant_creation)?;
+        Ok(Start::Write(lock(&self.state)?.tenants.get(tenant), Some(guard)))
+    }
+
+    /// Stores a fact revision. It supersedes the key's current value by LSN.
+    ///
+    /// `if_lsn` makes the write conditional on the key's current LSN, 0 meaning no current
+    /// value. A mismatch is `Conflict`. A retry key returns the original receipt before the
+    /// condition is checked, so `if_lsn` is not part of a retry's identity.
+    pub fn fact_put(
+        &self,
+        tenant: &str,
+        fact: NewFact,
+        idem_key: Option<&str>,
+        if_lsn: Option<u64>,
+    ) -> Result<FactWritten> {
+        self.write_fact(tenant, fact, false, idem_key, if_lsn)
+    }
+
+    /// Writes a tombstone. The key then has no current value. A tombstone keeps its key slot.
+    pub fn fact_delete(
+        &self,
+        tenant: &str,
+        key: &str,
+        agent: &str,
+        idem_key: Option<&str>,
+        if_lsn: Option<u64>,
+    ) -> Result<FactWritten> {
+        let fact = NewFact { key: key.into(), content: vec![], meta: vec![], agent: agent.into() };
+        self.write_fact(tenant, fact, true, idem_key, if_lsn)
+    }
+
+    fn write_fact(
+        &self,
+        tenant: &str,
+        fact: NewFact,
+        tombstone: bool,
+        idem_key: Option<&str>,
+        if_lsn: Option<u64>,
+    ) -> Result<FactWritten> {
+        if tenant.len() > 255 {
+            return Err(EngineError::rejected(ErrorKind::InvalidInput));
+        }
+        let (key, payload, digest) = fact_payload(fact, tombstone, idem_key)?;
+        let retry = idem_key.zip(digest).map(|(id, digest)| (dedup::Scope::Fact(key), id, digest));
+        let (committed, cached) = match self.start(tenant, retry)? {
+            Start::Cached(committed) => (committed, true),
+            Start::Write(id, _creation) => {
+                let mut records = Vec::with_capacity(2);
+                if id.is_none() {
+                    records.push(RecordInput {
+                        kind: Kind::TenantCreate,
+                        tenant_id: 0,
+                        content: tenant.as_bytes().to_vec(),
+                    });
+                }
+                records.push(RecordInput {
+                    kind: Kind::Fact,
+                    tenant_id: id.unwrap_or(0),
+                    content: payload,
+                });
+                let committed = self
+                    .tape
+                    .append_with_digest(records, Durability::Durable, digest, if_lsn)
+                    .map_err(EngineError::write)?;
+                (committed, false)
+            }
+        };
+        self.fact_written(committed, cached)
+    }
+
+    fn fact_written(&self, committed: Committed, cached: bool) -> Result<FactWritten> {
+        let Committed::Durable { txn, last_lsn, reply, .. } = committed;
+        let deduplicated = cached || reply == [REPLY_DEDUPLICATED];
+        self.published(|| Ok(FactWritten { txn, lsn: last_lsn, deduplicated }))
+    }
+
+    /// Queues a fact write for a later inline step. Register its tenant first.
+    #[cfg(feature = "sim")]
+    pub fn enqueue_fact_sim(
+        &self,
+        tenant: &str,
+        fact: NewFact,
+        tombstone: bool,
+        idem_key: Option<&str>,
+        if_lsn: Option<u64>,
+    ) -> Result<SimFact<'_>> {
+        let id = lock(&self.state)?
+            .tenants
+            .get(tenant)
+            .ok_or_else(|| EngineError::rejected(ErrorKind::InvalidInput))?;
+        let (_, content, digest) = fact_payload(fact, tombstone, idem_key)?;
+        let records = vec![RecordInput { kind: Kind::Fact, tenant_id: id, content }];
+        Ok(SimFact { engine: self, reply: self.tape.enqueue_sim(records, digest, if_lsn)? })
+    }
+
+    /// Runs a receipt builder after the writer acknowledged a commit. Publication failures
+    /// and receipt errors report `Committed`.
+    fn published<T>(&self, build: impl FnOnce() -> Result<T>) -> Result<T> {
+        (|| {
+            if let Some(error) = &lock(&self.state)?.failure {
+                return Err(error.clone());
+            }
+            build()
+        })()
+        .map_err(|mut error: EngineError| {
+            error.outcome = zerodb_tape::Outcome::Committed;
+            error
+        })
+    }
+
     /// Builds a receipt from a writer reply: the 8-byte first sequence, plus the
     /// cached-reply marker when preparation answered from the dedup table.
     fn receipt(
@@ -360,10 +572,7 @@ impl Engine {
         reply: &[u8],
         cached: bool,
     ) -> Result<Appended> {
-        (|| {
-            if let Some(error) = &lock(&self.state)?.failure {
-                return Err(error.clone());
-            }
+        self.published(|| {
             let (seq, marked) = match reply {
                 [seq @ .., REPLY_DEDUPLICATED] if seq.len() == 8 => (seq, true),
                 seq => (seq, false),
@@ -384,10 +593,6 @@ impl Engine {
                 seqs: (seq..end).collect(),
                 deduplicated: cached || marked,
             })
-        })()
-        .map_err(|mut error: EngineError| {
-            error.outcome = zerodb_tape::Outcome::Committed;
-            error
         })
     }
 
@@ -416,14 +621,7 @@ impl Engine {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        let digest = idem_key.map(|_| {
-            let mut hash = blake3::Hasher::new();
-            for record in &records {
-                hash.update(&(record.content.len() as u32).to_le_bytes());
-                hash.update(&record.content);
-            }
-            *hash.finalize().as_bytes()
-        });
+        let digest = idem_key.map(|_| digest(records.iter().map(|r| r.content.as_slice())));
         let key = Key(tenant, scope.agent.clone(), scope.session.clone());
         let pin = match self.pin(key.clone()) {
             Err(EngineError { kind: ErrorKind::ResourceExhausted("hot_pages"), .. }) => {
@@ -432,7 +630,7 @@ impl Engine {
             }
             result => result?,
         };
-        let reply = self.tape.enqueue_sim(records, digest)?;
+        let reply = self.tape.enqueue_sim(records, digest, None)?;
         Ok(SimAppend { engine: self, _pin: pin, count: turns.len() as u64, reply })
     }
 
@@ -601,6 +799,129 @@ impl Engine {
         }
         Ok(Window { turns, truncated })
     }
+    /// Returns a key's current value at a durable snapshot, or None when it has none.
+    pub fn fact_get(&self, tenant: &str, key: &str) -> Result<Option<StoredFact>> {
+        let (id, rev) = {
+            let Some((state, snapshot, id)) = self.fact_snapshot(tenant)? else {
+                return Ok(None);
+            };
+            let revs = state.facts.map.get(&(id, key.to_owned()));
+            match revs.and_then(|revs| visible(revs, snapshot).last()).filter(|rev| !rev.deleted) {
+                Some(rev) => (id, *rev),
+                None => return Ok(None),
+            }
+        };
+        let (mut read, _) = self.read_facts(id, [(key, rev)], usize::MAX)?;
+        Ok(read.pop().map(stored))
+    }
+
+    /// Returns up to `fact_history` revisions, newest first, within `max_bytes` but at least one.
+    pub fn fact_history(&self, tenant: &str, key: &str, max_bytes: usize) -> Result<FactHistory> {
+        let (id, newest, truncated) = {
+            let Some((state, snapshot, id)) = self.fact_snapshot(tenant)? else {
+                return Ok(FactHistory::default());
+            };
+            let Some(revs) = state.facts.map.get(&(id, key.to_owned())) else {
+                return Ok(FactHistory::default());
+            };
+            let (shown, history) = (visible(revs, snapshot), state.facts.history);
+            let truncated = shown.len() > history || (revs.dropped && !shown.is_empty());
+            (id, shown.iter().rev().take(history).copied().collect::<Vec<_>>(), truncated)
+        };
+        let newest = newest.into_iter().map(|rev| (key, rev));
+        let (read, cut) = self.read_facts(id, newest, max_bytes)?;
+        let revisions = read
+            .into_iter()
+            .map(|(rev, commit_time_ns, fact)| Revision {
+                lsn: rev.lsn,
+                commit_time_ns,
+                agent: fact.agent,
+                deleted: rev.deleted,
+                content: fact.content,
+                meta: fact.meta,
+            })
+            .collect();
+        Ok(FactHistory { revisions, truncated: cut || truncated })
+    }
+
+    /// Lists current facts under a prefix in key order, visiting at most 1,024 keys per call.
+    pub fn fact_list(&self, tenant: &str, query: FactQuery) -> Result<FactPage> {
+        if query.limit == 0 {
+            return Err(EngineError::rejected(ErrorKind::InvalidInput));
+        }
+        let (id, picked, mut next) = {
+            let Some((state, snapshot, id)) = self.fact_snapshot(tenant)? else {
+                return Ok(FactPage::default());
+            };
+            let start = match &query.after {
+                Some(after) if *after >= query.prefix => Bound::Excluded((id, after.clone())),
+                _ => Bound::Included((id, query.prefix.clone())),
+            };
+            let (mut picked, mut next, mut last, mut visited) =
+                (Vec::new(), None, None::<&String>, 0);
+            for ((owner, key), revs) in state.facts.map.range((start, Bound::Unbounded)) {
+                if *owner != id || !key.starts_with(&query.prefix) {
+                    break;
+                }
+                if picked.len() == query.limit || visited == 1024 {
+                    next = last.cloned();
+                    break;
+                }
+                visited += 1;
+                last = Some(key);
+                if let Some(rev) = visible(revs, snapshot).last().filter(|rev| !rev.deleted) {
+                    picked.push((key.clone(), *rev));
+                }
+            }
+            (id, picked, next)
+        };
+        let pairs = picked.iter().map(|(key, rev)| (key.as_str(), *rev));
+        let (read, cut) = self.read_facts(id, pairs, query.max_bytes)?;
+        let facts: Vec<_> = read.into_iter().map(stored).collect();
+        if cut {
+            next = facts.last().map(|fact| fact.key.clone());
+        }
+        Ok(FactPage { facts, next })
+    }
+
+    /// Takes the state lock, then the durable snapshot readers use, and resolves the tenant.
+    fn fact_snapshot(&self, tenant: &str) -> Result<Option<(MutexGuard<'_, State>, u64, u32)>> {
+        let state = lock(&self.state)?;
+        let snapshot = self.tape.durable_lsn();
+        Ok(state.tenants.get(tenant).map(|id| (state, snapshot, id)))
+    }
+
+    /// Reads frames until `max_bytes` would pass, keeping the first; counts the cut read too.
+    fn read_facts<'k>(
+        &self,
+        tenant: u32,
+        revs: impl IntoIterator<Item = (&'k str, Rev)>,
+        max_bytes: usize,
+    ) -> Result<(Vec<ReadFact>, bool)> {
+        let corrupt = || EngineError::rejected(ErrorKind::CorruptIndex);
+        let (mut read, mut bytes) = (Vec::new(), 0usize);
+        for (key, rev) in revs {
+            self.fact_reads.fetch_add(1, Ordering::Relaxed);
+            let frame = self.tape.read(rev.lsn)?.ok_or_else(corrupt)?;
+            let fact = crate::fact::decode(&frame.payload).map_err(|_| corrupt())?;
+            if frame.header.kind != Kind::Fact
+                || frame.header.tenant_id != tenant
+                || fact.key != key
+                || fact.tombstone != rev.deleted
+            {
+                return Err(corrupt());
+            }
+            bytes = bytes.saturating_add(
+                key.len() + fact.agent.len() + fact.content.len() + fact.meta.len(),
+            );
+            if bytes > max_bytes && !read.is_empty() {
+                return Ok((read, true));
+            }
+            read.push((rev, frame.header.commit_time_ns, fact));
+        }
+        Ok((read, false))
+    }
+
     /// Waits for the checkpoint worker to install a snapshot. Never runs checkpoint I/O on the writer.
     pub fn checkpoint(&self) -> Result<u64> {
         self.worker.flush()
@@ -630,6 +951,9 @@ impl Engine {
             checkpoint_state_lock_ns: state.checkpoint_lock_ns,
             window_reads: self.reads.load(Ordering::Relaxed),
             tenants: state.tenants.entries.len(),
+            fact_reads: self.fact_reads.load(Ordering::Relaxed),
+            facts: state.facts.map.len(),
+            fact_revisions: state.facts.map.values().map(|revs| revs.list.len()).sum(),
         })
     }
 }
@@ -666,6 +990,52 @@ impl SimAppend<'_> {
             }
         }
     }
+}
+
+enum Start<'a> {
+    Cached(Committed),
+    Write(Option<u32>, Option<std::sync::MutexGuard<'a, ()>>),
+}
+
+/// Encodes a fact payload and its retry digest. Returns the key for the retry scope.
+fn fact_payload(
+    fact: NewFact,
+    tombstone: bool,
+    idem_key: Option<&str>,
+) -> Result<(String, Vec<u8>, Option<Digest>)> {
+    let NewFact { key, content, meta, agent } = fact;
+    let idem = idem_key.map(str::to_owned);
+    let fact = Fact { key, content, meta, agent, source_refs: vec![], idem_key: idem, tombstone };
+    let payload = crate::fact::encode(&fact)?;
+    let digest = idem_key.map(|_| digest([payload.as_slice()]));
+    Ok((fact.key, payload, digest))
+}
+
+/// One queued simulation fact write. Finish it only after stepping its engine.
+#[cfg(feature = "sim")]
+#[derive(Debug)]
+pub struct SimFact<'a> {
+    engine: &'a Engine,
+    reply: std::sync::mpsc::Receiver<zerodb_tape::WriteResult>,
+}
+#[cfg(feature = "sim")]
+impl SimFact<'_> {
+    /// Receives the post-publication receipt without reading the tape.
+    pub fn finish(self) -> Result<FactWritten> {
+        let reply = self.reply.recv().map_err(|_| EngineError {
+            kind: ErrorKind::Poisoned,
+            outcome: zerodb_tape::Outcome::Unknown,
+        })?;
+        self.engine.fact_written(reply.map_err(EngineError::write)?, false)
+    }
+}
+
+/// A fact frame read for a revision, with its commit time.
+type ReadFact = (Rev, u64, Fact);
+
+fn stored((rev, commit_time_ns, fact): ReadFact) -> StoredFact {
+    let Fact { key, agent, content, meta, .. } = fact;
+    StoredFact { key, lsn: rev.lsn, commit_time_ns, agent, content, meta }
 }
 
 struct Pin<'a> {

@@ -22,6 +22,10 @@ pub struct EngineOptions {
     pub checkpoint_bytes: u64,
     /// Maximum idle interval before the checkpoint worker wakes.
     pub checkpoint_interval: Duration,
+    /// Maximum fact keys across tenants, at least 1. Tombstones keep their slots.
+    pub max_facts: usize,
+    /// Revisions reported per fact key, 1 to 4,096. The tape keeps every revision.
+    pub fact_history: usize,
 }
 impl Default for EngineOptions {
     fn default() -> Self {
@@ -35,6 +39,8 @@ impl Default for EngineOptions {
             dedup_global: 8_000_000,
             checkpoint_bytes: 64 * 1024 * 1024,
             checkpoint_interval: Duration::from_secs(60),
+            max_facts: 100_000,
+            fact_history: 16,
         }
     }
 }

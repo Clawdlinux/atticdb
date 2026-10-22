@@ -29,6 +29,16 @@ fn assert_committed(result: &Value, case: &str) -> u64 {
     seq
 }
 
+fn assert_fact_committed(result: &Value, case: &str) -> u64 {
+    let lsn =
+        result["structuredContent"]["lsn"].as_u64().unwrap_or_else(|| panic!("{case}: {result}"));
+    assert_eq!(text(result), format!("committed lsn={lsn}"), "{case}");
+    let mut keys: Vec<&String> = result["structuredContent"].as_object().unwrap().keys().collect();
+    keys.sort();
+    assert_eq!(keys, ["committed", "deduplicated", "lsn"], "{case}: one shape");
+    lsn
+}
+
 fn wait_for(what: &str, done: impl Fn() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(30);
     while !done() {
@@ -155,7 +165,17 @@ fn tool_calls_over_stdio() {
     let tools = mcp.request("tools/list", json!({}))["result"]["tools"].clone();
     let names: Vec<&str> =
         tools.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["memory_append", "memory_recent"]);
+    assert_eq!(names, ["memory_append", "memory_recent", "fact_set", "fact_get", "fact_list"]);
+    let (set, get, list) =
+        (&tools[2]["inputSchema"], &tools[3]["inputSchema"], &tools[4]["inputSchema"]);
+    assert_eq!((&set["required"], &get["required"]), (&json!(["key"]), &json!(["key"])));
+    for field in ["key", "content", "delete", "meta"] {
+        assert!(set["properties"][field].is_object(), "fact_set {field}");
+    }
+    assert_eq!(list["required"], json!(["prefix"]));
+    let limit = &list["properties"]["limit"];
+    assert_eq!((&limit["default"], &limit["maximum"]), (&json!(50), &json!(200)));
+    assert_eq!(list["properties"]["max_bytes"]["default"], 65536);
     let (append, recent) = (&tools[0]["inputSchema"], &tools[1]["inputSchema"]);
     assert_eq!(append["required"], json!(["content"]));
     for field in ["content", "role", "session", "meta"] {
@@ -194,6 +214,57 @@ fn tool_calls_over_stdio() {
     let (_, server) = running.vias[1].a("GET", "/v1/window?agent=ag&session=s2&last=10", None);
     assert_eq!(server["turns"][0]["content"], "two");
 
+    let first = mcp.call("fact_set", json!({"key": "repo/a", "content": "one"}));
+    let lsn = assert_fact_committed(&first, "first set");
+    assert_eq!(first["structuredContent"]["deduplicated"], false);
+    let second = mcp.call("fact_set", json!({"key": "repo/a", "content": "two", "meta": {"k": 2}}));
+    assert!(assert_fact_committed(&second, "second set") > lsn);
+    let got = mcp.call("fact_get", json!({"key": "repo/a"}));
+    let fact = &got["structuredContent"]["fact"];
+    assert_eq!(
+        (text(&got), &fact["content"], &fact["meta"]),
+        ("two", &json!("two"), &json!({"k": 2}))
+    );
+    assert_eq!(fact["agent"], "ag", "fact_set writes as --agent");
+    assert_fact_committed(
+        &mcp.call("fact_set", json!({"key": "repo/a", "delete": true})),
+        "delete",
+    );
+    let got = mcp.call("fact_get", json!({"key": "repo/a"}));
+    assert_eq!(
+        (text(&got), &got["structuredContent"]),
+        ("no current value", &json!({"fact": null}))
+    );
+    for key in ["repo/b", "repo/c"] {
+        assert_fact_committed(&mcp.call("fact_set", json!({"key": key, "content": key})), key);
+    }
+    let page = mcp.call("fact_list", json!({"prefix": "repo/", "limit": 1}));
+    assert_eq!(text(&page), "repo/b: repo/b\nmore: call again with after=repo/b");
+    let mut fields: Vec<&str> =
+        page["structuredContent"].as_object().unwrap().keys().map(String::as_str).collect();
+    fields.sort();
+    assert_eq!(
+        (fields, &page["structuredContent"]["next"]),
+        (vec!["facts", "next"], &json!("repo/b"))
+    );
+    let page = mcp.call("fact_list", json!({"prefix": "repo/", "after": "repo/b"}));
+    assert_eq!((text(&page), &page["structuredContent"]["next"]), ("repo/c: repo/c", &Value::Null));
+    assert_fact_committed(&mcp.call("fact_set", json!({"key": "e", "content": ""})), "empty");
+    assert_eq!(text(&mcp.call("fact_get", json!({"key": "e"}))), "(empty)");
+    let one = "pass exactly one of content or delete: true";
+    for (case, args, expect) in [
+        ("content and delete", json!({"key": "k", "content": "x", "delete": true}), one),
+        ("neither", json!({"key": "k"}), one),
+        (
+            "delete with meta",
+            json!({"key": "k", "delete": true, "meta": {}}),
+            "meta must be an object, and only with content",
+        ),
+    ] {
+        let rejected = mcp.call("fact_set", args);
+        assert_eq!((rejected["isError"].clone(), text(&rejected)), (json!(true), expect), "{case}");
+    }
+
     let rejected = mcp.call("memory_append", json!({"content": "x", "role": "robot"}));
     assert_eq!(rejected["isError"], true);
     let expect = "not_committed: nothing was written (invalid_input: role must be";
@@ -220,7 +291,8 @@ fn tool_calls_over_stdio() {
         assert_eq!(message["jsonrpc"], "2.0", "stdout holds only JSON-RPC: {line}");
     }
     let hex_run = stdout.as_bytes().windows(32).any(|w| w.iter().all(u8::is_ascii_hexdigit));
-    assert!(!hex_run && !stdout.contains("idem"), "no key reaches the model: {stdout}");
+    let hidden = !hex_run && !stdout.contains("idem") && !stdout.contains("if_lsn");
+    assert!(hidden, "no retry key or condition reaches the model: {stdout}");
     assert!(!stdout.contains(TOKEN_A) && !stdout.contains("tenant"), "{stdout}");
 
     // No attempt sent a byte, so nothing was written. A listener whose backlog is full
@@ -260,6 +332,28 @@ fn tool_calls_over_stdio() {
     }
     let (_, lost) = running.vias[1].a("GET", "/v1/window?agent=mcp&session=default&last=9", None);
     assert_eq!(lost["turns"], json!([]), "nothing sent under 2 s");
+}
+
+/// Keys count toward `max_bytes`, so a page of escaped NULs fits the response cap.
+#[test]
+fn escaped_fact_page_fits_the_response_cap() {
+    let dir = Dir::new();
+    let running = support::serve(support::sim_engine(&SimDisk::new(4), None, 100), &dir, 16);
+    let url = format!("http://{}", running.server.tcp_addr().unwrap());
+    let args = ["--url", &url, "--token-file", &private_file(&dir, "t", TOKEN_A)];
+    let mut mcp = Mcp::start(&dir.0, &args, None);
+    mcp.handshake();
+    let nul = |n| "\0".repeat(n);
+    for i in 0..200 {
+        let body = json!({"key": format!("n/{}{i:04}", nul(1018)), "content": nul(41_900),
+                          "idem_key": format!("n{i}")});
+        assert_eq!(running.vias[1].a("POST", "/v1/facts/put", Some(&body)).0, 200);
+    }
+    let args = json!({"prefix": "n/", "limit": 200, "max_bytes": 8 << 20});
+    let page = &mcp.call("fact_list", args)["structuredContent"];
+    let next = format!("n/{}0194", nul(1018));
+    let count = page["facts"].as_array().map(Vec::len);
+    assert!(count == Some(195) && page["next"] == json!(next), "{count:?}");
 }
 
 /// Adapters find or start one server, and send the token only to a server they trust.
@@ -461,6 +555,13 @@ fn unknown_outcome_never_downgrades() {
     let stderr = mcp.process.stderr();
     assert!(stderr.contains("exited: exit status: 70"), "the server exited on poison: {stderr}");
     assert_eq!(contents(&mcp.call("memory_recent", json!({}))), ["warm", "x"], "one copy");
+    std::fs::write(data.join(zerodb::fault::TRIGGER), "").unwrap();
+    let result = mcp.call("fact_set", json!({"key": "rule", "content": "x"}));
+    assert_fact_committed(&result, "fact_set after the poison exit");
+    assert_eq!(result["structuredContent"]["deduplicated"], true, "{result}");
+    let exits = mcp.process.stderr().matches("exited: exit status: 70").count();
+    assert_eq!(exits, 2, "the server exited on poison again");
+    assert_eq!(text(&mcp.call("fact_get", json!({"key": "rule"}))), "x");
     assert_eq!(mcp.close().0.code(), Some(0));
 
     // A server without `--exit-on-poison` and an adapter with `--url`: the first answer is

@@ -2,7 +2,7 @@
 
 Agent memory database written in Rust. Durable writes and fast recent-history reads.
 
-Status: early. The tape, session engine, S2 disk-full handling and the S3 server are implemented. This isn't ready for production.
+Status: early. The tape, session engine, S2 disk-full handling, the S3 server and S4 facts are implemented. This isn't ready for production.
 
 ## Quick start
 
@@ -24,6 +24,19 @@ curl -s --unix-socket data/zerodb.sock -H "Authorization: Bearer $TOKEN" \
 ```
 
 Send the same `idem_key` again and you get the same receipt with `"deduplicated": true`.
+
+Save a rule under a key, read it back, and list a prefix:
+
+```sh
+curl -s -H "Authorization: Bearer $TOKEN" \
+  -d '{"key":"repo/payments/retry-rule","content":"Retry 3 times, then fail.","idem_key":"r1"}' \
+  http://127.0.0.1:7425/v1/facts/put
+curl -s -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:7425/v1/facts/get?key=repo/payments/retry-rule'
+curl -s -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:7425/v1/facts/list?prefix=repo/'
+```
+
+A later put to the same key replaces its value. `POST /v1/facts/delete` removes it, and `get` then answers `{"fact": null}`.
+Add `"if_lsn": <lsn>` to a put to write only if the current value still has that LSN. A mismatch is 409 `conflict`.
 Stop the server with `kill %1`. Every acknowledged write is already synced.
 
 For an MCP client, point it at `zerodb mcp`. Use absolute paths. It starts the server if none is running:
@@ -33,11 +46,21 @@ For an MCP client, point it at `zerodb mcp`. Use absolute paths. It starts the s
   "args": ["mcp", "--config", "/path/to/zerodb.json", "--tenant", "me", "--data-dir", "/path/to/data"]}}}
 ```
 
+The model gets five tools: `memory_append` and `memory_recent` for sessions, and `fact_set`, `fact_get` and `fact_list` for keys.
+`fact_set` takes `content`, or `delete: true`. The later write wins, so a correction replaces the old rule.
+
+## Keys
+
+Each tenant has one key space. Every agent with the tenant's token sees the same keys.
+Agents keep their own keys apart with prefixes, for example `repo/<area>/<topic>` or `agent/<name>/...`.
+A prefix is a byte prefix: `repo/pay` matches `repo/payments/...`. End a prefix with `/` for path semantics.
+Keys are 1 to 1024 bytes. They travel in JSON bodies and query strings, never in URL paths.
+
 ## Why
 
 We want memory that keeps acknowledged writes and stays fast as history grows.
 Session history lives in 1 append-only log. Every index can be rebuilt from that log.
-Facts, forget and export come in later steps. Search is deferred.
+Facts keep one current value per key. Forget and export come in S5. Search is deferred.
 
 The current scope is [0003: slim v0.1](docs/design/0003-slim-v0.1.md).
 The [decision log](docs/design/0002-decision-log.md) explains the choices.
@@ -46,10 +69,10 @@ The [decision log](docs/design/0002-decision-log.md) explains the choices.
 ## What exists
 
 - `zerodb-tape`: location-bound CRC32C frames, whole-transaction footers, group commit and guarded recovery.
-- `zerodb-core`: `append`, `window`, tenant isolation, idempotent retries and incremental checkpoints.
+- `zerodb-core`: `append`, `window`, facts with conditional writes, tenant isolation, idempotent retries and incremental checkpoints.
 - `SimDisk`: seeded crashes, reordered writes, torn sectors, failed syncs, bit flips and full-disk faults.
 - `zerodb serve`: one server per data directory. HTTP/JSON on loopback TCP and a Unix socket, per-tenant tokens. See [crates/zerodb](crates/zerodb/README.md).
-- `zerodb mcp`: a stdio MCP adapter. It finds the running server or starts one, and retries with one key per call.
+- `zerodb mcp`: a stdio MCP adapter with 5 tools. It finds the running server or starts one, and retries with one key per call.
 - A Python client in [clients/python](clients/python/README.md), standard library only.
 - Agents in sandboxes and microVMs reach the server through its Unix socket. See [sandboxes.md](docs/deploy/sandboxes.md).
 
@@ -58,7 +81,8 @@ Record LSNs and transaction IDs are dense. Footers repeat the final record LSN.
 Every write waits for sync and publication. There is no lossy acknowledgement mode.
 Commit timestamps stay monotonic across restarts, even when the clock moves backwards.
 
-`Fact` and `Forget` payload v1 codecs exist. The engine rejects these kinds until their behavior ships.
+The engine applies `Fact` records. `Forget` has a v1 codec and stays rejected until S5.
+An S3 binary refuses to open a data directory that holds facts.
 There are no hash chains, signatures or tamper-evidence guarantees.
 Someone with write access to the directory can edit history.
 

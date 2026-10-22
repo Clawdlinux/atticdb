@@ -1,9 +1,9 @@
-//! `zerodb mcp`: an MCP server on stdio with two tools, `memory_append` and
-//! `memory_recent`, backed by a zerodb server.
+//! `zerodb mcp`: an MCP server on stdio with five tools, `memory_append`,
+//! `memory_recent`, `fact_set`, `fact_get` and `fact_list`, backed by a zerodb server.
 //!
 //! Newline-delimited JSON-RPC 2.0 on stdin and stdout, logs on stderr. One request at a
 //! time, so when stdin closes the call in progress has finished. The model never sees
-//! keys, tokens or tenants.
+//! retry keys, tokens, tenants or `if_lsn`.
 
 use crate::config::{read_token_file, Config, Token};
 use crate::launch::{Launch, Url};
@@ -148,6 +148,9 @@ impl Adapter {
             "tools/call" if self.initialized => match params["name"].as_str() {
                 Some("memory_append") => self.append(&params["arguments"]),
                 Some("memory_recent") => self.recent(&params["arguments"]),
+                Some("fact_set") => self.fact_set(&params["arguments"]),
+                Some("fact_get") => self.fact_get(&params["arguments"]),
+                Some("fact_list") => self.fact_list(&params["arguments"]),
                 _ => return Some(rpc_error(id, -32602, "unknown tool")),
             },
             _ => return Some(rpc_error(id, -32601, "method not found")),
@@ -167,16 +170,76 @@ impl Adapter {
             }
             Ok((string(args, "session")?, turn))
         })();
-        let ((session, turn), key) = match (turn, crate::random_hex(16)) {
-            (Ok(turn), Ok(key)) => (turn, key),
-            (Err(message), _) => return tool_error(message),
-            (_, Err(error)) => return tool_error(format!("cannot read /dev/urandom: {error}")),
+        let (session, turn) = match turn {
+            Ok(turn) => turn,
+            Err(message) => return tool_error(message),
         };
         let session = session.unwrap_or_else(|| self.session.clone());
-        let body =
-            json!({"agent": self.agent, "session": session, "idem_key": key, "turns": [turn]});
+        let body = json!({"agent": self.agent, "session": session, "turns": [turn]});
+        self.write("/v1/append", body)
+    }
+
+    fn fact_set(&mut self, args: &Value) -> Value {
+        let body = (|| {
+            let key = string(args, "key")?.ok_or("key is required")?;
+            let mut body = json!({"key": key, "agent": self.agent});
+            let delete = args["delete"] == true;
+            match (string(args, "content")?, delete) {
+                (Some(content), false) => body["content"] = json!(content),
+                (None, true) => {}
+                _ => return Err("pass exactly one of content or delete: true".to_owned()),
+            }
+            match &args["meta"] {
+                Value::Null => {}
+                meta @ Value::Object(_) if !delete => body["meta"] = meta.clone(),
+                _ => return Err("meta must be an object, and only with content".into()),
+            }
+            Ok((body, delete))
+        })();
+        match body {
+            Ok((body, true)) => self.write("/v1/facts/delete", body),
+            Ok((body, false)) => self.write("/v1/facts/put", body),
+            Err(message) => tool_error(message),
+        }
+    }
+
+    fn fact_get(&mut self, args: &Value) -> Value {
+        match string(args, "key").and_then(|key| key.ok_or("key is required".into())) {
+            Ok(key) => {
+                self.read("fact_get", &format!("/v1/facts/get?key={}", encode(&key)), "fact", fact)
+            }
+            Err(message) => tool_error(message),
+        }
+    }
+
+    fn fact_list(&mut self, args: &Value) -> Value {
+        let target = (|| {
+            let prefix = string(args, "prefix")?.ok_or("prefix is required")?;
+            let (limit, max_bytes) =
+                (number(args, "limit", 50)?.min(200), number(args, "max_bytes", 64 << 10)?);
+            let mut target = format!(
+                "/v1/facts/list?prefix={}&limit={limit}&max_bytes={max_bytes}",
+                encode(&prefix)
+            );
+            if let Some(after) = string(args, "after")? {
+                target += &format!("&after={}", encode(&after));
+            }
+            Ok::<_, String>(target)
+        })();
+        match target {
+            Ok(target) => self.read("fact_list", &target, "facts", facts),
+            Err(message) => tool_error(message),
+        }
+    }
+
+    /// Posts a write under one new retry key, judged by the outcome rule across attempts.
+    fn write(&mut self, target: &str, mut body: Value) -> Value {
+        match crate::random_hex(16) {
+            Ok(key) => body["idem_key"] = json!(key),
+            Err(error) => return tool_error(format!("cannot read /dev/urandom: {error}")),
+        }
         let (mut merge, mut reasons) = (Merge::default(), Vec::new());
-        self.retry("POST", "/v1/append", body.to_string().as_bytes(), |reply| {
+        self.retry("POST", target, body.to_string().as_bytes(), |reply| {
             let (attempt, detail) = match &reply {
                 Ok(reply) => match reply["outcome"].as_str().and_then(outcome::parse) {
                     Some(outcome) => (Attempt::Answered(outcome), describe(reply)),
@@ -186,7 +249,7 @@ impl Adapter {
             };
             let detail = note(&mut reasons, detail);
             match (merge.record(attempt), reply) {
-                (Some(Outcome::Committed), Ok(reply)) => Ok(committed(&reply)),
+                (Some(Outcome::Committed), Ok(reply)) => Ok(committed(&reply, target)),
                 (Some(outcome), _) => Ok(failed(outcome, &detail)),
                 (None, _) => Err(failed(merge.finish(), &detail)),
             }
@@ -195,12 +258,9 @@ impl Adapter {
 
     fn recent(&mut self, args: &Value) -> Value {
         let query = (|| {
-            let number = |name: &str, default: u64| match &args[name] {
-                Value::Null => Ok(default),
-                value => value.as_u64().ok_or(format!("{name} must be a whole number")),
-            };
             let session = string(args, "session")?.unwrap_or_else(|| self.session.clone());
-            Ok::<_, String>((number("n", 20)?.min(200), session, number("max_bytes", 64 << 10)?))
+            let max_bytes = number(args, "max_bytes", 64 << 10)?;
+            Ok::<_, String>((number(args, "n", 20)?.min(200), session, max_bytes))
         })();
         let (n, session, max_bytes) = match query {
             Ok(query) => query,
@@ -209,15 +269,26 @@ impl Adapter {
         let (agent, session) = (encode(&self.agent), encode(&session));
         let target =
             format!("/v1/window?agent={agent}&session={session}&last={n}&max_bytes={max_bytes}");
+        self.read("memory_recent", &target, "turns", turns)
+    }
+
+    /// Sends a read until it is answered. The reply field `field` marks success.
+    fn read(
+        &mut self,
+        tool: &str,
+        target: &str,
+        field: &str,
+        render: fn(&Value) -> Value,
+    ) -> Value {
         let mut reasons = Vec::new();
-        self.retry("GET", &target, &[], |reply| match reply {
-            Ok(reply) if reply["turns"].is_array() => Ok(turns(&reply)),
+        self.retry("GET", target, &[], |reply| match reply {
+            Ok(reply) if reply.get(field).is_some() => Ok(render(&reply)),
             Ok(reply) => {
                 let detail = note(&mut reasons, describe(&reply));
-                Ok(tool_error(format!("memory_recent failed: {detail}")))
+                Ok(tool_error(format!("{tool} failed: {detail}")))
             }
             Err((_, error)) => {
-                Err(tool_error(format!("memory_recent failed: {}", note(&mut reasons, error))))
+                Err(tool_error(format!("{tool} failed: {}", note(&mut reasons, error))))
             }
         })
     }
@@ -265,9 +336,8 @@ impl Adapter {
         reserve()?;
         let auth = format!("Bearer {}", self.token.expose());
         let headers = [("Host", host.as_str()), ("Authorization", auth.as_str())];
-        // JSON escapes a byte to at most 6 (`\u0000`), plus 1 MiB for the rest of a window.
-        let max = 6 * crate::api::MAX_WINDOW_BYTES as u64 + (1 << 20);
         let lost = |error: String| (Attempt::TransportError, error);
+        let max = crate::api::MAX_RESPONSE_BYTES;
         let response =
             crate::http::exchange(&mut *stream, method, target, &headers, body, deadline, max);
         let response = response.map_err(|error| lost(error.to_string()))?;
@@ -304,7 +374,62 @@ fn tools() -> Value {
                 },
             },
         },
+        {
+            "name": "fact_set",
+            "description": "Save a rule or fact under a path-like key, for example \
+                repo/payments/api/retry-rule. It replaces the key's current value, so a \
+                correction supersedes the old rule. Pass delete: true to remove the key. Every \
+                agent using this memory shares the same keys.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string"},
+                    "content": {"type": "string"},
+                    "delete": {"type": "boolean"},
+                    "meta": {"type": "object"},
+                },
+                "required": ["key"],
+            },
+        },
+        {
+            "name": "fact_get",
+            "description": "Read the current value of one key. A deleted key returns nothing, \
+                never an older value.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"key": {"type": "string"}},
+                "required": ["key"],
+            },
+        },
+        {
+            "name": "fact_list",
+            "description": "List current facts whose keys start with prefix, in key order, with \
+                their content. Call it before working in an area, for example with prefix \
+                repo/payments/.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "prefix": {"type": "string"},
+                    "after": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
+                    "max_bytes": {"type": "integer", "minimum": 0, "default": 65536},
+                },
+                "required": ["prefix"],
+            },
+        },
     ]})
+}
+
+fn number(args: &Value, name: &str, default: u64) -> Result<u64, String> {
+    match &args[name] {
+        Value::Null => Ok(default),
+        value => value.as_u64().ok_or(format!("{name} must be a whole number")),
+    }
+}
+
+/// A tool result with one text block.
+fn answer(text: String, structured: Value) -> Value {
+    json!({"content": [{"type": "text", "text": text}], "structuredContent": structured})
 }
 
 fn string(args: &Value, name: &str) -> Result<Option<String>, String> {
@@ -333,18 +458,49 @@ fn describe(reply: &Value) -> String {
     }
 }
 
-/// One `structuredContent` shape. Receipt fields are null when the server had no receipt.
-fn committed(reply: &Value) -> Value {
-    let seq = &reply["seqs"][0];
-    let text = if seq.is_null() {
-        "committed, receipt unavailable".into()
-    } else {
-        format!("committed seq={seq}")
+/// One `structuredContent` shape per tool, `seq` for appends only. Receipt fields are null
+/// when the server had no receipt.
+fn committed(reply: &Value, target: &str) -> Value {
+    let append = target == "/v1/append";
+    let lsn = &reply[if append { "last_lsn" } else { "lsn" }];
+    let mut structured =
+        json!({"committed": true, "lsn": lsn, "deduplicated": reply["deduplicated"]});
+    let (name, number) = if append { ("seq", &reply["seqs"][0]) } else { ("lsn", lsn) };
+    if append {
+        structured["seq"] = number.clone();
+    }
+    let text = match number {
+        Value::Null => "committed, receipt unavailable".into(),
+        number => format!("committed {name}={number}"),
     };
-    let (lsn, deduplicated) = (&reply["last_lsn"], &reply["deduplicated"]);
-    let structured =
-        json!({"committed": true, "seq": seq, "lsn": lsn, "deduplicated": deduplicated});
-    json!({"content": [{"type": "text", "text": text}], "structuredContent": structured})
+    answer(text, structured)
+}
+
+fn fact(reply: &Value) -> Value {
+    let fact = &reply["fact"];
+    let text = match fact["content"].as_str() {
+        Some("") => "(empty)".into(),
+        Some(content) => content.to_owned(),
+        None => "no current value".into(),
+    };
+    answer(text, json!({"fact": fact}))
+}
+
+fn facts(reply: &Value) -> Value {
+    let facts = reply["facts"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let field = |fact: &Value, name: &str| fact[name].as_str().unwrap_or_default().to_owned();
+    let mut text: Vec<String> = facts
+        .iter()
+        .map(|fact| format!("{}: {}", field(fact, "key"), field(fact, "content")))
+        .collect();
+    let next = reply["next"].as_str();
+    if text.is_empty() {
+        text.push("no current facts".into());
+    }
+    if let Some(next) = next {
+        text.push(format!("more: call again with after={next}"));
+    }
+    answer(text.join("\n"), json!({"facts": facts, "next": reply["next"]}))
 }
 
 fn failed(outcome: Outcome, detail: &str) -> Value {
@@ -371,8 +527,7 @@ fn turns(reply: &Value) -> Value {
         text.push("(older turns left out to fit max_bytes)".into());
     }
     let text = if text.is_empty() { "no turns".into() } else { text.join("\n") };
-    let structured = json!({"turns": turns, "truncated": reply["truncated"]});
-    json!({"content": [{"type": "text", "text": text}], "structuredContent": structured})
+    answer(text, json!({"turns": turns, "truncated": reply["truncated"]}))
 }
 
 fn tool_error(text: String) -> Value {
