@@ -437,13 +437,17 @@ fn startup_checks() {
                 let data = ctx.data.to_str().unwrap();
                 let url = format!("unix://{}", ctx.socket.display());
                 let token = support::private_file(&ctx.dir, "token", &ctx.token);
-                let load = ["load", "--url", &url, "--token-file", &token, "--writers", "2"];
-                let (status, out) = ctx.run(&[&load[..], &["--turns", "4"]].concat()).wait();
+                let load = ["load", "--url", &url, "--token-file", &token];
+                let good = ["--writers", "2", "--turns", "4"];
+                let (status, out) = ctx.run(&[&load[..], &good].concat()).wait();
                 assert!(status.success(), "{case}: {out}");
                 assert!(out.lines().any(|line| line == "turns=4"), "{case}: {out}");
                 assert!(out.lines().any(|line| line.starts_with("p99_us=")), "{case}: {out}");
-                let (status, out) = ctx.run(&[&load[..], &["--turns", "3"]].concat()).wait();
-                assert_eq!(status.code(), Some(2), "{case}: uneven split is a usage error: {out}");
+                let huge = ["--writers", "9223372036854775808", "--batch", "2", "--turns", "4"];
+                for bad in [&["--writers", "2", "--turns", "3"][..], &huge] {
+                    let (status, out) = ctx.run(&[&load[..], bad].concat()).wait();
+                    assert_eq!(status.code(), Some(2), "{case}: {bad:?} is a usage error: {out}");
+                }
                 let (status, stats) = ctx.run(&["stats", "--data-dir", data]).wait();
                 assert!(status.success(), "{case}: {stats}");
                 let durable = format!("durable_lsn={}", second["last_lsn"].as_u64().unwrap() + 4);

@@ -56,7 +56,14 @@ pub fn load(
     batch: usize,
     size: usize,
 ) -> u8 {
-    let run = crate::random_hex(4).unwrap_or_default();
+    // A reused run id would replay cached acks and count them as writes.
+    let run = match crate::random_hex(4) {
+        Ok(run) => run,
+        Err(error) => {
+            eprintln!("zerodb load: cannot read /dev/urandom: {error}");
+            return 1;
+        }
+    };
     let turn = json!({"role": "user", "content": "x".repeat(size)});
     let started = Instant::now();
     let results: Vec<Result<Vec<Duration>, String>> = std::thread::scope(|scope| {

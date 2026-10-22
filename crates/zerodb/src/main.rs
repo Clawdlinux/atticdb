@@ -134,10 +134,11 @@ fn load(mut flags: HashMap<String, String>) -> Option<u8> {
     };
     let (writers, turns) = (number("--writers", 1)?, number("--turns", 10_000)?);
     let (batch, size) = (number("--batch", 1)?, number("--size", 256)?);
-    if batch > 1024 || turns % (writers * batch) != 0 {
-        return Some(usage(
-            "--turns must be a multiple of --writers * --batch, batch at most 1024",
-        ));
+    // At most the server's connection cap and the tape's batch cap.
+    let split = writers.checked_mul(batch).filter(|n| turns % n == 0);
+    if writers > zerodb::serve::MAX_CONNECTIONS || batch > 1024 || split.is_none() {
+        let rule = "--turns must divide by --writers * --batch; writers <= 256, batch <= 1024";
+        return Some(usage(rule));
     }
     let url = match Url::parse(&flags.remove("--url")?) {
         Ok(url) => url,
