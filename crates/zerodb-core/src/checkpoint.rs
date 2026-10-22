@@ -380,7 +380,9 @@ fn snapshot(state: &State) -> Snapshot {
             }
         }
     }
-    let facts: Box<dyn Iterator<Item = (&FactKey, &Revs)>> = if full {
+    // Many dirty keys: walking the map in order is cheaper than a lookup per key.
+    let all = full || state.facts.dirty.len() * 2 >= state.facts.map.len();
+    let facts: Box<dyn Iterator<Item = (&FactKey, &Revs)>> = if all {
         Box::new(state.facts.map.iter())
     } else {
         Box::new(state.facts.dirty.iter().filter_map(|key| state.facts.map.get_key_value(key)))

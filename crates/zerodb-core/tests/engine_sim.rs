@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use zerodb_core::{
     turn::decode, Appended, Engine, EngineError, EngineOptions, ErrorKind, FactQuery, FactWritten,
-    Health, NewFact, NewTurn, Outcome, Role, Scope, SimAppend, SimFact, Turn, WindowQuery,
+    Health, NewFact, NewTurn, Outcome, Role, Scope, SimFact, Turn, WindowQuery,
 };
 use zerodb_tape::sim::{CapacityError, CapacityPlan, PublishPause, SimClock, StorageFullFault};
 use zerodb_tape::{Clock, Error, FileId, Io, Kind, LockGuard, Result, SimDisk, Tape, TapeOptions};
@@ -778,24 +778,25 @@ fn run_seed_with_capacity(seed: u64, plan: &CapacityPlan) -> Vec<Vec<Turn>> {
     history
 }
 
+/// One keyed turn or unconditional fact put, 512 to 2559 content bytes.
 fn enqueue_keyed_batch<'a>(
     engine: &'a Engine,
     oracle: &mut Oracle,
     rng: &mut Rng,
     clock: &SimClock,
-) -> (usize, SimAppend<'a>) {
+) -> (usize, Queued<'a>) {
     let index = oracle.batches.len();
     let scope = rng.below(4);
-    let mut batch = random_batch(rng, index, scope, clock.now_ns(), None);
-    batch.turns.truncate(1);
+    let mut batch = random_batch(rng, index, scope, clock.now_ns(), Some(oracle));
     let len = 512 + rng.below(2048);
-    batch.turns[0].content = rng.bytes(len);
+    let content = rng.bytes(len);
+    match &mut batch.fact {
+        Some(fact) => (fact.content, fact.if_lsn) = (Some(content), None),
+        None => batch.turns = vec![NewTurn { content, ..batch.turns[0].clone() }],
+    }
     batch.key = Some(format!("key-{index}"));
-    let reply = engine
-        .enqueue_sim(&oracle.scopes[scope], batch.turns.clone(), batch.key.as_deref())
-        .unwrap();
     oracle.batches.push(batch);
-    (index, reply)
+    (index, enqueue(engine, oracle, index, false))
 }
 
 fn capacity_faults(
@@ -818,6 +819,7 @@ fn capacity_faults(
             metrics.tenants,
             metrics.dedup_entries,
             metrics.dedup_window_effective,
+            (metrics.facts, metrics.fact_revisions),
             turns,
         )
     };
@@ -838,7 +840,7 @@ fn capacity_faults(
     io.watch_segment_writes.store(false, Ordering::SeqCst);
     assert_eq!(io.segment_writes.load(Ordering::SeqCst), 0, "a floor rejection wrote to a segment");
     for reply in queued {
-        let error = reply.finish().unwrap_err();
+        let error = reply().unwrap_err();
         assert!(matches!(error.kind, ErrorKind::Storage(Error::DiskFull)));
         assert_eq!(error.outcome, Outcome::NotCommitted);
     }
@@ -866,6 +868,9 @@ fn capacity_faults(
             engine.metrics().unwrap().tape_index.page_reloads > reloads,
             "sampled a cold index page"
         );
+    }
+    for key in oracle.facts.keys() {
+        oracle.check_fact(&engine, key);
     }
     assert_eq!(io.disk.available_bytes(Path::new("db")).unwrap(), 0);
     assert_eq!(engine.health(), Health::ReadOnly, "cold reads must not clear read-only");
@@ -920,7 +925,7 @@ fn capacity_faults(
     let mut pending = Vec::new();
     let mut post_return_pending = Vec::new();
     for (position, (index, reply)) in queued.into_iter().enumerate() {
-        let error = reply.finish().unwrap_err();
+        let error = reply().unwrap_err();
         let (class, outcomes) = plan.expected(position);
         assert!(
             match &error.kind {
