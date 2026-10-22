@@ -74,8 +74,7 @@ pub fn check(auth: &Auth, head: &Head, tcp: bool) -> Result<(Route, Option<Strin
     if (head.method.as_str(), head.path()) == ("GET", "/healthz") {
         return Ok((Route::Health, None));
     }
-    // Stats count activity across every tenant, so no tenant token may read them. The
-    // socket's file permissions decide who can. On TCP it is an unknown route behind the token.
+    // Stats span all tenants, so socket permissions guard them, not a tenant token.
     if !tcp && (head.method.as_str(), head.path()) == ("GET", "/v1/stats") {
         return Ok((Route::Stats, None));
     }
@@ -115,7 +114,7 @@ fn health_status(engine: &Engine) -> (u16, &'static str) {
     }
 }
 
-/// `GET /v1/stats`: health and engine metrics as one flat object. Counters cover this open.
+/// `GET /v1/stats`: health and engine metrics since this open.
 pub fn stats(engine: &Engine, instance: &str) -> Response {
     let Ok(m) = engine.metrics() else { return Response::error(503, "poisoned", None) };
     let index = &m.tape_index;

@@ -35,7 +35,7 @@ pub(crate) fn current(newest: Option<&Rev>) -> u64 {
 pub(crate) struct Facts {
     pub(crate) map: BTreeMap<FactKey, Revs>,
     pub(crate) dirty: BTreeSet<FactKey>,
-    /// Revisions held across all keys, so metrics never walk the map under the lock.
+    /// Total revisions, kept so metrics never walk the map under the lock.
     pub(crate) revisions: usize,
     max_keys: usize,
     pub(crate) history: usize,

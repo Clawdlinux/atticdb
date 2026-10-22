@@ -5,9 +5,7 @@ use serde_json::Value;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-/// `zerodb stats`: prints `GET /v1/stats` as sorted `key=value` lines. It reaches the server
-/// through `url` or the `LOCK` in `data_dir`, once, and never starts one: stats of a fresh
-/// empty server would hide that the real one is down.
+/// Prints `GET /v1/stats` as `key=value` lines. Never starts a server: that would hide an outage.
 pub fn stats(url: Option<&str>, data_dir: Option<&Path>) -> u8 {
     let deadline = Instant::now() + Duration::from_secs(5);
     let stream = match (url.map(Url::parse).transpose(), data_dir) {
