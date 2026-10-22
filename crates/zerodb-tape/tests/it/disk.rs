@@ -4,8 +4,8 @@ use crate::support::{manifest, primed_writer, record, submit, Machine, ObservedI
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use zerodb_tape::sim::DataDir;
 use zerodb_tape::sim::{frame::HEADER_LEN, SimClock, WriterCore};
+use zerodb_tape::sim::{make_spare, DataDir};
 use zerodb_tape::{Committed, Durability, Kind, Outcome, TapeOptions};
 use zerodb_tape::{Error, Io, SimDisk};
 
@@ -24,6 +24,7 @@ enum Fault {
     Sync,
     DirSync,
     Manifest,
+    Spare,
 }
 
 #[test]
@@ -41,6 +42,7 @@ fn space_faults_set_group_outcome() {
         ("segment sync error", Sync, false, true),
         ("directory sync error", DirSync, false, true),
         ("manifest write full", Manifest, false, true),
+        ("spare is one prepared roll", Spare, true, false),
     ] {
         space_fault(case, fault, expect_read_only, expect_poisoned);
     }
@@ -80,6 +82,9 @@ fn space_fault(case: &str, fault: Fault, expect_read_only: bool, expect_poisoned
         })
     };
     let (io, mut core, prepares) = primed_writer(floor, capacity, boundary, segment);
+    if matches!(fault, Spare) {
+        make_spare(io.clone(), Path::new("db"), segment, 0).unwrap();
+    }
     let before_prepares = prepares.load(Ordering::SeqCst);
     let before_manifest = manifest(&io.disk);
     let before_files = io.disk.list(Path::new("db")).unwrap();
@@ -99,10 +104,12 @@ fn space_fault(case: &str, fault: Fault, expect_read_only: bool, expect_poisoned
     let before_bytes = io.segment_bytes.load(Ordering::SeqCst);
     let used = capacity - io.disk.available_bytes(Path::new("db")).unwrap();
     let chunk = 1 << 20;
-    let reserve = 240 + segment + if indexed { 2 * chunk } else { 0 };
+    // A ready spare already holds the roll's blocks.
+    let roll = if matches!(fault, Spare) { 0 } else { segment };
+    let reserve = 240 + roll + if indexed { 2 * chunk } else { 0 };
     let floor_bytes = floor.unwrap_or((capacity / 20).min(1 << 30));
     match fault {
-        Floor | IndexFloor | DefaultFloor(_) => {
+        Floor | IndexFloor | DefaultFloor(_) | Spare => {
             io.disk.set_capacity(used + floor_bytes + reserve - 1).unwrap()
         }
         Create => io.full_next_create.store(true, Ordering::SeqCst),
@@ -165,15 +172,23 @@ fn space_fault(case: &str, fault: Fault, expect_read_only: bool, expect_poisoned
     if !matches!(fault, LaterAllocate | Sync | DirSync | Manifest) {
         assert_eq!(io.disk.list(Path::new("db")).unwrap(), before_files, "{case}");
     }
-    if matches!(fault, Floor | IndexFloor | DefaultFloor(_) | Stat | IndexStat) {
+    if matches!(fault, Floor | IndexFloor | DefaultFloor(_) | Stat | IndexStat | Spare) {
         assert_eq!(*io.events.lock().unwrap(), before_events, "{case}");
     }
-    let retry_size = if matches!(fault, DefaultFloor(_)) {
-        io.disk.set_capacity(used + floor_bytes + 120).unwrap();
-        8
-    } else {
-        io.disk.set_capacity(1 << 42).unwrap();
-        3800
+    let retry_size = match fault {
+        DefaultFloor(_) => {
+            io.disk.set_capacity(used + floor_bytes + 120).unwrap();
+            8
+        }
+        // The roll fits only by taking the spare. Then a refill would cross the floor by 1 byte.
+        Spare => {
+            io.disk.set_capacity(used + floor_bytes + segment - 1).unwrap();
+            3800
+        }
+        _ => {
+            io.disk.set_capacity(1 << 42).unwrap();
+            3800
+        }
     };
     if expect_poisoned {
         let retry = submit(&mut core, vec![record(Kind::Turn, 1, [7; 8])], Durability::Durable);
@@ -206,6 +221,18 @@ fn space_fault(case: &str, fault: Fault, expect_read_only: bool, expect_poisoned
     }
     assert!(!core.read_only() && !core.is_poisoned(), "{case}");
     assert_eq!(prepares.load(Ordering::SeqCst), before_prepares + 1, "{case}");
+    if matches!(fault, Spare) {
+        core.maintain().unwrap();
+        assert!(!io.disk.exists(Path::new("db/spare.zdb")).unwrap(), "{case}: refill skipped");
+        // A refill would push the tail write below the floor. The next roll hits it.
+        for floor_hit in [false, true] {
+            let reply = submit(&mut core, vec![record(Kind::Turn, 1, [7; 8])], Durability::Durable);
+            core.step();
+            let full = reply.recv().unwrap().map_err(|e| matches!(e.kind, Error::DiskFull));
+            assert_eq!(full.err(), floor_hit.then_some(true), "{case}");
+        }
+    }
+    let durable = core.durable_lsn();
     drop(core);
     let image = Arc::new(io.disk.crash().unwrap());
     image.set_capacity(1 << 42).unwrap();
@@ -214,10 +241,10 @@ fn space_fault(case: &str, fault: Fault, expect_read_only: bool, expect_poisoned
     let (core, report) =
         WriterCore::open_with(Machine::default(), image, Arc::new(SimClock::default()), "db", opts)
             .unwrap();
-    assert_eq!(report.durable_lsn, boundary + 1, "{case}");
+    assert_eq!(report.durable_lsn, durable, "{case}");
     // One read per 4096-byte routes page keeps the 131072-LSN rows fast in debug builds.
     let stride = if indexed { 256 } else { 1 };
-    for lsn in (1..=boundary + 1).step_by(stride).chain([boundary + 1]) {
+    for lsn in (1..=durable).step_by(stride).chain([durable]) {
         assert!(core.read(lsn).unwrap().is_some(), "{case}, lsn={lsn}");
     }
 }
