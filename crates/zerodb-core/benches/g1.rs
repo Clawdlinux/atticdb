@@ -12,7 +12,6 @@ use support::{encoded_batch, Bare, BenchDir};
 use zerodb_core::{turn::encode, Engine, EngineOptions, NewTurn, Role, Scope, WindowQuery};
 use zerodb_tape::{Durability, Kind, RecordInput, StdIo, SystemClock, Tape, TapeOptions};
 
-const WRITERS: usize = 16;
 const READERS: usize = 2;
 const WINDOW: usize = 16;
 const SESSIONS: usize = 64;
@@ -104,10 +103,10 @@ fn writers(
     append: impl Fn(usize, usize) + Sync,
     read: impl Fn(usize, usize) -> Option<u64> + Sync,
 ) -> (Duration, Vec<Duration>, Vec<Duration>, Queries) {
-    let barrier = Barrier::new(WRITERS + readers + 1);
+    let barrier = Barrier::new(writer_count() + readers + 1);
     let done = AtomicBool::new(false);
     std::thread::scope(|threads| {
-        let writers = (0..WRITERS)
+        let writers = (0..writer_count())
             .map(|writer| {
                 let (barrier, append) = (&barrier, &append);
                 threads.spawn(move || {
@@ -346,7 +345,7 @@ fn engine(iterations: usize, batch: usize, n: usize, checkpoint_bytes: u64) -> S
     let engine = Engine::open(&dir.0, opts.clone()).unwrap();
     // Register every tenant and session before timing, so timed bytes match the bare trace.
     std::thread::scope(|threads| {
-        for writer in 0..WRITERS {
+        for writer in 0..writer_count() {
             let engine = &engine;
             threads.spawn(move || {
                 for session in 0..SESSIONS {
@@ -356,7 +355,7 @@ fn engine(iterations: usize, batch: usize, n: usize, checkpoint_bytes: u64) -> S
         }
     });
     let templates = (0..SIZES.len()).map(|i| turns(i, batch)).collect::<Vec<_>>();
-    let scopes = (0..WRITERS)
+    let scopes = (0..writer_count())
         .map(|w| (0..SESSIONS).map(|s| scope(w, s)).collect::<Vec<_>>())
         .collect::<Vec<_>>();
     let warmup = engine.metrics().unwrap();
@@ -371,7 +370,7 @@ fn engine(iterations: usize, batch: usize, n: usize, checkpoint_bytes: u64) -> S
             );
         },
         |reader, i| {
-            let scope = &scopes[(i + reader) % WRITERS][i / WRITERS % SESSIONS];
+            let scope = &scopes[(i + reader) % writer_count()][i / writer_count() % SESSIONS];
             Some(black_box(engine.window(scope, WindowQuery::Last(WINDOW)).unwrap()).len() as u64)
         },
     );
@@ -419,7 +418,10 @@ fn engine(iterations: usize, batch: usize, n: usize, checkpoint_bytes: u64) -> S
             assert_eq!(tail[0].seq, (1 + batches * batch) as u64);
         }
     }
-    println!("engine/reopen: verified all {} session tails outside timing", WRITERS * SESSIONS);
+    println!(
+        "engine/reopen: verified all {} session tails outside timing",
+        writer_count() * SESSIONS
+    );
     stats
 }
 
@@ -480,6 +482,12 @@ fn tape_options() -> TapeOptions {
     }
 }
 
+/// `G1_WRITERS` closed-loop writers, 16 by default. Agents usually run 1 to 4.
+fn writer_count() -> usize {
+    static COUNT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *COUNT.get_or_init(|| env_number("G1_WRITERS", 16))
+}
+
 fn env_number(name: &str, default: usize) -> usize {
     std::env::var(name).map_or(default, |s| s.parse().unwrap())
 }
@@ -527,11 +535,12 @@ fn main() {
     assert!(symmetric <= 1, "G1_SYMMETRIC must be 0 or 1");
     let symmetric = symmetric == 1;
     assert!((1..=256).contains(&batch), "G1_BATCH must be in 1..=256");
+    assert!((1..=256).contains(&writer_count()), "G1_WRITERS must be in 1..=256");
     assert!(
-        n >= WRITERS * batch && n.is_multiple_of(WRITERS * batch),
-        "G1_TURNS must be a positive multiple of 16 * G1_BATCH"
+        n >= writer_count() * batch && n.is_multiple_of(writer_count() * batch),
+        "G1_TURNS must be a positive multiple of G1_WRITERS * G1_BATCH"
     );
-    let iterations = n / WRITERS / batch;
+    let iterations = n / writer_count() / batch;
     let reps = env_number("G1_REPS", 3);
     assert!(reps >= 3, "G1_REPS must be at least 3");
     if env_number("G1_REPLAY_PROBE", 0) != 0 {
@@ -545,7 +554,7 @@ fn main() {
         * 1024;
     assert!(checkpoint_bytes > 0);
     let reader_paths = if symmetric { "bare,tape,engine" } else { "engine" };
-    println!("G1: turns={n} batch={batch} writers={WRITERS} readers={READERS} symmetric={} reader_paths={reader_paths} sessions={} sizes={SIZES:?}", u8::from(symmetric), WRITERS * SESSIONS);
+    println!("G1: turns={n} batch={batch} writers={} readers={READERS} symmetric={} reader_paths={reader_paths} sessions={} sizes={SIZES:?}", writer_count(), u8::from(symmetric), writer_count() * SESSIONS);
     println!("Nearest-rank caller latency, measured per durable batch. macOS sync_data uses F_FULLFSYNC.");
     let mut results = Vec::new();
     for rep in 1..=reps {
