@@ -1,10 +1,10 @@
 //! Locked directory metadata and atomic replacements.
 
 use crate::crc32c::crc32c;
-use crate::io::{FileId, Io, LockGuard};
+use crate::io::{lock, FileId, Io, LockGuard};
 use crate::{Error, Result};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 pub(crate) struct Handle {
     pub io: Arc<dyn Io>,
@@ -40,6 +40,80 @@ pub fn atomic_install(io: Arc<dyn Io>, dir: &Path, name: &str, bytes: &[u8]) -> 
     io.sync_data(file.id).map_err(|e| Error::SyncFailed(e.to_string()))?;
     io.rename(&tmp, &dir.join(name))?;
     io.sync_dir(dir).map_err(|e| Error::SyncFailed(e.to_string()))
+}
+
+/// Keeps one zero-filled `spare.zdb` for the next roll, built as `spare.tmp`.
+///
+/// Zeroed blocks make each later segment sync a data flush only. Failures retry at the next call.
+pub fn make_spare(
+    io: Arc<dyn Io>,
+    dir: &Path,
+    size: u64,
+    floor: u64,
+    space: &Mutex<()>,
+) -> Result<()> {
+    let (tmp, spare) = (dir.join("spare.tmp"), dir.join("spare.zdb"));
+    let file = {
+        // The writer checks and reserves under the same lock, so both never pass on the same bytes.
+        let _space = lock(space)?;
+        if io.exists(&spare)? {
+            return Ok(());
+        }
+        if io.exists(&tmp)? {
+            io.remove(&tmp)?;
+        }
+        // Leave the active segment and a concurrent roll their room above the floor.
+        let free = io.available_bytes(dir)?;
+        if free < size.saturating_mul(2).saturating_add(floor) {
+            return Ok(());
+        }
+        let file = Handle::create(io.clone(), &tmp)?;
+        // A sparse fallback reserves nothing, so the fill could later cut into the floor.
+        match io.allocate(file.id, size).and_then(|()| io.available_bytes(dir)) {
+            Ok(left) if left <= free.saturating_sub(size) => file,
+            reserved => {
+                drop(file);
+                io.remove(&tmp)?;
+                return reserved.map(|_| ());
+            }
+        }
+    };
+    let filled = fill_zeros(io.as_ref(), file.id, size);
+    drop(file);
+    if let Err(error) = filled.and_then(|()| io.rename(&tmp, &spare)) {
+        // Free the space now, not at the next call.
+        io.remove(&tmp)?;
+        return Err(error);
+    }
+    io.sync_dir(dir).map_err(|e| Error::SyncFailed(e.to_string()))
+}
+
+/// Small synced chunks keep ext4 tape syncs from queuing behind the fill.
+fn fill_zeros(io: &dyn Io, file: FileId, size: u64) -> Result<()> {
+    let zeros = vec![0; 256 << 10];
+    let mut offset = 0;
+    while offset < size {
+        let count = (size - offset).min(zeros.len() as u64) as usize;
+        io.write_at(file, offset, &zeros[..count])?;
+        offset += count as u64;
+        // A macOS sync is a full device flush, and copy-on-write APFS converts no extents.
+        if cfg!(target_os = "linux") || offset == size {
+            io.sync_data(file).map_err(|e| Error::SyncFailed(e.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn zero_tail(io: &dyn Io, file: FileId, from: u64, size: u64) -> Result<()> {
+    io.set_len(file, size)?;
+    let zeros = vec![0; 1 << 20];
+    let mut offset = from;
+    while offset < size {
+        let count = (size - offset).min(zeros.len() as u64) as usize;
+        io.write_at(file, offset, &zeros[..count])?;
+        offset += count as u64;
+    }
+    Ok(())
 }
 
 pub(crate) fn corruption(lsn: u64, segment: u64, offset: u64, reason: impl ToString) -> Error {
@@ -193,13 +267,14 @@ impl DataDir {
             }
             let last = dir.segments.last().copied().unwrap_or(0);
             for path in dir.io.list(&dir.path)? {
-                let id = path
-                    .file_name()
-                    .and_then(|name| name.to_str())
+                let name = path.file_name().and_then(|name| name.to_str());
+                let id = name
                     .and_then(|name| name.strip_prefix("seg-"))
                     .and_then(|name| name.strip_suffix(".zdb"))
                     .and_then(|id| id.parse::<u64>().ok());
-                if id.is_some_and(|id| id > last) {
+                // Never trust a spare from before a crash.
+                if id.is_some_and(|id| id > last) || matches!(name, Some("spare.tmp" | "spare.zdb"))
+                {
                     dir.io.remove(&path)?;
                 }
             }
@@ -289,7 +364,7 @@ impl DataDir {
         self.path.join(format!("seg-{id:016}.zdb"))
     }
 
-    /// Preallocates a segment and persists its name before installing the manifest.
+    /// Takes the spare or preallocates a segment, then persists its name before installing the manifest.
     pub fn prepare_next_segment(&mut self, size: u64) -> Result<u64> {
         self.prepare_segment(size).map_err(SegmentPrepareError::into_error)
     }
@@ -307,14 +382,19 @@ impl DataDir {
             }
         }
         let path = self.segment_path(id);
-        let file =
-            Handle::create(self.io.clone(), &path).map_err(SegmentPrepareError::before_manifest)?;
-        if let Err(error) = self.io.allocate(file.id, size) {
-            drop(file);
-            self.io.remove(&path)?;
-            return Err(SegmentPrepareError::before_manifest(error));
+        let spare = self.path.join("spare.zdb");
+        if self.io.exists(&spare)? {
+            self.io.rename(&spare, &path).map_err(SegmentPrepareError::before_manifest)?;
+        } else {
+            let file = Handle::create(self.io.clone(), &path)
+                .map_err(SegmentPrepareError::before_manifest)?;
+            if let Err(error) = self.io.allocate(file.id, size) {
+                drop(file);
+                self.io.remove(&path)?;
+                return Err(SegmentPrepareError::before_manifest(error));
+            }
+            self.io.sync_data(file.id).map_err(|e| Error::SyncFailed(e.to_string()))?;
         }
-        self.io.sync_data(file.id).map_err(|e| Error::SyncFailed(e.to_string()))?;
         self.io.sync_dir(&self.path).map_err(|e| Error::SyncFailed(e.to_string()))?;
         let mut segments = self.segments.clone();
         segments.push(id);

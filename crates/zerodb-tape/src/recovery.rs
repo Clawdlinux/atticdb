@@ -1,6 +1,6 @@
 //! Footer-atomic replay and durable-boundary validation.
 
-use crate::dir::{corruption, read_exact, DataDir, Handle};
+use crate::dir::{corruption, read_exact, zero_tail, DataDir, Handle};
 use crate::frame::{self, Footer, Frame, Kind};
 use crate::lsn_index::LsnIndex;
 use crate::{Error, Result};
@@ -229,18 +229,6 @@ fn reported_bad_lsn(state: &Recovered, pending: &[(Frame, u64)], tail: &[u8]) ->
     next
 }
 
-fn zero_tail(dir: &DataDir, file: &Handle, from: u64, size: u64) -> Result<()> {
-    dir.io.set_len(file.id, size)?;
-    let zeros = [0; 64 * 1024];
-    let mut offset = from;
-    while offset < size {
-        let count = (size - offset).min(zeros.len() as u64) as usize;
-        dir.io.write_at(file.id, offset, &zeros[..count])?;
-        offset += count as u64;
-    }
-    Ok(())
-}
-
 fn last_decodable_lsn(bytes: &[u8], segment: u64, base: u64) -> u64 {
     let mut last = 0;
     let mut offset = 0;
@@ -392,7 +380,7 @@ fn finish_cut(dir: &mut DataDir, size: u64, values: &[u64]) -> Result<RecoveryRe
             Err(error) => return Err(error),
         };
         let from = if position < prefix.retained.len() { prefix.offset } else { 0 };
-        zero_tail(dir, &file, from, size)?;
+        zero_tail(dir.io.as_ref(), file.id, from, size)?;
         dir.io.sync_data(file.id)?;
     }
     // Persist the zeroed data first. Then lower the superblock, never raise it. The durable intent bridges a crash.
@@ -656,7 +644,7 @@ pub(crate) fn recover_with_budget(
                     pending.first().map_or(next, |(record, _)| record.header.lsn.max(next));
                 last_lost =
                     last_decodable_lsn(&bytes[start as usize..], segment, start).max(first_lost);
-                zero_tail(dir, &file, start, size)?;
+                zero_tail(dir.io.as_ref(), file.id, start, size)?;
                 touched = true;
                 cleared += size - start;
                 state.offset = start;

@@ -251,6 +251,10 @@ struct ReadState {
     groups: AtomicU64,
     grouped_requests: AtomicU64,
     superblock_installs: AtomicU64,
+    /// Held while checking and claiming disk space.
+    space: Mutex<()>,
+    /// The resolved free-space floor, or `u64::MAX` while unknown.
+    floor: AtomicU64,
 }
 
 impl ReadState {
@@ -405,6 +409,8 @@ impl<S: StateMachine> WriterCore<S> {
             groups: AtomicU64::new(0),
             grouped_requests: AtomicU64::new(0),
             superblock_installs: AtomicU64::new(0),
+            space: Mutex::new(()),
+            floor: AtomicU64::new(free_space_floor.unwrap_or(u64::MAX)),
         });
         if let Some(from) = opts.replay_from_lsn.checked_add(1) {
             for record in reads.scan(from) {
@@ -615,12 +621,22 @@ impl<S: StateMachine> WriterCore<S> {
                 }
             });
             if !self.queue.is_empty() {
+                let reads = self.reads.clone();
+                // The spare fill checks and claims space under the same lock.
+                let _space = match lock(&reads.space) {
+                    Ok(guard) => guard,
+                    Err(error) => {
+                        self.reject_storage_group(error);
+                        return;
+                    }
+                };
                 let floor = match self.free_space_floor {
                     Some(floor) => floor,
                     None => match self.reads.io.total_bytes(&self.reads.path) {
                         Ok(capacity) => {
                             let floor = (capacity / 20).min(1 << 30);
                             self.free_space_floor = Some(floor);
+                            self.reads.floor.store(floor, Ordering::Release);
                             floor
                         }
                         Err(error) => {
@@ -793,6 +809,26 @@ impl<S: StateMachine> WriterCore<S> {
         }
         self.checkpoint()
     }
+    /// Runs the maintenance worker's steps inline. Spare failures retry at the next call.
+    #[cfg(any(test, feature = "sim"))]
+    pub fn maintain(&mut self) -> Result<()> {
+        self.update_superblock()?;
+        if !self.is_poisoned() {
+            let _ = self.make_spare();
+        }
+        Ok(())
+    }
+    fn make_spare(&self) -> Result<()> {
+        let reads = &self.reads;
+        let floor = reads.floor.load(Ordering::Acquire);
+        crate::dir::make_spare(
+            reads.io.clone(),
+            &reads.path,
+            self.segments.capacity(),
+            floor,
+            &reads.space,
+        )
+    }
     fn superblock_due(&self) -> bool {
         !self.is_poisoned()
             && !self.read_only()
@@ -885,30 +921,42 @@ impl Coalescer {
     }
 }
 
-struct SuperblockWorker {
+/// Installs due superblocks, then keeps one spare segment ready.
+struct MaintenanceWorker {
     sender: Option<mpsc::SyncSender<()>>,
     thread: Option<JoinHandle<()>>,
 }
-impl SuperblockWorker {
+impl MaintenanceWorker {
     fn start<S: StateMachine>(core: &WriterCore<S>) -> Result<Self> {
         let reads = core.reads.clone();
         let io = reads.io.clone();
         let path = reads.path.clone();
+        let size = core.segments.capacity();
         let mut installed = core.segments.dir.superblock();
         let (sender, receiver) = mpsc::sync_channel(1);
         let thread =
-            std::thread::Builder::new().name("zerodb-superblock".into()).spawn(move || {
+            std::thread::Builder::new().name("zerodb-maintenance".into()).spawn(move || {
                 while receiver.recv().is_ok() {
-                    let boundary = reads.durable_lsn.load(Ordering::Acquire);
-                    if reads.poisoned.load(Ordering::Acquire) || boundary <= installed {
+                    if reads.poisoned.load(Ordering::Acquire) {
                         continue;
                     }
-                    if let Err(error) = crate::dir::write_superblock(io.clone(), &path, boundary) {
-                        reads.poisoned.store(true, Ordering::Release);
-                        eprintln!("zerodb: superblock maintenance failed: {error}");
-                    } else {
+                    let boundary = reads.durable_lsn.load(Ordering::Acquire);
+                    if boundary > installed {
+                        if let Err(error) =
+                            crate::dir::write_superblock(io.clone(), &path, boundary)
+                        {
+                            reads.poisoned.store(true, Ordering::Release);
+                            eprintln!("zerodb: superblock maintenance failed: {error}");
+                            continue;
+                        }
                         installed = boundary;
                         reads.superblock_installs.fetch_add(1, Ordering::Relaxed);
+                    }
+                    let floor = reads.floor.load(Ordering::Acquire);
+                    let spare =
+                        crate::dir::make_spare(io.clone(), &path, size, floor, &reads.space);
+                    if let Err(error) = spare {
+                        eprintln!("zerodb: spare segment fill failed: {error}");
                     }
                 }
             })?;
@@ -920,7 +968,7 @@ impl SuperblockWorker {
         }
     }
 }
-impl Drop for SuperblockWorker {
+impl Drop for MaintenanceWorker {
     fn drop(&mut self) {
         self.sender.take();
         if let Some(thread) = self.thread.take() {
@@ -994,6 +1042,10 @@ impl<S: StateMachine> Tape<S> {
         let mut coalescer = Coalescer::new(opts.coalescing_window);
         let (mut core, report) = WriterCore::open_with(state_machine, io, clock, path, opts)?;
         let reads = core.reads.clone();
+        // Fill the first spare before any write, so no open-time fill races the writer.
+        if let Err(error) = core.make_spare() {
+            eprintln!("zerodb: spare segment fill failed: {error}");
+        }
         #[cfg(feature = "sim")]
         if inline {
             return Ok((
@@ -1008,13 +1060,14 @@ impl<S: StateMachine> Tape<S> {
             ));
         }
         let (sender, receiver) = mpsc::channel();
-        let maintenance = SuperblockWorker::start(&core)?;
+        let maintenance = MaintenanceWorker::start(&core)?;
         let thread = std::thread::Builder::new().name("zerodb-writer".into()).spawn(move || {
             while let Ok(request) = receiver.recv() {
                 for request in coalescer.collect(&receiver, request) {
                     core.enqueue(request);
                 }
                 core.step();
+                // A roll moves the synced segment, so it is always due and wakes the spare fill.
                 if core.superblock_due() {
                     core.note_superblock_request();
                     maintenance.wake();
@@ -1063,7 +1116,7 @@ impl<S: StateMachine> Tape<S> {
             let (request, receiver) = WriteRequest::new(batch);
             core.enqueue(request);
             core.step();
-            let _ = core.update_superblock();
+            let _ = core.maintain();
             return receiver
                 .recv()
                 .map_err(|_| WriteError { kind: Error::Poisoned, outcome: Outcome::Unknown })?;
@@ -1111,7 +1164,7 @@ impl<S: StateMachine> Tape<S> {
             .ok_or_else(|| Error::Configuration("inline simulation required".into()))?;
         let mut core = lock(core)?;
         core.step();
-        let _ = core.update_superblock();
+        let _ = core.maintain();
         Ok(())
     }
 

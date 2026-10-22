@@ -182,7 +182,7 @@ fn directory_exists_and_list_match_across_backends() {
 mod directory {
     use std::path::Path;
     use std::sync::Arc;
-    use zerodb_tape::sim::{atomic_install, DataDir};
+    use zerodb_tape::sim::{atomic_install, make_spare, DataDir};
     use zerodb_tape::Error;
     use zerodb_tape::{Io, SimDisk, StdIo};
 
@@ -265,22 +265,36 @@ mod directory {
 
     #[test]
     fn retry_persists_orphan_removal_after_directory_sync_failure() {
-        for seed in 0..32 {
-            let io = Arc::new(SimDisk::new(seed));
-            let mut dir = DataDir::open(io.clone(), "db", None, 1024).unwrap();
-            dir.prepare_next_segment(1024).unwrap();
-            let id = dir.prepare_next_segment(1024).unwrap();
-            let orphan = dir.segment_path(id);
-            dir.install_manifest(&[1]).unwrap();
-            drop(dir);
-            io.fail_next_sync().unwrap();
-            assert!(matches!(
-                DataDir::open(io.clone(), "db", None, 1024),
-                Err(Error::SyncFailed(_))
-            ));
-            assert!(!io.exists(&orphan).unwrap());
-            let _retry = DataDir::open(io.clone(), "db", None, 1024).unwrap();
-            assert!(!io.crash().unwrap().exists(&orphan).unwrap(), "seed={seed}");
+        let db = Path::new("db");
+        for (case, renamed_spare) in [("allocated orphan", false), ("renamed spare orphan", true)] {
+            for seed in 0..32 {
+                let io = Arc::new(SimDisk::new(seed));
+                let mut dir = DataDir::open(io.clone(), db, None, 1024).unwrap();
+                dir.prepare_next_segment(1024).unwrap();
+                if renamed_spare {
+                    make_spare(io.clone(), db, 1024, 0, &Default::default()).unwrap();
+                }
+                let id = dir.prepare_next_segment(1024).unwrap();
+                assert!(!io.exists(&db.join("spare.zdb")).unwrap(), "{case}: roll took the spare");
+                dir.install_manifest(&[1]).unwrap();
+                // A crash can also leave a ready spare and a partial fill.
+                make_spare(io.clone(), db, 1024, 0, &Default::default()).unwrap();
+                io.close(io.create(&db.join("spare.tmp")).unwrap()).unwrap();
+                let leftovers = [dir.segment_path(id), db.join("spare.zdb"), db.join("spare.tmp")];
+                drop(dir);
+                io.fail_next_sync().unwrap();
+                assert!(
+                    matches!(DataDir::open(io.clone(), db, None, 1024), Err(Error::SyncFailed(_))),
+                    "{case}"
+                );
+                assert!(leftovers.iter().all(|path| !io.exists(path).unwrap()), "{case}");
+                let _retry = DataDir::open(io.clone(), db, None, 1024).unwrap();
+                let crash = io.crash().unwrap();
+                assert!(
+                    leftovers.iter().all(|path| !crash.exists(path).unwrap()),
+                    "{case} seed={seed}"
+                );
+            }
         }
     }
 }

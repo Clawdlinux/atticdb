@@ -4,8 +4,8 @@ use crate::support::{manifest, primed_writer, record, submit, Machine, ObservedI
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use zerodb_tape::sim::DataDir;
 use zerodb_tape::sim::{frame::HEADER_LEN, SimClock, WriterCore};
+use zerodb_tape::sim::{make_spare, DataDir};
 use zerodb_tape::{Committed, Durability, Kind, Outcome, TapeOptions};
 use zerodb_tape::{Error, Io, SimDisk};
 
@@ -24,6 +24,8 @@ enum Fault {
     Sync,
     DirSync,
     Manifest,
+    Spare,
+    SpareRename,
 }
 
 #[test]
@@ -41,6 +43,8 @@ fn space_faults_set_group_outcome() {
         ("segment sync error", Sync, false, true),
         ("directory sync error", DirSync, false, true),
         ("manifest write full", Manifest, false, true),
+        ("spare is one prepared roll", Spare, true, false),
+        ("spare rename full", SpareRename, true, false),
     ] {
         space_fault(case, fault, expect_read_only, expect_poisoned);
     }
@@ -80,6 +84,16 @@ fn space_fault(case: &str, fault: Fault, expect_read_only: bool, expect_poisoned
         })
     };
     let (io, mut core, prepares) = primed_writer(floor, capacity, boundary, segment);
+    if matches!(fault, Spare) {
+        // A failed rename frees the filled space at once.
+        io.fail_next_rename.store(true, Ordering::SeqCst);
+        assert!(make_spare(io.clone(), Path::new("db"), segment, 0, &Default::default()).is_err());
+        assert!(!io.disk.exists(Path::new("db/spare.tmp")).unwrap(), "{case}: spare.tmp removed");
+        make_spare(io.clone(), Path::new("db"), segment, 0, &Default::default()).unwrap();
+    }
+    if matches!(fault, SpareRename) {
+        make_spare(io.clone(), Path::new("db"), segment, 0, &Default::default()).unwrap();
+    }
     let before_prepares = prepares.load(Ordering::SeqCst);
     let before_manifest = manifest(&io.disk);
     let before_files = io.disk.list(Path::new("db")).unwrap();
@@ -99,10 +113,12 @@ fn space_fault(case: &str, fault: Fault, expect_read_only: bool, expect_poisoned
     let before_bytes = io.segment_bytes.load(Ordering::SeqCst);
     let used = capacity - io.disk.available_bytes(Path::new("db")).unwrap();
     let chunk = 1 << 20;
-    let reserve = 240 + segment + if indexed { 2 * chunk } else { 0 };
+    // A ready spare already holds the roll's blocks.
+    let roll = if matches!(fault, Spare) { 0 } else { segment };
+    let reserve = 240 + roll + if indexed { 2 * chunk } else { 0 };
     let floor_bytes = floor.unwrap_or((capacity / 20).min(1 << 30));
     match fault {
-        Floor | IndexFloor | DefaultFloor(_) => {
+        Floor | IndexFloor | DefaultFloor(_) | Spare => {
             io.disk.set_capacity(used + floor_bytes + reserve - 1).unwrap()
         }
         Create => io.full_next_create.store(true, Ordering::SeqCst),
@@ -121,6 +137,7 @@ fn space_fault(case: &str, fault: Fault, expect_read_only: bool, expect_poisoned
         Sync => io.fail_at.store(io.syncs.load(Ordering::SeqCst) + 1, Ordering::SeqCst),
         DirSync => io.fail_directory_sync.store(true, Ordering::SeqCst),
         Manifest => io.full_manifest_write.store(true, Ordering::SeqCst),
+        SpareRename => io.fail_next_rename.store(true, Ordering::SeqCst),
     }
     let size = if matches!(fault, LaterAllocate) { 3800 } else { 8 };
     let replies = [
@@ -165,15 +182,23 @@ fn space_fault(case: &str, fault: Fault, expect_read_only: bool, expect_poisoned
     if !matches!(fault, LaterAllocate | Sync | DirSync | Manifest) {
         assert_eq!(io.disk.list(Path::new("db")).unwrap(), before_files, "{case}");
     }
-    if matches!(fault, Floor | IndexFloor | DefaultFloor(_) | Stat | IndexStat) {
+    if matches!(fault, Floor | IndexFloor | DefaultFloor(_) | Stat | IndexStat | Spare) {
         assert_eq!(*io.events.lock().unwrap(), before_events, "{case}");
     }
-    let retry_size = if matches!(fault, DefaultFloor(_)) {
-        io.disk.set_capacity(used + floor_bytes + 120).unwrap();
-        8
-    } else {
-        io.disk.set_capacity(1 << 42).unwrap();
-        3800
+    let retry_size = match fault {
+        DefaultFloor(_) => {
+            io.disk.set_capacity(used + floor_bytes + 120).unwrap();
+            8
+        }
+        // The roll fits only by taking the spare. Then a refill would cross the floor by 1 byte.
+        Spare => {
+            io.disk.set_capacity(used + floor_bytes + segment - 1).unwrap();
+            3800
+        }
+        _ => {
+            io.disk.set_capacity(1 << 42).unwrap();
+            3800
+        }
     };
     if expect_poisoned {
         let retry = submit(&mut core, vec![record(Kind::Turn, 1, [7; 8])], Durability::Durable);
@@ -206,6 +231,18 @@ fn space_fault(case: &str, fault: Fault, expect_read_only: bool, expect_poisoned
     }
     assert!(!core.read_only() && !core.is_poisoned(), "{case}");
     assert_eq!(prepares.load(Ordering::SeqCst), before_prepares + 1, "{case}");
+    if matches!(fault, Spare) {
+        core.maintain().unwrap();
+        assert!(!io.disk.exists(Path::new("db/spare.zdb")).unwrap(), "{case}: refill skipped");
+        // A refill would push the tail write below the floor. The next roll hits it.
+        for floor_hit in [false, true] {
+            let reply = submit(&mut core, vec![record(Kind::Turn, 1, [7; 8])], Durability::Durable);
+            core.step();
+            let full = reply.recv().unwrap().map_err(|e| matches!(e.kind, Error::DiskFull));
+            assert_eq!(full.err(), floor_hit.then_some(true), "{case}");
+        }
+    }
+    let durable = core.durable_lsn();
     drop(core);
     let image = Arc::new(io.disk.crash().unwrap());
     image.set_capacity(1 << 42).unwrap();
@@ -214,10 +251,10 @@ fn space_fault(case: &str, fault: Fault, expect_read_only: bool, expect_poisoned
     let (core, report) =
         WriterCore::open_with(Machine::default(), image, Arc::new(SimClock::default()), "db", opts)
             .unwrap();
-    assert_eq!(report.durable_lsn, boundary + 1, "{case}");
+    assert_eq!(report.durable_lsn, durable, "{case}");
     // One read per 4096-byte routes page keeps the 131072-LSN rows fast in debug builds.
     let stride = if indexed { 256 } else { 1 };
-    for lsn in (1..=boundary + 1).step_by(stride).chain([boundary + 1]) {
+    for lsn in (1..=durable).step_by(stride).chain([durable]) {
         assert!(core.read(lsn).unwrap().is_some(), "{case}, lsn={lsn}");
     }
 }
@@ -641,32 +678,59 @@ fn failed_allocation_does_not_change_manifest() {
 mod segments {
     use std::path::Path;
     use std::sync::Arc;
-    use zerodb_tape::sim::{DataDir, SegmentWriter};
+    use zerodb_tape::sim::{make_spare, DataDir, SegmentWriter};
     use zerodb_tape::Error;
     use zerodb_tape::{Io, SimDisk};
 
     #[test]
     fn roll_prepares_names_and_syncs_every_dirty_file() {
-        for seed in 0..100 {
-            let io = Arc::new(SimDisk::new(seed));
-            let dir = DataDir::open(io.clone(), "db", None, 512).unwrap();
-            let mut writer = SegmentWriter::new(dir, 512, 0).unwrap();
-            assert_eq!(writer.write_batch(&[7; 300]).unwrap(), (1, 0));
-            assert_eq!(writer.write_batch(&[8; 300]).unwrap(), (2, 0));
-            writer.sync().unwrap();
-            drop(writer);
-            let crash = io.crash().unwrap();
-            let dir = DataDir::open(Arc::new(crash.clone()), "db", None, 512).unwrap();
-            assert_eq!(dir.segments(), &[1, 2]);
-            for (id, byte) in [(1, 7), (2, 8)] {
-                eprintln!("case: id={id:?}, byte={byte:?}");
-                let file = crash.open(&dir.segment_path(id)).unwrap();
-                assert_eq!(crash.len(file).unwrap(), 512);
-                let mut bytes = [0; 512];
-                crash.read_at(file, 0, &mut bytes).unwrap();
-                crash.close(file).unwrap();
-                assert_eq!(&bytes[..300], &[byte; 300]);
-                assert_eq!(&bytes[300..], &[0; 212]);
+        for (case, spare) in [("preallocated roll", false), ("spare roll", true)] {
+            for seed in 0..100 {
+                let io = Arc::new(SimDisk::new(seed));
+                let dir = DataDir::open(io.clone(), "db", None, 512).unwrap();
+                let mut writer = SegmentWriter::new(dir, 512, 0).unwrap();
+                if spare && seed == 0 {
+                    // A sparse fallback reserves nothing, so no spare is made.
+                    let sparse = Arc::new(crate::support::ObservedIo {
+                        sparse_allocation: true,
+                        ..crate::support::ObservedIo::new(0)
+                    });
+                    DataDir::open(sparse.clone(), "db", None, 512).unwrap();
+                    make_spare(sparse.clone(), Path::new("db"), 512, 0, &Default::default())
+                        .unwrap();
+                    for name in ["db/spare.zdb", "db/spare.tmp"] {
+                        assert!(!sparse.disk.exists(Path::new(name)).unwrap(), "{case}: {name}");
+                    }
+                }
+                if spare {
+                    let used =
+                        SimDisk::DEFAULT_CAPACITY - io.available_bytes("db".as_ref()).unwrap();
+                    for (room, made) in [(2 * 512 - 1, false), (2 * 512, true)] {
+                        io.set_capacity(used + 100 + room).unwrap();
+                        make_spare(io.clone(), Path::new("db"), 512, 100, &Default::default())
+                            .unwrap();
+                        assert_eq!(io.exists("db/spare.zdb".as_ref()).unwrap(), made, "{case}");
+                    }
+                    io.set_capacity(SimDisk::DEFAULT_CAPACITY).unwrap();
+                }
+                assert_eq!(writer.write_batch(&[7; 300]).unwrap(), (1, 0));
+                assert_eq!(writer.write_batch(&[8; 300]).unwrap(), (2, 0));
+                assert!(!io.exists(Path::new("db/spare.zdb")).unwrap(), "{case}: spare taken");
+                writer.sync().unwrap();
+                drop(writer);
+                let crash = io.crash().unwrap();
+                let dir = DataDir::open(Arc::new(crash.clone()), "db", None, 512).unwrap();
+                assert_eq!(dir.segments(), &[1, 2], "{case}");
+                for (id, byte) in [(1, 7), (2, 8)] {
+                    eprintln!("case: {case}, id={id:?}, byte={byte:?}");
+                    let file = crash.open(&dir.segment_path(id)).unwrap();
+                    assert_eq!(crash.len(file).unwrap(), 512);
+                    let mut bytes = [0; 512];
+                    crash.read_at(file, 0, &mut bytes).unwrap();
+                    crash.close(file).unwrap();
+                    assert_eq!(&bytes[..300], &[byte; 300]);
+                    assert_eq!(&bytes[300..], &[0; 212]);
+                }
             }
         }
     }

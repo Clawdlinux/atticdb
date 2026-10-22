@@ -155,6 +155,8 @@ fn open_and_shutdown_install_superblocks_with_bounded_rewrites() {
                     .any(|e| e == "rename db/SUPERBLOCK.tmp db/SUPERBLOCK"),
                 "{label}"
             );
+            // Open fills a spare. Shutdown joins the worker, which refills after each roll.
+            assert!(io.disk.exists(std::path::Path::new("db/spare.zdb")).unwrap(), "{label}");
             assert_eq!(superblock(&io, 1024), session + 1, "{label}");
             let image = Arc::new(io.disk.crash().unwrap());
             let (tape, report) =

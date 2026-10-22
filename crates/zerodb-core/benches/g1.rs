@@ -210,10 +210,10 @@ fn window_report(label: &str, queries: Queries, mut reads: Vec<Duration>) {
 
 fn bare(iterations: usize, batch: usize, n: usize, symmetric: bool) -> Stats {
     let dir = BenchDir::new();
-    let mut bare = Bare::new(&dir.0);
     let templates = (0..SIZES.len())
         .map(|i| Arc::new(encoded_batch(&records(&scope(0, 0), i, batch))))
         .collect::<Vec<_>>();
+    let mut bare = Bare::new(&dir.0);
     println!(
         "matched encoded batch bytes: {:?}",
         templates.iter().map(|b| b.len()).collect::<Vec<_>>()

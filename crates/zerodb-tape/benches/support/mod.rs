@@ -1,8 +1,9 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use zerodb_tape::sim::frame::{self, Footer, Frame, Header, Kind, VERSION};
-use zerodb_tape::sim::DEFAULT_SEGMENT_SIZE;
+use zerodb_tape::sim::{make_spare, DEFAULT_SEGMENT_SIZE};
 use zerodb_tape::{Io, RecordInput, StdIo};
 
 mod fs {
@@ -60,6 +61,7 @@ pub fn encoded_batch(inputs: &[RecordInput]) -> Vec<u8> {
     bytes
 }
 
+/// Keeps one zero-filled spare like the tape: filled at open, refilled in the background.
 #[derive(Debug)]
 pub struct Bare {
     file: File,
@@ -67,17 +69,36 @@ pub struct Bare {
     segment: u64,
     offset: u64,
     dirty: bool,
+    wake: Option<std::sync::mpsc::SyncSender<()>>,
+    refill: Option<std::thread::JoinHandle<()>>,
 }
 impl Bare {
     #[track_caller]
     pub fn new(dir: &Path) -> Self {
+        let file = Self::segment(dir, 0);
+        Self::fill(dir);
+        // One pending wake, like the tape's maintenance worker, so no refill request is lost.
+        let (wake, woken) = std::sync::mpsc::sync_channel(1);
+        let owned = dir.to_owned();
+        let refill = std::thread::spawn(move || {
+            while woken.recv().is_ok() {
+                Self::fill(&owned);
+            }
+        });
         Self {
-            file: Self::segment(dir, 0),
+            file,
             dir: dir.to_owned(),
             segment: 0,
             offset: 0,
             dirty: false,
+            wake: Some(wake),
+            refill: Some(refill),
         }
+    }
+    #[track_caller]
+    fn fill(dir: &Path) {
+        let io: Arc<dyn Io> = Arc::new(StdIo::new());
+        make_spare(io, dir, DEFAULT_SEGMENT_SIZE, 0, &Default::default()).unwrap();
     }
     pub fn path(dir: &Path, id: u64) -> PathBuf {
         dir.join(format!("bare-{id}"))
@@ -89,13 +110,19 @@ impl Bare {
     }
     #[track_caller]
     fn segment(dir: &Path, id: u64) -> File {
-        let path = Self::path(dir, id);
-        let io = StdIo::new();
-        let file = io.create(&path).unwrap();
-        io.allocate(file, DEFAULT_SEGMENT_SIZE).unwrap();
-        io.sync_data(file).unwrap();
-        io.close(file).unwrap();
-        io.sync_dir(dir).unwrap();
+        let (path, spare) = (Self::path(dir, id), dir.join("spare.zdb"));
+        if spare.exists() {
+            std::fs::rename(spare, &path).unwrap();
+            StdIo::new().sync_dir(dir).unwrap();
+        } else {
+            // Like the tape's first segment, and a roll with no spare ready.
+            let io = StdIo::new();
+            let file = io.create(&path).unwrap();
+            io.allocate(file, DEFAULT_SEGMENT_SIZE).unwrap();
+            io.sync_data(file).unwrap();
+            io.close(file).unwrap();
+            io.sync_dir(dir).unwrap();
+        }
         OpenOptions::new().write(true).open(path).unwrap()
     }
     #[track_caller]
@@ -107,6 +134,9 @@ impl Bare {
             self.segment += 1;
             self.file = Self::segment(&self.dir, self.segment);
             self.offset = 0;
+            if let Some(wake) = &self.wake {
+                let _ = wake.try_send(());
+            }
         }
         self.file.write_all(bytes).unwrap();
         self.offset += bytes.len() as u64;
@@ -117,6 +147,14 @@ impl Bare {
         if self.dirty {
             self.file.sync_data().unwrap();
             self.dirty = false;
+        }
+    }
+}
+impl Drop for Bare {
+    fn drop(&mut self) {
+        self.wake.take();
+        if let Some(refill) = self.refill.take() {
+            let _ = refill.join();
         }
     }
 }

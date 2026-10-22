@@ -51,8 +51,12 @@ impl SegmentWriter {
             }
             remaining -= size;
         }
-        bytes
-            .saturating_add(rolls.saturating_sub(self.ready.len() as u64).saturating_mul(self.size))
+        let mut ready = self.ready.len() as u64;
+        // A ready spare's blocks are already gone from `available`.
+        if rolls > ready && self.dir.io.exists(&self.dir.path.join("spare.zdb")).unwrap_or(false) {
+            ready += 1;
+        }
+        bytes.saturating_add(rolls.saturating_sub(ready).saturating_mul(self.size))
     }
 
     pub(crate) fn prepare_group(

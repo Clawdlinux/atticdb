@@ -21,6 +21,7 @@ pub struct ObservedIo {
     pub capacity_after_space_check: Mutex<Option<u64>>,
     pub full_next_create: AtomicBool,
     pub full_manifest_write: AtomicBool,
+    pub fail_next_rename: AtomicBool,
     pub fail_directory_sync: AtomicBool,
     pub fail_extension: AtomicBool,
     pub sparse_allocation: bool,
@@ -44,6 +45,7 @@ impl ObservedIo {
             capacity_after_space_check: Mutex::new(None),
             full_next_create: AtomicBool::new(false),
             full_manifest_write: AtomicBool::new(false),
+            fail_next_rename: AtomicBool::new(false),
             fail_directory_sync: AtomicBool::new(false),
             fail_extension: AtomicBool::new(false),
             sparse_allocation: false,
@@ -161,6 +163,12 @@ impl Io for ObservedIo {
         result
     }
     fn rename(&self, from: &Path, to: &Path) -> Result<()> {
+        if self.fail_next_rename.swap(false, Ordering::SeqCst) {
+            return Err(Error::Io(
+                std::io::ErrorKind::StorageFull,
+                "injected rename failure".into(),
+            ));
+        }
         let result = self.disk.rename(from, to);
         self.event(format!("rename {} {}", from.display(), to.display()));
         result
