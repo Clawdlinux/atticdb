@@ -450,7 +450,8 @@ fn startup_checks() {
                 }
                 let (status, stats) = ctx.run(&["stats", "--data-dir", data]).wait();
                 assert!(status.success(), "{case}: {stats}");
-                let durable = format!("durable_lsn={}", second["last_lsn"].as_u64().unwrap() + 4);
+                let last = second["last_lsn"].as_u64().unwrap() + 4;
+                let durable = format!("durable_lsn={last}");
                 for line in ["health=ok", &durable] {
                     assert!(stats.lines().any(|got| got == line), "{case}: {line} in {stats}");
                 }
@@ -472,6 +473,15 @@ fn startup_checks() {
                 let left =
                     support::files(&ctx.dir.0).into_keys().filter(|n| n.contains(".verify-"));
                 assert_eq!(left.count(), 0, "{case}: verify left its copy");
+                let from = first["first_lsn"].as_u64().unwrap();
+                let dump = ["dump", "--data-dir", data, "--from", &from.to_string()];
+                let (status, out) = ctx.run(&dump).wait();
+                assert!(status.success() && !out.contains("two"), "{case}: no content: {out}");
+                let lsns: Vec<&str> = out.lines().map(|l| l.split(' ').next().unwrap()).collect();
+                let acked: Vec<String> = (from..=last).map(|l| format!("lsn={l}")).collect();
+                assert_eq!(lsns, acked, "{case}: acked records in LSN order: {out}");
+                let (status, out) = ctx.run(&[&dump[..], &["--limit", "1"]].concat()).wait();
+                assert!(status.success() && out.lines().count() == 1, "{case}: limit 1: {out}");
                 let (status, stats) = ctx.run(&["stats", "--data-dir", data]).wait();
                 assert_eq!(status.code(), Some(1), "{case}: no server: {stats}");
                 for url in ["http://127.0.0.1:7425", "not-a-url"] {

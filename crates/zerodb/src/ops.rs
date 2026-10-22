@@ -5,11 +5,13 @@ use crate::launch::{self, Launch, Url};
 use crate::serve::EXIT_LOCKED;
 use serde_json::{json, Value};
 use std::fs::{DirBuilder, OpenOptions, TryLockError};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use zerodb_core::{Engine, EngineOptions, ErrorKind};
+use zerodb_tape::{StdIo, SystemClock, Tape, TapeOptions};
 
 /// Prints `GET /v1/stats` as `key=value` lines. Never starts a server: that would hide an outage.
 pub fn stats(socket: Option<&Path>, data_dir: Option<&Path>) -> u8 {
@@ -153,6 +155,32 @@ pub fn verify(dir: &Path, scratch: Option<&Path>) -> u8 {
                 _ => error.to_string(),
             })?;
         print_fields(&crate::api::stats_fields(&engine).ok_or("engine poisoned")?);
+        Ok(())
+    })
+}
+
+/// `zerodb dump`: one line per durable record from `from` on, at most `limit`. Never content.
+pub fn dump(dir: &Path, scratch: Option<&Path>, from: u64, limit: usize) -> u8 {
+    on_copy(dir, scratch, |copy| {
+        let (io, clock) = (Arc::new(StdIo::new()), Arc::new(SystemClock));
+        let (tape, _) = Tape::open(io, clock, copy, TapeOptions::default())
+            .map_err(|error| error.to_string())?;
+        let mut out = std::io::stdout().lock();
+        for record in tape.scan(from).take(limit) {
+            let r = record.map_err(|error| error.to_string())?;
+            // Not `println!`: it panics when the reader, such as `head`, exits first.
+            writeln!(
+                out,
+                "lsn={} txn={} kind={:?} tenant={} bytes={} commit_time_ns={}",
+                r.lsn,
+                r.txn,
+                r.kind,
+                r.tenant_id,
+                r.payload.len(),
+                r.commit_time_ns
+            )
+            .map_err(|error| error.to_string())?;
+        }
         Ok(())
     })
 }
