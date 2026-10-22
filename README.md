@@ -72,6 +72,7 @@ The [decision log](docs/design/0002-decision-log.md) explains the choices.
 - `zerodb-core`: `append`, `window`, facts with conditional writes, tenant isolation, idempotent retries and incremental checkpoints.
 - `SimDisk`: seeded crashes, reordered writes, torn sectors, failed syncs, bit flips and full-disk faults.
 - `zerodb serve`: one server per data directory. HTTP/JSON on loopback TCP and a Unix socket, per-tenant tokens. See [crates/zerodb](crates/zerodb/README.md).
+- `zerodb stats`: live engine metrics from the Unix socket as `key=value` lines.
 - `zerodb mcp`: a stdio MCP adapter with 5 tools. It finds the running server or starts one, and retries with one key per call.
 - A Python client in [clients/python](clients/python/README.md), standard library only.
 - Agents in sandboxes and microVMs reach the server through its Unix socket. See [sandboxes.md](docs/deploy/sandboxes.md).

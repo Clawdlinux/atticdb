@@ -138,6 +138,7 @@ impl Shared {
             let tenant = tenant.unwrap_or_default();
             let response = match route {
                 Route::Health => api::health(&self.engine, &self.config.instance),
+                Route::Stats => api::stats(&self.engine, &self.config.instance),
                 Route::Append => api::append(&self.engine, &tenant, request.body),
                 Route::Window => api::window(&self.engine, &tenant, &request.head.target),
                 Route::FactPut | Route::FactDelete => {

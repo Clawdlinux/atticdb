@@ -201,7 +201,7 @@ pub(crate) fn connect_unix(path: &Path, deadline: Instant) -> io::Result<UnixStr
 /// A connection to the socket named in `LOCK`, if it is ours, under an owner-only parent,
 /// and answered `/healthz` on this connection with the instance id in `LOCK`. The token
 /// then goes over the same connection. Otherwise the reason, and no token was sent.
-fn discover(dir: &Path, deadline: Instant) -> Result<UnixStream, String> {
+pub(crate) fn discover(dir: &Path, deadline: Instant) -> Result<UnixStream, String> {
     let mut lock = String::new();
     crate::config::open_regular(OpenOptions::new().read(true), &dir.join("LOCK"))
         .and_then(|mut file| file.read_to_string(&mut lock))

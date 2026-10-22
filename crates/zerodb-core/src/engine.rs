@@ -953,7 +953,7 @@ impl Engine {
             tenants: state.tenants.entries.len(),
             fact_reads: self.fact_reads.load(Ordering::Relaxed),
             facts: state.facts.map.len(),
-            fact_revisions: state.facts.map.values().map(|revs| revs.list.len()).sum(),
+            fact_revisions: state.facts.revisions,
         })
     }
 }

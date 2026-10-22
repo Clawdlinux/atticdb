@@ -286,6 +286,7 @@ fn auth_and_host_rules() {
     let window = "/v1/window?agent=a&session=secret&last=10";
     let unauthorized = json!({"outcome": "not_committed", "error": "unauthorized"});
     let forbidden = json!({"outcome": "not_committed", "error": "forbidden_host"});
+    let not_found = json!({"outcome": "not_committed", "error": "not_found"});
     let bad = "token-x-0123456789abcdefghijklmnopqrstuv";
     // (case, via, Host, token, target, status, body or turn count)
     let rows = [
@@ -318,6 +319,17 @@ fn auth_and_host_rules() {
         ("foreign host on unix", unix, Some("evil.example"), Some(TOKEN_A), window, 200, Ok(1)),
         ("missing host on unix", unix, None, Some(TOKEN_A), window, 200, Ok(1)),
         ("health without token", tcp, Some("127.0.0.1"), None, "/healthz", 200, Ok(0)),
+        ("stats on unix without token", unix, None, None, "/v1/stats", 200, Ok(0)),
+        ("stats on tcp", tcp, Some("127.0.0.1"), Some(TOKEN_A), "/v1/stats", 404, Err(&not_found)),
+        (
+            "stats on tcp without token",
+            tcp,
+            Some("127.0.0.1"),
+            None,
+            "/v1/stats",
+            401,
+            Err(&unauthorized),
+        ),
         (
             "health with foreign host",
             tcp,
@@ -404,6 +416,11 @@ fn health_tracks_engine_state() {
     let unix = &running.vias[1];
     let instance = running.instance.as_str();
     let health = || unix.call(None, None, "GET", "/healthz", None);
+    let stats = || {
+        let (status, stats) = unix.call(None, None, "GET", "/v1/stats", None);
+        assert_eq!(status, 200, "stats serve in every state: {stats}");
+        (stats["health"].clone(), stats["durable_lsn"].clone(), stats["facts"].clone())
+    };
     let append = |key: &str, content: &str| {
         unix.a("POST", "/v1/append", Some(&append_body("s", key, content)))
     };
@@ -454,6 +471,8 @@ fn health_tracks_engine_state() {
     let (status, rule) = unix.a("GET", "/v1/facts/get?key=rule", None);
     assert_eq!((status, &rule["fact"]["content"]), (200, &json!("kept")), "fact reads serve");
     assert_eq!(health(), (200, json!({"status": "read_only", "instance": instance})));
+    let (_, kept) = unix.a("GET", "/v1/facts/get?key=rule", None);
+    assert_eq!(stats(), (json!("read_only"), kept["fact"]["lsn"].clone(), json!(1)));
     assert_eq!(contents(), ["one"]);
     disk.set_capacity(capacity).unwrap();
     let (status, committed) = append("floor", "two");
@@ -467,6 +486,7 @@ fn health_tracks_engine_state() {
     let unknown = append("sync", "three");
     assert_eq!(unknown, (500, json!({"outcome": "unknown", "error": "storage"})));
     assert_eq!(health(), (503, json!({"status": "poisoned", "instance": instance})));
+    assert_eq!(stats().0, "poisoned");
     assert_eq!(contents(), ["one", "two"], "reads keep the published view");
     // A failed sync publishes no dedup entry, so the retry gets not_committed from the
     // poisoned writer. Only the outcome rule keeps the caller at unknown.

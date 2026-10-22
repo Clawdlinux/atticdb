@@ -35,12 +35,14 @@ pub(crate) fn current(newest: Option<&Rev>) -> u64 {
 pub(crate) struct Facts {
     pub(crate) map: BTreeMap<FactKey, Revs>,
     pub(crate) dirty: BTreeSet<FactKey>,
+    /// Total revisions, kept so metrics never walk the map under the lock.
+    pub(crate) revisions: usize,
     max_keys: usize,
     pub(crate) history: usize,
 }
 impl Facts {
     pub(crate) fn new(max_keys: usize, history: usize) -> Self {
-        Self { map: BTreeMap::new(), dirty: BTreeSet::new(), max_keys, history }
+        Self { map: BTreeMap::new(), dirty: BTreeSet::new(), revisions: 0, max_keys, history }
     }
     fn admit(&self, key: &FactKey) -> Result<()> {
         if !self.map.contains_key(key) && self.map.len() >= self.max_keys {
@@ -64,6 +66,7 @@ impl Facts {
                 self.map.entry(key.clone()).or_default()
             }
         };
+        let held = revs.list.len();
         revs.list.push(rev);
         let tail = revs.list.len().saturating_sub(self.history + 1);
         let below = revs.list.partition_point(|rev| rev.lsn < floor).saturating_sub(1);
@@ -74,6 +77,7 @@ impl Facts {
         // Only dropping the oldest retained revisions hides history from some reader.
         revs.dropped |= below.min(tail) > 0;
         revs.list.drain(..below.min(tail));
+        self.revisions = self.revisions - held + revs.list.len();
         if !self.dirty.contains(key) {
             self.dirty.insert(key.clone());
         }
@@ -89,7 +93,9 @@ impl Facts {
         self.admit(&key)?;
         let cut = list.len().saturating_sub(self.history + 1);
         list.drain(..cut);
-        self.map.insert(key, Revs { list, dropped: dropped || cut > 0 });
+        let len = list.len();
+        let held = self.map.insert(key, Revs { list, dropped: dropped || cut > 0 });
+        self.revisions = self.revisions - held.map_or(0, |revs| revs.list.len()) + len;
         Ok(())
     }
 }
