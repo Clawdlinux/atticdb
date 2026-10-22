@@ -104,6 +104,7 @@ They use the newest revision at or below that LSN, so a group that is not acknow
 `fact_list` walks keys under a byte prefix in key order. It visits at most 1,024 keys per call, tombstones included.
 `next` is the last key the walk finished with. A page can hold no facts and still have a `next`.
 A byte budget always returns the first fact or revision. Later ones stop before `max_bytes` is passed.
+The budget counts key, agent, content and meta bytes, so a JSON page stays under 6 times `max_bytes` plus fixed fields.
 `fact_reads` counts every tape read of a fact read, including the one a budget cut. `facts` counts keys.
 `fact_revisions` counts retained pointers.
 

@@ -17,7 +17,8 @@ FIRST_BACKOFF = 0.05
 MAX_BACKOFF = 2.0
 # Time kept for the request itself: no attempt connects or sends with less left.
 MIN_ATTEMPT = 2.0
-# A window holds up to 8 MiB of content, and JSON escapes a byte to at most 6.
+# A page holds up to 8 MiB of keys, agents, content and meta, and JSON escapes a byte
+# to at most 6. Fixed fields of up to 4,096 items and a 6 KiB `next` fit in 1 MiB.
 MAX_RESPONSE = 6 * (8 << 20) + (1 << 20)
 # Receipt fields per write. The last one is missing when the server had no receipt.
 RECEIPT = ("deduplicated", "txn", "first_lsn", "last_lsn", "seqs")

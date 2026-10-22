@@ -302,11 +302,17 @@ impl Oracle {
                 .facts
                 .iter()
                 .filter(|((owner, _), _)| owner == tenant)
-                .filter_map(|((_, key), revs)| Some((key, revs.last()?.1.as_ref()?)))
+                .filter_map(|((_, key), revs)| {
+                    let (lsn, content) = revs.last()?;
+                    let agent = self.batches.iter().position(|b| {
+                        b.fact.is_some() && b.receipt.as_ref().is_some_and(|r| r.last_lsn == *lsn)
+                    });
+                    Some((key, agent?.to_string(), content.as_ref()?))
+                })
                 .collect();
             for prefix in &prefixes {
                 let expected: Vec<_> =
-                    live.iter().copied().filter(|(key, _)| key.starts_with(prefix)).collect();
+                    live.iter().filter(|(key, ..)| key.starts_with(prefix)).collect();
                 let (limit, max_bytes) =
                     (1 + rng.below(4), [0, 300, 2000, usize::MAX][rng.below(4)]);
                 let (mut seen, mut after) = (0, None);
@@ -316,15 +322,20 @@ impl Oracle {
                     let page = engine.fact_list(tenant, query).unwrap();
                     // The first `limit` remaining facts that fit the budget, at least one.
                     let (mut returned, mut bytes, mut cut) = (0, 0, false);
-                    for (_, content) in expected[seen..].iter().take(limit) {
-                        bytes += content.len();
+                    for (key, agent, content) in expected[seen..].iter().take(limit) {
+                        bytes += key.len() + agent.len() + content.len();
                         if returned > 0 && bytes > max_bytes {
                             cut = true;
                             break;
                         }
                         returned += 1;
                     }
-                    let got: Vec<_> = page.facts.iter().map(|f| (&f.key, &f.content)).collect();
+                    let got: Vec<_> =
+                        page.facts.iter().map(|f| (&f.key, &f.agent, &f.content)).collect();
+                    let expected: Vec<_> = expected
+                        .iter()
+                        .map(|(key, agent, content)| (*key, agent, *content))
+                        .collect();
                     let case = format!(
                         "tenant={tenant} prefix={prefix:?} limit={limit} max_bytes={max_bytes}"
                     );
@@ -1305,6 +1316,8 @@ fn inline_group_publishes_once_and_replies_with_original_sequences() {
     let (k, c, d) = (put("k", 2), put("c", 0), put("d", 0));
     let old = engine.fact_history("t", "k", usize::MAX).unwrap();
     assert!(old.truncated && old.revisions.len() == 1);
+    let d_old = engine.fact_history("t", "d", usize::MAX).unwrap();
+    assert!(!d_old.truncated && d_old.revisions.len() == 1);
     let queue = |key, value: Option<u8>, idem, if_lsn| {
         engine.enqueue_fact_sim("t", fact(key, value), value.is_none(), idem, if_lsn).unwrap()
     };
@@ -1313,6 +1326,7 @@ fn inline_group_publishes_once_and_replies_with_original_sequences() {
         queue("c", Some(1), Some("c1"), Some(c.lsn)),
         queue("c", Some(2), None, Some(c.lsn)),
         queue("d", Some(1), None, None),
+        queue("d", Some(2), None, None),
         queue("d", None, None, None),
         queue("c", Some(1), Some("c1"), Some(c.lsn)),
     ];
@@ -1323,6 +1337,9 @@ fn inline_group_publishes_once_and_replies_with_original_sequences() {
         // Truncation drops `k`'s first revision while readers still see the old watermark.
         let parked = engine.fact_history("t", "k", usize::MAX).unwrap();
         assert_eq!(parked, old, "truncated holds at the old watermark");
+        // Three `d` writes drop a revision of this group only. Nothing older exists.
+        let parked = engine.fact_history("t", "d", usize::MAX).unwrap();
+        assert_eq!(parked, d_old, "no truncation at the old watermark");
         for (key, lsn) in [("k", k.lsn), ("c", c.lsn), ("d", d.lsn)] {
             let value = engine.fact_get("t", key).unwrap().map(|fact| fact.lsn);
             assert_eq!(value, Some(lsn), "{key}: the pre-group value, never a group one or none");
@@ -1330,12 +1347,13 @@ fn inline_group_publishes_once_and_replies_with_original_sequences() {
         release.send(()).unwrap();
         stepping.join().unwrap();
     });
-    let [k3, c1, c2, d1, d2, retried] = queued.map(SimFact::finish);
+    let [k3, c1, c2, d1, d2, d3, retried] = queued.map(SimFact::finish);
     let (k3, c1) = (k3.unwrap(), c1.unwrap());
     let error = c2.unwrap_err();
     assert!(matches!(error.kind, ErrorKind::Conflict), "the same if_lsn twice in one group");
     assert_eq!(error.outcome, Outcome::NotCommitted);
-    assert!(d1.unwrap().lsn < d2.unwrap().lsn);
+    let lsns = [d1, d2, d3].map(|written| written.unwrap().lsn);
+    assert!(lsns.is_sorted(), "{lsns:?}");
     assert_eq!(engine.fact_get("t", "d").unwrap(), None, "put then delete in one group");
     let retried = retried.unwrap();
     assert!(retried.deduplicated && (retried.txn, retried.lsn) == (c1.txn, c1.lsn));

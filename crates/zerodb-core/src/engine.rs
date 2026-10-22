@@ -111,7 +111,7 @@ pub struct FactQuery {
     pub after: Option<String>,
     /// Maximum facts per page, at least 1.
     pub limit: usize,
-    /// Content and meta bytes per page. The first fact is always returned.
+    /// Key, agent, content and meta bytes per page. The first fact is always returned.
     pub max_bytes: usize,
 }
 /// One page of current facts in key order.
@@ -911,7 +911,9 @@ impl Engine {
             {
                 return Err(corrupt());
             }
-            bytes = bytes.saturating_add(fact.content.len() + fact.meta.len());
+            bytes = bytes.saturating_add(
+                key.len() + fact.agent.len() + fact.content.len() + fact.meta.len(),
+            );
             if bytes > max_bytes && !read.is_empty() {
                 return Ok((read, true));
             }

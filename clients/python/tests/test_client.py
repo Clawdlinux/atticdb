@@ -84,6 +84,14 @@ def test_fact_retry_conflict_and_list(server, listener):
     assert client.fact_list("repo/", limit=1) == {"facts": [], "next": None}
 
 
+def test_escaped_fact_page_fits_the_response_cap(server):
+    # Keys count toward max_bytes, so a page of escaped NULs fits MAX_RESPONSE.
+    client, nul = Client(server.url["unix"], TOKEN), "\0"
+    for i in range(200):
+        client.fact_put(f"n/{nul * 1018}{i:04}", nul * 41_900, idem_key=f"n{i}")
+    page = client.fact_list("n/", limit=200, max_bytes=8 << 20)
+    assert len(page["facts"]) == 195 and page["next"] == f"n/{nul * 1018}0194"
+
 def test_retry_survives_server_restart(server):
     # The turn is durable but the reply is never read when the server dies.
     client = Client(server.url["unix"], TOKEN)

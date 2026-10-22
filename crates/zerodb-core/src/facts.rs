@@ -65,14 +65,15 @@ impl Facts {
             }
         };
         revs.list.push(rev);
-        let len = revs.list.len();
-        let tail = len.saturating_sub(self.history + 1);
+        let tail = revs.list.len().saturating_sub(self.history + 1);
         let below = revs.list.partition_point(|rev| rev.lsn < floor).saturating_sub(1);
         if below + 1 < tail {
+            // Revisions of this publication only: no reader at the old watermark sees them.
             revs.list.drain(below + 1..tail);
         }
+        // Only dropping the oldest retained revisions hides history from some reader.
+        revs.dropped |= below.min(tail) > 0;
         revs.list.drain(..below.min(tail));
-        revs.dropped |= revs.list.len() < len;
         if !self.dirty.contains(key) {
             self.dirty.insert(key.clone());
         }

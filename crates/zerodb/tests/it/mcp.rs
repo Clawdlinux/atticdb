@@ -334,6 +334,28 @@ fn tool_calls_over_stdio() {
     assert_eq!(lost["turns"], json!([]), "nothing sent under 2 s");
 }
 
+/// Keys count toward `max_bytes`, so a page of escaped NULs fits the response cap.
+#[test]
+fn escaped_fact_page_fits_the_response_cap() {
+    let dir = Dir::new();
+    let running = support::serve(support::sim_engine(&SimDisk::new(4), None, 100), &dir, 16);
+    let url = format!("http://{}", running.server.tcp_addr().unwrap());
+    let args = ["--url", &url, "--token-file", &private_file(&dir, "t", TOKEN_A)];
+    let mut mcp = Mcp::start(&dir.0, &args, None);
+    mcp.handshake();
+    let nul = |n| "\0".repeat(n);
+    for i in 0..200 {
+        let body = json!({"key": format!("n/{}{i:04}", nul(1018)), "content": nul(41_900),
+                          "idem_key": format!("n{i}")});
+        assert_eq!(running.vias[1].a("POST", "/v1/facts/put", Some(&body)).0, 200);
+    }
+    let args = json!({"prefix": "n/", "limit": 200, "max_bytes": 8 << 20});
+    let page = &mcp.call("fact_list", args)["structuredContent"];
+    let next = format!("n/{}0194", nul(1018));
+    let count = page["facts"].as_array().map(Vec::len);
+    assert!(count == Some(195) && page["next"] == json!(next), "{count:?}");
+}
+
 /// Adapters find or start one server, and send the token only to a server they trust.
 #[test]
 fn launch_race_starts_one_server() {

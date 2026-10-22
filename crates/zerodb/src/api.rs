@@ -20,6 +20,9 @@ pub const MAX_WINDOW_TURNS: usize = 1000;
 pub const DEFAULT_WINDOW_BYTES: usize = 1 << 20;
 /// Largest `max_bytes` of a window.
 pub const MAX_WINDOW_BYTES: usize = 8 << 20;
+/// Largest response body. JSON escapes a budgeted byte to at most 6 (`\u0000`). Fixed fields
+/// cost at most 151 bytes per item, so 4,096 items and a 6 KiB `next` fit in the 1 MiB rest.
+pub const MAX_RESPONSE_BYTES: u64 = 6 * MAX_WINDOW_BYTES as u64 + (1 << 20);
 
 const ROLES: [(Role, &str); 4] = [
     (Role::System, "system"),

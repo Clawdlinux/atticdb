@@ -336,9 +336,8 @@ impl Adapter {
         reserve()?;
         let auth = format!("Bearer {}", self.token.expose());
         let headers = [("Host", host.as_str()), ("Authorization", auth.as_str())];
-        // JSON escapes a byte to at most 6 (`\u0000`), plus 1 MiB for the rest of a window.
-        let max = 6 * crate::api::MAX_WINDOW_BYTES as u64 + (1 << 20);
         let lost = |error: String| (Attempt::TransportError, error);
+        let max = crate::api::MAX_RESPONSE_BYTES;
         let response =
             crate::http::exchange(&mut *stream, method, target, &headers, body, deadline, max);
         let response = response.map_err(|error| lost(error.to_string()))?;
