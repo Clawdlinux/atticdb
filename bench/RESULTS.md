@@ -1327,3 +1327,32 @@ At S1 the Engine p99 was 1.84 to 2.05 ms and p99.9 was 4.0 to 4.3 ms.
 
 Verdict: the Linux NVMe 1.5x gate still fails. Engine/bare p99 is about 2.7x.
 Tape alone is under 1.5x. The remaining gap is in the Engine layer, about 0.55 ms at p99.
+
+## Zero-filled spares and agent concurrency (2026-10-22)
+
+Azure Standard_L8s_v3, centralindia zone 3, Linux 7.0, ext4. G1 at `G1_WRITERS` 1, 4 and 16, batch 4, symmetric readers, medians of 3.
+Engine durable ack, `main` before (`68654ab`) and after (`fdf4225`, PR #19) zero-filled spare segments.
+
+Local NVMe, 200k, 400k and 1M turns:
+
+| Writers | p50 µs | p99 µs | p99.9 µs | Turns/s |
+|---|---|---|---|---|
+| 1 | 157 → 67 | 193 → 193 | 241 → 219 | 25.3k → 48.8k |
+| 4 | 231 → 141 | 292 → 280 | 760 → 646 | 68.5k → 105.7k |
+| 16 | 585 → 432 | 1,103 → 910 | 2,157 → 1,896 | 104k → 138k |
+
+Attached managed disks, host caching off, 20k, 20k and 80k turns:
+
+| Disk | Writers | Engine p50 µs | Engine p99 µs | Turns/s | Engine/bare p50 |
+|---|---|---|---|---|---|
+| Premium SSD v2, 128 GiB, 3,000 IOPS | 1 | 1,908 → 1,883 | 3,208 → 3,167 | 1.98k → 2.01k | 1.01 |
+| | 4 | 1,995 → 1,898 | 3,114 → 3,066 | 7.7k → 7.9k | 1.03 |
+| | 16 | 2,355 → 2,096 | 3,945 → 3,768 | 26.9k → 34.5k | 1.03 |
+| Premium SSD P30, 1 TiB | 1 | 4,464 → 4,423 | 6,733 → 6,854 | 870 → 874 | 1.01 |
+| | 4 | 4,617 → 4,650 | 6,532 → 7,207 | 3.38k → 3.34k | 1.03 |
+| | 16 | 5,329 → 4,950 | 9,248 → 9,279 | 11.6k → 15.0k | 1.05 |
+
+On managed disks an ack costs one device write round trip: about 1.9 ms on Premium SSD v2 and 4.4 ms on P30.
+The engine adds 1% to 5% over a bare `pwrite` plus `fdatasync`. Zero-fill does not change 1 or 4 writers there, and adds 28% throughput at 16.
+On local NVMe the round trip is about 60 µs, so the journal commit that zero-fill removes was most of the ack.
+Ultra Disk was not available in zone 3.
