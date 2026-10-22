@@ -14,7 +14,7 @@
 
 ### D1. A dry-run `Io`
 
-Opening a data directory repairs it. Recovery zero-fills torn tails and rewrites bytes (`recovery.rs:647-688`). `DataDir::open` removes orphan segments and spares (`dir.rs:233-247`). The engine writes checkpoints and the tape fills a spare. A second, read-only recovery would drift from the real one, so we don't write one.
+Opening a data directory repairs it. Recovery zero-fills torn tails and rewrites bytes (`recovery.rs:647-680`). `DataDir::open` removes orphan segments and spares (`dir.rs:270-280`) and rewrites the `LOCK` holder line (`dir.rs:311-314`). The engine writes checkpoints and the tape fills a spare. A second, read-only recovery would drift from the real one, so we don't write one.
 
 Instead, `DryRunIo` in `crates/zerodb/src/dryrun.rs` wraps `StdIo`, following the `FaultIo` precedent (`fault.rs`):
 
@@ -29,7 +29,7 @@ I am choosing a buffering `Io` over a read-only scanner because verify then repo
 ### D2. `zerodb verify --data-dir <dir>`
 
 - Opens `Engine::open_with(DryRunIo, SystemClock, dir, EngineOptions::default())`, the options `serve` uses.
-- On success it prints sorted `key=value` lines, built by the same code as `GET /v1/stats` (factor the JSON out of `api::stats`). Then it prints `changes=<n>` and one `change=<path>` line per path the open would have written.
+- On success it prints sorted `key=value` lines, built by the same code as `GET /v1/stats` (factor the JSON out of `api::stats`). Then it prints `changes=<n>` and one `change=<path>` line per path the open would have written, apart from the `LOCK` holder line, which every open rewrites.
 - Exit codes: 0 opened, 1 the open failed (corruption, invalid configuration), 75 locked.
 
 ### D3. `zerodb dump --data-dir <dir> [--from <lsn>] [--limit <n>]`
