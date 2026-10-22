@@ -1,7 +1,7 @@
 use crate::support::{self, append_body, Dir, Process, Via};
 use serde_json::{json, Value};
 use std::os::fd::OwnedFd;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, FileExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 struct Ctx {
@@ -497,6 +497,17 @@ fn startup_checks() {
                 let contents: Vec<&Value> =
                     window["turns"].as_array().unwrap().iter().map(|t| &t["content"]).collect();
                 assert_eq!(contents, [&json!("one")], "{case}: only turns at or below the cut");
+                restarted.child.kill().unwrap();
+                restarted.wait();
+                // The restart put the superblock above LSN 1, so this is corruption, not a torn tail.
+                let segment = ctx.data.join("seg-0000000000000001.zdb");
+                let file = std::fs::OpenOptions::new().read(true).write(true).open(segment);
+                let (file, mut byte) = (file.unwrap(), [0]);
+                file.read_exact_at(&mut byte, 40).unwrap();
+                file.write_all_at(&[!byte[0]], 40).unwrap();
+                let (status, out) = ctx.run(&verify).wait();
+                assert_eq!(status.code(), Some(1), "{case}: corrupt first frame: {out}");
+                assert!(out.contains("at LSN 1,"), "{case}: names the LSN: {out}");
             }
             #[cfg(feature = "fault-inject")]
             Expect::ExitsOnPoison(replaced) => {
