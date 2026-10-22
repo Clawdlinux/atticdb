@@ -6,7 +6,7 @@ use crate::serve::EXIT_LOCKED;
 use serde_json::{json, Value};
 use std::fs::{DirBuilder, OpenOptions, TryLockError};
 use std::io::{Read, Write};
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -255,8 +255,15 @@ fn copy_locked(dir: &Path, scratch: Option<&Path>) -> Result<Scratch, (u8, Strin
     let copy = Scratch(path);
     for entry in std::fs::read_dir(&dir).map_err(fail)? {
         let entry = entry.map_err(fail)?;
-        // The socket and anything else that is not a regular file stays behind.
-        if entry.file_type().map_err(fail)?.is_file() {
+        let kind = entry.file_type().map_err(fail)?;
+        // The server's socket stays behind. Anything else would make an incomplete copy.
+        if kind.is_socket() {
+            continue;
+        }
+        if !kind.is_file() {
+            return Err((1, format!("{}: not a regular file", entry.path().display())));
+        }
+        {
             let to = copy.0.join(entry.file_name());
             std::fs::copy(entry.path(), &to).map_err(fail)?;
             // Opening needs write access, and a backup can be read-only.

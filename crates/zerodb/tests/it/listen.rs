@@ -517,6 +517,12 @@ fn startup_checks() {
                 let (status, out) = ctx.run(&verify).wait();
                 assert_eq!(status.code(), Some(1), "{case}: rejected checkpoint: {out}");
                 assert!(out.contains("checkpoint"), "{case}: {out}");
+                std::fs::remove_file(&checkpoint).unwrap();
+                // A symlink is refused, never skipped into an incomplete copy.
+                std::os::unix::fs::symlink("elsewhere", &checkpoint).unwrap();
+                let (status, out) = ctx.run(&verify).wait();
+                assert_eq!(status.code(), Some(1), "{case}: symlinked checkpoint: {out}");
+                assert!(out.contains("not a regular file"), "{case}: {out}");
                 std::fs::remove_file(checkpoint).unwrap();
                 // The restart put the superblock above LSN 1, so this is corruption, not a torn tail.
                 let segment = ctx.data.join("seg-0000000000000001.zdb");
