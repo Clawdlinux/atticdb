@@ -1,21 +1,19 @@
 //! Operator commands that read a running server.
 
-use crate::launch::{self, Url};
+use crate::launch;
 use serde_json::Value;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 /// Prints `GET /v1/stats` as `key=value` lines. Never starts a server: that would hide an outage.
-pub fn stats(url: Option<&str>, data_dir: Option<&Path>) -> u8 {
+pub fn stats(socket: Option<&Path>, data_dir: Option<&Path>) -> u8 {
     let deadline = Instant::now() + Duration::from_secs(5);
-    let stream = match (url.map(Url::parse).transpose(), data_dir) {
-        (Err(error), _) => Err(error),
-        (Ok(Some(Url::Tcp(_))), _) => Err("stats is served on the Unix socket only".into()),
-        (Ok(Some(Url::Unix(path))), _) => {
-            launch::connect_unix(&path, deadline).map_err(|e| format!("{}: {e}", path.display()))
+    let stream = match (socket, data_dir) {
+        (Some(path), _) => {
+            launch::connect_unix(path, deadline).map_err(|e| format!("{}: {e}", path.display()))
         }
-        (Ok(None), Some(dir)) => launch::discover(dir, deadline),
-        (Ok(None), None) => Err("stats needs --url or --data-dir".into()),
+        (None, Some(dir)) => launch::discover(dir, deadline),
+        (None, None) => Err("stats needs a socket or a data directory".into()),
     };
     let response = stream.and_then(|mut stream| {
         let host = [("Host", "localhost")];

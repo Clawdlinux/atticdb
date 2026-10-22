@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use zerodb::config::{Config, Listen};
+use zerodb::launch::Url;
 
 const USAGE: &str = "usage:
   zerodb init --config <path> --tenant <name>
@@ -106,5 +107,16 @@ fn stats(mut flags: HashMap<String, String>) -> Option<u8> {
     if url.is_some() == dir.is_some() {
         return None;
     }
-    Some(zerodb::ops::stats(url.as_deref(), dir.as_deref().map(Path::new)))
+    let socket = match url.as_deref().map(Url::parse).transpose() {
+        Ok(Some(Url::Unix(path))) => Some(path),
+        Ok(None) => None,
+        Ok(Some(Url::Tcp(_))) => return Some(usage("stats is served on the Unix socket only")),
+        Err(error) => return Some(usage(&error)),
+    };
+    Some(zerodb::ops::stats(socket.as_deref(), dir.as_deref().map(Path::new)))
+}
+
+fn usage(message: &str) -> u8 {
+    eprintln!("zerodb: {message}");
+    2
 }

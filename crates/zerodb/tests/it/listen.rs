@@ -448,6 +448,10 @@ fn startup_checks() {
                 server.wait();
                 let (status, stats) = ctx.run(&["stats", "--data-dir", data]).wait();
                 assert_eq!(status.code(), Some(1), "{case}: no server: {stats}");
+                for url in ["http://127.0.0.1:7425", "not-a-url"] {
+                    let (status, stats) = ctx.run(&["stats", "--url", url]).wait();
+                    assert_eq!(status.code(), Some(2), "{case}: {url} is a usage error: {stats}");
+                }
                 let (status, report) = ctx.run(&recover).wait();
                 assert!(status.success(), "{case}: {report}");
                 let mut restarted = ctx.serve(&ctx.data, &[]);
