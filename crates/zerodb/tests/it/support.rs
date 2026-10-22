@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::os::fd::OwnedFd;
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
@@ -424,4 +424,12 @@ impl Drop for Holders {
             kill_holder(data);
         }
     }
+}
+
+/// A new mode 0600 file in `dir`. Returns its path.
+pub fn private_file(dir: &Dir, name: &str, content: &str) -> String {
+    let path = dir.0.join(name);
+    let mut file = File::options().write(true).create_new(true).mode(0o600).open(&path).unwrap();
+    file.write_all(content.as_bytes()).unwrap();
+    path.to_str().unwrap().to_owned()
 }
