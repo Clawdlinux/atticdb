@@ -8,6 +8,7 @@ mod dedup;
 mod engine;
 mod error;
 pub mod fact;
+mod facts;
 pub mod forget;
 mod machine;
 mod options;
@@ -18,7 +19,9 @@ pub mod turn;
 
 #[cfg(feature = "sim")]
 pub use engine::SimAppend;
-pub use engine::{Appended, Engine, Health, Metrics, Scope, Turn, Window, WindowQuery};
+pub use engine::{
+    Appended, Engine, FactWritten, Health, Metrics, NewFact, Scope, Turn, Window, WindowQuery,
+};
 pub use error::{EngineError, ErrorKind};
 pub use options::EngineOptions;
 pub use turn::{NewTurn, Role};

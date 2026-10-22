@@ -8,6 +8,8 @@ pub enum ErrorKind {
     InvalidInput,
     /// A retry key was already used with different content.
     IdempotencyConflict,
+    /// A conditional write found a different current LSN. Nothing was written.
+    Conflict,
     /// A configured memory limit prevented a write.
     ResourceExhausted(&'static str),
     /// Stored engine data failed validation.
@@ -36,6 +38,7 @@ impl EngineError {
             Error::Rejected("idempotency") => ErrorKind::IdempotencyConflict,
             Error::Rejected("invalid_input") => ErrorKind::InvalidInput,
             Error::Rejected("corrupt_index") => ErrorKind::CorruptIndex,
+            Error::Rejected("conflict") => ErrorKind::Conflict,
             Error::Poisoned => ErrorKind::Poisoned,
             Error::Rejected(resource) => ErrorKind::ResourceExhausted(resource),
             error => ErrorKind::Storage(error),

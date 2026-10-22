@@ -140,12 +140,17 @@ pub struct PreparedBatch {
     changed: bool,
     reply: Vec<u8>,
     application_digest: Option<Digest>,
+    application_arg: Option<u64>,
 }
 
 impl PreparedBatch {
     /// Returns an opaque application digest computed by the caller, if supplied.
     pub fn application_digest(&self) -> Option<Digest> {
         self.application_digest
+    }
+    /// Returns an opaque caller argument for preparation, if supplied. It is never framed.
+    pub fn application_arg(&self) -> Option<u64> {
+        self.application_arg
     }
     /// Stages an application receipt. Durable replies release it only after sync and publication.
     pub fn set_reply(&mut self, reply: Vec<u8>) {
@@ -216,6 +221,7 @@ impl PreparedBatch {
             changed: false,
             reply: Vec::new(),
             application_digest: None,
+            application_arg: None,
         })
     }
 }
@@ -1033,15 +1039,17 @@ impl<S: StateMachine> Tape<S> {
 
     /// Atomically appends a nonempty batch using the requested acknowledgement mode.
     pub fn append(&self, batch: Vec<RecordInput>, mode: Durability) -> WriteResult {
-        self.append_with_digest(batch, mode, None)
+        self.append_with_digest(batch, mode, None, None)
     }
 
-    /// Appends with a caller-computed application digest. Frame CRCs remain independent.
+    /// Appends with a caller-computed application digest and an unframed preparation argument.
+    /// Frame CRCs remain independent.
     pub fn append_with_digest(
         &self,
         batch: Vec<RecordInput>,
         mode: Durability,
         digest: Option<Digest>,
+        arg: Option<u64>,
     ) -> WriteResult {
         if self.reads.poisoned.load(Ordering::Acquire) {
             return Err(rejected(Error::Poisoned));
@@ -1051,6 +1059,7 @@ impl<S: StateMachine> Tape<S> {
             let mut core = core.lock().map_err(|_| rejected(Error::Poisoned))?;
             let mut batch = PreparedBatch::new(batch, mode)?;
             batch.application_digest = digest;
+            batch.application_arg = arg;
             let (request, receiver) = WriteRequest::new(batch);
             core.enqueue(request);
             core.step();
@@ -1061,6 +1070,7 @@ impl<S: StateMachine> Tape<S> {
         }
         let mut batch = PreparedBatch::new(batch, mode)?;
         batch.application_digest = digest;
+        batch.application_arg = arg;
         let (request, receiver) = WriteRequest::new(batch);
         self.sender
             .as_ref()
@@ -1078,9 +1088,11 @@ impl<S: StateMachine> Tape<S> {
         &self,
         records: Vec<RecordInput>,
         digest: Option<Digest>,
+        arg: Option<u64>,
     ) -> Result<mpsc::Receiver<WriteResult>> {
         let mut batch = PreparedBatch::new(records, Durability::Durable).map_err(|e| e.kind)?;
         batch.application_digest = digest;
+        batch.application_arg = arg;
         let (request, receiver) = WriteRequest::new(batch);
         let core = self
             .inline

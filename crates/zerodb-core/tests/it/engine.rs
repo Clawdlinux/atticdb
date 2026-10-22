@@ -1,4 +1,5 @@
 use crate::support;
+use crate::support::facts::new_fact;
 use crate::support::sessions::*;
 use crate::support::TestDir;
 use std::collections::HashMap;
@@ -236,6 +237,11 @@ fn dedup_scope_bounds_and_oldest_eviction_survive_the_public_api() {
     assert_eq!(engine.metrics().unwrap().dedup_window_effective, 1);
     assert_eq!(engine.append(&checkpoint_scope, vec![turn(5)], Some("5")).unwrap().seqs, vec![6]);
     assert_eq!(engine.append(&checkpoint_scope, vec![turn(0)], Some("0")).unwrap().seqs, vec![7]);
+    let mut session = scope("x");
+    session.tenant = "first".into();
+    let appended = engine.append(&session, vec![turn(1)], Some("same")).unwrap();
+    let fact = engine.fact_put("first", new_fact("x", 1, "a"), Some("same"), None).unwrap();
+    assert!(!fact.deduplicated && fact.lsn > appended.last_lsn, "session x and fact key x");
 }
 
 #[test]
@@ -243,12 +249,14 @@ fn checkpoint_bounds_replay_and_corrupt_derived_data_falls_back() {
     let disk = Arc::new(SimDisk::new(5));
     let engine = open(disk.clone(), options());
     engine.append(&scope("s"), (0..100).map(turn).collect(), Some("initial")).unwrap();
+    let before = engine.fact_put("tenant", new_fact("fact/key", 1, "a"), Some("f"), None).unwrap();
     engine.checkpoint().unwrap();
     engine.append(&scope("s"), (100..107).map(turn).collect(), Some("tail")).unwrap();
+    let after = engine.fact_put("tenant", new_fact("fact/key", 2, "a"), None, None).unwrap();
     let oracle = engine.window(&scope("s"), WindowQuery::Last(200)).unwrap();
     drop(engine);
     let engine = open(disk.clone(), options());
-    assert_eq!(engine.metrics().unwrap().replayed_records, 7);
+    assert_eq!(engine.metrics().unwrap().replayed_records, 8);
     assert_eq!(engine.window(&scope("s"), WindowQuery::Last(200)).unwrap(), oracle);
     drop(engine);
     let checkpoint = disk
@@ -258,12 +266,19 @@ fn checkpoint_bounds_replay_and_corrupt_derived_data_falls_back() {
         .find(|p| p.file_name().unwrap().to_str().unwrap().starts_with("ckpt-"))
         .unwrap();
     let file = disk.open(&checkpoint).unwrap();
-    disk.flip_bit(file, 12).unwrap();
+    let mut image = vec![0; disk.len(file).unwrap() as usize];
+    disk.read_at(file, 0, &mut image).unwrap();
+    // Tag 4 records are written last, so the key's last occurrence is inside one.
+    let offset = image.windows(8).rposition(|w| w == b"fact/key").unwrap();
+    disk.flip_bit(file, offset as u64).unwrap();
     disk.close(file).unwrap();
     let engine = open(disk, options());
     assert_eq!(engine.metrics().unwrap().checkpoint_warnings, 1);
-    assert_eq!(engine.metrics().unwrap().replayed_records, 108);
+    assert_eq!(engine.metrics().unwrap().replayed_records, 110);
     assert_eq!(engine.window(&scope("s"), WindowQuery::Last(200)).unwrap(), oracle);
+    let retry = engine.fact_put("tenant", new_fact("fact/key", 1, "a"), Some("f"), None).unwrap();
+    assert!(retry.deduplicated && retry.lsn == before.lsn && retry.txn == before.txn);
+    engine.fact_put("tenant", new_fact("fact/key", 3, "a"), None, Some(after.lsn)).unwrap();
 }
 
 #[test]
@@ -630,7 +645,12 @@ fn invalid_batches_leave_no_sequences_or_tenants() {
     let mut too_big = turn(1);
     too_big.content = vec![0; 4 * 1024 * 1024];
     assert!(engine.append(&scope("s"), vec![too_big], None).is_err());
+    for (case, key) in [("empty key", String::new()), ("1025-byte key", "k".repeat(1025))] {
+        let error = engine.fact_put("new", new_fact(&key, 1, "a"), None, None).unwrap_err();
+        assert!(matches!(error.kind, ErrorKind::InvalidInput), "{case}: {error}");
+    }
     assert_eq!(engine.metrics().unwrap().tenants, 0);
+    assert_eq!(engine.metrics().unwrap().durable_lsn, 0);
     assert_eq!(engine.append(&scope("s"), vec![turn(1)], None).unwrap().seqs, vec![1]);
 }
 

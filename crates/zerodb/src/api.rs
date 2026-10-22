@@ -201,6 +201,7 @@ fn classify(kind: &ErrorKind) -> (u16, &'static str) {
     match kind {
         ErrorKind::InvalidInput => (400, "invalid_input"),
         ErrorKind::IdempotencyConflict => (409, "idempotency_conflict"),
+        ErrorKind::Conflict => (409, "conflict"),
         ErrorKind::ResourceExhausted(_) => (429, "resource_exhausted"),
         ErrorKind::Poisoned => (503, "poisoned"),
         ErrorKind::CorruptIndex => (500, "corrupt_index"),

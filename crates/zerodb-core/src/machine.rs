@@ -1,15 +1,18 @@
 use crate::checkpoint::{read_page, Command};
-use crate::dedup::{Dedup, DedupKey, Entry};
+use crate::dedup::{digest, Dedup, DedupKey, Entry, Scope};
 use crate::error::{lock, Result};
+use crate::fact;
+use crate::facts::{current, FactKey, Rev};
 use crate::session::{address, Key};
 use crate::state::State;
 use crate::tenant::Registry;
 use crate::turn::{decode_ref as decode, set_seq};
 use crate::{EngineError, EngineOptions, ErrorKind};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use zerodb_tape::{
-    Committed, CommittedRecord, Error, Io, Outcome, Prepare, PreparedBatch, StateMachine,
+    Committed, CommittedRecord, Error, Io, Kind, Outcome, Prepare, PreparedBatch, StateMachine,
     WriteError,
 };
 
@@ -24,6 +27,7 @@ pub(crate) struct Machine {
     opts: EngineOptions,
     tenants: Registry,
     dedup: Dedup,
+    facts: HashMap<FactKey, Rev>,
     lsn: u64,
     txn: u64,
     digest_txn: u64,
@@ -49,6 +53,7 @@ impl Machine {
             opts,
             tenants: s.tenants.clone(),
             dedup,
+            facts: HashMap::new(),
             lsn: s.published_lsn,
             txn: s.txn,
             digest_txn: 0,
@@ -61,63 +66,83 @@ impl Machine {
         Ok(machine)
     }
     fn prepare_inner(&mut self, batch: &mut PreparedBatch) -> Result<Prepare> {
+        let invalid = || EngineError::rejected(ErrorKind::InvalidInput);
         let records: Vec<_> = batch.records().collect();
-        let create = records.first().filter(|r| r.kind == zerodb_tape::Kind::TenantCreate);
-        let turns = &records[usize::from(create.is_some())..];
-        let first = decode(
-            &turns.first().ok_or_else(|| EngineError::rejected(ErrorKind::InvalidInput))?.content,
-        )?;
+        let count = records.len();
+        let create = records.first().filter(|r| r.kind == Kind::TenantCreate);
+        let body = &records[usize::from(create.is_some())..];
+        let head = body.first().ok_or_else(invalid)?;
         let tenant = if let Some(record) = create {
-            let name = std::str::from_utf8(&record.content)
-                .map_err(|_| EngineError::rejected(ErrorKind::InvalidInput))?;
+            let name = std::str::from_utf8(&record.content).map_err(|_| invalid())?;
             if name.len() > 255 || self.tenants.get(name).is_some() {
-                return Err(EngineError::rejected(ErrorKind::InvalidInput));
+                return Err(invalid());
             }
             if self.tenants.entries.len() >= self.opts.max_tenants.min(10_000) {
                 return Err(EngineError::rejected(ErrorKind::ResourceExhausted("tenants")));
             }
             self.tenants.entries.len() as u32 + 1
         } else {
-            turns[0].tenant_id
+            head.tenant_id
         };
         if tenant == 0 || (create.is_none() && tenant as usize > self.tenants.entries.len()) {
-            return Err(EngineError::rejected(ErrorKind::InvalidInput));
+            return Err(invalid());
         }
-        let key = Key(tenant, first.agent_id.to_owned(), first.session_id.to_owned());
-        let mut hash = (first.idem_key.is_some() && batch.application_digest().is_none())
-            .then(blake3::Hasher::new);
-        for (i, record) in turns.iter().enumerate() {
-            let next;
-            let decoded = if i == 0 {
-                &first
-            } else {
-                next = decode(&record.content)?;
-                &next
-            };
-            if record.kind != zerodb_tape::Kind::Turn
-                || decoded.seq != 0
-                || decoded.agent_id != key.1
-                || decoded.session_id != key.2
-                || decoded.idem_key != first.idem_key
-                || (create.is_none() && record.tenant_id != tenant)
+        // A fact write is exactly one record. Turns and facts never share a batch.
+        let (session, fact, dedup_key, digest) = if head.kind == Kind::Fact {
+            let fact = fact::decode(&head.content)?;
+            if body.len() != 1
+                || fact.key.is_empty()
+                || !fact.source_refs.is_empty()
+                || (fact.tombstone && !(fact.content.is_empty() && fact.meta.is_empty()))
             {
-                return Err(EngineError::rejected(ErrorKind::InvalidInput));
+                return Err(invalid());
             }
-            if let Some(hash) = &mut hash {
-                hash.update(&(record.content.len() as u32).to_le_bytes());
-                hash.update(&record.content);
-                #[cfg(test)]
+            let digest = batch.application_digest().unwrap_or_else(|| {
+                fact.idem_key.as_ref().map_or([0; 32], |_| digest([head.content.as_slice()]))
+            });
+            let dedup_key =
+                fact.idem_key.clone().map(|id| DedupKey(tenant, Scope::Fact(fact.key.clone()), id));
+            (None, Some(fact), dedup_key, digest)
+        } else {
+            let first = decode(&head.content)?;
+            let key = Key(tenant, first.agent_id.to_owned(), first.session_id.to_owned());
+            let mut hash = (first.idem_key.is_some() && batch.application_digest().is_none())
+                .then(blake3::Hasher::new);
+            for (i, record) in body.iter().enumerate() {
+                let next;
+                let decoded = if i == 0 {
+                    &first
+                } else {
+                    next = decode(&record.content)?;
+                    &next
+                };
+                if record.kind != Kind::Turn
+                    || decoded.seq != 0
+                    || decoded.agent_id != key.1
+                    || decoded.session_id != key.2
+                    || decoded.idem_key != first.idem_key
+                    || (create.is_none() && record.tenant_id != tenant)
                 {
-                    self.prepare_hash_bytes += record.content.len();
+                    return Err(invalid());
+                }
+                if let Some(hash) = &mut hash {
+                    hash.update(&(record.content.len() as u32).to_le_bytes());
+                    hash.update(&record.content);
+                    #[cfg(test)]
+                    {
+                        self.prepare_hash_bytes += record.content.len();
+                    }
                 }
             }
-        }
-        let digest = batch
-            .application_digest()
-            .or_else(|| hash.map(|h| *h.finalize().as_bytes()))
-            .unwrap_or([0; 32]);
-        let dedup_key =
-            first.idem_key.map(|id| DedupKey(tenant, first.session_id.to_owned(), id.to_owned()));
+            let digest = batch
+                .application_digest()
+                .or_else(|| hash.map(|h| *h.finalize().as_bytes()))
+                .unwrap_or([0; 32]);
+            let dedup_key = first
+                .idem_key
+                .map(|id| DedupKey(tenant, Scope::Session(key.2.clone()), id.to_owned()));
+            (Some((key, body.len())), None, dedup_key, digest)
+        };
         let mut state = lock(&self.state)?;
         if let Some(error) = &state.failure {
             return Err(error.clone());
@@ -133,34 +158,47 @@ impl Machine {
         if dedup_key.is_some() && !self.dedup.can_stage(tenant) {
             return Err(EngineError::rejected(ErrorKind::ResourceExhausted("prepared_dedup")));
         }
+        let fact = fact.map(|fact| ((tenant, fact.key), fact.tombstone));
+        if let Some((key, _)) = &fact {
+            let newest =
+                self.facts.get(key).or_else(|| state.facts.map.get(key).and_then(|r| r.last()));
+            if batch.application_arg().is_some_and(|lsn| lsn != current(newest)) {
+                return Err(EngineError::rejected(ErrorKind::Conflict));
+            }
+            if newest.is_none() && state.facts.full(&self.facts) {
+                return Err(EngineError::rejected(ErrorKind::ResourceExhausted("facts")));
+            }
+        }
         let first_lsn = self
             .lsn
             .checked_add(1)
             .ok_or_else(|| EngineError::rejected(ErrorKind::ResourceExhausted("lsn")))?;
         let last_lsn = self
             .lsn
-            .checked_add(records.len() as u64)
+            .checked_add(count as u64)
             .ok_or_else(|| EngineError::rejected(ErrorKind::ResourceExhausted("lsn")))?;
         let txn = self
             .txn
             .checked_add(1)
             .ok_or_else(|| EngineError::rejected(ErrorKind::ResourceExhausted("txn")))?;
-        let seq = state.index.reserve(&key, turns.len())?;
+        let seq = match &session {
+            Some((key, turns)) => Some(state.index.reserve(key, *turns)?),
+            None => None,
+        };
         if let Some(record) = create {
-            let name = std::str::from_utf8(&record.content)
-                .map_err(|_| EngineError::rejected(ErrorKind::InvalidInput))?;
+            let name = std::str::from_utf8(&record.content).map_err(|_| invalid())?;
             self.tenants.insert(name, tenant, first_lsn, self.opts.max_tenants)?;
         }
         let offset = usize::from(create.is_some());
         for (index, record) in batch.records_mut().enumerate() {
             record.tenant_id = tenant;
-            if index >= offset {
+            if let Some(seq) = seq.filter(|_| index >= offset) {
                 set_seq(&mut record.content, seq + (index - offset) as u64)?;
             }
         }
         self.lsn = last_lsn;
         self.txn = txn;
-        let reply = seq.to_le_bytes().to_vec();
+        let reply = seq.map_or_else(Vec::new, |seq| seq.to_le_bytes().to_vec());
         batch.set_reply(reply.clone());
         if let Some(key) = dedup_key {
             self.dedup.insert(Entry {
@@ -169,20 +207,34 @@ impl Machine {
                 committed: Committed::Durable { txn, first_lsn, last_lsn, reply },
             });
         }
+        if let Some((key, deleted)) = fact {
+            self.facts.insert(key, Rev { lsn: last_lsn, deleted });
+        }
         Ok(Prepare::Write)
     }
 
-    fn install(&mut self, state: &mut State, record: &CommittedRecord, replay: bool) -> Result<()> {
+    fn install(
+        &mut self,
+        state: &mut State,
+        record: &CommittedRecord,
+        floor: u64,
+        replay: bool,
+    ) -> Result<()> {
+        let corrupt = || EngineError::rejected(ErrorKind::CorruptIndex);
         if self.digest_txn != record.txn {
             self.digest_txn = record.txn;
             self.first_lsn = record.lsn;
             self.first_seq = 0;
             self.hash.reset();
         }
+        if record.kind != Kind::TenantCreate
+            && (record.tenant_id == 0 || record.tenant_id as usize > state.tenants.entries.len())
+        {
+            return Err(corrupt());
+        }
         match record.kind {
-            zerodb_tape::Kind::TenantCreate => {
-                let name = std::str::from_utf8(&record.payload)
-                    .map_err(|_| EngineError::rejected(ErrorKind::CorruptIndex))?;
+            Kind::TenantCreate => {
+                let name = std::str::from_utf8(&record.payload).map_err(|_| corrupt())?;
                 state.tenants.insert(name, record.tenant_id, record.lsn, self.opts.max_tenants)?;
                 if replay {
                     self.tenants.insert(
@@ -193,18 +245,13 @@ impl Machine {
                     )?;
                 }
             }
-            zerodb_tape::Kind::Turn => {
-                let turn = decode(&record.payload)
-                    .map_err(|_| EngineError::rejected(ErrorKind::CorruptIndex))?;
+            Kind::Turn => {
+                let turn = decode(&record.payload).map_err(|_| corrupt())?;
                 if self.first_seq == 0 {
                     self.first_seq = turn.seq;
                 }
                 let key =
                     Key(record.tenant_id, turn.agent_id.to_owned(), turn.session_id.to_owned());
-                if record.tenant_id == 0 || record.tenant_id as usize > state.tenants.entries.len()
-                {
-                    return Err(EngineError::rejected(ErrorKind::CorruptIndex));
-                }
                 if replay {
                     if let Some(entry) = state.index.sessions.get(&key) {
                         if entry.len > 0 {
@@ -220,27 +267,41 @@ impl Machine {
                 if let Some(id) = turn.idem_key.filter(|_| replay) {
                     let mut normalized = record.payload.to_vec();
                     set_seq(&mut normalized, 0)?;
-                    self.hash.update(&(normalized.len() as u32).to_le_bytes());
-                    self.hash.update(&normalized);
-                    let entry = Entry {
-                        key: DedupKey(record.tenant_id, turn.session_id.to_owned(), id.to_owned()),
-                        digest: *self.hash.finalize().as_bytes(),
-                        committed: Committed::Durable {
-                            txn: record.txn,
-                            first_lsn: self.first_lsn,
-                            last_lsn: record.lsn,
-                            reply: self.first_seq.to_le_bytes().to_vec(),
-                        },
-                    };
-                    state.dedup.insert(entry);
-                } else if let Some(entry) = self.dedup.entries.values().next().filter(|entry| {
-                    matches!(entry.committed, Committed::Durable { last_lsn, .. } if last_lsn == record.lsn)
-                }) {
-                    let age = entry.age();
-                    if let Some(entry) = self.dedup.remove(age) { state.dedup.insert_arc(entry); }
+                    let key = DedupKey(
+                        record.tenant_id,
+                        Scope::Session(turn.session_id.to_owned()),
+                        id.to_owned(),
+                    );
+                    let reply = self.first_seq.to_le_bytes().to_vec();
+                    self.rebuild(state, record, key, &normalized, reply);
                 }
             }
-            _ => return Err(EngineError::rejected(ErrorKind::CorruptIndex)),
+            Kind::Fact => {
+                let fact = fact::decode(&record.payload).map_err(|_| corrupt())?;
+                let key = (record.tenant_id, fact.key);
+                state.facts.install(
+                    &key,
+                    Rev { lsn: record.lsn, deleted: fact.tombstone },
+                    floor,
+                )?;
+                if self.facts.get(&key).is_some_and(|rev| rev.lsn == record.lsn) {
+                    self.facts.remove(&key);
+                }
+                if let Some(id) = fact.idem_key.filter(|_| replay) {
+                    let key = DedupKey(record.tenant_id, Scope::Fact(key.1), id);
+                    self.rebuild(state, record, key, &record.payload, Vec::new());
+                }
+            }
+            _ => return Err(corrupt()),
+        }
+        // Move this transaction's staged retry entry once its last record is published.
+        if let Some(entry) = self.dedup.entries.values().next().filter(|entry| {
+            matches!(entry.committed, Committed::Durable { last_lsn, .. } if last_lsn == record.lsn)
+        }) {
+            let age = entry.age();
+            if let Some(entry) = self.dedup.remove(age) {
+                state.dedup.insert_arc(entry);
+            }
         }
         state.bytes = state.bytes.saturating_add(
             record.payload.len() as u64 + 40 + if state.txn != record.txn { 72 } else { 0 },
@@ -254,12 +315,36 @@ impl Machine {
         }
         Ok(())
     }
+
+    /// Rebuilds a replayed retry entry. The digest covers the transaction's payloads so far.
+    fn rebuild(
+        &mut self,
+        state: &mut State,
+        record: &CommittedRecord,
+        key: DedupKey,
+        payload: &[u8],
+        reply: Vec<u8>,
+    ) {
+        self.hash.update(&(payload.len() as u32).to_le_bytes());
+        self.hash.update(payload);
+        state.dedup.insert(Entry {
+            key,
+            digest: *self.hash.finalize().as_bytes(),
+            committed: Committed::Durable {
+                txn: record.txn,
+                first_lsn: self.first_lsn,
+                last_lsn: record.lsn,
+                reply,
+            },
+        });
+    }
 }
 fn tape_error(error: EngineError) -> Error {
     match error.kind {
         ErrorKind::IdempotencyConflict => Error::Rejected("idempotency"),
         ErrorKind::ResourceExhausted(resource) => Error::Rejected(resource),
         ErrorKind::InvalidInput => Error::Rejected("invalid_input"),
+        ErrorKind::Conflict => Error::Rejected("conflict"),
         ErrorKind::CorruptIndex => Error::Rejected("corrupt_index"),
         ErrorKind::Poisoned => Error::Poisoned,
         ErrorKind::Storage(error) => error,
@@ -274,8 +359,9 @@ impl StateMachine for Machine {
     fn publish(&mut self, records: &[CommittedRecord]) {
         let shared = self.state.clone();
         let mut state = shared.lock().unwrap_or_else(|poison| poison.into_inner());
+        let first = records.first().map_or(0, |record| record.lsn);
         for record in records {
-            if let Err(mut error) = self.install(&mut state, record, false) {
+            if let Err(mut error) = self.install(&mut state, record, first, false) {
                 error.outcome = Outcome::Committed;
                 state.fail(error);
                 break;
@@ -310,7 +396,7 @@ impl StateMachine for Machine {
                 recovery_checkpoint(self.io.as_ref(), &self.dir, &shared)?;
             }
             let mut state = lock(&shared).map_err(tape_error)?;
-            self.install(&mut state, record, true).map_err(tape_error)
+            self.install(&mut state, record, u64::MAX, true).map_err(tape_error)
         })();
         if result.is_err() {
             if let Ok(mut state) = self.state.lock() {
@@ -347,8 +433,31 @@ mod tests {
     use zerodb_tape::{Durability, Kind, RecordInput, SimDisk};
 
     #[test]
-    fn fact_and_forget_are_not_applied_as_turns() {
-        for kind in [Kind::Fact, Kind::Forget] {
+    fn forget_and_mixed_fact_batches_reserve_nothing() {
+        let turn = crate::turn::encode(
+            "a",
+            "s",
+            0,
+            &NewTurn { role: Role::User, content: vec![], meta: vec![] },
+            Some("k"),
+        )
+        .unwrap();
+        let fact = crate::fact::encode(&crate::fact::Fact {
+            key: "k".into(),
+            content: vec![1],
+            meta: vec![],
+            agent: "a".into(),
+            source_refs: vec![],
+            idem_key: Some("k".into()),
+            tombstone: false,
+        })
+        .unwrap();
+        for (case, records) in [
+            ("forget", vec![(Kind::Forget, &turn)]),
+            ("fact then turn", vec![(Kind::Fact, &fact), (Kind::Turn, &turn)]),
+            ("turn then fact", vec![(Kind::Turn, &turn), (Kind::Fact, &fact)]),
+            ("one key twice", vec![(Kind::Fact, &fact), (Kind::Fact, &fact)]),
+        ] {
             let opts = EngineOptions::default();
             let mut initial = State::new(&opts);
             initial.tenants.insert("t", 1, 1, 10_000).unwrap();
@@ -359,21 +468,17 @@ mod tests {
                 opts,
             )
             .unwrap();
-            let content = crate::turn::encode(
-                "a",
-                "s",
-                0,
-                &NewTurn { role: Role::User, content: vec![], meta: vec![] },
-                None,
-            )
-            .unwrap();
-            let mut batch = PreparedBatch::new(
-                vec![RecordInput { kind, tenant_id: 1, content }],
-                Durability::Durable,
-            )
-            .unwrap();
-            assert!(matches!(machine.prepare(&mut batch), Prepare::Reject(_)));
-            assert_eq!(machine.lsn, 0);
+            let records = records
+                .into_iter()
+                .map(|(kind, content)| RecordInput { kind, tenant_id: 1, content: content.clone() })
+                .collect();
+            let mut batch = PreparedBatch::new(records, Durability::Durable).unwrap();
+            let Prepare::Reject(error) = machine.prepare(&mut batch) else {
+                panic!("{case}: expected rejection");
+            };
+            assert!(matches!(EngineError::write(error).kind, ErrorKind::InvalidInput), "{case}");
+            assert_eq!(machine.lsn, 0, "{case}");
+            assert!(machine.facts.is_empty() && machine.dedup.entries.is_empty(), "{case}");
         }
     }
 
@@ -483,7 +588,7 @@ mod tests {
         initial.txn = 1;
         for age in 2..=3 {
             initial.dedup.insert(Entry {
-                key: DedupKey(1, age.to_string(), "old".into()),
+                key: DedupKey(1, Scope::Session(age.to_string()), "old".into()),
                 digest: [0; 32],
                 committed: Committed::Durable {
                     txn: 1,
@@ -530,9 +635,15 @@ mod tests {
         );
         let checkpoint = crate::checkpoint::load(disk.as_ref(), std::path::Path::new("db"), &opts);
         for age in 2..=3 {
-            assert!(checkpoint.dedup.get(&DedupKey(1, age.to_string(), "old".into())).is_some());
+            assert!(checkpoint
+                .dedup
+                .get(&DedupKey(1, Scope::Session(age.to_string()), "old".into()))
+                .is_some());
         }
-        assert!(checkpoint.dedup.get(&DedupKey(1, "new1".into(), "key".into())).is_none());
+        assert!(checkpoint
+            .dedup
+            .get(&DedupKey(1, Scope::Session("new1".into()), "key".into()))
+            .is_none());
         machine.publish(&records);
         assert!(machine.dedup.entries.is_empty());
         assert_eq!(shared.lock().unwrap().dedup.entries.len(), 2);

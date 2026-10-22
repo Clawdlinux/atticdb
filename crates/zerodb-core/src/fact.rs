@@ -2,7 +2,7 @@
 
 use crate::turn::{bytes, CodecError, Cursor};
 
-/// A fact revision. The engine does not apply facts yet.
+/// A fact revision. One fact record per write.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Fact {
     /// Tenant-scoped UTF-8 key, at most 1024 bytes.

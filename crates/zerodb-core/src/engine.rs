@@ -1,6 +1,7 @@
 use crate::checkpoint::{self, Worker};
-use crate::dedup::DedupKey;
+use crate::dedup::{self, digest, DedupKey};
 use crate::error::{lock, Result};
+use crate::fact::Fact;
 use crate::machine::{Machine, REPLY_DEDUPLICATED};
 use crate::session::{address, Key};
 use crate::state::State;
@@ -9,7 +10,9 @@ use crate::{EngineError, EngineOptions, ErrorKind, NewTurn, Role};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, TryLockError};
-use zerodb_tape::{Clock, Committed, Durability, Io, Kind, RecordInput, StdIo, SystemClock, Tape};
+use zerodb_tape::{
+    Clock, Committed, Digest, Durability, Io, Kind, RecordInput, StdIo, SystemClock, Tape,
+};
 
 /// A session's isolation boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -32,6 +35,28 @@ pub struct Appended {
     pub last_lsn: u64,
     /// Dense session sequences, starting at 1.
     pub seqs: Vec<u64>,
+    /// True when a retry key returned an earlier receipt and nothing new was written.
+    pub deduplicated: bool,
+}
+/// A fact revision to store under a tenant-scoped key.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NewFact {
+    /// UTF-8 key, 1 to 1024 bytes. Hierarchy is addressing only.
+    pub key: String,
+    /// Opaque content, at most 4 MiB.
+    pub content: Vec<u8>,
+    /// Opaque metadata, at most 64 KiB.
+    pub meta: Vec<u8>,
+    /// Attribution only, at most 255 bytes. It does not change the key.
+    pub agent: String,
+}
+/// A durable fact write receipt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FactWritten {
+    /// Original transaction, including on retries.
+    pub txn: u64,
+    /// The revision's LSN. A later conditional write passes it as `if_lsn`.
+    pub lsn: u64,
     /// True when a retry key returned an earlier receipt and nothing new was written.
     pub deduplicated: bool,
 }
@@ -115,6 +140,8 @@ pub struct Metrics {
     pub window_reads: u64,
     /// Registered tenants.
     pub tenants: usize,
+    /// Fact keys held, tombstones included.
+    pub facts: usize,
 }
 
 /// Writer availability. Reads retain the last durable view.
@@ -187,6 +214,8 @@ impl Engine {
             || opts.dedup_per_tenant == 0
             || opts.dedup_global == 0
             || opts.checkpoint_interval.is_zero()
+            || opts.max_facts == 0
+            || !(1..=4096).contains(&opts.fact_history)
         {
             return Err(EngineError::rejected(ErrorKind::InvalidInput));
         }
@@ -258,41 +287,15 @@ impl Engine {
                 .collect::<std::result::Result<Vec<_>, _>>()
         };
         let payloads = encode_all()?;
-        let digest = idem_key.map(|_| {
-            let mut hash = blake3::Hasher::new();
-            for payload in &payloads {
-                hash.update(&(payload.len() as u32).to_le_bytes());
-                hash.update(payload);
+        let digest = idem_key.map(|_| digest(payloads.iter().map(Vec::as_slice)));
+        let retry = idem_key
+            .zip(digest)
+            .map(|(id, digest)| (dedup::Scope::Session(scope.session.clone()), id, digest));
+        let (tenant, _creation) = match self.start(&scope.tenant, retry)? {
+            Start::Cached(Committed::Durable { txn, last_lsn, reply, .. }) => {
+                return self.receipt(turns.len() as u64, txn, last_lsn, &reply, true);
             }
-            *hash.finalize().as_bytes()
-        });
-        let mut tenant = {
-            let state = lock(&self.state)?;
-            let tenant = state.tenants.get(&scope.tenant);
-            if let (Some(tenant), Some(idem_key), Some(digest)) = (tenant, idem_key, digest) {
-                let key = DedupKey(tenant, scope.session.clone(), idem_key.to_owned());
-                if let Some(entry) = state.dedup.get(&key) {
-                    if let Some(error) = &state.failure {
-                        return Err(error.clone());
-                    }
-                    let Committed::Durable { txn, last_lsn, reply, .. } = entry.resolve(digest)?;
-                    // Read the tape watermark after taking the state lock, like window_snapshot.
-                    // Machine publication releases this lock before the tape advances its watermark.
-                    // Only covered receipts bypass the writer, so the next read cannot lag this ack.
-                    if last_lsn <= self.tape.durable_lsn() {
-                        drop(state);
-                        return self.receipt(turns.len() as u64, txn, last_lsn, &reply, true);
-                    }
-                }
-            }
-            tenant
-        };
-        let _creation = if tenant.is_none() {
-            let guard = lock(&self.tenant_creation)?;
-            tenant = lock(&self.state)?.tenants.get(&scope.tenant);
-            Some(guard)
-        } else {
-            None
+            Start::Write(tenant, creation) => (tenant, creation),
         };
         let records = |payloads: Vec<Vec<u8>>| {
             let mut records = Vec::with_capacity(payloads.len() + 1);
@@ -332,7 +335,7 @@ impl Engine {
             };
             let result = self
                 .tape
-                .append_with_digest(records(payloads), Durability::Durable, digest)
+                .append_with_digest(records(payloads), Durability::Durable, digest, None)
                 .map_err(EngineError::write);
             drop(pin);
             match result {
@@ -350,6 +353,134 @@ impl Engine {
         Err(EngineError::rejected(ErrorKind::ResourceExhausted("hot_pages")))
     }
 
+    /// Answers a covered retry from published state, else resolves the tenant.
+    /// An unknown tenant holds the creation guard until the write returns.
+    fn start(
+        &self,
+        tenant: &str,
+        retry: Option<(dedup::Scope, &str, Digest)>,
+    ) -> Result<Start<'_>> {
+        {
+            let state = lock(&self.state)?;
+            let id = state.tenants.get(tenant);
+            if let (Some(id), Some((scope, idem_key, digest))) = (id, retry) {
+                if let Some(entry) = state.dedup.get(&DedupKey(id, scope, idem_key.to_owned())) {
+                    if let Some(error) = &state.failure {
+                        return Err(error.clone());
+                    }
+                    let committed = entry.resolve(digest)?;
+                    let Committed::Durable { last_lsn, .. } = committed;
+                    // Read the tape watermark after taking the state lock, like window_snapshot.
+                    // Machine publication releases this lock before the tape advances its watermark.
+                    // Only covered receipts bypass the writer, so the next read cannot lag this ack.
+                    if last_lsn <= self.tape.durable_lsn() {
+                        return Ok(Start::Cached(committed));
+                    }
+                }
+            }
+            if id.is_some() {
+                return Ok(Start::Write(id, None));
+            }
+        }
+        let guard = lock(&self.tenant_creation)?;
+        Ok(Start::Write(lock(&self.state)?.tenants.get(tenant), Some(guard)))
+    }
+
+    /// Stores a fact revision. It supersedes the key's current value by LSN.
+    ///
+    /// `if_lsn` makes the write conditional on the key's current LSN, 0 meaning no current
+    /// value. A mismatch is `Conflict`. A retry key returns the original receipt before the
+    /// condition is checked, so `if_lsn` is not part of a retry's identity.
+    pub fn fact_put(
+        &self,
+        tenant: &str,
+        fact: NewFact,
+        idem_key: Option<&str>,
+        if_lsn: Option<u64>,
+    ) -> Result<FactWritten> {
+        self.write_fact(tenant, fact, false, idem_key, if_lsn)
+    }
+
+    /// Writes a tombstone. The key then has no current value. A tombstone keeps its key slot.
+    pub fn fact_delete(
+        &self,
+        tenant: &str,
+        key: &str,
+        agent: &str,
+        idem_key: Option<&str>,
+        if_lsn: Option<u64>,
+    ) -> Result<FactWritten> {
+        let fact = NewFact { key: key.into(), content: vec![], meta: vec![], agent: agent.into() };
+        self.write_fact(tenant, fact, true, idem_key, if_lsn)
+    }
+
+    fn write_fact(
+        &self,
+        tenant: &str,
+        fact: NewFact,
+        tombstone: bool,
+        idem_key: Option<&str>,
+        if_lsn: Option<u64>,
+    ) -> Result<FactWritten> {
+        if tenant.len() > 255 {
+            return Err(EngineError::rejected(ErrorKind::InvalidInput));
+        }
+        let NewFact { key, content, meta, agent } = fact;
+        let idem = idem_key.map(str::to_owned);
+        let fact =
+            Fact { key, content, meta, agent, source_refs: vec![], idem_key: idem, tombstone };
+        let payload = crate::fact::encode(&fact)?;
+        let digest = idem_key.map(|_| digest([payload.as_slice()]));
+        let retry =
+            idem_key.zip(digest).map(|(id, digest)| (dedup::Scope::Fact(fact.key), id, digest));
+        let (committed, cached) = match self.start(tenant, retry)? {
+            Start::Cached(committed) => (committed, true),
+            Start::Write(id, _creation) => {
+                let mut records = Vec::with_capacity(2);
+                if id.is_none() {
+                    records.push(RecordInput {
+                        kind: Kind::TenantCreate,
+                        tenant_id: 0,
+                        content: tenant.as_bytes().to_vec(),
+                    });
+                }
+                records.push(RecordInput {
+                    kind: Kind::Fact,
+                    tenant_id: id.unwrap_or(0),
+                    content: payload,
+                });
+                let committed = self
+                    .tape
+                    .append_with_digest(records, Durability::Durable, digest, if_lsn)
+                    .map_err(EngineError::write)?;
+                (committed, false)
+            }
+        };
+        let Committed::Durable { txn, last_lsn, reply, .. } = committed;
+        self.published(|| {
+            Ok(FactWritten {
+                txn,
+                lsn: last_lsn,
+                deduplicated: cached || reply == [REPLY_DEDUPLICATED],
+            })
+        })
+    }
+
+    /// Runs a receipt builder after the writer acknowledged a commit. Publication failures
+    /// and receipt errors report `Committed`.
+    fn published<T>(&self, build: impl FnOnce() -> Result<T>) -> Result<T> {
+        (|| {
+            if let Some(error) = &lock(&self.state)?.failure {
+                return Err(error.clone());
+            }
+            build()
+        })()
+        .map_err(|mut error: EngineError| {
+            error.outcome = zerodb_tape::Outcome::Committed;
+            error
+        })
+    }
+
     /// Builds a receipt from a writer reply: the 8-byte first sequence, plus the
     /// cached-reply marker when preparation answered from the dedup table.
     fn receipt(
@@ -360,10 +491,7 @@ impl Engine {
         reply: &[u8],
         cached: bool,
     ) -> Result<Appended> {
-        (|| {
-            if let Some(error) = &lock(&self.state)?.failure {
-                return Err(error.clone());
-            }
+        self.published(|| {
             let (seq, marked) = match reply {
                 [seq @ .., REPLY_DEDUPLICATED] if seq.len() == 8 => (seq, true),
                 seq => (seq, false),
@@ -384,10 +512,6 @@ impl Engine {
                 seqs: (seq..end).collect(),
                 deduplicated: cached || marked,
             })
-        })()
-        .map_err(|mut error: EngineError| {
-            error.outcome = zerodb_tape::Outcome::Committed;
-            error
         })
     }
 
@@ -416,14 +540,7 @@ impl Engine {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        let digest = idem_key.map(|_| {
-            let mut hash = blake3::Hasher::new();
-            for record in &records {
-                hash.update(&(record.content.len() as u32).to_le_bytes());
-                hash.update(&record.content);
-            }
-            *hash.finalize().as_bytes()
-        });
+        let digest = idem_key.map(|_| digest(records.iter().map(|r| r.content.as_slice())));
         let key = Key(tenant, scope.agent.clone(), scope.session.clone());
         let pin = match self.pin(key.clone()) {
             Err(EngineError { kind: ErrorKind::ResourceExhausted("hot_pages"), .. }) => {
@@ -432,7 +549,7 @@ impl Engine {
             }
             result => result?,
         };
-        let reply = self.tape.enqueue_sim(records, digest)?;
+        let reply = self.tape.enqueue_sim(records, digest, None)?;
         Ok(SimAppend { engine: self, _pin: pin, count: turns.len() as u64, reply })
     }
 
@@ -630,6 +747,7 @@ impl Engine {
             checkpoint_state_lock_ns: state.checkpoint_lock_ns,
             window_reads: self.reads.load(Ordering::Relaxed),
             tenants: state.tenants.entries.len(),
+            facts: state.facts.map.len(),
         })
     }
 }
@@ -666,6 +784,11 @@ impl SimAppend<'_> {
             }
         }
     }
+}
+
+enum Start<'a> {
+    Cached(Committed),
+    Write(Option<u32>, Option<std::sync::MutexGuard<'a, ()>>),
 }
 
 struct Pin<'a> {
