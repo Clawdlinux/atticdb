@@ -1,6 +1,4 @@
-use crate::support::{
-    self, init, init_config, kill_holder, text, Dir, Holders, Mcp, Process, TOKEN_A,
-};
+use crate::support::{self, init, init_config, kill_holder, text, Dir, Holders, Mcp, TOKEN_A};
 use serde_json::{json, Value};
 use std::fs::File;
 use std::io::{Read, Write};
@@ -338,7 +336,9 @@ fn tool_calls_over_stdio() {
 #[test]
 fn escaped_fact_page_fits_the_response_cap() {
     let dir = Dir::new();
-    let running = support::serve(support::sim_engine(&SimDisk::new(4), None, 100), &dir, 16);
+    // 200 back-to-back connections can outrun reaping under a busy suite; 16 then answers 503.
+    let cap = zerodb::serve::MAX_CONNECTIONS;
+    let running = support::serve(support::sim_engine(&SimDisk::new(4), None, 100), &dir, cap);
     let url = format!("http://{}", running.server.tcp_addr().unwrap());
     let args = ["--url", &url, "--token-file", &private_file(&dir, "t", TOKEN_A)];
     let mut mcp = Mcp::start(&dir.0, &args, None);
@@ -490,7 +490,8 @@ fn launch_race_starts_one_server() {
         use std::os::unix::net::UnixStream;
         assert!(kill_holder(&data));
         let serve = ["serve", "--config", "c.json", "--data-dir", "d", "--listen", "none"];
-        let mut holder = Process::spawn(&dir.0, &[&serve[..], &["--exit-on-poison"]].concat());
+        let mut holder =
+            support::Process::spawn(&dir.0, &[&serve[..], &["--exit-on-poison"]].concat());
         holder.ready();
         let socket = data.join(zerodb::listen::SOCKET_NAME);
         let via = Via::Unix(socket.clone());
@@ -572,7 +573,7 @@ fn unknown_outcome_never_downgrades() {
     let serve = ["serve", "--config", "c.json", "--data-dir", "d", "--listen", "none"];
     let url = format!("unix://{}", data.join(zerodb::listen::SOCKET_NAME).display());
     for (case, restart) in [("restarted after 1 s", true), ("no restart, 3 s deadline", false)] {
-        let mut server = Process::spawn(&dir.0, &serve);
+        let mut server = support::Process::spawn(&dir.0, &serve);
         server.ready();
         let deadline = if restart { "30s" } else { "3s" };
         let args = ["--url", &url, "--retry-deadline", deadline];
@@ -587,7 +588,7 @@ fn unknown_outcome_never_downgrades() {
             std::thread::sleep(Duration::from_secs(1));
             server.child.kill().unwrap();
             server.wait();
-            server = Process::spawn(&dir.0, &serve);
+            server = support::Process::spawn(&dir.0, &serve);
             server.ready();
             let result = mcp.response()["result"].clone();
             assert_committed(&result, case);
