@@ -70,10 +70,10 @@ pub fn make_spare(io: Arc<dyn Io>, dir: &Path, size: u64, floor: u64) -> Result<
     io.sync_dir(dir).map_err(|e| Error::SyncFailed(e.to_string()))
 }
 
-/// Claims the space at once, then syncs each MiB so no tape sync waits on a large flush.
+/// Claims the space at once. Small synced chunks keep tape syncs from queuing behind the fill.
 fn fill_zeros(io: &dyn Io, file: FileId, size: u64) -> Result<()> {
     io.allocate(file, size)?;
-    let zeros = vec![0; 1 << 20];
+    let zeros = vec![0; 256 << 10];
     let mut offset = 0;
     while offset < size {
         let count = (size - offset).min(zeros.len() as u64) as usize;
