@@ -20,7 +20,8 @@ pub mod turn;
 #[cfg(feature = "sim")]
 pub use engine::SimAppend;
 pub use engine::{
-    Appended, Engine, FactWritten, Health, Metrics, NewFact, Scope, Turn, Window, WindowQuery,
+    Appended, Engine, FactHistory, FactPage, FactQuery, FactWritten, Health, Metrics, NewFact,
+    Revision, Scope, StoredFact, Turn, Window, WindowQuery,
 };
 pub use error::{EngineError, ErrorKind};
 pub use options::EngineOptions;

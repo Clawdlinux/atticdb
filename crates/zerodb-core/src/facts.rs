@@ -11,6 +11,12 @@ pub(crate) struct Rev {
     pub(crate) deleted: bool,
 }
 
+/// Revisions a reader at `snapshot` may see, oldest first. Its current value is the newest
+/// one, unless that is a tombstone. Never an older revision.
+pub(crate) fn visible(revs: &[Rev], snapshot: u64) -> &[Rev] {
+    &revs[..revs.partition_point(|rev| rev.lsn <= snapshot)]
+}
+
 /// LSN of the current value, or 0 when the key has none.
 pub(crate) fn current(newest: Option<&Rev>) -> u64 {
     newest.filter(|rev| !rev.deleted).map_or(0, |rev| rev.lsn)

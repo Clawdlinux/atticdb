@@ -2,11 +2,13 @@ use crate::checkpoint::{self, Worker};
 use crate::dedup::{self, digest, DedupKey};
 use crate::error::{lock, Result};
 use crate::fact::Fact;
+use crate::facts::{visible, Rev};
 use crate::machine::{Machine, REPLY_DEDUPLICATED};
 use crate::session::{address, Key};
 use crate::state::State;
 use crate::turn::{decode, encode};
 use crate::{EngineError, EngineOptions, ErrorKind, NewTurn, Role};
+use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, TryLockError};
@@ -59,6 +61,66 @@ pub struct FactWritten {
     pub lsn: u64,
     /// True when a retry key returned an earlier receipt and nothing new was written.
     pub deduplicated: bool,
+}
+/// A fact's current value.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredFact {
+    /// Tenant-scoped key.
+    pub key: String,
+    /// The revision's LSN, usable as `if_lsn`.
+    pub lsn: u64,
+    /// Commit timestamp from the tape.
+    pub commit_time_ns: u64,
+    /// Attribution of this revision.
+    pub agent: String,
+    /// Opaque content.
+    pub content: Vec<u8>,
+    /// Opaque metadata.
+    pub meta: Vec<u8>,
+}
+/// One revision of a fact key. A deleted revision has empty content and meta.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Revision {
+    /// The revision's LSN.
+    pub lsn: u64,
+    /// Commit timestamp from the tape.
+    pub commit_time_ns: u64,
+    /// Attribution of this revision.
+    pub agent: String,
+    /// True for a tombstone.
+    pub deleted: bool,
+    /// Opaque content.
+    pub content: Vec<u8>,
+    /// Opaque metadata.
+    pub meta: Vec<u8>,
+}
+/// A key's revisions, newest first, at most `fact_history`.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct FactHistory {
+    /// Whole revisions, newest first.
+    pub revisions: Vec<Revision>,
+    /// True when older revisions exist than the ones returned.
+    pub truncated: bool,
+}
+/// A key-ordered listing of current facts under a byte prefix.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FactQuery {
+    /// Byte prefix. End it with `/` for path semantics.
+    pub prefix: String,
+    /// Exclusive cursor: a previous page's `next`.
+    pub after: Option<String>,
+    /// Maximum facts per page, at least 1.
+    pub limit: usize,
+    /// Content and meta bytes per page. The first fact is always returned.
+    pub max_bytes: usize,
+}
+/// One page of current facts in key order.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct FactPage {
+    /// Current facts. Deleted keys are skipped.
+    pub facts: Vec<StoredFact>,
+    /// The last key the walk finished with, returned or skipped. None once it left the prefix.
+    pub next: Option<String>,
 }
 /// A durable turn returned in sequence order.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -140,6 +202,9 @@ pub struct Metrics {
     pub window_reads: u64,
     /// Registered tenants.
     pub tenants: usize,
+    /// Tape::read calls issued by fact reads. A budget-cut call adds 1 read for the entry it
+    /// left out.
+    pub fact_reads: u64,
     /// Fact keys held, tombstones included.
     pub facts: usize,
     /// Revision pointers held, at most `fact_history + 2` per key.
@@ -167,6 +232,7 @@ pub struct Engine {
     dir: PathBuf,
     tenant_creation: Mutex<()>,
     reads: AtomicU64,
+    fact_reads: AtomicU64,
 }
 impl std::fmt::Debug for Engine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -267,6 +333,7 @@ impl Engine {
             dir,
             tenant_creation: Mutex::new(()),
             reads: AtomicU64::new(0),
+            fact_reads: AtomicU64::new(0),
         })
     }
 
@@ -720,6 +787,128 @@ impl Engine {
         }
         Ok(Window { turns, truncated })
     }
+    /// Returns a key's current value at a durable snapshot, or None when it has none.
+    pub fn fact_get(&self, tenant: &str, key: &str) -> Result<Option<StoredFact>> {
+        let (id, rev) = {
+            let state = lock(&self.state)?;
+            let snapshot = self.tape.durable_lsn();
+            let Some(id) = state.tenants.get(tenant) else {
+                return Ok(None);
+            };
+            let revs = state.facts.map.get(&(id, key.to_owned()));
+            match revs.and_then(|revs| visible(revs, snapshot).last()).filter(|rev| !rev.deleted) {
+                Some(rev) => (id, *rev),
+                None => return Ok(None),
+            }
+        };
+        let (mut read, _) = self.read_facts(id, [(key, rev)], usize::MAX)?;
+        Ok(read.pop().map(stored))
+    }
+
+    /// Returns at most `fact_history` revisions, newest first, whose content and meta total at
+    /// most `max_bytes`. The newest revision is always returned.
+    pub fn fact_history(&self, tenant: &str, key: &str, max_bytes: usize) -> Result<FactHistory> {
+        let (id, revs, history) = {
+            let state = lock(&self.state)?;
+            let snapshot = self.tape.durable_lsn();
+            let Some(id) = state.tenants.get(tenant) else {
+                return Ok(FactHistory::default());
+            };
+            let revs = state.facts.map.get(&(id, key.to_owned()));
+            let revs = revs.map_or(&[][..], |revs| visible(revs, snapshot));
+            // One more than shown, so `truncated` needs no extra read.
+            let keep = revs.len().saturating_sub(state.facts.history + 1);
+            (id, revs[keep..].to_vec(), state.facts.history)
+        };
+        let newest = revs.iter().rev().take(history).map(|rev| (key, *rev));
+        let (read, cut) = self.read_facts(id, newest, max_bytes)?;
+        let revisions = read
+            .into_iter()
+            .map(|(rev, commit_time_ns, fact)| Revision {
+                lsn: rev.lsn,
+                commit_time_ns,
+                agent: fact.agent,
+                deleted: rev.deleted,
+                content: fact.content,
+                meta: fact.meta,
+            })
+            .collect();
+        Ok(FactHistory { revisions, truncated: cut || revs.len() > history })
+    }
+
+    /// Lists current facts under a prefix in key order. A call visits at most 1,024 keys,
+    /// deleted ones included, so `next` can follow a page with no facts.
+    pub fn fact_list(&self, tenant: &str, query: FactQuery) -> Result<FactPage> {
+        if query.limit == 0 {
+            return Err(EngineError::rejected(ErrorKind::InvalidInput));
+        }
+        let (id, picked, mut next) = {
+            let state = lock(&self.state)?;
+            let snapshot = self.tape.durable_lsn();
+            let Some(id) = state.tenants.get(tenant) else {
+                return Ok(FactPage::default());
+            };
+            let start = match &query.after {
+                Some(after) if *after >= query.prefix => Bound::Excluded((id, after.clone())),
+                _ => Bound::Included((id, query.prefix.clone())),
+            };
+            let (mut picked, mut next, mut last, mut visited) =
+                (Vec::new(), None, None::<&String>, 0);
+            for ((owner, key), revs) in state.facts.map.range((start, Bound::Unbounded)) {
+                if *owner != id || !key.starts_with(&query.prefix) {
+                    break;
+                }
+                if picked.len() == query.limit || visited == 1024 {
+                    next = last.cloned();
+                    break;
+                }
+                visited += 1;
+                last = Some(key);
+                if let Some(rev) = visible(revs, snapshot).last().filter(|rev| !rev.deleted) {
+                    picked.push((key.clone(), *rev));
+                }
+            }
+            (id, picked, next)
+        };
+        let pairs = picked.iter().map(|(key, rev)| (key.as_str(), *rev));
+        let (read, cut) = self.read_facts(id, pairs, query.max_bytes)?;
+        let facts: Vec<_> = read.into_iter().map(stored).collect();
+        if cut {
+            next = facts.last().map(|fact| fact.key.clone());
+        }
+        Ok(FactPage { facts, next })
+    }
+
+    /// Reads fact frames in order until the next would pass `max_bytes`. The first is always
+    /// returned. Returns whether the budget cut the reads; the cut entry's read is counted.
+    fn read_facts<'k>(
+        &self,
+        tenant: u32,
+        revs: impl IntoIterator<Item = (&'k str, Rev)>,
+        max_bytes: usize,
+    ) -> Result<(Vec<ReadFact>, bool)> {
+        let corrupt = || EngineError::rejected(ErrorKind::CorruptIndex);
+        let (mut read, mut bytes) = (Vec::new(), 0usize);
+        for (key, rev) in revs {
+            self.fact_reads.fetch_add(1, Ordering::Relaxed);
+            let frame = self.tape.read(rev.lsn)?.ok_or_else(corrupt)?;
+            let fact = crate::fact::decode(&frame.payload).map_err(|_| corrupt())?;
+            if frame.header.kind != Kind::Fact
+                || frame.header.tenant_id != tenant
+                || fact.key != key
+                || fact.tombstone != rev.deleted
+            {
+                return Err(corrupt());
+            }
+            bytes = bytes.saturating_add(fact.content.len() + fact.meta.len());
+            if bytes > max_bytes && !read.is_empty() {
+                return Ok((read, true));
+            }
+            read.push((rev, frame.header.commit_time_ns, fact));
+        }
+        Ok((read, false))
+    }
+
     /// Waits for the checkpoint worker to install a snapshot. Never runs checkpoint I/O on the writer.
     pub fn checkpoint(&self) -> Result<u64> {
         self.worker.flush()
@@ -749,6 +938,7 @@ impl Engine {
             checkpoint_state_lock_ns: state.checkpoint_lock_ns,
             window_reads: self.reads.load(Ordering::Relaxed),
             tenants: state.tenants.entries.len(),
+            fact_reads: self.fact_reads.load(Ordering::Relaxed),
             facts: state.facts.map.len(),
             fact_revisions: state.facts.map.values().map(Vec::len).sum(),
         })
@@ -792,6 +982,14 @@ impl SimAppend<'_> {
 enum Start<'a> {
     Cached(Committed),
     Write(Option<u32>, Option<std::sync::MutexGuard<'a, ()>>),
+}
+
+/// A fact frame read for a revision, with its commit time.
+type ReadFact = (Rev, u64, Fact);
+
+fn stored((rev, commit_time_ns, fact): ReadFact) -> StoredFact {
+    let Fact { key, agent, content, meta, .. } = fact;
+    StoredFact { key, lsn: rev.lsn, commit_time_ns, agent, content, meta }
 }
 
 struct Pin<'a> {

@@ -1,5 +1,5 @@
 use crate::support;
-use crate::support::facts::new_fact;
+use crate::support::facts::{new_fact, query};
 use crate::support::sessions::*;
 use crate::support::TestDir;
 use std::collections::HashMap;
@@ -254,6 +254,15 @@ fn checkpoint_bounds_replay_and_corrupt_derived_data_falls_back() {
     engine.append(&scope("s"), (100..107).map(turn).collect(), Some("tail")).unwrap();
     let after = engine.fact_put("tenant", new_fact("fact/key", 2, "a"), None, None).unwrap();
     let oracle = engine.window(&scope("s"), WindowQuery::Last(200)).unwrap();
+    let facts = |engine: &Engine| {
+        (
+            engine.fact_get("tenant", "fact/key").unwrap(),
+            engine.fact_history("tenant", "fact/key", usize::MAX).unwrap(),
+            engine.fact_list("tenant", query("", 100, usize::MAX)).unwrap(),
+        )
+    };
+    let fact_oracle = facts(&engine);
+    assert_eq!(fact_oracle.1.revisions.len(), 2);
     drop(engine);
     let engine = open(disk.clone(), options());
     assert_eq!(engine.metrics().unwrap().replayed_records, 8);
@@ -276,6 +285,7 @@ fn checkpoint_bounds_replay_and_corrupt_derived_data_falls_back() {
     assert_eq!(engine.metrics().unwrap().checkpoint_warnings, 1);
     assert_eq!(engine.metrics().unwrap().replayed_records, 110);
     assert_eq!(engine.window(&scope("s"), WindowQuery::Last(200)).unwrap(), oracle);
+    assert_eq!(facts(&engine), fact_oracle, "full replay rebuilds the same fact reads");
     let retry = engine.fact_put("tenant", new_fact("fact/key", 1, "a"), Some("f"), None).unwrap();
     assert!(retry.deduplicated && retry.lsn == before.lsn && retry.txn == before.txn);
     engine.fact_put("tenant", new_fact("fact/key", 3, "a"), None, Some(after.lsn)).unwrap();
