@@ -12,6 +12,7 @@ const USAGE: &str = "usage:
   zerodb serve --config <path> [--data-dir <dir>] [--listen <addr>|none] [--unix-socket <path>]
                [--unix-socket-group <gid or name>] [--exit-on-poison]
   zerodb recover --truncate-at <lsn> --data-dir <dir>
+  zerodb stats --url unix:///path | --data-dir <dir>
   zerodb mcp [--url unix:///path|http://127.0.0.1:<port>] [--data-dir <dir>] [--config <path>]
              [--tenant <name>] [--token-file <path>] [--agent <name>] [--session <name>]
              [--retry-deadline <n>s|<n>ms]
@@ -29,6 +30,7 @@ fn main() -> ExitCode {
             )
             .and_then(serve),
             "recover" => flags(rest, &["--truncate-at", "--data-dir"], &[]).and_then(recover),
+            "stats" => flags(rest, &["--url", "--data-dir"], &[]).and_then(stats),
             "mcp" => {
                 let valued = ["--url", "--data-dir", "--config", "--tenant", "--token-file"];
                 let more = ["--agent", "--session", "--retry-deadline"];
@@ -97,4 +99,12 @@ fn serve(mut flags: HashMap<String, String>) -> Option<u8> {
 fn recover(mut flags: HashMap<String, String>) -> Option<u8> {
     let lsn = flags.remove("--truncate-at")?.parse().ok()?;
     Some(zerodb::serve::recover(Path::new(&flags.remove("--data-dir")?), lsn))
+}
+
+fn stats(mut flags: HashMap<String, String>) -> Option<u8> {
+    let (url, dir) = (flags.remove("--url"), flags.remove("--data-dir"));
+    if url.is_some() == dir.is_some() {
+        return None;
+    }
+    Some(zerodb::ops::stats(url.as_deref(), dir.as_deref().map(Path::new)))
 }

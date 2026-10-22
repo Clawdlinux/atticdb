@@ -45,6 +45,10 @@ Send `Authorization: Bearer <token>`. The token picks the tenant. On TCP the `Ho
 | `POST /v1/append` | `{"agent", "session", "idem_key", "turns": [{"role", "content", "meta"?}]}` | `{"outcome": "committed", "deduplicated", "txn", "first_lsn", "last_lsn", "seqs"}` |
 | `GET /v1/window` | `?agent=&session=` plus `last=N`, or `since_seq=S` with an optional `limit=N`. Optional `max_bytes=B` | `{"turns": [{"seq", "lsn", "commit_time_ns", "role", "content", "meta"}], "truncated"}` |
 | `GET /healthz` | No token | `{"status": "ok" or "read_only", "instance"}`. 503 with `"poisoned"` |
+| `GET /v1/stats` | Unix socket only, no token | One flat object: `instance`, `health`, `durable_lsn`, tenant and fact counts, writer groups, checkpoint and lock timings, tape-index memory. Counters cover this open |
+
+`/v1/stats` counts activity across every tenant, so no tenant token can read it. Whoever can open the socket can, which the socket's mode and `--unix-socket-group` decide. On TCP it is 404 behind the token.
+`zerodb stats --data-dir <dir>` or `--url unix:///path` prints it as sorted `key=value` lines for grep. It connects once and never starts a server. Exit 0, 1 when no server answers, 2 on bad flags.
 
 - `role` is `system`, `user`, `assistant` or `tool`. `meta` is a JSON object, at most 64 KiB. `idem_key` is required, 1 to 128 bytes.
 - `last` and `limit` are capped at 1,000. `max_bytes` defaults to 1 MiB and is capped at 8 MiB. Turns are never cut. `truncated` says the budget, not the query, ended the window.

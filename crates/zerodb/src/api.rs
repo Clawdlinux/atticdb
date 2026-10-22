@@ -1,7 +1,7 @@
 //! HTTP routes: `POST /v1/append`, `GET /v1/window`, `GET /healthz`, and the fact routes
 //! `POST /v1/facts/put`, `POST /v1/facts/delete`, `GET /v1/facts/get`,
 //! `GET /v1/facts/history` and `GET /v1/facts/list`. Fact keys travel in bodies and query
-//! strings, never in paths.
+//! strings, never in paths. `GET /v1/stats` answers on the Unix socket only.
 
 use crate::auth::{self, Auth};
 use crate::http::{Budget, Head, Response};
@@ -36,6 +36,8 @@ const ROLES: [(Role, &str); 4] = [
 pub enum Route {
     /// `GET /healthz`, no token.
     Health,
+    /// `GET /v1/stats`, Unix socket only, no token.
+    Stats,
     /// `POST /v1/append`.
     Append,
     /// `GET /v1/window`.
@@ -72,6 +74,11 @@ pub fn check(auth: &Auth, head: &Head, tcp: bool) -> Result<(Route, Option<Strin
     if (head.method.as_str(), head.path()) == ("GET", "/healthz") {
         return Ok((Route::Health, None));
     }
+    // Stats count activity across every tenant, so no tenant token may read them. The
+    // socket's file permissions decide who can. On TCP it is an unknown route behind the token.
+    if !tcp && (head.method.as_str(), head.path()) == ("GET", "/v1/stats") {
+        return Ok((Route::Stats, None));
+    }
     let tenant = auth.tenant(head).ok_or_else(auth::unauthorized)?.to_owned();
     match ROUTES.iter().find(|(_, path, _)| *path == head.path()) {
         Some((method, _, route)) if *method == head.method => Ok((*route, Some(tenant))),
@@ -96,12 +103,55 @@ pub(crate) fn loopback_host(value: &[u8]) -> bool {
 
 /// `GET /healthz`. Read-only stays 200 on purpose: only a write can clear it.
 pub fn health(engine: &Engine, instance: &str) -> Response {
-    let (status, text) = match engine.health() {
+    let (status, text) = health_status(engine);
+    Response::json(status, &json!({"status": text, "instance": instance}))
+}
+
+fn health_status(engine: &Engine) -> (u16, &'static str) {
+    match engine.health() {
         Health::Ok => (200, "ok"),
         Health::ReadOnly => (200, "read_only"),
         Health::Poisoned => (503, "poisoned"),
-    };
-    Response::json(status, &json!({"status": text, "instance": instance}))
+    }
+}
+
+/// `GET /v1/stats`: health and engine metrics as one flat object. Counters cover this open.
+pub fn stats(engine: &Engine, instance: &str) -> Response {
+    let Ok(m) = engine.metrics() else { return Response::error(503, "poisoned", None) };
+    let index = &m.tape_index;
+    Response::json(
+        200,
+        &json!({
+            "instance": instance,
+            "health": health_status(engine).1,
+            "durable_lsn": m.durable_lsn,
+            "tenants": m.tenants,
+            "facts": m.facts,
+            "fact_revisions": m.fact_revisions,
+            "dedup_entries": m.dedup_entries,
+            "dedup_window_effective": m.dedup_window_effective,
+            "hot_page_bytes": m.hot_page_bytes,
+            "writer_groups": m.writer_groups,
+            "writer_group_requests": m.writer_group_requests,
+            "superblock_installs": m.superblock_installs,
+            "replayed_records": m.replayed_records,
+            "window_reads": m.window_reads,
+            "fact_reads": m.fact_reads,
+            "checkpoint_watermark": m.checkpoint_watermark,
+            "checkpoint_files": m.checkpoint_files,
+            "checkpoint_saves": m.checkpoint_saves,
+            "checkpoint_warnings": m.checkpoint_warnings,
+            "checkpoint_pending_bytes": m.checkpoint_pending_bytes,
+            "checkpoint_buffer_peak_bytes": m.checkpoint_buffer_peak_bytes,
+            "checkpoint_snapshot_lock_ns": m.checkpoint_snapshot_lock_ns,
+            "checkpoint_state_lock_ns": m.checkpoint_state_lock_ns,
+            "tape_index_resident_bytes": index.resident_bytes,
+            "tape_index_budget_bytes": index.budget_bytes,
+            "tape_index_page_reloads": index.page_reloads,
+            "tape_index_page_evictions": index.page_evictions,
+            "tape_index_dirty_page_evictions": index.dirty_page_evictions,
+        }),
+    )
 }
 
 /// JSON trees in memory at once: request parses and window builds. An 8 MiB body like

@@ -431,14 +431,23 @@ fn startup_checks() {
                 server.ready();
                 let (status, first) = ctx.append(&unix, "one");
                 assert_eq!(status, 200, "{case}: {first}");
-                assert_eq!(ctx.append(&unix, "two").0, 200, "{case}");
+                let (status, second) = ctx.append(&unix, "two");
+                assert_eq!(status, 200, "{case}: {second}");
                 let cut = first["last_lsn"].to_string();
                 let data = ctx.data.to_str().unwrap();
+                let (status, stats) = ctx.run(&["stats", "--data-dir", data]).wait();
+                assert!(status.success(), "{case}: {stats}");
+                let durable = format!("durable_lsn={}", second["last_lsn"]);
+                for line in ["health=ok", &durable] {
+                    assert!(stats.lines().any(|got| got == line), "{case}: {line} in {stats}");
+                }
                 let recover = ["recover", "--truncate-at", &cut, "--data-dir", data];
                 let (status, stderr) = ctx.run(&recover).wait();
                 assert_eq!(status.code(), Some(75), "{case}: refused under the lock: {stderr}");
                 server.child.kill().unwrap();
                 server.wait();
+                let (status, stats) = ctx.run(&["stats", "--data-dir", data]).wait();
+                assert_eq!(status.code(), Some(1), "{case}: no server: {stats}");
                 let (status, report) = ctx.run(&recover).wait();
                 assert!(status.success(), "{case}: {report}");
                 let mut restarted = ctx.serve(&ctx.data, &[]);

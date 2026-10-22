@@ -12,6 +12,7 @@ pub mod http;
 pub mod launch;
 pub mod listen;
 pub mod mcp;
+pub mod ops;
 pub mod outcome;
 pub mod serve;
 
