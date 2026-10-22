@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
 use zerodb_tape::{Committed, FileId, Io};
+// Table CRC: a bitwise loop stalled the writer during checkpoints.
+use zerodb_tape::crc32c as crc;
 
 fn corrupt() -> EngineError {
     EngineError::rejected(ErrorKind::CorruptIndex)
@@ -52,16 +54,6 @@ impl Drop for PendingFile<'_> {
     }
 }
 
-fn crc(data: &[u8]) -> u32 {
-    let mut crc = !0u32;
-    for byte in data {
-        crc ^= u32::from(*byte);
-        for _ in 0..8 {
-            crc = (crc >> 1) ^ (0x82f6_3b78 & (0u32.wrapping_sub(crc & 1)));
-        }
-    }
-    !crc
-}
 fn exact(io: &dyn Io, id: FileId, mut off: u64, mut out: &mut [u8]) -> Result<()> {
     while !out.is_empty() {
         let n = io.read_at(id, off, out)?;
@@ -81,15 +73,15 @@ fn write(io: &dyn Io, id: FileId, off: &mut u64, payload: &[u8]) -> Result<(u64,
     *off += u64::from(len);
     Ok(location)
 }
+/// Appends `crc | len | payload` without a temporary buffer.
 fn buffer_record(out: &mut Vec<u8>, payload: &[u8]) -> (u64, u32) {
-    let mut record = vec![0; 4];
-    record.extend_from_slice(&((payload.len() + 8) as u32).to_le_bytes());
-    record.extend_from_slice(payload);
-    let sum = crc(&record[4..]);
-    record[..4].copy_from_slice(&sum.to_le_bytes());
-    let location = (out.len() as u64, record.len() as u32);
-    out.extend(record);
-    location
+    let (start, len) = (out.len(), payload.len() + 8);
+    out.extend_from_slice(&[0; 4]);
+    out.extend_from_slice(&(len as u32).to_le_bytes());
+    out.extend_from_slice(payload);
+    let sum = crc(&out[start + 4..]);
+    out[start..start + 4].copy_from_slice(&sum.to_le_bytes());
+    (start as u64, len as u32)
 }
 fn read(io: &dyn Io, id: FileId, off: u64) -> Result<(Vec<u8>, u32)> {
     read_hashed(io, id, off, None)

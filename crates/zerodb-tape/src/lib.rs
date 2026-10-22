@@ -29,6 +29,7 @@ pub(crate) mod simdisk;
 mod state_machine;
 pub(crate) mod writer;
 
+pub use crc32c::crc32c;
 pub use error::{Error, Result};
 pub use frame::{Digest, Frame, Header, Kind};
 pub use io::{Clock, FileId, Io, LockGuard, StdIo, SystemClock};
