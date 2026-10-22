@@ -330,7 +330,7 @@ Each repetition runs bare, Tape, then Engine. Summaries report medians and min/m
 Ratios are paired within repetitions before computing their median.
 `G1_HISTORY=0` skips only the separate history experiment.
 Each durable batch contains 4 turns. Content sizes cycle through 256, 512, 1024, 4096, and 8192 bytes.
-`G1_BATCH` accepts 1 through 256. `G1_TURNS` must be divisible by `16 * G1_BATCH`.
+`G1_BATCH` accepts 1 through 256. `G1_WRITERS` sets the closed-loop writers, 16 by default, 1 through 100, so agent ids keep one width. `G1_TURNS` must be divisible by `G1_WRITERS * G1_BATCH`.
 The engine runs with 2 concurrent last-16 window readers and default checkpoint settings.
 Every session starts with 1 untimed turn. Timed writes exclude tenant creation.
 Durable-ack latency includes caller preparation and queueing. Quantiles use nearest rank per batch, not per turn.
