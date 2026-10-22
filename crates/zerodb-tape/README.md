@@ -123,7 +123,8 @@ A roll takes the zero-filled `spare.zdb` when one is ready, and preallocates oth
 On ext4, preallocated blocks are unwritten extents, so each sync after a first write also commits the journal.
 Zeroed blocks make each segment sync a data flush only.
 Open fills the first spare before the writer starts. The maintenance thread refills it after each roll.
-It skips the fill when that would leave less than the floor free. The space check counts a ready spare as one prepared segment.
+The fill preallocates, then writes zeros in 256 KiB chunks with a sync after each, so tape syncs never queue behind a large flush.
+It skips the fill unless two segments of room stay above the floor. The space check counts a ready spare as one prepared segment.
 Open deletes leftover `spare.tmp` and `spare.zdb` files.
 Copy-on-write filesystems such as btrfs, ZFS and APFS gain nothing from zero-fill and pay one extra segment write.
 Recovery accepts fully zero, full-sized trailing reservations as unused, regardless of their size or count.
