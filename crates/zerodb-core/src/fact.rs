@@ -73,13 +73,34 @@ pub fn decode(payload: &[u8]) -> Result<Fact, CodecError> {
     let agent = cur.string(255)?;
     let source_refs = lsns(&mut cur)?;
     let idem_key = get_key(&mut cur)?;
-    let tombstone = match cur.byte()? {
-        0 => false,
-        1 => true,
-        _ => return Err(CodecError),
-    };
+    let tombstone = flag(&mut cur)?;
     cur.end()?;
     Ok(Fact { key, content, meta, agent, source_refs, idem_key, tombstone })
+}
+
+/// Decodes the key, retry key and tombstone bit without copying content.
+pub(crate) fn header(payload: &[u8]) -> Result<(String, Option<String>, bool), CodecError> {
+    let mut cur = Cursor(payload);
+    if cur.byte()? != 1 {
+        return Err(CodecError);
+    }
+    let key = cur.string(1024)?;
+    for max in [4 * 1024 * 1024, 65536, 255] {
+        cur.blob(max)?;
+    }
+    lsns(&mut cur)?;
+    let idem_key = get_key(&mut cur)?;
+    let tombstone = flag(&mut cur)?;
+    cur.end()?;
+    Ok((key, idem_key, tombstone))
+}
+
+fn flag(cur: &mut Cursor<'_>) -> Result<bool, CodecError> {
+    match cur.byte()? {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(CodecError),
+    }
 }
 
 pub(crate) fn lsns(cur: &mut Cursor<'_>) -> Result<Vec<u64>, CodecError> {

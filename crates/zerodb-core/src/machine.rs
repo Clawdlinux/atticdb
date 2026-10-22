@@ -88,7 +88,7 @@ impl Machine {
             return Err(invalid());
         }
         // A fact write is exactly one record. Turns and facts never share a batch.
-        let (session, fact, dedup_key, digest) = if head.kind == Kind::Fact {
+        let (session, fact, scope, idem) = if head.kind == Kind::Fact {
             let fact = fact::decode(&head.content)?;
             if body.len() != 1
                 || fact.key.is_empty()
@@ -97,17 +97,11 @@ impl Machine {
             {
                 return Err(invalid());
             }
-            let digest = batch.application_digest().unwrap_or_else(|| {
-                fact.idem_key.as_ref().map_or([0; 32], |_| digest([head.content.as_slice()]))
-            });
-            let dedup_key =
-                fact.idem_key.clone().map(|id| DedupKey(tenant, Scope::Fact(fact.key.clone()), id));
-            (None, Some(fact), dedup_key, digest)
+            let staged = Some(((tenant, fact.key.clone()), fact.tombstone));
+            (None, staged, Scope::Fact(fact.key), fact.idem_key)
         } else {
             let first = decode(&head.content)?;
             let key = Key(tenant, first.agent_id.to_owned(), first.session_id.to_owned());
-            let mut hash = (first.idem_key.is_some() && batch.application_digest().is_none())
-                .then(blake3::Hasher::new);
             for (i, record) in body.iter().enumerate() {
                 let next;
                 let decoded = if i == 0 {
@@ -125,24 +119,23 @@ impl Machine {
                 {
                     return Err(invalid());
                 }
-                if let Some(hash) = &mut hash {
-                    hash.update(&(record.content.len() as u32).to_le_bytes());
-                    hash.update(&record.content);
-                    #[cfg(test)]
-                    {
-                        self.prepare_hash_bytes += record.content.len();
-                    }
-                }
             }
-            let digest = batch
-                .application_digest()
-                .or_else(|| hash.map(|h| *h.finalize().as_bytes()))
-                .unwrap_or([0; 32]);
-            let dedup_key = first
-                .idem_key
-                .map(|id| DedupKey(tenant, Scope::Session(key.2.clone()), id.to_owned()));
-            (Some((key, body.len())), None, dedup_key, digest)
+            let scope = Scope::Session(key.2.clone());
+            (Some((key, body.len())), None, scope, first.idem_key.map(str::to_owned))
         };
+        let payloads = || body.iter().map(|record| record.content.as_slice());
+        let digest = match batch.application_digest() {
+            Some(digest) => digest,
+            None if idem.is_some() => {
+                #[cfg(test)]
+                {
+                    self.prepare_hash_bytes += payloads().map(<[u8]>::len).sum::<usize>();
+                }
+                digest(payloads())
+            }
+            None => [0; 32],
+        };
+        let dedup_key = idem.map(|id| DedupKey(tenant, scope, id));
         let mut state = lock(&self.state)?;
         if let Some(error) = &state.failure {
             return Err(error.clone());
@@ -158,7 +151,6 @@ impl Machine {
         if dedup_key.is_some() && !self.dedup.can_stage(tenant) {
             return Err(EngineError::rejected(ErrorKind::ResourceExhausted("prepared_dedup")));
         }
-        let fact = fact.map(|fact| ((tenant, fact.key), fact.tombstone));
         if let Some((key, _)) = &fact {
             let newest =
                 self.facts.get(key).or_else(|| state.facts.map.get(key).and_then(|r| r.last()));
@@ -277,17 +269,14 @@ impl Machine {
                 }
             }
             Kind::Fact => {
-                let fact = fact::decode(&record.payload).map_err(|_| corrupt())?;
-                let key = (record.tenant_id, fact.key);
-                state.facts.install(
-                    &key,
-                    Rev { lsn: record.lsn, deleted: fact.tombstone },
-                    floor,
-                )?;
+                let (key, idem_key, deleted) =
+                    fact::header(&record.payload).map_err(|_| corrupt())?;
+                let key = (record.tenant_id, key);
+                state.facts.install(&key, Rev { lsn: record.lsn, deleted }, floor)?;
                 if self.facts.get(&key).is_some_and(|rev| rev.lsn == record.lsn) {
                     self.facts.remove(&key);
                 }
-                if let Some(id) = fact.idem_key.filter(|_| replay) {
+                if let Some(id) = idem_key.filter(|_| replay) {
                     let key = DedupKey(record.tenant_id, Scope::Fact(key.1), id);
                     self.rebuild(state, record, key, &record.payload, Vec::new());
                 }

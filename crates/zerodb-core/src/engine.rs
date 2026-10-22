@@ -142,6 +142,8 @@ pub struct Metrics {
     pub tenants: usize,
     /// Fact keys held, tombstones included.
     pub facts: usize,
+    /// Revision pointers held, at most `fact_history + 2` per key.
+    pub fact_revisions: usize,
 }
 
 /// Writer availability. Reads retain the last durable view.
@@ -748,6 +750,7 @@ impl Engine {
             window_reads: self.reads.load(Ordering::Relaxed),
             tenants: state.tenants.entries.len(),
             facts: state.facts.map.len(),
+            fact_revisions: state.facts.map.values().map(Vec::len).sum(),
         })
     }
 }

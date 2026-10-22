@@ -36,20 +36,30 @@ impl Facts {
     }
     /// True when a new key cannot be staged next to the group's staged keys.
     pub(crate) fn full(&self, staged: &HashMap<FactKey, Rev>) -> bool {
-        self.map.len() + staged.len() >= self.max_keys
-            && self.map.len() + staged.keys().filter(|key| !self.map.contains_key(*key)).count()
-                >= self.max_keys
+        self.map.len() + staged.keys().filter(|key| !self.map.contains_key(*key)).count()
+            >= self.max_keys
     }
-    /// Appends a revision. Keeps the newest one below `floor`, the group's first LSN,
-    /// so a reader at the previous durable LSN still finds it.
+    /// Appends a revision. Keeps the newest `history + 1` revisions, plus the newest one below
+    /// `floor`, the publication's first LSN, for readers at the previous durable LSN.
+    /// So a key holds at most `history + 2` revisions.
     pub(crate) fn install(&mut self, key: &FactKey, rev: Rev, floor: u64) -> Result<()> {
-        self.admit(key)?;
-        let revs = self.map.entry(key.clone()).or_default();
+        let revs = match self.map.get_mut(key) {
+            Some(revs) => revs,
+            None => {
+                self.admit(key)?;
+                self.map.entry(key.clone()).or_default()
+            }
+        };
         revs.push(rev);
-        while revs.len() > self.history + 1 && revs[1].lsn < floor {
-            revs.remove(0);
+        let tail = revs.len().saturating_sub(self.history + 1);
+        let below = revs.partition_point(|rev| rev.lsn < floor).saturating_sub(1);
+        if below + 1 < tail {
+            revs.drain(below + 1..tail);
         }
-        self.dirty.insert(key.clone());
+        revs.drain(..below.min(tail));
+        if !self.dirty.contains(key) {
+            self.dirty.insert(key.clone());
+        }
         Ok(())
     }
     /// Replaces a key's revisions from a checkpoint, trimmed to the current history.

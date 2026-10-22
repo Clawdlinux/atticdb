@@ -264,6 +264,7 @@ fn load_inner(io: &dyn Io, dir: &Path, opts: &EngineOptions) -> Result<State> {
                 4 => {
                     let tenant = cur.u32()?;
                     let key = cur.string(1024)?;
+                    let history = cur.u32()? as usize;
                     let revs = (0..cur.u32()?)
                         .map(|_| {
                             let lsn = cur.u64()?;
@@ -274,7 +275,9 @@ fn load_inner(io: &dyn Io, dir: &Path, opts: &EngineOptions) -> Result<State> {
                         })
                         .collect::<Result<Vec<_>>>()?;
                     cur.end()?;
-                    if tenant == 0
+                    // Written under a smaller fact_history, the entry may lack revisions replay keeps.
+                    if history < opts.fact_history
+                        || tenant == 0
                         || tenant as usize > state.tenants.entries.len()
                         || revs.is_empty()
                         || revs.iter().any(|rev| rev.lsn == 0 || rev.lsn > boundary)
@@ -341,6 +344,7 @@ struct Snapshot {
     pages: Vec<PageSnapshot>,
     dedup: Vec<Arc<Entry>>,
     facts: Vec<(FactKey, Vec<Rev>)>,
+    fact_history: usize,
 }
 fn snapshot(state: &State) -> Snapshot {
     let full = state.chain.len() >= 8;
@@ -406,6 +410,7 @@ fn snapshot(state: &State) -> Snapshot {
                 (key.clone(), revs[revs.len().saturating_sub(state.facts.history + 1)..].to_vec())
             })
             .collect(),
+        fact_history: state.facts.history,
     }
 }
 const BUFFER_LIMIT: usize = 4 * 1024 * 1024;
@@ -533,6 +538,7 @@ pub(crate) fn save(io: &dyn Io, dir: &Path, shared: &Mutex<State>) -> Result<u64
         let mut data = vec![4];
         data.extend_from_slice(&tenant.to_le_bytes());
         bytes(&mut data, key.as_bytes());
+        data.extend_from_slice(&(snap.fact_history as u32).to_le_bytes());
         data.extend_from_slice(&(revs.len() as u32).to_le_bytes());
         for rev in revs {
             data.extend_from_slice(&rev.lsn.to_le_bytes());

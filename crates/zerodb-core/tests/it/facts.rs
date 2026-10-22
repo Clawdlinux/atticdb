@@ -149,17 +149,46 @@ fn put_supersede_delete_condition_and_reopen() {
 }
 
 #[test]
-fn conditional_writes_race_to_one_winner() {
-    let engine = open(Arc::new(SimDisk::new(61)), options());
+fn changed_fact_history_on_reopen_matches_full_replay() {
+    let disk = Arc::new(SimDisk::new(62));
+    let with = |fact_history| EngineOptions { fact_history, ..options() };
+    let engine = open(disk.clone(), with(3));
+    for value in 0..6 {
+        engine.fact_put("t", new_fact("k", value, "a"), None, None).unwrap();
+    }
+    engine.checkpoint().unwrap();
+    drop(engine);
+    // Full replay keeps min(revisions written, fact_history + 1).
+    for (case, history, warnings, revisions, writes) in [
+        ("decrease trims on load", 2, 0, 3, 1),
+        ("decrease then increase replays", 3, 1, 4, 0),
+        ("increase replays", 5, 1, 6, 0),
+    ] {
+        let engine = open(disk.clone(), with(history));
+        assert_eq!(engine.metrics().unwrap().checkpoint_warnings, warnings, "{case}");
+        assert_eq!(engine.metrics().unwrap().fact_revisions, revisions, "{case}");
+        for value in 0..writes {
+            engine.fact_put("t", new_fact("k", value, "a"), None, None).unwrap();
+        }
+        engine.checkpoint().unwrap();
+    }
+}
+
+#[test]
+fn concurrent_groups_pick_one_conditional_winner_and_bound_revisions() {
+    let opts = EngineOptions { fact_history: 1, ..options() };
+    let engine = open(Arc::new(SimDisk::new(61)), opts);
     let mut current = engine.fact_put("t", new_fact("k", 0, "a"), None, None).unwrap().lsn;
     let barrier = Barrier::new(8);
     for round in 0..50 {
+        let before = durable(&engine);
         let results: Vec<_> = std::thread::scope(|threads| {
             let handles: Vec<_> = (0..8)
                 .map(|i| {
                     let (engine, barrier) = (&engine, &barrier);
                     threads.spawn(move || {
                         barrier.wait();
+                        engine.fact_put("t", new_fact("burst", i, "a"), None, None).unwrap();
                         engine.fact_put("t", new_fact("k", i, "a"), None, Some(current))
                     })
                 })
@@ -173,6 +202,9 @@ fn conditional_writes_race_to_one_winner() {
             assert_eq!(error.outcome, Outcome::NotCommitted, "round {round}");
         }
         current = winners[0].lsn;
-        assert_eq!(durable(&engine), current, "round {round}: losers write nothing");
+        assert_eq!(durable(&engine), before + 9, "round {round}: losers write nothing");
+        // Completed same-key groups leave at most fact_history + 2 pointers per key.
+        let metrics = engine.metrics().unwrap();
+        assert!(metrics.fact_revisions <= metrics.facts * 3, "round {round}: {metrics:?}");
     }
 }
