@@ -494,14 +494,8 @@ impl Engine {
         if tenant.len() > 255 {
             return Err(EngineError::rejected(ErrorKind::InvalidInput));
         }
-        let NewFact { key, content, meta, agent } = fact;
-        let idem = idem_key.map(str::to_owned);
-        let fact =
-            Fact { key, content, meta, agent, source_refs: vec![], idem_key: idem, tombstone };
-        let payload = crate::fact::encode(&fact)?;
-        let digest = idem_key.map(|_| digest([payload.as_slice()]));
-        let retry =
-            idem_key.zip(digest).map(|(id, digest)| (dedup::Scope::Fact(fact.key), id, digest));
+        let (key, payload, digest) = fact_payload(fact, tombstone, idem_key)?;
+        let retry = idem_key.zip(digest).map(|(id, digest)| (dedup::Scope::Fact(key), id, digest));
         let (committed, cached) = match self.start(tenant, retry)? {
             Start::Cached(committed) => (committed, true),
             Start::Write(id, _creation) => {
@@ -525,14 +519,32 @@ impl Engine {
                 (committed, false)
             }
         };
+        self.fact_written(committed, cached)
+    }
+
+    fn fact_written(&self, committed: Committed, cached: bool) -> Result<FactWritten> {
         let Committed::Durable { txn, last_lsn, reply, .. } = committed;
-        self.published(|| {
-            Ok(FactWritten {
-                txn,
-                lsn: last_lsn,
-                deduplicated: cached || reply == [REPLY_DEDUPLICATED],
-            })
-        })
+        let deduplicated = cached || reply == [REPLY_DEDUPLICATED];
+        self.published(|| Ok(FactWritten { txn, lsn: last_lsn, deduplicated }))
+    }
+
+    /// Queues a fact write for a later inline step. Register its tenant first.
+    #[cfg(feature = "sim")]
+    pub fn enqueue_fact_sim(
+        &self,
+        tenant: &str,
+        fact: NewFact,
+        tombstone: bool,
+        idem_key: Option<&str>,
+        if_lsn: Option<u64>,
+    ) -> Result<SimFact<'_>> {
+        let id = lock(&self.state)?
+            .tenants
+            .get(tenant)
+            .ok_or_else(|| EngineError::rejected(ErrorKind::InvalidInput))?;
+        let (_, content, digest) = fact_payload(fact, tombstone, idem_key)?;
+        let records = vec![RecordInput { kind: Kind::Fact, tenant_id: id, content }];
+        Ok(SimFact { engine: self, reply: self.tape.enqueue_sim(records, digest, if_lsn)? })
     }
 
     /// Runs a receipt builder after the writer acknowledged a commit. Publication failures
@@ -981,6 +993,39 @@ impl SimAppend<'_> {
 enum Start<'a> {
     Cached(Committed),
     Write(Option<u32>, Option<std::sync::MutexGuard<'a, ()>>),
+}
+
+/// Encodes a fact payload and its retry digest. Returns the key for the retry scope.
+fn fact_payload(
+    fact: NewFact,
+    tombstone: bool,
+    idem_key: Option<&str>,
+) -> Result<(String, Vec<u8>, Option<Digest>)> {
+    let NewFact { key, content, meta, agent } = fact;
+    let idem = idem_key.map(str::to_owned);
+    let fact = Fact { key, content, meta, agent, source_refs: vec![], idem_key: idem, tombstone };
+    let payload = crate::fact::encode(&fact)?;
+    let digest = idem_key.map(|_| digest([payload.as_slice()]));
+    Ok((fact.key, payload, digest))
+}
+
+/// One queued simulation fact write. Finish it only after stepping its engine.
+#[cfg(feature = "sim")]
+#[derive(Debug)]
+pub struct SimFact<'a> {
+    engine: &'a Engine,
+    reply: std::sync::mpsc::Receiver<zerodb_tape::WriteResult>,
+}
+#[cfg(feature = "sim")]
+impl SimFact<'_> {
+    /// Receives the post-publication receipt without reading the tape.
+    pub fn finish(self) -> Result<FactWritten> {
+        let reply = self.reply.recv().map_err(|_| EngineError {
+            kind: ErrorKind::Poisoned,
+            outcome: zerodb_tape::Outcome::Unknown,
+        })?;
+        self.engine.fact_written(reply.map_err(EngineError::write)?, false)
+    }
 }
 
 /// A fact frame read for a revision, with its commit time.

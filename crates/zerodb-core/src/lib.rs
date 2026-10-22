@@ -17,12 +17,12 @@ mod state;
 mod tenant;
 pub mod turn;
 
-#[cfg(feature = "sim")]
-pub use engine::SimAppend;
 pub use engine::{
     Appended, Engine, FactHistory, FactPage, FactQuery, FactWritten, Health, Metrics, NewFact,
     Revision, Scope, StoredFact, Turn, Window, WindowQuery,
 };
+#[cfg(feature = "sim")]
+pub use engine::{SimAppend, SimFact};
 pub use error::{EngineError, ErrorKind};
 pub use options::EngineOptions;
 pub use turn::{NewTurn, Role};
