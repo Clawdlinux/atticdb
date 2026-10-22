@@ -798,13 +798,19 @@ impl<S: StateMachine> WriterCore<S> {
     pub fn maintain(&mut self) -> Result<()> {
         self.update_superblock()?;
         if !self.is_poisoned() {
-            let _ = crate::dir::make_spare(
-                self.reads.io.clone(),
-                &self.reads.path,
-                self.segments.capacity(),
-            );
+            let _ = self.make_spare();
         }
         Ok(())
+    }
+    fn make_spare(&self) -> Result<()> {
+        // Without a floor the writer is read-only, so skip the fill.
+        let floor = self.free_space_floor.unwrap_or(u64::MAX);
+        crate::dir::make_spare(
+            self.reads.io.clone(),
+            &self.reads.path,
+            self.segments.capacity(),
+            floor,
+        )
     }
     fn superblock_due(&self) -> bool {
         !self.is_poisoned()
@@ -898,30 +904,40 @@ impl Coalescer {
     }
 }
 
-struct SuperblockWorker {
+/// Installs due superblocks, then keeps one spare segment ready.
+struct MaintenanceWorker {
     sender: Option<mpsc::SyncSender<()>>,
     thread: Option<JoinHandle<()>>,
 }
-impl SuperblockWorker {
+impl MaintenanceWorker {
     fn start<S: StateMachine>(core: &WriterCore<S>) -> Result<Self> {
         let reads = core.reads.clone();
         let io = reads.io.clone();
         let path = reads.path.clone();
+        let size = core.segments.capacity();
+        let floor = core.free_space_floor.unwrap_or(u64::MAX);
         let mut installed = core.segments.dir.superblock();
         let (sender, receiver) = mpsc::sync_channel(1);
         let thread =
-            std::thread::Builder::new().name("zerodb-superblock".into()).spawn(move || {
+            std::thread::Builder::new().name("zerodb-maintenance".into()).spawn(move || {
                 while receiver.recv().is_ok() {
-                    let boundary = reads.durable_lsn.load(Ordering::Acquire);
-                    if reads.poisoned.load(Ordering::Acquire) || boundary <= installed {
+                    if reads.poisoned.load(Ordering::Acquire) {
                         continue;
                     }
-                    if let Err(error) = crate::dir::write_superblock(io.clone(), &path, boundary) {
-                        reads.poisoned.store(true, Ordering::Release);
-                        eprintln!("zerodb: superblock maintenance failed: {error}");
-                    } else {
+                    let boundary = reads.durable_lsn.load(Ordering::Acquire);
+                    if boundary > installed {
+                        if let Err(error) =
+                            crate::dir::write_superblock(io.clone(), &path, boundary)
+                        {
+                            reads.poisoned.store(true, Ordering::Release);
+                            eprintln!("zerodb: superblock maintenance failed: {error}");
+                            continue;
+                        }
                         installed = boundary;
                         reads.superblock_installs.fetch_add(1, Ordering::Relaxed);
+                    }
+                    if let Err(error) = crate::dir::make_spare(io.clone(), &path, size, floor) {
+                        eprintln!("zerodb: spare segment fill failed: {error}");
                     }
                 }
             })?;
@@ -933,7 +949,7 @@ impl SuperblockWorker {
         }
     }
 }
-impl Drop for SuperblockWorker {
+impl Drop for MaintenanceWorker {
     fn drop(&mut self) {
         self.sender.take();
         if let Some(thread) = self.thread.take() {
@@ -1007,9 +1023,12 @@ impl<S: StateMachine> Tape<S> {
         let mut coalescer = Coalescer::new(opts.coalescing_window);
         let (mut core, report) = WriterCore::open_with(state_machine, io, clock, path, opts)?;
         let reads = core.reads.clone();
+        // Fill the first spare before any write, so no open-time fill races the writer.
+        if let Err(error) = core.make_spare() {
+            eprintln!("zerodb: spare segment fill failed: {error}");
+        }
         #[cfg(feature = "sim")]
         if inline {
-            let _ = core.maintain();
             return Ok((
                 Self {
                     sender: None,
@@ -1022,13 +1041,14 @@ impl<S: StateMachine> Tape<S> {
             ));
         }
         let (sender, receiver) = mpsc::channel();
-        let maintenance = SuperblockWorker::start(&core)?;
+        let maintenance = MaintenanceWorker::start(&core)?;
         let thread = std::thread::Builder::new().name("zerodb-writer".into()).spawn(move || {
             while let Ok(request) = receiver.recv() {
                 for request in coalescer.collect(&receiver, request) {
                     core.enqueue(request);
                 }
                 core.step();
+                // A roll moves the synced segment, so it is always due and wakes the spare fill.
                 if core.superblock_due() {
                     core.note_superblock_request();
                     maintenance.wake();

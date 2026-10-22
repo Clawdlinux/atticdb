@@ -641,32 +641,38 @@ fn failed_allocation_does_not_change_manifest() {
 mod segments {
     use std::path::Path;
     use std::sync::Arc;
-    use zerodb_tape::sim::{DataDir, SegmentWriter};
+    use zerodb_tape::sim::{make_spare, DataDir, SegmentWriter};
     use zerodb_tape::Error;
     use zerodb_tape::{Io, SimDisk};
 
     #[test]
     fn roll_prepares_names_and_syncs_every_dirty_file() {
-        for seed in 0..100 {
-            let io = Arc::new(SimDisk::new(seed));
-            let dir = DataDir::open(io.clone(), "db", None, 512).unwrap();
-            let mut writer = SegmentWriter::new(dir, 512, 0).unwrap();
-            assert_eq!(writer.write_batch(&[7; 300]).unwrap(), (1, 0));
-            assert_eq!(writer.write_batch(&[8; 300]).unwrap(), (2, 0));
-            writer.sync().unwrap();
-            drop(writer);
-            let crash = io.crash().unwrap();
-            let dir = DataDir::open(Arc::new(crash.clone()), "db", None, 512).unwrap();
-            assert_eq!(dir.segments(), &[1, 2]);
-            for (id, byte) in [(1, 7), (2, 8)] {
-                eprintln!("case: id={id:?}, byte={byte:?}");
-                let file = crash.open(&dir.segment_path(id)).unwrap();
-                assert_eq!(crash.len(file).unwrap(), 512);
-                let mut bytes = [0; 512];
-                crash.read_at(file, 0, &mut bytes).unwrap();
-                crash.close(file).unwrap();
-                assert_eq!(&bytes[..300], &[byte; 300]);
-                assert_eq!(&bytes[300..], &[0; 212]);
+        for (case, spare) in [("preallocated roll", false), ("spare roll", true)] {
+            for seed in 0..100 {
+                let io = Arc::new(SimDisk::new(seed));
+                let dir = DataDir::open(io.clone(), "db", None, 512).unwrap();
+                let mut writer = SegmentWriter::new(dir, 512, 0).unwrap();
+                if spare {
+                    make_spare(io.clone(), Path::new("db"), 512, 0).unwrap();
+                }
+                assert_eq!(writer.write_batch(&[7; 300]).unwrap(), (1, 0));
+                assert_eq!(writer.write_batch(&[8; 300]).unwrap(), (2, 0));
+                assert!(!io.exists(Path::new("db/spare.zdb")).unwrap(), "{case}: spare taken");
+                writer.sync().unwrap();
+                drop(writer);
+                let crash = io.crash().unwrap();
+                let dir = DataDir::open(Arc::new(crash.clone()), "db", None, 512).unwrap();
+                assert_eq!(dir.segments(), &[1, 2], "{case}");
+                for (id, byte) in [(1, 7), (2, 8)] {
+                    eprintln!("case: {case}, id={id:?}, byte={byte:?}");
+                    let file = crash.open(&dir.segment_path(id)).unwrap();
+                    assert_eq!(crash.len(file).unwrap(), 512);
+                    let mut bytes = [0; 512];
+                    crash.read_at(file, 0, &mut bytes).unwrap();
+                    crash.close(file).unwrap();
+                    assert_eq!(&bytes[..300], &[byte; 300]);
+                    assert_eq!(&bytes[300..], &[0; 212]);
+                }
             }
         }
     }

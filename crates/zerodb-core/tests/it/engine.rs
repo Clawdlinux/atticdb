@@ -389,6 +389,9 @@ fn write_outages_report_health_preserve_reads_and_retry_keys() {
                         io.disk.close(file).unwrap();
                     }
                     if matches!(fault, Fault::ReopenFull | Fault::ReopenDirtyFull) {
+                        // Open drops the old spare, so fill the disk without it.
+                        io.disk.remove(std::path::Path::new("db/spare.zdb")).unwrap();
+                        io.disk.sync_dir(std::path::Path::new("db")).unwrap();
                         let capacity = io.disk.total_bytes(std::path::Path::new("db")).unwrap();
                         let free = io.disk.available_bytes(std::path::Path::new("db")).unwrap();
                         // Recovery write-backs fit in 5 pages. Reservation plus floor needs two
@@ -831,7 +834,7 @@ fn periodic_superblock_io_does_not_run_on_the_writer() {
             .map(|(thread, _)| thread.clone())
             .collect::<Vec<_>>();
         if !names.is_empty() {
-            assert!(names.iter().all(|name| name == "zerodb-superblock"), "{names:?}");
+            assert!(names.iter().all(|name| name == "zerodb-maintenance"), "{names:?}");
             break;
         }
         assert!(std::time::Instant::now() < deadline);

@@ -44,14 +44,18 @@ pub fn atomic_install(io: Arc<dyn Io>, dir: &Path, name: &str, bytes: &[u8]) -> 
 
 /// Keeps one zero-filled `spare.zdb` for the next roll, built as `spare.tmp`.
 ///
-/// Zeroed blocks make each later segment sync a data flush only. Failures retry at the next call.
-pub fn make_spare(io: Arc<dyn Io>, dir: &Path, size: u64) -> Result<()> {
+/// Zeroed blocks make each later segment sync a data flush only. Skips the fill if it would
+/// leave less than `floor` free. Failures retry at the next call.
+pub fn make_spare(io: Arc<dyn Io>, dir: &Path, size: u64, floor: u64) -> Result<()> {
     let (tmp, spare) = (dir.join("spare.tmp"), dir.join("spare.zdb"));
     if io.exists(&spare)? {
         return Ok(());
     }
     if io.exists(&tmp)? {
         io.remove(&tmp)?;
+    }
+    if io.available_bytes(dir)?.checked_sub(size).is_none_or(|left| left < floor) {
+        return Ok(());
     }
     let file = Handle::create(io.clone(), &tmp)?;
     let filled = zero_tail(io.as_ref(), file.id, 0, size)
