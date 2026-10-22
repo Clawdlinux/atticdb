@@ -8,9 +8,8 @@ use crate::{EngineError, EngineOptions, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
-use zerodb_tape::{Committed, FileId, Io};
-// Table CRC: a bitwise loop stalled the writer during checkpoints.
 use zerodb_tape::crc32c as crc;
+use zerodb_tape::{Committed, FileId, Io};
 
 fn corrupt() -> EngineError {
     EngineError::rejected(ErrorKind::CorruptIndex)
