@@ -84,15 +84,18 @@ pub fn make_spare(
     io.sync_dir(dir).map_err(|e| Error::SyncFailed(e.to_string()))
 }
 
-/// Small synced chunks keep tape syncs from queuing behind the fill.
+/// Small synced chunks keep ext4 tape syncs from queuing behind the fill.
 fn fill_zeros(io: &dyn Io, file: FileId, size: u64) -> Result<()> {
     let zeros = vec![0; 256 << 10];
     let mut offset = 0;
     while offset < size {
         let count = (size - offset).min(zeros.len() as u64) as usize;
         io.write_at(file, offset, &zeros[..count])?;
-        io.sync_data(file).map_err(|e| Error::SyncFailed(e.to_string()))?;
         offset += count as u64;
+        // A macOS sync is a full device flush, and copy-on-write APFS converts no extents.
+        if cfg!(target_os = "linux") || offset == size {
+            io.sync_data(file).map_err(|e| Error::SyncFailed(e.to_string()))?;
+        }
     }
     Ok(())
 }
