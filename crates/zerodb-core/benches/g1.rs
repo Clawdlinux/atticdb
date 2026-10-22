@@ -535,7 +535,7 @@ fn main() {
     assert!(symmetric <= 1, "G1_SYMMETRIC must be 0 or 1");
     let symmetric = symmetric == 1;
     assert!((1..=256).contains(&batch), "G1_BATCH must be in 1..=256");
-    assert!((1..=256).contains(&writer_count()), "G1_WRITERS must be in 1..=256");
+    assert!((1..=100).contains(&writer_count()), "G1_WRITERS must be in 1..=100");
     assert!(
         n >= writer_count() * batch && n.is_multiple_of(writer_count() * batch),
         "G1_TURNS must be a positive multiple of G1_WRITERS * G1_BATCH"
