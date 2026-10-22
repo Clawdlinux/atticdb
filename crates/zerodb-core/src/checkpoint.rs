@@ -595,15 +595,22 @@ pub(crate) fn save(io: &dyn Io, dir: &Path, shared: &Mutex<State>) -> Result<u64
             .checkpoint_lock_ns
             .max(start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64);
     }
-    {
+    // A write after the snapshot keeps its key dirty for the next checkpoint.
+    for chunk in snap.facts.chunks(1024) {
         let mut state = lock(shared)?;
         let start = std::time::Instant::now();
-        // A write after the snapshot keeps its key dirty for the next checkpoint.
-        for (key, revs, _) in &snap.facts {
+        for (key, revs, _) in chunk {
             if state.facts.map.get(key).and_then(|r| r.list.last()) == revs.last() {
                 state.facts.dirty.remove(key);
             }
         }
+        state.checkpoint_lock_ns = state
+            .checkpoint_lock_ns
+            .max(start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64);
+    }
+    {
+        let mut state = lock(shared)?;
+        let start = std::time::Instant::now();
         state.watermark = snap.lsn;
         state.checkpoint_bytes = snap.bytes;
         state.checkpoint_saves += 1;
