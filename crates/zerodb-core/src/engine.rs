@@ -11,7 +11,7 @@ use crate::{EngineError, EngineOptions, ErrorKind, NewTurn, Role};
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, TryLockError};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use zerodb_tape::{
     Clock, Committed, Digest, Durability, Io, Kind, RecordInput, StdIo, SystemClock, Tape,
 };
@@ -790,9 +790,7 @@ impl Engine {
     /// Returns a key's current value at a durable snapshot, or None when it has none.
     pub fn fact_get(&self, tenant: &str, key: &str) -> Result<Option<StoredFact>> {
         let (id, rev) = {
-            let state = lock(&self.state)?;
-            let snapshot = self.tape.durable_lsn();
-            let Some(id) = state.tenants.get(tenant) else {
+            let Some((state, snapshot, id)) = self.fact_snapshot(tenant)? else {
                 return Ok(None);
             };
             let revs = state.facts.map.get(&(id, key.to_owned()));
@@ -805,22 +803,20 @@ impl Engine {
         Ok(read.pop().map(stored))
     }
 
-    /// Returns at most `fact_history` revisions, newest first, whose content and meta total at
-    /// most `max_bytes`. The newest revision is always returned.
+    /// Returns up to `fact_history` revisions, newest first, within `max_bytes` but at least one.
     pub fn fact_history(&self, tenant: &str, key: &str, max_bytes: usize) -> Result<FactHistory> {
-        let (id, revs, history) = {
-            let state = lock(&self.state)?;
-            let snapshot = self.tape.durable_lsn();
-            let Some(id) = state.tenants.get(tenant) else {
+        let (id, newest, truncated) = {
+            let Some((state, snapshot, id)) = self.fact_snapshot(tenant)? else {
                 return Ok(FactHistory::default());
             };
-            let revs = state.facts.map.get(&(id, key.to_owned()));
-            let revs = revs.map_or(&[][..], |revs| visible(revs, snapshot));
-            // One more than shown, so `truncated` needs no extra read.
-            let keep = revs.len().saturating_sub(state.facts.history + 1);
-            (id, revs[keep..].to_vec(), state.facts.history)
+            let Some(revs) = state.facts.map.get(&(id, key.to_owned())) else {
+                return Ok(FactHistory::default());
+            };
+            let (shown, history) = (visible(revs, snapshot), state.facts.history);
+            let truncated = shown.len() > history || (revs.dropped && !shown.is_empty());
+            (id, shown.iter().rev().take(history).copied().collect::<Vec<_>>(), truncated)
         };
-        let newest = revs.iter().rev().take(history).map(|rev| (key, *rev));
+        let newest = newest.into_iter().map(|rev| (key, rev));
         let (read, cut) = self.read_facts(id, newest, max_bytes)?;
         let revisions = read
             .into_iter()
@@ -833,19 +829,16 @@ impl Engine {
                 meta: fact.meta,
             })
             .collect();
-        Ok(FactHistory { revisions, truncated: cut || revs.len() > history })
+        Ok(FactHistory { revisions, truncated: cut || truncated })
     }
 
-    /// Lists current facts under a prefix in key order. A call visits at most 1,024 keys,
-    /// deleted ones included, so `next` can follow a page with no facts.
+    /// Lists current facts under a prefix in key order, visiting at most 1,024 keys per call.
     pub fn fact_list(&self, tenant: &str, query: FactQuery) -> Result<FactPage> {
         if query.limit == 0 {
             return Err(EngineError::rejected(ErrorKind::InvalidInput));
         }
         let (id, picked, mut next) = {
-            let state = lock(&self.state)?;
-            let snapshot = self.tape.durable_lsn();
-            let Some(id) = state.tenants.get(tenant) else {
+            let Some((state, snapshot, id)) = self.fact_snapshot(tenant)? else {
                 return Ok(FactPage::default());
             };
             let start = match &query.after {
@@ -879,8 +872,14 @@ impl Engine {
         Ok(FactPage { facts, next })
     }
 
-    /// Reads fact frames in order until the next would pass `max_bytes`. The first is always
-    /// returned. Returns whether the budget cut the reads; the cut entry's read is counted.
+    /// Takes the state lock, then the durable snapshot readers use, and resolves the tenant.
+    fn fact_snapshot(&self, tenant: &str) -> Result<Option<(MutexGuard<'_, State>, u64, u32)>> {
+        let state = lock(&self.state)?;
+        let snapshot = self.tape.durable_lsn();
+        Ok(state.tenants.get(tenant).map(|id| (state, snapshot, id)))
+    }
+
+    /// Reads frames until `max_bytes` would pass, keeping the first; counts the cut read too.
     fn read_facts<'k>(
         &self,
         tenant: u32,
@@ -940,7 +939,7 @@ impl Engine {
             tenants: state.tenants.entries.len(),
             fact_reads: self.fact_reads.load(Ordering::Relaxed),
             facts: state.facts.map.len(),
-            fact_revisions: state.facts.map.values().map(Vec::len).sum(),
+            fact_revisions: state.facts.map.values().map(|revs| revs.list.len()).sum(),
         })
     }
 }

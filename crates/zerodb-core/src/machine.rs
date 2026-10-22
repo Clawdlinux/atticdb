@@ -152,8 +152,10 @@ impl Machine {
             return Err(EngineError::rejected(ErrorKind::ResourceExhausted("prepared_dedup")));
         }
         if let Some((key, _)) = &fact {
-            let newest =
-                self.facts.get(key).or_else(|| state.facts.map.get(key).and_then(|r| r.last()));
+            let newest = self
+                .facts
+                .get(key)
+                .or_else(|| state.facts.map.get(key).and_then(|r| r.list.last()));
             if batch.application_arg().is_some_and(|lsn| lsn != current(newest)) {
                 return Err(EngineError::rejected(ErrorKind::Conflict));
             }

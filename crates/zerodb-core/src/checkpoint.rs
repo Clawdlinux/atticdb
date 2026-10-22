@@ -1,6 +1,6 @@
 use crate::dedup::{DedupKey, Entry, Scope};
 use crate::error::{lock, Result};
-use crate::facts::{FactKey, Rev};
+use crate::facts::{FactKey, Rev, Revs};
 use crate::session::{Backing, Key};
 use crate::state::State;
 use crate::turn::{bytes, Cursor};
@@ -265,6 +265,7 @@ fn load_inner(io: &dyn Io, dir: &Path, opts: &EngineOptions) -> Result<State> {
                     let tenant = cur.u32()?;
                     let key = cur.string(1024)?;
                     let history = cur.u32()? as usize;
+                    let dropped = cur.byte()?;
                     let revs = (0..cur.u32()?)
                         .map(|_| {
                             let lsn = cur.u64()?;
@@ -277,6 +278,7 @@ fn load_inner(io: &dyn Io, dir: &Path, opts: &EngineOptions) -> Result<State> {
                     cur.end()?;
                     // Written under a smaller fact_history, the entry may lack revisions replay keeps.
                     if history < opts.fact_history
+                        || dropped > 1
                         || tenant == 0
                         || tenant as usize > state.tenants.entries.len()
                         || revs.is_empty()
@@ -285,7 +287,7 @@ fn load_inner(io: &dyn Io, dir: &Path, opts: &EngineOptions) -> Result<State> {
                     {
                         return Err(corrupt());
                     }
-                    state.facts.restore((tenant, key), revs)?;
+                    state.facts.restore((tenant, key), revs, dropped == 1)?;
                 }
                 _ => return Err(corrupt()),
             }
@@ -343,7 +345,7 @@ struct Snapshot {
     tenants: Vec<(u32, String, u64)>,
     pages: Vec<PageSnapshot>,
     dedup: Vec<Arc<Entry>>,
-    facts: Vec<(FactKey, Vec<Rev>)>,
+    facts: Vec<(FactKey, Vec<Rev>, bool)>,
     fact_history: usize,
 }
 fn snapshot(state: &State) -> Snapshot {
@@ -378,7 +380,7 @@ fn snapshot(state: &State) -> Snapshot {
             }
         }
     }
-    let facts: Box<dyn Iterator<Item = (&FactKey, &Vec<Rev>)>> = if full {
+    let facts: Box<dyn Iterator<Item = (&FactKey, &Revs)>> = if full {
         Box::new(state.facts.map.iter())
     } else {
         Box::new(state.facts.dirty.iter().filter_map(|key| state.facts.map.get_key_value(key)))
@@ -407,7 +409,8 @@ fn snapshot(state: &State) -> Snapshot {
             .collect(),
         facts: facts
             .map(|(key, revs)| {
-                (key.clone(), revs[revs.len().saturating_sub(state.facts.history + 1)..].to_vec())
+                let cut = revs.list.len().saturating_sub(state.facts.history + 1);
+                (key.clone(), revs.list[cut..].to_vec(), revs.dropped || cut > 0)
             })
             .collect(),
         fact_history: state.facts.history,
@@ -534,11 +537,12 @@ pub(crate) fn save(io: &dyn Io, dir: &Path, shared: &Mutex<State>) -> Result<u64
         data.extend_from_slice(reply);
         buffer.record(&data)?;
     }
-    for ((tenant, key), revs) in &snap.facts {
+    for ((tenant, key), revs, dropped) in &snap.facts {
         let mut data = vec![4];
         data.extend_from_slice(&tenant.to_le_bytes());
         bytes(&mut data, key.as_bytes());
         data.extend_from_slice(&(snap.fact_history as u32).to_le_bytes());
+        data.push(u8::from(*dropped));
         data.extend_from_slice(&(revs.len() as u32).to_le_bytes());
         for rev in revs {
             data.extend_from_slice(&rev.lsn.to_le_bytes());
@@ -593,8 +597,8 @@ pub(crate) fn save(io: &dyn Io, dir: &Path, shared: &Mutex<State>) -> Result<u64
         let mut state = lock(shared)?;
         let start = std::time::Instant::now();
         // A write after the snapshot keeps its key dirty for the next checkpoint.
-        for (key, revs) in &snap.facts {
-            if state.facts.map.get(key).and_then(|r| r.last()) == revs.last() {
+        for (key, revs, _) in &snap.facts {
+            if state.facts.map.get(key).and_then(|r| r.list.last()) == revs.last() {
                 state.facts.dirty.remove(key);
             }
         }

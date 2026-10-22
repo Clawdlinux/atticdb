@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use zerodb_core::{
-    turn::decode, Appended, Engine, EngineOptions, ErrorKind, Health, NewTurn, Outcome, Role,
-    Scope, SimAppend, Turn, WindowQuery,
+    turn::decode, Appended, Engine, EngineOptions, ErrorKind, Health, NewFact, NewTurn, Outcome,
+    Role, Scope, SimAppend, Turn, WindowQuery,
 };
 use zerodb_tape::sim::{CapacityError, CapacityPlan, PublishPause, SimClock, StorageFullFault};
 use zerodb_tape::{Clock, Error, FileId, Io, Kind, LockGuard, Result, SimDisk, Tape, TapeOptions};
@@ -1029,6 +1029,7 @@ fn inline_group_publishes_once_and_replies_with_original_sequences() {
             publish_pause: Some(pause.clone()),
             ..TapeOptions::default()
         },
+        fact_history: 1,
         ..EngineOptions::default()
     };
     let engine = open(io.clone(), Arc::new(SimClock::default()), &opts);
@@ -1087,6 +1088,25 @@ fn inline_group_publishes_once_and_replies_with_original_sequences() {
     assert_eq!(after.writer_groups - before.writer_groups, 2);
     assert_eq!(after.writer_group_requests - before.writer_group_requests, 4);
     assert_eq!(engine.window(&scope, WindowQuery::Last(10)).unwrap().len(), 3);
+
+    // Publishing the third revision drops the first while readers still see the old watermark.
+    let fact =
+        |value| NewFact { key: "k".into(), content: vec![value], meta: vec![], agent: "a".into() };
+    engine.fact_put("t", fact(1), None, None).unwrap();
+    let second = engine.fact_put("t", fact(2), None, None).unwrap();
+    let old = engine.fact_history("t", "k", usize::MAX).unwrap();
+    assert!(old.truncated && old.revisions.len() == 1);
+    std::thread::scope(|threads| {
+        let (engine, fact) = (&engine, &fact);
+        let (arrived, release) = pause.arm();
+        let writing = threads.spawn(move || engine.fact_put("t", fact(3), None, None).unwrap());
+        arrived.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        let parked = engine.fact_history("t", "k", usize::MAX).unwrap();
+        assert_eq!(parked, old, "truncated holds at the old watermark");
+        assert_eq!(engine.fact_get("t", "k").unwrap().unwrap().lsn, second.lsn);
+        release.send(()).unwrap();
+        writing.join().unwrap();
+    });
 }
 
 #[test]

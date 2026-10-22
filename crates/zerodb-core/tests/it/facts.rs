@@ -170,6 +170,10 @@ fn put_supersede_delete_condition_and_reopen() {
     assert_eq!(value(&engine, "b", "a/x"), Some((1, "a".into(), other.lsn)), "tenant b's own");
     assert_eq!(history(&engine, "a", "a/1").0.len(), 3);
     assert!(!history(&engine, "a", "a/1").1, "exactly fact_history revisions");
+    let before = reads(&engine);
+    let cut = engine.fact_history("a", "a/1", 8).unwrap();
+    assert!(cut.truncated && cut.revisions.len() == 1, "a byte budget cuts history");
+    assert_eq!(reads(&engine) - before, 2, "returned revisions plus the cut read");
 
     engine.checkpoint().unwrap();
     let last = engine.fact_put("a", new_fact("a/2", 5, "a"), Some("last"), Some(0)).unwrap();
