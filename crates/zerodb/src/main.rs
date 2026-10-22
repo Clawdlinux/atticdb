@@ -16,6 +16,7 @@ const USAGE: &str = "usage:
   zerodb stats --url unix:///path | --data-dir <dir>
   zerodb load --url unix:///path|http://127.0.0.1:<port> [--token-file <path>] [--writers <n>]
               [--turns <n>] [--batch <n>] [--size <bytes>]
+  zerodb verify --data-dir <dir> [--scratch <dir>]
   zerodb mcp [--url unix:///path|http://127.0.0.1:<port>] [--data-dir <dir>] [--config <path>]
              [--tenant <name>] [--token-file <path>] [--agent <name>] [--session <name>]
              [--retry-deadline <n>s|<n>ms]
@@ -38,6 +39,7 @@ fn main() -> ExitCode {
                 let valued = ["--url", "--token-file", "--writers", "--turns", "--batch", "--size"];
                 flags(rest, &valued, &[]).and_then(load)
             }
+            "verify" => flags(rest, &["--data-dir", "--scratch"], &[]).and_then(verify),
             "mcp" => {
                 let valued = ["--url", "--data-dir", "--config", "--tenant", "--token-file"];
                 let more = ["--agent", "--session", "--retry-deadline"];
@@ -120,6 +122,11 @@ fn stats(mut flags: HashMap<String, String>) -> Option<u8> {
         Err(error) => return Some(usage(&error)),
     };
     Some(zerodb::ops::stats(socket.as_deref(), dir.as_deref().map(Path::new)))
+}
+
+fn verify(mut flags: HashMap<String, String>) -> Option<u8> {
+    let scratch = flags.remove("--scratch").map(PathBuf::from);
+    Some(zerodb::ops::verify(Path::new(&flags.remove("--data-dir")?), scratch.as_deref()))
 }
 
 fn usage(message: &str) -> u8 {

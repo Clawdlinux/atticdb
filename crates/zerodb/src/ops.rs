@@ -1,10 +1,15 @@
-//! Operator commands against a running server.
+//! Operator commands against a running server or a copy of a stopped data directory.
 
 use crate::config::Token;
 use crate::launch::{self, Launch, Url};
+use crate::serve::EXIT_LOCKED;
 use serde_json::{json, Value};
-use std::path::Path;
+use std::fs::{DirBuilder, OpenOptions, TryLockError};
+use std::io::Read;
+use std::os::unix::fs::DirBuilderExt;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+use zerodb_core::{Engine, EngineOptions, ErrorKind};
 
 /// Prints `GET /v1/stats` as `key=value` lines. Never starts a server: that would hide an outage.
 pub fn stats(socket: Option<&Path>, data_dir: Option<&Path>) -> u8 {
@@ -25,17 +30,12 @@ pub fn stats(socket: Option<&Path>, data_dir: Option<&Path>) -> u8 {
         200 => serde_json::from_slice::<Value>(&response.body).map_err(|e| e.to_string()),
         status => Err(format!("status {status}: {}", String::from_utf8_lossy(&response.body))),
     });
-    match body.as_ref().map(Value::as_object) {
-        Ok(Some(fields)) => {
-            for (key, value) in fields {
-                match value {
-                    Value::String(text) => println!("{key}={text}"),
-                    other => println!("{key}={other}"),
-                }
-            }
+    match body {
+        Ok(fields) if fields.is_object() => {
+            print_fields(&fields);
             0
         }
-        Ok(None) => {
+        Ok(_) => {
             eprintln!("zerodb stats: response is not a JSON object");
             1
         }
@@ -132,4 +132,93 @@ pub fn load(
         println!("{name}={:.1}", us(p));
     }
     0
+}
+
+/// Prints object fields as `key=value` lines, sorted by key.
+fn print_fields(fields: &Value) {
+    for (key, value) in fields.as_object().into_iter().flatten() {
+        match value {
+            Value::String(text) => println!("{key}={text}"),
+            other => println!("{key}={other}"),
+        }
+    }
+}
+
+/// `zerodb verify`: the real engine open on a copy, then the `GET /v1/stats` fields.
+pub fn verify(dir: &Path, scratch: Option<&Path>) -> u8 {
+    on_copy(dir, scratch, |copy| {
+        let engine =
+            Engine::open(copy, EngineOptions::default()).map_err(|error| match error.kind {
+                ErrorKind::Storage(error) => error.to_string(),
+                _ => error.to_string(),
+            })?;
+        print_fields(&crate::api::stats_fields(&engine).ok_or("engine poisoned")?);
+        Ok(())
+    })
+}
+
+/// A scratch copy, removed on drop.
+struct Scratch(PathBuf);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_dir_all(&self.0) {
+            eprintln!("zerodb: cannot remove {}: {error}", self.0.display());
+        }
+    }
+}
+
+/// Runs `inspect` on a copy of `dir` and removes the copy. Returns the exit code.
+/// Opening repairs a directory, so the original is only locked and read.
+fn on_copy(
+    dir: &Path,
+    scratch: Option<&Path>,
+    inspect: impl FnOnce(&Path) -> Result<(), String>,
+) -> u8 {
+    let result = copy_locked(dir, scratch).and_then(|copy| inspect(&copy.0).map_err(|e| (1, e)));
+    result.map_or_else(
+        |(code, message)| {
+            eprintln!("zerodb: {}: {message}", dir.display());
+            code
+        },
+        |()| 0,
+    )
+}
+
+/// Copies the regular files of `dir` into a new mode 0700 directory under its `LOCK`.
+fn copy_locked(dir: &Path, scratch: Option<&Path>) -> Result<Scratch, (u8, String)> {
+    let fail = |error: std::io::Error| (1, error.to_string());
+    let mut options = OpenOptions::new();
+    let mut lock = match crate::config::open_regular(options.read(true), &dir.join("LOCK")) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err((1, "not a data directory".into()))
+        }
+        opened => opened.map_err(fail)?,
+    };
+    match lock.try_lock() {
+        Ok(()) => {}
+        Err(TryLockError::WouldBlock) => {
+            let mut holder = String::new();
+            let _ = lock.read_to_string(&mut holder);
+            return Err((EXIT_LOCKED, format!("locked by {}", holder.trim())));
+        }
+        Err(TryLockError::Error(error)) => return Err(fail(error)),
+    }
+    // Canonical, so `.` or a trailing slash cannot put the copy inside `dir`.
+    let dir = std::fs::canonicalize(dir).map_err(fail)?;
+    let parent = scratch.or(dir.parent()).ok_or((1, "no parent for the copy".into()))?;
+    let mut name = dir.file_name().unwrap_or_default().to_owned();
+    name.push(format!(".verify-{}", crate::random_hex(4).map_err(fail)?));
+    let path = parent.join(name);
+    let named = |error| (1, format!("{}: {error}", path.display()));
+    DirBuilder::new().mode(0o700).create(&path).map_err(named)?;
+    let copy = Scratch(path);
+    for entry in std::fs::read_dir(&dir).map_err(fail)? {
+        let entry = entry.map_err(fail)?;
+        // The socket and anything else that is not a regular file stays behind.
+        if entry.file_type().map_err(fail)?.is_file() {
+            std::fs::copy(entry.path(), copy.0.join(entry.file_name())).map_err(fail)?;
+        }
+    }
+    Ok(copy)
 }

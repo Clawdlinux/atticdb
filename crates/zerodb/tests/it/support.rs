@@ -1,4 +1,5 @@
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -15,6 +16,12 @@ use zerodb::config::{Tenant, Token};
 use zerodb::serve::{self, Listeners, ServeConfig, Server};
 use zerodb_core::{Engine, EngineOptions};
 use zerodb_tape::{SimDisk, SystemClock, TapeOptions};
+
+/// Every entry name in `dir` with its bytes, or `None` when it cannot be read as a file.
+pub fn files(dir: &Path) -> BTreeMap<String, Option<Vec<u8>>> {
+    let entries = std::fs::read_dir(dir).unwrap().map(|entry| entry.unwrap());
+    entries.map(|e| (e.file_name().into_string().unwrap(), std::fs::read(e.path()).ok())).collect()
+}
 
 /// Makes a mode 0600 FIFO at `path`.
 pub fn mkfifo(path: &Path) {

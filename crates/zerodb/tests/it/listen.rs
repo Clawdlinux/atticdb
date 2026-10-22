@@ -457,8 +457,21 @@ fn startup_checks() {
                 let recover = ["recover", "--truncate-at", &cut, "--data-dir", data];
                 let (status, stderr) = ctx.run(&recover).wait();
                 assert_eq!(status.code(), Some(75), "{case}: refused under the lock: {stderr}");
+                let verify = ["verify", "--data-dir", data];
+                let (status, stderr) = ctx.run(&verify).wait();
+                assert_eq!(status.code(), Some(75), "{case}: verify under the lock: {stderr}");
                 server.child.kill().unwrap();
                 server.wait();
+                let before = support::files(&ctx.data);
+                let (status, out) = ctx.run(&verify).wait();
+                assert!(status.success(), "{case}: {out}");
+                for line in ["health=ok", &durable] {
+                    assert!(out.lines().any(|got| got == line), "{case}: {line} in {out}");
+                }
+                assert_eq!(support::files(&ctx.data), before, "{case}: verify wrote the data dir");
+                let left =
+                    support::files(&ctx.dir.0).into_keys().filter(|n| n.contains(".verify-"));
+                assert_eq!(left.count(), 0, "{case}: verify left its copy");
                 let (status, stats) = ctx.run(&["stats", "--data-dir", data]).wait();
                 assert_eq!(status.code(), Some(1), "{case}: no server: {stats}");
                 for url in ["http://127.0.0.1:7425", "not-a-url"] {
