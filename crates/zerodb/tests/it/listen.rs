@@ -463,7 +463,18 @@ fn startup_checks() {
                 assert_eq!(status.code(), Some(75), "{case}: verify under the lock: {stderr}");
                 server.child.kill().unwrap();
                 server.wait();
+                // A read-only backup must still verify.
+                let modes = |mode| {
+                    for name in support::files(&ctx.data).into_keys() {
+                        let perms = std::fs::Permissions::from_mode(mode);
+                        std::fs::set_permissions(ctx.data.join(name), perms).unwrap();
+                    }
+                };
+                modes(0o400);
                 let before = support::files(&ctx.data);
+                let inside = ["--scratch", data];
+                let (status, out) = ctx.run(&[&verify[..], &inside].concat()).wait();
+                assert_eq!(status.code(), Some(2), "{case}: scratch inside the data dir: {out}");
                 let (status, out) = ctx.run(&verify).wait();
                 assert!(status.success(), "{case}: {out}");
                 for line in ["health=ok", &durable] {
@@ -473,6 +484,7 @@ fn startup_checks() {
                 let left =
                     support::files(&ctx.dir.0).into_keys().filter(|n| n.contains(".verify-"));
                 assert_eq!(left.count(), 0, "{case}: verify left its copy");
+                modes(0o600);
                 let from = first["first_lsn"].as_u64().unwrap();
                 let dump = ["dump", "--data-dir", data, "--from", &from.to_string()];
                 let (status, out) = ctx.run(&dump).wait();
@@ -499,6 +511,13 @@ fn startup_checks() {
                 assert_eq!(contents, [&json!("one")], "{case}: only turns at or below the cut");
                 restarted.child.kill().unwrap();
                 restarted.wait();
+                // Replay hides a bad checkpoint from the open, so verify reports it.
+                let checkpoint = ctx.data.join("CHECKPOINT");
+                std::fs::write(&checkpoint, "garbage").unwrap();
+                let (status, out) = ctx.run(&verify).wait();
+                assert_eq!(status.code(), Some(1), "{case}: rejected checkpoint: {out}");
+                assert!(out.contains("checkpoint"), "{case}: {out}");
+                std::fs::remove_file(checkpoint).unwrap();
                 // The restart put the superblock above LSN 1, so this is corruption, not a torn tail.
                 let segment = ctx.data.join("seg-0000000000000001.zdb");
                 let file = std::fs::OpenOptions::new().read(true).write(true).open(segment);

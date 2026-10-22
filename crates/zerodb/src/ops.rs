@@ -6,7 +6,7 @@ use crate::serve::EXIT_LOCKED;
 use serde_json::{json, Value};
 use std::fs::{DirBuilder, OpenOptions, TryLockError};
 use std::io::{Read, Write};
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -154,7 +154,12 @@ pub fn verify(dir: &Path, scratch: Option<&Path>) -> u8 {
                 ErrorKind::Storage(error) => error.to_string(),
                 _ => error.to_string(),
             })?;
-        print_fields(&crate::api::stats_fields(&engine).ok_or("engine poisoned")?);
+        let fields = crate::api::stats_fields(&engine).ok_or("engine poisoned")?;
+        print_fields(&fields);
+        // Load logged the reason. Replay hid it, so a clean open is not a clean directory.
+        if fields["checkpoint_warnings"] != 0 {
+            return Err("a checkpoint was rejected and the tape replayed".into());
+        }
         Ok(())
     })
 }
@@ -234,7 +239,14 @@ fn copy_locked(dir: &Path, scratch: Option<&Path>) -> Result<Scratch, (u8, Strin
     }
     // Canonical, so `.` or a trailing slash cannot put the copy inside `dir`.
     let dir = std::fs::canonicalize(dir).map_err(fail)?;
-    let parent = scratch.or(dir.parent()).ok_or((1, "no parent for the copy".into()))?;
+    let parent = match scratch {
+        Some(scratch) => std::fs::canonicalize(scratch).map_err(fail)?,
+        None => dir.parent().ok_or((1, "no parent for the copy".into()))?.to_owned(),
+    };
+    // A copy inside the source would add and remove entries in it.
+    if parent.starts_with(&dir) {
+        return Err((2, "--scratch must be outside the data directory".into()));
+    }
     let mut name = dir.file_name().unwrap_or_default().to_owned();
     name.push(format!(".verify-{}", crate::random_hex(4).map_err(fail)?));
     let path = parent.join(name);
@@ -245,7 +257,10 @@ fn copy_locked(dir: &Path, scratch: Option<&Path>) -> Result<Scratch, (u8, Strin
         let entry = entry.map_err(fail)?;
         // The socket and anything else that is not a regular file stays behind.
         if entry.file_type().map_err(fail)?.is_file() {
-            std::fs::copy(entry.path(), copy.0.join(entry.file_name())).map_err(fail)?;
+            let to = copy.0.join(entry.file_name());
+            std::fs::copy(entry.path(), &to).map_err(fail)?;
+            // Opening needs write access, and a backup can be read-only.
+            std::fs::set_permissions(&to, std::fs::Permissions::from_mode(0o600)).map_err(fail)?;
         }
     }
     Ok(copy)

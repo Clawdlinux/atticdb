@@ -30,7 +30,7 @@ I am choosing a copy over an in-memory dry-run `Io` because review found that wo
 
 - Opens `Engine::open(copy, EngineOptions::default())`, the options `serve` uses.
 - Prints sorted `key=value` lines from the same code as `GET /v1/stats`. Factor the JSON out of `api::stats` into a function both use.
-- Exit codes: 0 opened, 1 the open failed (the message names the LSN for `recover --truncate-at`), 75 locked.
+- Exit codes: 0 opened, 1 the open failed or a checkpoint was rejected, 75 locked. A failed open names the first bad LSN; `recover --truncate-at` takes a transaction boundary below it.
 
 ### D3. `zerodb dump --data-dir <dir> [--scratch <dir>] [--from <lsn>] [--limit <n>]`
 
@@ -49,4 +49,4 @@ I am choosing a copy over an in-memory dry-run `Io` because review found that wo
 
 ## Not in this plan
 
-Repair. `zerodb recover --truncate-at` already does that, and verify's error names the LSN to cut at.
+Repair. `zerodb recover --truncate-at` already does that. verify names the first bad LSN, and recover names the nearest boundaries for an interior one.
