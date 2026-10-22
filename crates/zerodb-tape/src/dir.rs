@@ -63,16 +63,20 @@ pub fn make_spare(
             io.remove(&tmp)?;
         }
         // Leave the active segment and a concurrent roll their room above the floor.
-        if io.available_bytes(dir)? < size.saturating_mul(2).saturating_add(floor) {
+        let free = io.available_bytes(dir)?;
+        if free < size.saturating_mul(2).saturating_add(floor) {
             return Ok(());
         }
         let file = Handle::create(io.clone(), &tmp)?;
-        if let Err(error) = io.allocate(file.id, size) {
-            drop(file);
-            io.remove(&tmp)?;
-            return Err(error);
+        // A sparse fallback reserves nothing, so the fill could later cut into the floor.
+        match io.allocate(file.id, size).and_then(|()| io.available_bytes(dir)) {
+            Ok(left) if left <= free.saturating_sub(size) => file,
+            reserved => {
+                drop(file);
+                io.remove(&tmp)?;
+                return reserved.map(|_| ());
+            }
         }
-        file
     };
     let filled = fill_zeros(io.as_ref(), file.id, size);
     drop(file);
@@ -380,7 +384,7 @@ impl DataDir {
         let path = self.segment_path(id);
         let spare = self.path.join("spare.zdb");
         if self.io.exists(&spare)? {
-            self.io.rename(&spare, &path)?;
+            self.io.rename(&spare, &path).map_err(SegmentPrepareError::before_manifest)?;
         } else {
             let file = Handle::create(self.io.clone(), &path)
                 .map_err(SegmentPrepareError::before_manifest)?;

@@ -25,6 +25,7 @@ enum Fault {
     DirSync,
     Manifest,
     Spare,
+    SpareRename,
 }
 
 #[test]
@@ -43,6 +44,7 @@ fn space_faults_set_group_outcome() {
         ("directory sync error", DirSync, false, true),
         ("manifest write full", Manifest, false, true),
         ("spare is one prepared roll", Spare, true, false),
+        ("spare rename full", SpareRename, true, false),
     ] {
         space_fault(case, fault, expect_read_only, expect_poisoned);
     }
@@ -89,6 +91,9 @@ fn space_fault(case: &str, fault: Fault, expect_read_only: bool, expect_poisoned
         assert!(!io.disk.exists(Path::new("db/spare.tmp")).unwrap(), "{case}: spare.tmp removed");
         make_spare(io.clone(), Path::new("db"), segment, 0, &Default::default()).unwrap();
     }
+    if matches!(fault, SpareRename) {
+        make_spare(io.clone(), Path::new("db"), segment, 0, &Default::default()).unwrap();
+    }
     let before_prepares = prepares.load(Ordering::SeqCst);
     let before_manifest = manifest(&io.disk);
     let before_files = io.disk.list(Path::new("db")).unwrap();
@@ -132,6 +137,7 @@ fn space_fault(case: &str, fault: Fault, expect_read_only: bool, expect_poisoned
         Sync => io.fail_at.store(io.syncs.load(Ordering::SeqCst) + 1, Ordering::SeqCst),
         DirSync => io.fail_directory_sync.store(true, Ordering::SeqCst),
         Manifest => io.full_manifest_write.store(true, Ordering::SeqCst),
+        SpareRename => io.fail_next_rename.store(true, Ordering::SeqCst),
     }
     let size = if matches!(fault, LaterAllocate) { 3800 } else { 8 };
     let replies = [
@@ -683,6 +689,19 @@ mod segments {
                 let io = Arc::new(SimDisk::new(seed));
                 let dir = DataDir::open(io.clone(), "db", None, 512).unwrap();
                 let mut writer = SegmentWriter::new(dir, 512, 0).unwrap();
+                if spare && seed == 0 {
+                    // A sparse fallback reserves nothing, so no spare is made.
+                    let sparse = Arc::new(crate::support::ObservedIo {
+                        sparse_allocation: true,
+                        ..crate::support::ObservedIo::new(0)
+                    });
+                    DataDir::open(sparse.clone(), "db", None, 512).unwrap();
+                    make_spare(sparse.clone(), Path::new("db"), 512, 0, &Default::default())
+                        .unwrap();
+                    for name in ["db/spare.zdb", "db/spare.tmp"] {
+                        assert!(!sparse.disk.exists(Path::new(name)).unwrap(), "{case}: {name}");
+                    }
+                }
                 if spare {
                     let used =
                         SimDisk::DEFAULT_CAPACITY - io.available_bytes("db".as_ref()).unwrap();

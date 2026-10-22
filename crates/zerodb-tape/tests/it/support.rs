@@ -164,7 +164,10 @@ impl Io for ObservedIo {
     }
     fn rename(&self, from: &Path, to: &Path) -> Result<()> {
         if self.fail_next_rename.swap(false, Ordering::SeqCst) {
-            return Err(Error::Io(std::io::ErrorKind::Other, "injected rename failure".into()));
+            return Err(Error::Io(
+                std::io::ErrorKind::StorageFull,
+                "injected rename failure".into(),
+            ));
         }
         let result = self.disk.rename(from, to);
         self.event(format!("rename {} {}", from.display(), to.display()));
