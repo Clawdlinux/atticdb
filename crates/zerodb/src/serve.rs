@@ -58,7 +58,8 @@ pub struct ServeConfig {
     pub exit_on_poison: bool,
     /// Most open connections, [`MAX_CONNECTIONS`] for `zerodb serve`.
     pub max_connections: usize,
-    /// One stderr line per request. Off by default: every connection thread shares the lock.
+    /// One stderr line per request. Off by default: every connection thread shares the
+    /// lock. 5xx answers are always logged.
     pub log_requests: bool,
 }
 
@@ -131,9 +132,7 @@ impl Shared {
             api::check(&self.config.auth, head, tcp)
                 .map(|(route, tenant)| (route, tenant, started))
                 .inspect_err(|response| {
-                    if self.config.log_requests {
-                        log(&head.method, head.path(), response, "-", started);
-                    }
+                    self.log(&head.method, head.path(), response, "-", started);
                 })
         };
         while let Some((request, (route, tenant, started))) = conn.next_request(check) {
@@ -155,9 +154,7 @@ impl Shared {
                 }
             };
             let _ = conn.respond(&response);
-            if self.config.log_requests {
-                log(&method, &path, &response, &tenant, started);
-            }
+            self.log(&method, &path, &response, &tenant, started);
             self.tracker.update(|conns| conns.in_flight -= 1);
             self.exit_on_poison();
             if self.stopping.load(Ordering::Acquire) {
@@ -167,7 +164,15 @@ impl Shared {
     }
 }
 
-/// One line per request. Never a header value, a body or a query string.
+impl Shared {
+    /// One line per logged request. Never a header value, a body or a query string.
+    fn log(&self, method: &str, path: &str, response: &Response, tenant: &str, started: Instant) {
+        if self.config.log_requests || response.status >= 500 {
+            log(method, path, response, tenant, started);
+        }
+    }
+}
+
 fn log(method: &str, path: &str, response: &Response, tenant: &str, started: Instant) {
     let tenant = if tenant.is_empty() { "-" } else { tenant };
     let ms = started.elapsed().as_secs_f64() * 1000.0;

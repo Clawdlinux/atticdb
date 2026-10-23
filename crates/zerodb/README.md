@@ -27,7 +27,7 @@ Tenant names are 1 to 255 bytes. Tokens are 32 to 1024 bytes of visible ASCII, s
 - `LOCK` and `GET /healthz` carry a per-start instance id.
 - At most 256 connections. Past that, a new connection gets 503 `busy`. A request body grows only as its bytes arrive, up to 8 MiB, and is dropped once parsed. At most 2 JSON trees exist at once, request parses and window builds together, and a tree can be about 16x its body. Window bodies being written total at most 256 MiB. A window that waits 5 s for that budget gets 503 `busy`. Memory stays under about 256 x 8 MiB = 2 GiB of raw bodies or turns, plus 2 trees of about 16 x 8 MiB, plus 256 MiB + 2 x 49 MiB of window bodies, in the worst case.
 - `--exit-on-poison`: when the engine is poisoned, stop accepting, finish responses in flight, remove the socket path if it is still the one this server installed, and exit 70. A fresh start recovers. Without it, a poisoned server serves reads and 503 `poisoned` until you restart it.
-- Logs: startup, shutdown and errors on stderr. `--log-requests` adds one line per request with method, path, status, tenant and latency. Never headers, bodies or query strings.
+- Logs: startup, shutdown and 5xx answers on stderr, one line each with method, path, status, tenant and latency. `--log-requests` adds a line for every request. Never headers, bodies or query strings.
 - Stop it with a signal. Every acknowledged write is already synced, so `kill` is safe.
 
 | Exit code | Meaning |

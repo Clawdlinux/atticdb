@@ -551,6 +551,7 @@ fn startup_checks() {
                 assert_eq!(ctx.append(&Via::Tcp(tcp.unwrap()), "poison"), (500, unknown), "{case}");
                 let (status, stderr) = server.wait();
                 assert_eq!(status.code(), Some(70), "{case}: {stderr}");
+                assert!(stderr.contains(" POST /v1/append 500 "), "{case}: 5xx logged: {stderr}");
                 if other.is_some() {
                     let kept = std::os::unix::net::UnixStream::connect(&ctx.socket);
                     assert!(kept.is_ok(), "{case}: {kept:?}");
