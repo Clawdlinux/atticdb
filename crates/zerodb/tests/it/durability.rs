@@ -11,7 +11,7 @@ use std::net::Shutdown;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -181,15 +181,24 @@ fn two_mcp_clients_and_a_killed_server_lose_nothing() {
         mcp.handshake();
     }
     assert!(!locked(&data), "no server before the first call");
+    // Only H restarts a killed server, so H keeps calling until G is done.
+    let guests = AtomicUsize::new(2);
     let calls: Vec<(&str, Vec<Call>)> = std::thread::scope(|scope| {
         let threads = adapters.iter_mut().enumerate().map(|(i, (session, mcp))| {
+            let guests = &guests;
             scope.spawn(move || {
-                let call = |n| {
+                let host = *session == "h";
+                let mut call = |n| {
                     let content = format!("{session}{i}-{n}");
                     let result = mcp.call("memory_append", json!({"content": content}));
                     (content, outcome(&result), result["structuredContent"]["seq"].as_u64())
                 };
-                (*session, (0..250).map(call).collect())
+                let more = |&n: &u32| n < 250 || host && guests.load(Ordering::SeqCst) > 0;
+                let calls = (0..).take_while(more).map(&mut call).collect();
+                if !host {
+                    guests.fetch_sub(1, Ordering::SeqCst);
+                }
+                (*session, calls)
             })
         });
         threads.collect::<Vec<_>>().into_iter().map(|thread| thread.join().unwrap()).collect()
@@ -207,7 +216,7 @@ fn two_mcp_clients_and_a_killed_server_lose_nothing() {
     for session in ["h", "g"] {
         let calls: Vec<Call> =
             calls.iter().filter(|(s, _)| *s == session).flat_map(|(_, c)| c.clone()).collect();
-        assert_eq!(calls.len(), 500, "{session}");
+        assert!(calls.len() >= 500, "{session}: {}", calls.len());
         check(session, &calls, &read_back(&via, &token, "mcp", session));
     }
 }
