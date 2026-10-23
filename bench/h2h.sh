@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Head-to-head: durable 256-byte appends, acknowledged only after fsync, closed-loop clients.
 # Linux only. Usage: bench/h2h.sh <directory on the disk under test> [label]
+# H2H_THINK=<ms> paces writers like agents between model calls: each sleeps a uniform 0 to 2x
+# that before each write. zerodb and the Redis family then share one driver, h2h_paced.py,
+# since memtier's rate limit fires every connection on the same clock.
 # Builds pinned Redis, Valkey, DiceDB and memtier_benchmark into $H2H_TOOLS on first run.
 set -euo pipefail
 DISK=$(realpath "${1:?usage: bench/h2h.sh <dir on the disk under test> [label]}")
@@ -9,6 +12,7 @@ cd "$(dirname "$0")/.."
 REPS=${H2H_REPS:-3}
 WRITERS=${H2H_WRITERS:-"1 4 16"}
 PER=${H2H_PER_WRITER:-5000}
+THINK=${H2H_THINK:-0}
 SIZE=256
 TOOLS=${H2H_TOOLS:-$HOME/h2h-tools}
 OUT=bench/h2h-$LABEL.tsv
@@ -58,8 +62,13 @@ zerodb() {
     "$ZDB" serve --config "$TMP/c.json" --data-dir "$data" --listen none >"$TMP/serve.log" 2>&1 &
     local pid=$! status=0
     wait_socket $pid "$data/zerodb.sock" "$TMP/serve.log"
-    "$ZDB" load --url "unix://$data/zerodb.sock" --token-file "$TMP/token" \
-        --writers "$1" --turns $(($1 * PER)) --size $SIZE >"$TMP/load" || status=$?
+    if [ "$THINK" = 0 ]; then
+        "$ZDB" load --url "unix://$data/zerodb.sock" --token-file "$TMP/token" \
+            --writers "$1" --turns $(($1 * PER)) --size $SIZE >"$TMP/load" || status=$?
+    else
+        ZERODB_TOKEN=$(cat "$TMP/token") python3 bench/h2h_paced.py zerodb "$data/zerodb.sock" \
+            "$1" "$PER" $SIZE "$THINK" >"$TMP/load" || status=$?
+    fi
     kill $pid && wait $pid || true
     # A failed run must not become a row.
     [ $status = 0 ] && pick <"$TMP/load"
@@ -74,11 +83,16 @@ resp() {
     local pid=$! status=0
     wait_socket $pid "$sock" "$data/log"
     rm -f "$TMP/m.json"
-    "$MEMTIER" --unix-socket="$sock" --protocol=redis --clients="$1" --threads=1 --pipeline=1 \
-        --requests="$PER" --data-size=$SIZE --command="RPUSH __key__ __data__" \
-        --command-key-pattern=R --key-prefix=s --key-minimum=1 --key-maximum=64 \
-        --hide-histogram --print-percentiles=50,99,99.9 --json-out-file="$TMP/m.json" \
-        >"$TMP/memtier.log" 2>&1 || status=$?
+    if [ "$THINK" = 0 ]; then
+        "$MEMTIER" --unix-socket="$sock" --protocol=redis --clients="$1" --threads=1 --pipeline=1 \
+            --requests="$PER" --data-size=$SIZE --command="RPUSH __key__ __data__" \
+            --command-key-pattern=R --key-prefix=s --key-minimum=1 --key-maximum=64 \
+            --hide-histogram --print-percentiles=50,99,99.9 --json-out-file="$TMP/m.json" \
+            >"$TMP/memtier.log" 2>&1 || status=$?
+    else
+        python3 bench/h2h_paced.py resp "$sock" "$1" "$PER" $SIZE "$THINK" \
+            >"$TMP/load" 2>"$TMP/memtier.log" || status=$?
+    fi
     # memtier counts error replies, such as MISCONF after an AOF failure, as operations.
     local errors
     errors=$("$TOOLS/$2/src/$2-cli" -s "$sock" info stats | tr -d '\r' |
@@ -86,6 +100,7 @@ resp() {
     [ "$errors" = 0 ] || { echo "$2: $errors error replies" >&2 && status=1; }
     kill $pid && wait $pid || true
     [ $status = 0 ] || { cat "$TMP/memtier.log" >&2 && return $status; }
+    [ "$THINK" = 0 ] || { pick <"$TMP/load" && return; }
     python3 - "$TMP/m.json" <<'PY'
 import json, sys
 totals = json.load(open(sys.argv[1]))["ALL STATS"]["Totals"]
@@ -97,11 +112,11 @@ PY
 
 sqlite() {
     rm -f "$DISK"/h2h.db*
-    python3 bench/h2h_sqlite.py "$DISK/h2h.db" "$1" "$PER" $SIZE | pick
+    python3 bench/h2h_sqlite.py "$DISK/h2h.db" "$1" "$PER" $SIZE "$THINK" | pick
 }
 
 {
-    echo "# $(uname -sr) $(findmnt -no SOURCE,FSTYPE --target "$DISK")"
+    echo "# $(uname -sr) $(findmnt -no SOURCE,FSTYPE --target "$DISK"), think ${THINK} ms"
     echo "# zerodb ${H2H_ZERODB_REV:-$(git rev-parse --short HEAD)}, memtier $("$MEMTIER" --version | head -1)"
     for name in redis valkey dicedb; do echo "# $("$TOOLS/$name/src/$name-server" --version)"; done
     echo "# sqlite $(python3 -c 'import sqlite3; print(sqlite3.sqlite_version)')"
