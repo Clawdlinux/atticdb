@@ -56,7 +56,7 @@ Durable appends, `fsync` before every ack, Azure L8s v3, medians of 3. Full tabl
 
 At 16 or more writers on local NVMe, zerodb ties the Redis family on throughput. Its p99 is the worst of the 4 servers in every such run.
 At 64 writers with 5 ms think it has the best p50, 149 µs against 184 to 186. Its p99 is 598 µs against 342 to 560.
-At 256 writers with 50 ms think its p99 is 631 µs. Redis and Valkey get 303 and 302. #47 tracks the NVMe p99 gap. With 1 writer, in-process SQLite is fastest: 19,746 acks/s against zerodb's 10,218.
+At 256 writers with 50 ms think its p99 is 631 µs. Redis and Valkey get 303 and 302. [#47](https://github.com/Clawdlinux/zerodb/issues/47) tracks the NVMe p99 gap. With 1 writer, in-process SQLite is fastest: 19,746 acks/s against zerodb's 10,218.
 On Premium SSD v2, zerodb leads the Redis family on acks/s, p50 and p99 in every run. At 16 writers it acks 10,083/s against redis 4,047.
 
 ## How it works
