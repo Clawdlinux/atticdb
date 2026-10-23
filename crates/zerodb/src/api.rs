@@ -7,6 +7,7 @@ use crate::auth::{self, Auth};
 use crate::http::{Budget, Head, Response};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use zerodb_core::{
     Appended, Engine, EngineError, ErrorKind, FactQuery, FactWritten, Health, NewFact, NewTurn,
@@ -138,6 +139,7 @@ pub fn stats_fields(engine: &Engine) -> Option<Value> {
         "hot_page_bytes": m.hot_page_bytes,
         "writer_groups": m.writer_groups,
         "writer_group_requests": m.writer_group_requests,
+        "busy_replies": BUSY.load(Ordering::Relaxed),
         "superblock_installs": m.superblock_installs,
         "replayed_records": m.replayed_records,
         "window_reads": m.window_reads,
@@ -167,8 +169,12 @@ static SENDING: Budget = Budget::new(256 << 20);
 /// How long a window waits for [`SENDING`] before it answers 503 `busy`.
 const SEND_WAIT: Duration = Duration::from_secs(5);
 
+/// 503 `busy` replies since the process started. Nonzero means a cap is too small.
+static BUSY: AtomicU64 = AtomicU64::new(0);
+
 /// 503 `busy`: nothing reached the engine.
 pub(crate) fn busy() -> Response {
+    BUSY.fetch_add(1, Ordering::Relaxed);
     Response::error(503, "busy", None)
 }
 
