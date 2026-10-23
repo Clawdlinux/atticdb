@@ -56,6 +56,16 @@ Agents keep their own keys apart with prefixes, for example `repo/<area>/<topic>
 A prefix is a byte prefix: `repo/pay` matches `repo/payments/...`. End a prefix with `/` for path semantics.
 Keys are 1 to 1024 bytes. They travel in JSON bodies and query strings, never in URL paths.
 
+## Sandboxed agents
+
+Run zerodb next to the harness, not inside the sandbox. The harness is the trusted loop that calls the model and starts sandboxes.
+It reads the window and facts, puts them in the prompt, and appends the results.
+Code in the microVM or container never gets a token or a socket, so a prompt injection there cannot read other sessions.
+Sandboxes can die or be snapshotted. Memory survives and moves between agents, because one zerodb serves them all.
+The sandbox's egress policy needs no rule for zerodb.
+
+Tokens grant a whole tenant. Do not hand one to untrusted code until scoped tokens exist.
+
 ## Why
 
 We want memory that keeps acknowledged writes and stays fast as history grows.
