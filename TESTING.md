@@ -58,7 +58,7 @@ cargo test -p zerodb-tape --test it recovery::     # 1 behavior module
 cargo test --workspace -- --ignored                # the slow checks, in debug
 ```
 
-The `sim` and `engine_sim` targets keep their CI names.
+The `sim` and `engine_sim` sims stay outside `tests/it` as their own test targets, so CI can call them by name.
 Debug builds skip slow filesystem tests and seeded tape schedules. The release CI step runs them.
 
 ## Simulations
@@ -67,10 +67,10 @@ The sim commands in the [README](README.md#build-and-test) run 2,000 seeds.
 Both sims vary disk headroom around the free-space floor and release space before retrying.
 Each seed chooses the capacity phase's generation, covering fresh and recovered writers.
 Floor rejections must issue no segment writes, including unpublished frames.
-They inject partial-write and sync `StorageFull` errors alongside crash cuts.
+The sims inject partial-write and sync `StorageFull` errors alongside crash cuts.
 The oracles check rejection state, read-only recovery, and acknowledged durability after reopening.
 The engine sim also checks dedup state and verifies rejected-key retries commit exactly once.
-Failures print the seed, capacity plan, and the existing repro command.
+Failures print the seed, the capacity plan and the command that reproduces the run.
 
 ## Before adding a test
 
