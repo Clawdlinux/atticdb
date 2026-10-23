@@ -14,6 +14,8 @@ TOOLS=${H2H_TOOLS:-$HOME/h2h-tools}
 OUT=bench/h2h-$LABEL.tsv
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
+# With a trap, bash lets the current run stop its own server before exiting.
+trap 'exit 143' TERM INT
 
 fetch() {
     [ -d "$TOOLS/$1" ] || git clone -q --depth 1 --branch "$3" "https://github.com/$2" "$TOOLS/$1"
@@ -77,6 +79,11 @@ resp() {
         --command-key-pattern=R --key-prefix=s --key-minimum=1 --key-maximum=64 \
         --hide-histogram --print-percentiles=50,99,99.9 --json-out-file="$TMP/m.json" \
         >"$TMP/memtier.log" 2>&1 || status=$?
+    # memtier counts error replies, such as MISCONF after an AOF failure, as operations.
+    local errors
+    errors=$("$TOOLS/$2/src/$2-cli" -s "$sock" info stats | tr -d '\r' |
+        awk -F: '/^total_error_replies:/ {print $2}')
+    [ "$errors" = 0 ] || { echo "$2: $errors error replies" >&2 && status=1; }
     kill $pid && wait $pid || true
     [ $status = 0 ] || { cat "$TMP/memtier.log" >&2 && return $status; }
     python3 - "$TMP/m.json" <<'PY'
