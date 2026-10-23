@@ -287,6 +287,50 @@ fn tool_calls_over_stdio() {
     assert!(hidden, "no retry key or condition reaches the model: {stdout}");
     assert!(!stdout.contains(TOKEN_A) && !stdout.contains("tenant"), "{stdout}");
 
+    // The same tools from a shell: one JSON line on stdout, the reason on stderr.
+    let cli = |verb: &[&str]| {
+        let mut process = support::Process::spawn(&dir.0, &[verb, &args[..]].concat());
+        let (status, _) = process.wait();
+        (status.code().unwrap(), process.stdout(), process.stderr())
+    };
+    let json = |out: &str| serde_json::from_str::<Value>(out).unwrap();
+    let (code, out, _) = cli(&["append", "--session", "sh", "--content", "hi", "--role", "user"]);
+    assert_eq!((code, &json(&out)["seq"]), (0, &json!(1)), "append: {out}");
+    let (code, out, _) = cli(&["recent", "--session", "sh", "--n", "1"]);
+    assert_eq!((code, &json(&out)["turns"][0]["content"]), (0, &json!("hi")), "recent: {out}");
+    assert_eq!(cli(&["fact", "set", "--key", "sh/k", "--content", "v"]).0, 0);
+    let (code, out, _) = cli(&["fact", "get", "--key", "sh/k"]);
+    assert_eq!((code, &json(&out)["fact"]["content"]), (0, &json!("v")), "fact get: {out}");
+    let (code, out, _) = cli(&["fact", "list", "--prefix", "sh/", "--limit", "5"]);
+    assert_eq!((code, &json(&out)["facts"][0]["key"]), (0, &json!("sh/k")), "fact list: {out}");
+    assert_eq!(cli(&["fact", "set", "--key", "sh/k", "--delete"]).0, 0);
+    let (code, out, _) = cli(&["fact", "get", "--key", "sh/k"]);
+    assert_eq!((code, json(&out)), (0, json!({"fact": null})), "deleted: {out}");
+    let (code, out, err) = cli(&["fact", "set", "--key", "k", "--content", "x", "--delete"]);
+    assert_eq!((code, out.as_str()), (1, ""), "{err}");
+    assert!(err.contains("pass exactly one of content or delete"), "{err}");
+    let (code, _, err) = cli(&["append", "--content", "x", "--role", "robot"]);
+    assert!(code == 1 && err.contains("not_committed: nothing was written"), "{err}");
+    for bad in
+        [&["recent", "--n", "x"][..], &["fact", "drop", "--key", "k"], &["recent", "--key", "k"]]
+    {
+        assert_eq!(cli(bad).0, 2, "{bad:?} is a usage error");
+    }
+    // Every attempt is sent and then cut off, so the outcome stays unknown.
+    let lossy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let lossy_url = format!("http://{}", lossy.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for mut conn in lossy.incoming().map_while(Result::ok) {
+            let _ = std::io::Read::read(&mut conn, &mut [0; 4096]);
+        }
+    });
+    let unknown = ["append", "--url", &lossy_url, "--content", "x", "--retry-deadline", "2500ms"];
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_zerodb"));
+    command.args(unknown).current_dir(&dir.0).env("ZERODB_TOKEN", TOKEN_A);
+    let (status, out) = support::Process::start(command.stdin(std::process::Stdio::null())).wait();
+    assert_eq!(status.code(), Some(3), "unknown outcome: {out}");
+    assert!(out.contains("zerodb: unknown: the write may be saved"), "{out}");
+
     // No attempt sent a byte, so nothing was written. A listener whose backlog is full
     // never accepts: connecting must still stop at the deadline.
     let _full = support::saturated(&dir.0.join("full"));

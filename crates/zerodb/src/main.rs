@@ -18,10 +18,30 @@ const USAGE: &str = "usage:
               [--turns <n>] [--batch <n>] [--size <bytes>] [--think <ms>]
   zerodb verify --data-dir <dir> [--scratch <dir>]
   zerodb dump --data-dir <dir> [--scratch <dir>] [--from <lsn>] [--limit <n>]
-  zerodb mcp [--url unix:///path|http://127.0.0.1:<port>] [--data-dir <dir>] [--config <path>]
+  zerodb mcp <connect>
+  zerodb append <connect> --content <text> [--role user|assistant|tool]
+  zerodb recent <connect> [--n <n>] [--max-bytes <n>]
+  zerodb fact set <connect> --key <key> (--content <text> | --delete)
+  zerodb fact get <connect> --key <key>
+  zerodb fact list <connect> --prefix <prefix> [--after <key>] [--limit <n>] [--max-bytes <n>]
+  <connect>: [--url unix:///path|http://127.0.0.1:<port>] [--data-dir <dir>] [--config <path>]
              [--tenant <name>] [--token-file <path>] [--agent <name>] [--session <name>]
              [--retry-deadline <n>s|<n>ms]
-  The mcp token comes from --token-file, ZERODB_TOKEN, or the config entry for --tenant.";
+  The token comes from --token-file, ZERODB_TOKEN, or the config entry for --tenant.
+  append, recent and fact print one JSON line. They exit 1 when nothing was written,
+  3 when a write may or may not be saved.";
+
+/// Flags of every command that talks to a server as a tenant.
+const CONNECT: [&str; 8] = [
+    "--url",
+    "--data-dir",
+    "--config",
+    "--tenant",
+    "--token-file",
+    "--agent",
+    "--session",
+    "--retry-deadline",
+];
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -52,11 +72,20 @@ fn main() -> ExitCode {
             "dump" => {
                 flags(rest, &["--data-dir", "--scratch", "--from", "--limit"], &[]).and_then(dump)
             }
-            "mcp" => {
-                let valued = ["--url", "--data-dir", "--config", "--tenant", "--token-file"];
-                let more = ["--agent", "--session", "--retry-deadline"];
-                flags(rest, &[&valued[..], &more].concat(), &[]).map(zerodb::mcp::start)
-            }
+            "mcp" => flags(rest, &CONNECT, &[]).map(zerodb::mcp::start),
+            "append" => tool(rest, "memory_append", &["--content", "--role"], &[]),
+            "recent" => tool(rest, "memory_recent", &["--n", "--max-bytes"], &[]),
+            "fact" => match rest.split_first().map(|(verb, rest)| (verb.as_str(), rest)) {
+                Some(("set", rest)) => {
+                    tool(rest, "fact_set", &["--key", "--content"], &["--delete"])
+                }
+                Some(("get", rest)) => tool(rest, "fact_get", &["--key"], &[]),
+                Some(("list", rest)) => {
+                    let valued = ["--prefix", "--after", "--limit", "--max-bytes"];
+                    tool(rest, "fact_list", &valued, &[])
+                }
+                _ => None,
+            },
             _ => None,
         },
         None => None,
@@ -82,6 +111,11 @@ fn flags(args: &[String], valued: &[&str], switches: &[&str]) -> Option<HashMap<
         }
     }
     Some(parsed)
+}
+
+fn tool(args: &[String], name: &str, valued: &[&str], switches: &[&str]) -> Option<u8> {
+    flags(args, &[&CONNECT[..], valued].concat(), switches)
+        .map(|flags| zerodb::mcp::command(name, flags))
 }
 
 fn report<T>(result: Result<T, impl std::fmt::Display>) -> Result<T, u8> {
