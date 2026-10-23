@@ -18,7 +18,7 @@ curl -s --unix-socket data/zerodb.sock -H "Authorization: Bearer $TOKEN" \
 ```
 
 That appends over TCP and reads over the Unix socket. A repeated `idem_key` returns `"deduplicated": true`.
-Facts live at `/v1/facts/put`, `get`, `list` and `delete`. Each key holds 1 value, and a later put replaces it. With `"if_lsn": <lsn>`, a put writes only if the current value still has that LSN. A mismatch is 409 `conflict`.
+Facts live at `/v1/facts/put`, `get`, `list` and `delete`. Each key holds 1 current value, and a later put replaces it. With `"if_lsn": <lsn>`, a put writes only if the current value still has that LSN. A mismatch is 409 `conflict`.
 
 ## MCP
 
@@ -30,12 +30,12 @@ Facts live at `/v1/facts/put`, `get`, `list` and `delete`. Each key holds 1 valu
 
 ## Shell verbs
 
-The same 5 tools run from a shell. Each prints 1 JSON line, and `fact set --delete` deletes.
+The same 5 tools run from a shell, with `zerodb mcp`'s connection flags. Each prints 1 JSON line. `fact set --delete` deletes.
 
 ```sh
 export ZERODB_TOKEN=$TOKEN
 Z="--url unix://$PWD/data/zerodb.sock --agent planner --session run-1"
-zerodb append $Z --content "hi" --role user          # {"committed":true,"deduplicated":false,"lsn":4,"seq":2}
+zerodb append $Z --content "hi" --role user          # {"committed":true,"deduplicated":false,"lsn":3,"seq":2}
 zerodb recent $Z --n 10                              # {"truncated":false,"turns":[...]}
 zerodb fact set $Z --key repo/payments/retry-rule --content "Retry 3 times, then fail."
 zerodb fact get $Z --key repo/payments/retry-rule    # {"fact":{"agent":"planner","content":...}}
@@ -60,12 +60,12 @@ On Premium SSD v2 at 16 writers, zerodb acks 10,083/s against redis 4,047.
 
 ## How it works
 
-- One append-only tape is both WAL and store. Indexes and checkpoints are derived and rebuild from it (D1).
-- Spare segments are zero-filled in the background. On ext4 each `fdatasync` is then 1 device round trip (D78).
+- 1 append-only tape is both WAL and store. Indexes and checkpoints are derived and rebuild from it (D1, I8).
+- A zero-filled spare segment is kept ready for the next roll. On ext4 an `fdatasync` is then usually 1 device round trip (D78).
 - Group commit never waits on a timer. The writer syncs whatever is queued when it wakes (D80).
 - Frames carry location-seeded CRC32C and footers bind whole transactions. Recovery cuts only an unproven tail (D64, D65, D8, I1).
 - Windows cost O(returned). Paged arrays, held to a memory budget, map seqs to LSNs and LSNs to offsets (D2, D66, I5).
-- Every write has an `idem_key`. Clients never downgrade `unknown`. The dedup map has 64 shards (D67, D81).
+- Every write has an `idem_key`. Clients never downgrade `unknown` (D75). The dedup map has 64 shards (D67, D81).
 - Below a free-space floor the engine goes read-only. Writes are rejected before anything is written. Reads keep working (I14).
 
 D-ids: [decision log](docs/design/0002-decision-log.md). I-ids: invariants in [0003](docs/design/0003-slim-v0.1.md), the current scope.
@@ -74,7 +74,7 @@ CI runs both SimDisk crash simulations on 2,000 seeds. There is no tamper eviden
 ## Sandboxed agents
 
 By default the harness holds memory. It reads the window and facts, builds the prompt and appends results (D79).
-Code in a microVM or container gets no token and no socket, because a token grants a whole tenant. Direct access ([sandboxes.md](docs/deploy/sandboxes.md)) is for code you trust with that tenant, or with its own.
+Code in a microVM or container gets no token and no socket, because a token grants a whole tenant. Direct access ([sandboxes.md](docs/deploy/sandboxes.md)) is for code you trust with that tenant, or with a tenant of its own.
 
 ## Keys
 
@@ -105,6 +105,6 @@ ZERODB_SIM_SEEDS=2000 cargo test -p zerodb-core --release --features sim --test 
 ## Docs
 
 - [zerodb](crates/zerodb/README.md): server, HTTP API, MCP, `stats`, `load`, `verify`, `dump` and `recover`.
-- [zerodb-core](crates/zerodb-core/README.md) and [zerodb-tape](crates/zerodb-tape/README.md): engine, formats, recovery and limits. [Python client](clients/python/README.md), [TESTING.md](TESTING.md), [G1 on macOS](bench/RESULTS.md), [0001 (historical)](docs/design/0001-architecture.md).
+- [zerodb-core](crates/zerodb-core/README.md) and [zerodb-tape](crates/zerodb-tape/README.md): engine, formats, recovery and limits. [Python client](clients/python/README.md), [TESTING.md](TESTING.md), [macOS engine runs](bench/RESULTS.md), [0001 (historical)](docs/design/0001-architecture.md).
 
 License: MIT OR Apache-2.0.

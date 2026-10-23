@@ -54,7 +54,7 @@ tests/test_<area>.py   one file per behavior area
 ## Running
 
 ```sh
-cargo test -p zerodb-tape --test it recovery::     # one behavior module
+cargo test -p zerodb-tape --test it recovery::     # 1 behavior module
 cargo test --workspace -- --ignored                # the slow checks, in debug
 ```
 
