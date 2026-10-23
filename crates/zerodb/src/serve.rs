@@ -139,6 +139,7 @@ impl Shared {
             let response = match route {
                 Route::Health => api::health(&self.engine, &self.config.instance),
                 Route::Stats => api::stats(&self.engine, &self.config.instance),
+                Route::Metrics => api::metrics(&self.engine),
                 Route::Append => api::append(&self.engine, &tenant, request.body),
                 Route::Window => api::window(&self.engine, &tenant, &request.head.target),
                 Route::FactPut | Route::FactDelete => {
