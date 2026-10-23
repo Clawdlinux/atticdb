@@ -57,6 +57,7 @@ pub fn load(
     turns: usize,
     batch: usize,
     size: usize,
+    think: Duration,
 ) -> u8 {
     // A reused run id would replay cached acks and count them as writes.
     let run = match crate::random_hex(4) {
@@ -84,7 +85,15 @@ pub fn load(
                         ("Connection", "keep-alive"),
                     ];
                     let mut samples = Vec::with_capacity(turns / writers / batch);
+                    let mut rng = u64::from_str_radix(run, 16).unwrap_or(0) ^ writer as u64;
                     for i in 0..turns / writers / batch {
+                        // Uniform in [0, 2 * think): an agent's model call between writes.
+                        if !think.is_zero() {
+                            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+                            std::thread::sleep(
+                                think.mul_f64((rng >> 11) as f64 / (1u64 << 52) as f64),
+                            );
+                        }
                         let body = json!({"agent": "load", "session": format!("load-{writer}"),
                             "idem_key": format!("{run}-{writer}-{i}"), "turns": vec![turn; batch]});
                         let body = body.to_string();
@@ -128,7 +137,9 @@ pub fn load(
     let us = |p: f64| {
         samples[((samples.len() as f64 * p).ceil() as usize).max(1) - 1].as_secs_f64() * 1e6
     };
-    println!("writers={writers}\nbatch={batch}\nsize={size}\nturns={done}\nseconds={seconds:.3}");
+    let think = think.as_millis();
+    println!("writers={writers}\nbatch={batch}\nsize={size}\nthink_ms={think}\nturns={done}");
+    println!("seconds={seconds:.3}");
     println!("turns_per_sec={:.1}", done as f64 / seconds);
     for (name, p) in [("p50_us", 0.5), ("p99_us", 0.99), ("p999_us", 0.999), ("max_us", 1.0)] {
         println!("{name}={:.1}", us(p));

@@ -438,13 +438,16 @@ fn startup_checks() {
                 let url = format!("unix://{}", ctx.socket.display());
                 let token = support::private_file(&ctx.dir, "token", &ctx.token);
                 let load = ["load", "--url", &url, "--token-file", &token];
-                let good = ["--writers", "2", "--turns", "4"];
+                let good = ["--writers", "2", "--turns", "4", "--think", "1"];
                 let (status, out) = ctx.run(&[&load[..], &good].concat()).wait();
                 assert!(status.success(), "{case}: {out}");
-                assert!(out.lines().any(|line| line == "turns=4"), "{case}: {out}");
+                for line in ["turns=4", "think_ms=1"] {
+                    assert!(out.lines().any(|got| got == line), "{case}: {line} in {out}");
+                }
                 assert!(out.lines().any(|line| line.starts_with("p99_us=")), "{case}: {out}");
                 let huge = ["--writers", "9223372036854775808", "--batch", "2", "--turns", "4"];
-                for bad in [&["--writers", "2", "--turns", "3"][..], &huge] {
+                let slow = ["--turns", "4", "--think", "60001"];
+                for bad in [&["--writers", "2", "--turns", "3"][..], &huge, &slow] {
                     let (status, out) = ctx.run(&[&load[..], bad].concat()).wait();
                     assert_eq!(status.code(), Some(2), "{case}: {bad:?} is a usage error: {out}");
                 }
