@@ -57,14 +57,16 @@ def main():
              f'<rect width="{width}" height="{height}" fill="white"/>',
              f'<text x="{pad}" y="28" font-size="17" font-weight="700">'
              'Durable 256-byte appends, ack after fsync, closed-loop writers</text>']
+    stalls = []
     for col, (disk, name) in enumerate(DISKS):
         data = medians(HERE / f"h2h-{disk}.tsv")
+        stalls.append(f"{data[(16, 'sqlite')][4] / 1e6:.1f} s on {name}")
         for row, (metric, label) in enumerate(METRICS):
             x, y = pad + col * (w + pad), 80 + row * (h + 2 * pad)
             parts += panel(x, y, w, h, f"{name}: {label}", data, metric)
     parts.append(f'<text x="{pad}" y="{height - 46}" font-size="12" fill="#444">'
-                 "SQLite p99 hides lock stalls: its slowest ack took 2.7 s on NVMe and "
-                 "49 s on Premium SSD v2 at 16 writers. Medians of 3 runs, Azure L8s_v3.</text>")
+                 f"SQLite p99 hides lock stalls: its slowest ack at 16 writers took "
+                 f"{' and '.join(stalls)}. Medians of 3 runs, Azure L8s_v3.</text>")
     lx = pad
     for system in SYSTEMS:
         parts.append(f'<rect x="{lx}" y="{height - 26}" width="12" height="12" '

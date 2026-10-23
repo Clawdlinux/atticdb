@@ -1,0 +1,22 @@
+# Linux 7.0.0-1017-azure /dev/sdc ext4, think 5 ms
+# zerodb d40f048, memtier memtier_benchmark v=2.5.2 sha=f3ff1793:0 bits=64 libevent=2.1.12-stable openssl=OpenSSL 3.0.13 30 Jan 2024 prometheus=yes
+# Redis server v=8.10.2 sha=498ecd0d:0 malloc=jemalloc-5.3.0 bits=64 build=a529286fee875111
+# Valkey server v=9.1.2 sha=7f1dffed:0 malloc=jemalloc-5.3.0 bits=64 build=139ad15c4318cf6c
+# Valkey server v=8.0.6 sha=b005bb61:0 malloc=jemalloc-5.3.0 bits=64 build=a0a96ee680330451
+# sqlite 3.45.1
+system	writers	rep	turns_per_sec	p50_us	p99_us	p999_us	max_us
+zerodb	64	1	9823.1	1202.0	2253.2	4631.5	8544.2
+redis	64	1	7417.7	3330.5	5107.7	13394.7	30509.7
+valkey	64	1	7418.6	3364.3	5306.3	9552.7	16782.1
+dicedb	64	1	7434.9	3334.1	5049.6	6572.9	9885.3
+sqlite	64	1	1096.8	3870.1	830081.8	1830344.3	4433099.4
+zerodb	64	2	9715.7	1223.1	2557.8	5918.1	10462.4
+redis	64	2	7315.8	3443.2	5983.4	11215.1	16879.0
+valkey	64	2	7387.7	3352.5	5310.6	14730.6	23404.7
+dicedb	64	2	7420.9	3336.0	5385.7	9457.2	12932.8
+sqlite	64	2	1087.0	3866.4	830701.8	1931090.1	4634162.7
+zerodb	64	3	9683.6	1252.6	2500.0	4741.5	7150.8
+redis	64	3	7293.5	3496.9	5654.3	9185.6	11903.1
+valkey	64	3	7242.5	3515.4	5735.4	9027.9	12507.1
+dicedb	64	3	7277.4	3483.9	5665.3	9358.3	13694.5
+sqlite	64	3	1090.1	3870.5	830064.1	1730905.6	4532854.7
