@@ -297,8 +297,13 @@ pub fn append(engine: &Engine, tenant: &str, body: Vec<u8>) -> Response {
             let started = std::time::Instant::now();
             let result = engine.append(&scope, turns, Some(&key));
             let elapsed = started.elapsed();
-            if result.as_ref().is_ok_and(|receipt| !receipt.deduplicated) {
+            // Dedup and lost receipts tell nothing about new turns.
+            let fresh = result.as_ref().is_ok_and(|receipt| !receipt.deduplicated);
+            let response = append_response(result);
+            if response.status == 200 {
                 ACK_SECONDS.record(elapsed.as_secs_f64());
+            }
+            if fresh {
                 for (len, hash) in seen {
                     TURN_BYTES.record(len as f64);
                     if RECENT[(hash % 4096) as usize].swap(hash, Ordering::Relaxed) == hash {
@@ -306,7 +311,7 @@ pub fn append(engine: &Engine, tenant: &str, body: Vec<u8>) -> Response {
                     }
                 }
             }
-            append_response(result)
+            response
         }
         Err(message) => invalid(message),
     }
