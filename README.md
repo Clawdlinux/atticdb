@@ -144,6 +144,7 @@ Only a later write's passing space check clears `ReadOnly`. Poisoning requires r
 
 See [the core API notes](crates/zerodb-core/README.md) for formats and limits.
 See [benchmark results](bench/RESULTS.md) for the measured macOS workload and its limits.
+See the [head-to-head](bench/H2H.md) against Redis, Valkey, DiceDB and SQLite with an fsync before every ack.
 
 ## Steps
 
