@@ -383,6 +383,7 @@ fn launch_race_starts_one_server() {
     wait_for("the losing server exits", || log().contains(" is locked by "));
     assert_eq!(log().matches("zerodb: serving").count(), 1, "one server: {}", log());
     assert!(!log().contains("in use"), "never EADDRINUSE: {}", log());
+    assert!(!log().contains(" POST /v1/append "), "requests are not logged: {}", log());
     let stderr: String = racers.iter().map(|mcp| mcp.process.stderr()).collect();
     let exits = stderr.lines().filter(|line| line.contains("exited:"));
     assert!(exits.into_iter().all(|line| line.ends_with("exit status: 75")), "{stderr}");

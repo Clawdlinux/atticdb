@@ -11,7 +11,7 @@ use zerodb::launch::Url;
 const USAGE: &str = "usage:
   zerodb init --config <path> --tenant <name>
   zerodb serve --config <path> [--data-dir <dir>] [--listen <addr>|none] [--unix-socket <path>]
-               [--unix-socket-group <gid or name>] [--exit-on-poison]
+               [--unix-socket-group <gid or name>] [--exit-on-poison] [--log-requests]
   zerodb recover --truncate-at <lsn> --data-dir <dir>
   zerodb stats --url unix:///path | --data-dir <dir>
   zerodb load --url unix:///path|http://127.0.0.1:<port> [--token-file <path>] [--writers <n>]
@@ -31,7 +31,7 @@ fn main() -> ExitCode {
             "serve" => flags(
                 rest,
                 &["--config", "--data-dir", "--listen", "--unix-socket", "--unix-socket-group"],
-                &["--exit-on-poison"],
+                &["--exit-on-poison", "--log-requests"],
             )
             .and_then(serve),
             "recover" => flags(rest, &["--truncate-at", "--data-dir"], &[]).and_then(recover),
@@ -114,7 +114,9 @@ fn serve(mut flags: HashMap<String, String>) -> Option<u8> {
     config.data_dir = flags.remove("--data-dir").map(PathBuf::from).or(config.data_dir);
     config.unix_socket = flags.remove("--unix-socket").map(PathBuf::from).or(config.unix_socket);
     config.unix_socket_group = flags.remove("--unix-socket-group").or(config.unix_socket_group);
-    Some(zerodb::serve::start(config, flags.contains_key("--exit-on-poison")))
+    let (poison, requests) =
+        (flags.contains_key("--exit-on-poison"), flags.contains_key("--log-requests"));
+    Some(zerodb::serve::start(config, poison, requests))
 }
 
 fn recover(mut flags: HashMap<String, String>) -> Option<u8> {
