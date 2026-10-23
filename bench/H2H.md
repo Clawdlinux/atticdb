@@ -41,17 +41,17 @@ Dragonfly is not timed. It has no append-only file, so it cannot acknowledge a w
 | 1 | redis | 490 | 2,127 | 3,183 | 4,799 | 8,767 |
 | 1 | valkey | 492 | 2,127 | 3,167 | 5,023 | 8,255 |
 | 1 | dicedb | 487 | 2,127 | 3,183 | 4,703 | 9,663 |
-| 1 | sqlite | 1,081 | 708 | 2,616 | 3,839 | 10,144 |
+| 1 | sqlite | 1,150 | 712 | 2,541 | 2,966 | 5,626 |
 | 4 | zerodb | 2,986 | 1,415 | 2,339 | 4,154 | 6,928 |
 | 4 | redis | 993 | 4,047 | 5,631 | 9,791 | 13,247 |
 | 4 | valkey | 966 | 4,159 | 5,663 | 9,215 | 20,479 |
 | 4 | dicedb | 1,007 | 3,999 | 5,567 | 10,047 | 17,279 |
-| 4 | sqlite | 1,240 | 726 | 2,426 | 530,456 | 4,033,839 |
+| 4 | sqlite | 1,425 | 706 | 2,245 | 2,986 | 10,544,948 |
 | 16 | zerodb | 10,083 | 1,598 | 2,553 | 5,366 | 11,783 |
 | 16 | redis | 4,047 | 3,935 | 5,471 | 7,967 | 19,583 |
 | 16 | valkey | 4,024 | 3,967 | 5,535 | 9,919 | 23,423 |
 | 16 | dicedb | 3,910 | 4,063 | 5,535 | 8,703 | 11,903 |
-| 16 | sqlite | 1,337 | 715 | 104,198 | 2,231,177 | 6,938,246 |
+| 16 | sqlite | 1,508 | 704 | 1,752 | 3,038 | 49,091,519 |
 
 Agent-shaped:
 
@@ -76,17 +76,17 @@ Agent-shaped:
 | 1 | redis | 8,787 | 111 | 175 | 215 | 343 |
 | 1 | valkey | 8,738 | 111 | 175 | 223 | 455 |
 | 1 | dicedb | 8,940 | 111 | 167 | 207 | 367 |
-| 1 | sqlite | 9,094 | 33 | 153 | 419 | 812 |
+| 1 | sqlite | 19,746 | 31 | 160 | 399 | 1,033 |
 | 4 | zerodb | 28,072 | 136 | 201 | 232 | 637 |
 | 4 | redis | 19,628 | 199 | 279 | 335 | 551 |
 | 4 | valkey | 19,595 | 199 | 287 | 335 | 447 |
 | 4 | dicedb | 19,513 | 199 | 287 | 335 | 511 |
-| 4 | sqlite | 11,355 | 35 | 3,172 | 33,372 | 228,970 |
+| 4 | sqlite | 22,333 | 31 | 137 | 693 | 730,431 |
 | 16 | zerodb | 54,784 | 282 | 462 | 639 | 1,234 |
 | 16 | redis | 52,922 | 303 | 407 | 495 | 1,727 |
 | 16 | valkey | 55,287 | 287 | 383 | 463 | 1,711 |
 | 16 | dicedb | 57,439 | 279 | 367 | 447 | 1,703 |
-| 16 | sqlite | 13,594 | 39 | 18,323 | 103,527 | 629,189 |
+| 16 | sqlite | 26,626 | 31 | 124 | 742 | 2,831,688 |
 
 Agent-shaped:
 
@@ -107,8 +107,8 @@ Agent-shaped:
 
 - **One device round trip, not two.** An append that grows a file makes `fdatasync` also commit the size change to the ext4 journal. Redis-family AOF grows on every write, so each ack costs about two round trips: 2.1 ms on Premium SSD v2. zerodb writes into zero-filled, preallocated segments, and SQLite mostly rewrites its WAL in place. Both pay one round trip, 0.7 ms.
 - **Group commit.** zerodb syncs once for all queued writers. On the slow disk that turns 16 writers into 12× its 1-writer throughput. The Redis family groups too, but every group still pays the two round trips.
-- **SQLite serializes writers.** Its writers take one lock. A loser sleeps in the busy handler for up to 100 ms per retry. So p50 stays low while throughput stops growing and the max reaches seconds: 2.7 s on NVMe and 49 s on Premium SSD v2 at 16 writers. The percentiles hide it, because the stalled inserts are under 0.1% of samples.
-- **SQLite has no socket.** It runs in the writer's process. On fast NVMe with one writer that wins: 31 µs against zerodb's 89 µs, which includes an HTTP round trip over the Unix socket.
+- **SQLite serializes writers.** Its writers take one lock. A loser sleeps in the busy handler for up to 100 ms per retry. So p50 stays low while throughput stops growing and the max reaches seconds: 2.8 s on NVMe and 49 s on Premium SSD v2 at 16 writers. The percentiles hide it, because the stalled inserts are under 0.1% of samples.
+- **SQLite has no socket.** It runs in the writer's process. On fast NVMe with one writer that wins: 31 µs against zerodb's 95 µs, which includes an HTTP round trip over the Unix socket.
 - **On NVMe at 16 writers zerodb now ties.** It acks 54.8k/s against 52.9k to 57.4k. Earlier it trailed at 36k. A 200 µs group-commit wait cost more than the 60 µs sync, and #28 removed it (D80). Its p99 is 462 µs against 367 to 407.
 - **Retry-key growth stalled the writer.** Each doubling of the per-tenant retry-key map rehashed every key under the state lock: about 6 ms at 57k keys, about 100 ms near 1M. With 64 writers that put zerodb's p99.9 at 6.3 ms. #43 shards the map 64 ways (D81). Now zerodb's p99.9 under agent load is 959 µs and 824 µs on NVMe, against 854 to 3,684 for the Redis family.
 - **Agent-shaped on NVMe, zerodb leads at the median and trails at p99.** p50 is 149 µs against about 185 at 64 writers. p99 at 256 writers is 631 µs against 302 to 303 for Redis and Valkey. Profiling for #34 points at thread handoffs: each append hops from a connection thread to the writer thread and back, and waking an idle vCPU costs a hypervisor exit. Pinning every server thread to one vCPU turns 1 writer's p50 from anywhere between 85 and 222 µs into a steady 71 µs (D82).
