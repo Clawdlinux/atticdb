@@ -83,7 +83,7 @@ The [decision log](docs/design/0002-decision-log.md) explains the choices.
 - `SimDisk`: seeded crashes, reordered writes, torn sectors, failed syncs, bit flips and full-disk faults.
 - `zerodb serve`: one server per data directory. HTTP/JSON on loopback TCP and a Unix socket, per-tenant tokens. See [crates/zerodb](crates/zerodb/README.md).
 - `zerodb stats`: live engine metrics from the Unix socket as `key=value` lines.
-- `zerodb load`: closed-loop append load against a server, with ack latency percentiles. `--think <ms>` pauses each writer a random 0 to 2x that between writes, like an agent's model call.
+- `zerodb load`: closed-loop append load against a server, with ack latency percentiles. `--think <ms>` (at most 4000) pauses each writer a random 0 to 2x that between writes, like an agent's model call.
 - `zerodb verify` and `zerodb dump`: check a stopped data directory on a copy. Verify names the LSN of damage. Dump lists records without content.
 - `zerodb mcp`: a stdio MCP adapter with 5 tools. It finds the running server or starts one, and retries with one key per call.
 - A Python client in [clients/python](clients/python/README.md), standard library only.

@@ -446,7 +446,7 @@ fn startup_checks() {
                 }
                 assert!(out.lines().any(|line| line.starts_with("p99_us=")), "{case}: {out}");
                 let huge = ["--writers", "9223372036854775808", "--batch", "2", "--turns", "4"];
-                let slow = ["--turns", "4", "--think", "60001"];
+                let slow = ["--turns", "4", "--think", "4001"];
                 for bad in [&["--writers", "2", "--turns", "3"][..], &huge, &slow] {
                     let (status, out) = ctx.run(&[&load[..], bad].concat()).wait();
                     assert_eq!(status.code(), Some(2), "{case}: {bad:?} is a usage error: {out}");
