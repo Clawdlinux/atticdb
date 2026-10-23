@@ -12,7 +12,7 @@ import sys
 import time
 
 
-def writer(path, rows, size, out):
+def writer(path, rows, size):
     db = sqlite3.connect(path, timeout=60, isolation_level=None)
     db.execute("PRAGMA synchronous=FULL")
     body, samples = os.urandom(size), []
@@ -21,7 +21,7 @@ def writer(path, rows, size, out):
         sent = time.perf_counter()
         db.execute("INSERT INTO turns(body) VALUES (?)", (body,))
         samples.append(time.perf_counter() - sent)
-    out.put((samples, start, time.perf_counter()))
+    return samples, start, time.perf_counter()
 
 
 def main():
@@ -30,13 +30,9 @@ def main():
     db.execute("PRAGMA journal_mode=WAL")
     db.execute("CREATE TABLE turns(id INTEGER PRIMARY KEY, body BLOB)")
     db.close()
-    out = mp.Queue()
-    procs = [mp.Process(target=writer, args=(path, rows, size, out)) for _ in range(writers)]
-    for proc in procs:
-        proc.start()
-    results = [out.get() for _ in procs]
-    for proc in procs:
-        proc.join()
+    # A pool re-raises a writer's error here instead of waiting forever for its result.
+    with mp.Pool(writers) as pool:
+        results = pool.starmap(writer, [(path, rows, size)] * writers)
     samples = sorted(s for result in results for s in result[0])
     seconds = max(r[2] for r in results) - min(r[1] for r in results)
     us = lambda p: samples[max(1, math.ceil(len(samples) * p)) - 1] * 1e6

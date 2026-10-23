@@ -3,9 +3,9 @@
 # Linux only. Usage: bench/h2h.sh <directory on the disk under test> [label]
 # Builds pinned Redis, Valkey, DiceDB and memtier_benchmark into $H2H_TOOLS on first run.
 set -euo pipefail
-cd "$(dirname "$0")/.."
-DISK=${1:?usage: bench/h2h.sh <dir on the disk under test> [label]}
+DISK=$(realpath "${1:?usage: bench/h2h.sh <dir on the disk under test> [label]}")
 LABEL=${2:-$(basename "$DISK")}
+cd "$(dirname "$0")/.."
 REPS=${H2H_REPS:-3}
 WRITERS=${H2H_WRITERS:-"1 4 16"}
 PER=${H2H_PER_WRITER:-5000}
@@ -33,6 +33,17 @@ cargo build -q --release -p zerodb
 ZDB=target/release/zerodb
 MEMTIER=$TOOLS/memtier/memtier_benchmark
 
+# Waits for a server's socket. Fails with its log if the server exits first.
+wait_socket() {
+    until [ -S "$2" ]; do
+        if ! kill -0 "$1" 2>/dev/null; then
+            echo "server exited before creating $2:" >&2 && cat "$3" >&2
+            return 1
+        fi
+        sleep 0.1
+    done
+}
+
 # Prints `turns_per_sec p50_us p99_us p999_us max_us` from `key=value` lines on stdin.
 pick() {
     awk -F= '{v[$1]=$2} END {print v["turns_per_sec"], v["p50_us"], v["p99_us"], v["p999_us"], v["max_us"]}'
@@ -43,11 +54,13 @@ zerodb() {
     rm -rf "$data" "$TMP/c.json"
     (umask 077 && "$ZDB" init --config "$TMP/c.json" --tenant h2h >"$TMP/token")
     "$ZDB" serve --config "$TMP/c.json" --data-dir "$data" --listen none >"$TMP/serve.log" 2>&1 &
-    local pid=$!
-    until [ -S "$data/zerodb.sock" ]; do sleep 0.1; done
+    local pid=$! status=0
+    wait_socket $pid "$data/zerodb.sock" "$TMP/serve.log"
     "$ZDB" load --url "unix://$data/zerodb.sock" --token-file "$TMP/token" \
-        --writers "$1" --turns $(($1 * PER)) --size $SIZE | pick
+        --writers "$1" --turns $(($1 * PER)) --size $SIZE >"$TMP/load" || status=$?
     kill $pid && wait $pid || true
+    # A failed run must not become a row.
+    [ $status = 0 ] && pick <"$TMP/load"
 }
 
 # Redis-protocol servers: AOF with appendfsync always, so each reply waits for its fsync.
@@ -56,13 +69,16 @@ resp() {
     rm -rf "$data" && mkdir -p "$data"
     "$TOOLS/$2/src/$2-server" --port 0 --unixsocket "$sock" --dir "$data" --save "" \
         --appendonly yes --appendfsync always --logfile "$data/log" &
-    local pid=$!
-    until [ -S "$sock" ]; do sleep 0.1; done
+    local pid=$! status=0
+    wait_socket $pid "$sock" "$data/log"
+    rm -f "$TMP/m.json"
     "$MEMTIER" --unix-socket="$sock" --protocol=redis --clients="$1" --threads=1 --pipeline=1 \
         --requests="$PER" --data-size=$SIZE --command="RPUSH __key__ __data__" \
         --command-key-pattern=R --key-prefix=s --key-minimum=1 --key-maximum=64 \
-        --hide-histogram --print-percentiles=50,99,99.9 --json-out-file="$TMP/m.json" >/dev/null 2>&1
+        --hide-histogram --print-percentiles=50,99,99.9 --json-out-file="$TMP/m.json" \
+        >"$TMP/memtier.log" 2>&1 || status=$?
     kill $pid && wait $pid || true
+    [ $status = 0 ] || { cat "$TMP/memtier.log" >&2 && return $status; }
     python3 - "$TMP/m.json" <<'PY'
 import json, sys
 totals = json.load(open(sys.argv[1]))["ALL STATS"]["Totals"]
