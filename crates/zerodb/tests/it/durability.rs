@@ -193,12 +193,9 @@ fn two_mcp_clients_and_a_killed_server_lose_nothing() {
                     let result = mcp.call("memory_append", json!({"content": content}));
                     (content, outcome(&result), result["structuredContent"]["seq"].as_u64())
                 };
+                let _done = (!host).then(|| Done(guests));
                 let more = |&n: &u32| n < 250 || host && guests.load(Ordering::SeqCst) > 0;
-                let calls = (0..).take_while(more).map(&mut call).collect();
-                if !host {
-                    guests.fetch_sub(1, Ordering::SeqCst);
-                }
-                (*session, calls)
+                (*session, (0..).take_while(more).map(&mut call).collect())
             })
         });
         threads.collect::<Vec<_>>().into_iter().map(|thread| thread.join().unwrap()).collect()
@@ -218,6 +215,15 @@ fn two_mcp_clients_and_a_killed_server_lose_nothing() {
             calls.iter().filter(|(s, _)| *s == session).flat_map(|(_, c)| c.clone()).collect();
         assert!(calls.len() >= 500, "{session}: {}", calls.len());
         check(session, &calls, &read_back(&via, &token, "mcp", session));
+    }
+}
+
+/// Counts a guest adapter out, even when it panics, so hosts stop calling.
+struct Done<'a>(&'a AtomicUsize);
+
+impl Drop for Done<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
