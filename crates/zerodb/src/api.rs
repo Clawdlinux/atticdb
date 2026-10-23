@@ -39,6 +39,8 @@ pub enum Route {
     Health,
     /// `GET /v1/stats`, Unix socket only, no token.
     Stats,
+    /// `GET /metrics`, Unix socket only, no token.
+    Metrics,
     /// `POST /v1/append`.
     Append,
     /// `GET /v1/window`.
@@ -76,8 +78,10 @@ pub fn check(auth: &Auth, head: &Head, tcp: bool) -> Result<(Route, Option<Strin
         return Ok((Route::Health, None));
     }
     // Stats span all tenants, so socket permissions guard them, not a tenant token.
-    if !tcp && (head.method.as_str(), head.path()) == ("GET", "/v1/stats") {
-        return Ok((Route::Stats, None));
+    match (tcp, head.method.as_str(), head.path()) {
+        (false, "GET", "/v1/stats") => return Ok((Route::Stats, None)),
+        (false, "GET", "/metrics") => return Ok((Route::Metrics, None)),
+        _ => {}
     }
     let tenant = auth.tenant(head).ok_or_else(auth::unauthorized)?.to_owned();
     match ROUTES.iter().find(|(_, path, _)| *path == head.path()) {
@@ -122,6 +126,63 @@ pub fn stats(engine: &Engine, instance: &str) -> Response {
     };
     fields["instance"] = json!(instance);
     Response::json(200, &fields)
+}
+
+/// `/v1/stats` counters. Its other numbers are gauges, and `_ns` maxima become seconds.
+const COUNTERS: [&str; 12] = [
+    "writer_groups",
+    "writer_group_requests",
+    "superblock_installs",
+    "replayed_records",
+    "window_reads",
+    "fact_reads",
+    "checkpoint_saves",
+    "checkpoint_warnings",
+    "tape_index_page_reloads",
+    "tape_index_page_evictions",
+    "tape_index_dirty_page_evictions",
+    "busy_replies",
+];
+/// Upper bounds of the append ack histogram, in seconds.
+const ACK_BUCKETS: [f64; 13] =
+    [50e-6, 100e-6, 250e-6, 500e-6, 1e-3, 2.5e-3, 5e-3, 10e-3, 25e-3, 50e-3, 100e-3, 250e-3, 1.0];
+/// Committed appends per bucket, the last past 1 s.
+static ACKS: [AtomicU64; 14] = [const { AtomicU64::new(0) }; 14];
+static ACK_NANOS: AtomicU64 = AtomicU64::new(0);
+
+/// `GET /metrics`: `/v1/stats` and the append ack histogram in Prometheus text format 0.0.4.
+pub fn metrics(engine: &Engine) -> Response {
+    let Some(fields) = stats_fields(engine) else {
+        return Response::error(503, "poisoned", None);
+    };
+    let mut out = String::new();
+    let mut add = |name: &str, kind: &str, value: &str| {
+        out += &format!("# TYPE zerodb_{name} {kind}\nzerodb_{name} {value}\n");
+    };
+    for (key, value) in fields.as_object().into_iter().flatten() {
+        let Some(number) = value.as_u64() else { continue };
+        match key.strip_suffix("_ns") {
+            Some(base) => {
+                add(&format!("{base}_seconds"), "gauge", &(number as f64 / 1e9).to_string())
+            }
+            None if COUNTERS.contains(&key.as_str()) => {
+                add(&format!("{key}_total"), "counter", &number.to_string())
+            }
+            None => add(key, "gauge", &number.to_string()),
+        }
+    }
+    add("read_only", "gauge", if fields["health"] == "read_only" { "1" } else { "0" });
+    out += "# TYPE zerodb_append_ack_seconds histogram\n";
+    let mut count = 0;
+    for (i, bucket) in ACKS.iter().enumerate() {
+        count += bucket.load(Ordering::Relaxed);
+        let le = ACK_BUCKETS.get(i).map_or("+Inf".into(), f64::to_string);
+        out += &format!("zerodb_append_ack_seconds_bucket{{le=\"{le}\"}} {count}\n");
+    }
+    let sum = ACK_NANOS.load(Ordering::Relaxed) as f64 / 1e9;
+    out +=
+        &format!("zerodb_append_ack_seconds_sum {sum}\nzerodb_append_ack_seconds_count {count}\n");
+    Response::text(200, "text/plain; version=0.0.4; charset=utf-8", out)
 }
 
 /// The `GET /v1/stats` fields except `instance`. `None` when the engine is poisoned.
@@ -192,7 +253,16 @@ pub fn append(engine: &Engine, tenant: &str, body: Vec<u8>) -> Response {
     match parsed {
         Ok((agent, session, key, turns)) => {
             let scope = Scope { tenant: tenant.to_owned(), agent, session };
-            append_response(engine.append(&scope, turns, Some(&key)))
+            let started = std::time::Instant::now();
+            let response = append_response(engine.append(&scope, turns, Some(&key)));
+            if response.status == 200 {
+                let elapsed = started.elapsed();
+                let seconds = elapsed.as_secs_f64();
+                let bucket = ACK_BUCKETS.iter().position(|le| seconds <= *le).unwrap_or(13);
+                ACKS[bucket].fetch_add(1, Ordering::Relaxed);
+                ACK_NANOS.fetch_add(elapsed.as_nanos() as u64, Ordering::Relaxed);
+            }
+            response
         }
         Err(message) => invalid(message),
     }

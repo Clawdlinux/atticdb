@@ -481,6 +481,24 @@ fn health_tracks_engine_state() {
     assert_eq!(health(), (200, json!({"status": "read_only", "instance": instance})));
     let (_, kept) = unix.a("GET", "/v1/facts/get?key=rule", None);
     assert_eq!(stats(), (json!("read_only"), kept["fact"]["lsn"].clone(), json!(1)));
+    // The same numbers for Prometheus, on the socket only.
+    let wire = unix.raw(b"GET /metrics HTTP/1.1\r\nConnection: close\r\n\r\n");
+    let (head, text) = wire.split_once("\r\n\r\n").unwrap();
+    assert!(head.contains("Content-Type: text/plain; version=0.0.4"), "{head}");
+    let value = |name: &str| {
+        let line = text.lines().find(|line| line.split(' ').next() == Some(name));
+        line.and_then(|line| line.split(' ').nth(1)).unwrap_or_else(|| panic!("{name}: {text}"))
+    };
+    assert_eq!((value("zerodb_read_only"), value("zerodb_facts")), ("1", "1"), "{text}");
+    for line in ["# TYPE zerodb_writer_groups_total counter", "# TYPE zerodb_facts gauge"] {
+        assert!(text.lines().any(|got| got == line), "{line}: {text}");
+    }
+    value("zerodb_checkpoint_snapshot_lock_seconds");
+    let count = value("zerodb_append_ack_seconds_count");
+    assert_eq!(value("zerodb_append_ack_seconds_bucket{le=\"+Inf\"}"), count, "{text}");
+    assert!(count.parse::<u64>().unwrap() >= 1, "the committed append is counted: {text}");
+    let tcp = &running.vias[0];
+    assert_eq!(tcp.call(Some("127.0.0.1"), None, "GET", "/metrics", None).0, 401, "not on TCP");
     assert_eq!(contents(), ["one"]);
     disk.set_capacity(capacity).unwrap();
     let (status, committed) = append("floor", "two");

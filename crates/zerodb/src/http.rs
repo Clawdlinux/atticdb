@@ -149,8 +149,10 @@ impl fmt::Debug for Request {
 pub struct Response {
     /// Status code.
     pub status: u16,
-    /// JSON body bytes.
+    /// Body bytes.
     pub body: Vec<u8>,
+    /// `Content-Type`.
+    pub content_type: &'static str,
     /// A share of a [`Budget`] that lasts until the response is dropped, after its write.
     pub(crate) _held: Option<Held>,
 }
@@ -158,7 +160,12 @@ pub struct Response {
 impl Response {
     /// A response with a JSON body.
     pub fn json(status: u16, body: &Value) -> Self {
-        Self { status, body: body.to_string().into_bytes(), _held: None }
+        Self::text(status, "application/json", body.to_string())
+    }
+
+    /// A response with a text body of `content_type`.
+    pub fn text(status: u16, content_type: &'static str, body: String) -> Self {
+        Self { status, body: body.into_bytes(), content_type, _held: None }
     }
 
     /// `{"outcome": "not_committed", "error": <error>, "message"?: <message>}`. Nothing
@@ -466,10 +473,10 @@ pub fn write_response<S: Stream + ?Sized>(
     close: bool,
     deadline: Instant,
 ) -> io::Result<()> {
-    let (status, length) = (response.status, response.body.len());
+    let (status, length, kind) = (response.status, response.body.len(), response.content_type);
     let connection = if close { "close" } else { "keep-alive" };
     let head = format!(
-        "HTTP/1.1 {status} \r\nContent-Type: application/json\r\nContent-Length: {length}\r\nConnection: {connection}\r\n\r\n"
+        "HTTP/1.1 {status} \r\nContent-Type: {kind}\r\nContent-Length: {length}\r\nConnection: {connection}\r\n\r\n"
     );
     write_until(stream, head.as_bytes(), deadline)?;
     write_until(stream, &response.body, deadline)
@@ -742,7 +749,7 @@ mod tests {
         while let Some((request, ())) = conn.next_request(check) {
             assert_eq!(request.body.len() as u64, request.head.content_length);
             bodies.push(request.body);
-            let reply = Response { status: 200, body: vec![b'x'; reply_bytes], _held: None };
+            let reply = Response::text(200, "text/plain", "x".repeat(reply_bytes));
             if conn.respond(&reply).is_err() {
                 write_errors += 1;
             }
