@@ -202,6 +202,7 @@ pub fn serve(engine: Arc<Engine>, dir: &Dir, max_connections: usize) -> Running 
         instance: instance.clone(),
         exit_on_poison: false,
         max_connections,
+        log_requests: false,
     };
     let server = serve::run(engine, listeners, config).unwrap();
     let vias = [Via::Tcp(server.tcp_addr().unwrap()), Via::Unix(socket)];

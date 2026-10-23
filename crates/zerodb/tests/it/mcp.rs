@@ -383,6 +383,7 @@ fn launch_race_starts_one_server() {
     wait_for("the losing server exits", || log().contains(" is locked by "));
     assert_eq!(log().matches("zerodb: serving").count(), 1, "one server: {}", log());
     assert!(!log().contains("in use"), "never EADDRINUSE: {}", log());
+    assert!(!log().contains(" POST /v1/append "), "requests are not logged: {}", log());
     let stderr: String = racers.iter().map(|mcp| mcp.process.stderr()).collect();
     let exits = stderr.lines().filter(|line| line.contains("exited:"));
     assert!(exits.into_iter().all(|line| line.ends_with("exit status: 75")), "{stderr}");
@@ -564,7 +565,9 @@ fn unknown_outcome_never_downgrades() {
     let dir = Dir::new();
     let token = init_config(&dir);
     let data = dir.0.join("d");
-    let serve = ["serve", "--config", "c.json", "--data-dir", "d", "--listen", "none"];
+    // The test reads request lines to see the unknown answer and the rejected retries.
+    let serve =
+        ["serve", "--config", "c.json", "--data-dir", "d", "--listen", "none", "--log-requests"];
     let url = format!("unix://{}", data.join(zerodb::listen::SOCKET_NAME).display());
     for (case, restart) in [("restarted after 1 s", true), ("no restart, 3 s deadline", false)] {
         let mut server = support::Process::spawn(&dir.0, &serve);

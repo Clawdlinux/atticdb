@@ -338,7 +338,7 @@ fn startup_checks() {
             |_| vec!["--exit-on-poison".into()],
             Expect::ExitsOnPoison(true),
         ),
-        ("recover", |_| vec![], Expect::Recovers),
+        ("recover", |_| vec!["--log-requests".into()], Expect::Recovers),
     ];
 
     for (case, prepare, expect) in rows {
@@ -465,7 +465,9 @@ fn startup_checks() {
                 let (status, stderr) = ctx.run(&verify).wait();
                 assert_eq!(status.code(), Some(75), "{case}: verify under the lock: {stderr}");
                 server.child.kill().unwrap();
-                server.wait();
+                let (_, stderr) = server.wait();
+                let line = " POST /v1/append 200 tenant=a ";
+                assert!(stderr.contains(line), "{case}: --log-requests logs requests: {stderr}");
                 // A read-only backup must still verify.
                 let modes = |mode| {
                     for name in support::files(&ctx.data).into_keys() {
@@ -549,6 +551,7 @@ fn startup_checks() {
                 assert_eq!(ctx.append(&Via::Tcp(tcp.unwrap()), "poison"), (500, unknown), "{case}");
                 let (status, stderr) = server.wait();
                 assert_eq!(status.code(), Some(70), "{case}: {stderr}");
+                assert!(stderr.contains(" POST /v1/append 500 "), "{case}: 5xx logged: {stderr}");
                 if other.is_some() {
                     let kept = std::os::unix::net::UnixStream::connect(&ctx.socket);
                     assert!(kept.is_ok(), "{case}: {kept:?}");

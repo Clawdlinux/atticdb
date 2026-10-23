@@ -58,6 +58,9 @@ pub struct ServeConfig {
     pub exit_on_poison: bool,
     /// Most open connections, [`MAX_CONNECTIONS`] for `zerodb serve`.
     pub max_connections: usize,
+    /// One stderr line per request. Off by default: every connection thread shares the
+    /// lock. 5xx answers are always logged.
+    pub log_requests: bool,
 }
 
 #[derive(Default)]
@@ -128,7 +131,9 @@ impl Shared {
             let started = Instant::now();
             api::check(&self.config.auth, head, tcp)
                 .map(|(route, tenant)| (route, tenant, started))
-                .inspect_err(|response| log(&head.method, head.path(), response, "-", started))
+                .inspect_err(|response| {
+                    self.log(&head.method, head.path(), response, "-", started);
+                })
         };
         while let Some((request, (route, tenant, started))) = conn.next_request(check) {
             // Counted once the body is in. A body still arriving at a poison exit gets a
@@ -149,7 +154,7 @@ impl Shared {
                 }
             };
             let _ = conn.respond(&response);
-            log(&method, &path, &response, &tenant, started);
+            self.log(&method, &path, &response, &tenant, started);
             self.tracker.update(|conns| conns.in_flight -= 1);
             self.exit_on_poison();
             if self.stopping.load(Ordering::Acquire) {
@@ -159,7 +164,15 @@ impl Shared {
     }
 }
 
-/// One line per request. Never a header value, a body or a query string.
+impl Shared {
+    /// One line per logged request. Never a header value, a body or a query string.
+    fn log(&self, method: &str, path: &str, response: &Response, tenant: &str, started: Instant) {
+        if self.config.log_requests || response.status >= 500 {
+            log(method, path, response, tenant, started);
+        }
+    }
+}
+
 fn log(method: &str, path: &str, response: &Response, tenant: &str, started: Instant) {
     let tenant = if tenant.is_empty() { "-" } else { tenant };
     let ms = started.elapsed().as_secs_f64() * 1000.0;
@@ -320,8 +333,8 @@ fn busy<S: Stream>(mut stream: S) {
 ///
 /// Order: TCP, then the engine and its lock, then the Unix socket. So two racing
 /// starts can only collide on the lock, and only the lock holder touches the socket.
-pub fn start(config: Config, exit_on_poison: bool) -> u8 {
-    match try_start(config, exit_on_poison) {
+pub fn start(config: Config, exit_on_poison: bool, log_requests: bool) -> u8 {
+    match try_start(config, exit_on_poison, log_requests) {
         Ok(code) => code,
         Err((code, message)) => {
             let _ = writeln!(io::stderr(), "zerodb: {message}");
@@ -330,7 +343,7 @@ pub fn start(config: Config, exit_on_poison: bool) -> u8 {
     }
 }
 
-fn try_start(config: Config, exit_on_poison: bool) -> Result<u8, (u8, String)> {
+fn try_start(config: Config, exit_on_poison: bool, log_requests: bool) -> Result<u8, (u8, String)> {
     let fail = |message: String| (1, message);
     let data_dir = config.data_dir.ok_or_else(|| fail("set data_dir or --data-dir".into()))?;
     let data_dir = std::path::absolute(&data_dir).map_err(|error| fail(error.to_string()))?;
@@ -370,7 +383,7 @@ fn try_start(config: Config, exit_on_poison: bool) -> Result<u8, (u8, String)> {
     let listeners = Listeners { tcp, unix: Some(unix) };
     let auth = Auth::new(&config.tenants);
     let max_connections = MAX_CONNECTIONS;
-    let config = ServeConfig { auth, instance, exit_on_poison, max_connections };
+    let config = ServeConfig { auth, instance, exit_on_poison, max_connections, log_requests };
     let server = run(Arc::new(engine), listeners, config).map_err(|e| fail(e.to_string()))?;
     // One write, so a reader never sees half of the line.
     let (instance, socket) = (&server.shared.config.instance, socket.display());
