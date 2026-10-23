@@ -50,7 +50,8 @@ class Server:
 
     def start(self):
         offset = os.path.getsize(self.log_path) if os.path.exists(self.log_path) else 0
-        args = ["serve", "--config", self.config, "--data-dir", self.data]
+        # Tests read request lines to see unknown answers and rejected retries.
+        args = ["serve", "--config", self.config, "--data-dir", self.data, "--log-requests"]
         with open(self.log_path, "ab") as log:
             self.process = subprocess.Popen(
                 [BIN, *args, "--listen", "127.0.0.1:0"],
