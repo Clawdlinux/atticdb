@@ -7,7 +7,7 @@ pub use crate::dir::{atomic_install, make_spare, DataDir};
 pub use crate::io::SimClock;
 pub use crate::recovery::{recover, Recovered};
 pub use crate::segment::{SegmentWriter, DEFAULT_SEGMENT_SIZE};
-pub use crate::writer::{Coalescer, PreparedBatch, WriteRequest, WriterCore};
+pub use crate::writer::{PreparedBatch, WriteRequest, WriterCore};
 use crate::{
     Clock, Committed, CommittedRecord, Durability, Error, FileId, Io, Kind, LockGuard, Outcome,
     Prepare, RecordInput, RecoveryReport, Result, SimDisk, StateMachine, Tape,

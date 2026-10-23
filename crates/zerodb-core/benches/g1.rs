@@ -233,10 +233,8 @@ fn bare(iterations: usize, batch: usize, n: usize, symmetric: bool) -> Stats {
     let worker = std::thread::spawn(move || {
         let mut syncs = 0;
         let mut requests = 0;
-        let mut coalescer =
-            zerodb_tape::sim::Coalescer::new(TapeOptions::default().coalescing_window);
         while let Ok(first) = receiver.recv() {
-            let group = coalescer.collect(&receiver, first);
+            let group: Vec<_> = std::iter::once(first).chain(receiver.try_iter()).collect();
             for request in &group {
                 bare.write(&request.bytes);
             }
