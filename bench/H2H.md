@@ -70,7 +70,7 @@ zerodb acknowledges 2.7× as many writes as Redis, Valkey and DiceDB at 1 writer
 - **Group commit.** zerodb syncs once for all queued writers. On the slow disk that turns 16 writers into 12× its 1-writer throughput. The Redis family groups too, but every group still pays the two round trips.
 - **SQLite serializes writers.** Its writers take one lock. A loser sleeps in the busy handler for up to 100 ms per retry. So p50 stays low while throughput stops growing and the max reaches seconds: 2.7 s on NVMe and 49 s on Premium SSD v2 at 16 writers. The percentiles hide it, because the stalled inserts are under 0.1% of samples.
 - **SQLite has no socket.** It runs in the writer's process. On fast NVMe with one writer that wins: 31 µs against zerodb's 89 µs, which includes an HTTP round trip over the Unix socket.
-- **zerodb trails at 16 writers on NVMe.** When the device answers in about 60 µs, per-request CPU on zerodb's single writer thread sets the pace: HTTP and JSON parsing, framing, one `pwrite` per append. Redis's event loop is cheaper per request. That is the next thing to work on.
+- **zerodb trails at 16 writers on NVMe.** When the device answers in about 60 µs, per-request CPU sets the pace. zerodb parses HTTP and JSON on a thread per connection, then hands each append to the single writer thread, which prepares, frames and `pwrite`s it. Redis does all of that in one event loop. The server path is not profiled yet, so how the cost splits between those threads is open. That is the next thing to work on.
 
 ## Not covered
 
