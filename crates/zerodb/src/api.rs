@@ -129,7 +129,7 @@ pub fn stats(engine: &Engine, instance: &str) -> Response {
 }
 
 /// `/v1/stats` counters. Its other numbers are gauges, and `_ns` maxima become seconds.
-const COUNTERS: [&str; 12] = [
+const COUNTERS: [&str; 13] = [
     "writer_groups",
     "writer_group_requests",
     "superblock_installs",
@@ -142,13 +142,59 @@ const COUNTERS: [&str; 12] = [
     "tape_index_page_evictions",
     "tape_index_dirty_page_evictions",
     "busy_replies",
+    "turn_repeats",
 ];
-/// Upper bounds of the append ack histogram, in seconds.
-const ACK_BUCKETS: [f64; 13] =
-    [50e-6, 100e-6, 250e-6, 500e-6, 1e-3, 2.5e-3, 5e-3, 10e-3, 25e-3, 50e-3, 100e-3, 250e-3, 1.0];
-/// Committed appends per bucket, the last past 1 s.
-static ACKS: [AtomicU64; 14] = [const { AtomicU64::new(0) }; 14];
-static ACK_NANOS: AtomicU64 = AtomicU64::new(0);
+
+/// A Prometheus histogram over fixed upper bounds, with one more bucket past the last.
+struct Histogram {
+    bounds: &'static [f64],
+    counts: [AtomicU64; 24],
+    /// Sum in steps of `unit`, so it stays an integer.
+    sum: AtomicU64,
+    unit: f64,
+}
+
+impl Histogram {
+    const fn new(bounds: &'static [f64], unit: f64) -> Self {
+        Self { bounds, counts: [const { AtomicU64::new(0) }; 24], sum: AtomicU64::new(0), unit }
+    }
+
+    fn record(&self, value: f64) {
+        let bucket = self.bounds.iter().position(|le| value <= *le).unwrap_or(self.bounds.len());
+        self.counts[bucket].fetch_add(1, Ordering::Relaxed);
+        self.sum.fetch_add((value / self.unit) as u64, Ordering::Relaxed);
+    }
+
+    fn render(&self, name: &str, out: &mut String) {
+        *out += &format!("# TYPE zerodb_{name} histogram\n");
+        let mut count = 0;
+        for (i, bucket) in self.counts[..=self.bounds.len()].iter().enumerate() {
+            count += bucket.load(Ordering::Relaxed);
+            let le = self.bounds.get(i).map_or("+Inf".into(), f64::to_string);
+            *out += &format!("zerodb_{name}_bucket{{le=\"{le}\"}} {count}\n");
+        }
+        let sum = self.sum.load(Ordering::Relaxed) as f64 * self.unit;
+        *out += &format!("zerodb_{name}_sum {sum}\nzerodb_{name}_count {count}\n");
+    }
+}
+
+/// Committed append latency, 50 µs to 1 s.
+static ACK_SECONDS: Histogram = Histogram::new(
+    &[50e-6, 100e-6, 250e-6, 500e-6, 1e-3, 2.5e-3, 5e-3, 10e-3, 25e-3, 50e-3, 100e-3, 250e-3, 1.0],
+    1e-9,
+);
+/// Content size of newly written turns, 64 B to 4 MiB in powers of 2.
+static TURN_BYTES: Histogram = Histogram::new(
+    &[
+        64.0, 128.0, 256.0, 512.0, 1024.0, 2048.0, 4096.0, 8192.0, 16384.0, 32768.0, 65536.0,
+        131072.0, 262144.0, 524288.0, 1048576.0, 2097152.0, 4194304.0,
+    ],
+    1.0,
+);
+/// One content hash per slot. A turn whose hash is already in its slot is a repeat. Slots
+/// get overwritten, so `turn_repeats` is a lower bound on exact repeats.
+static RECENT: [AtomicU64; 4096] = [const { AtomicU64::new(0) }; 4096];
+static REPEATS: AtomicU64 = AtomicU64::new(0);
 
 /// `GET /metrics`: `/v1/stats` and the append ack histogram in Prometheus text format 0.0.4.
 pub fn metrics(engine: &Engine) -> Response {
@@ -172,16 +218,8 @@ pub fn metrics(engine: &Engine) -> Response {
         }
     }
     add("read_only", "gauge", if fields["health"] == "read_only" { "1" } else { "0" });
-    out += "# TYPE zerodb_append_ack_seconds histogram\n";
-    let mut count = 0;
-    for (i, bucket) in ACKS.iter().enumerate() {
-        count += bucket.load(Ordering::Relaxed);
-        let le = ACK_BUCKETS.get(i).map_or("+Inf".into(), f64::to_string);
-        out += &format!("zerodb_append_ack_seconds_bucket{{le=\"{le}\"}} {count}\n");
-    }
-    let sum = ACK_NANOS.load(Ordering::Relaxed) as f64 / 1e9;
-    out +=
-        &format!("zerodb_append_ack_seconds_sum {sum}\nzerodb_append_ack_seconds_count {count}\n");
+    ACK_SECONDS.render("append_ack_seconds", &mut out);
+    TURN_BYTES.render("turn_content_bytes", &mut out);
     Response::text(200, "text/plain; version=0.0.4; charset=utf-8", out)
 }
 
@@ -201,6 +239,7 @@ pub fn stats_fields(engine: &Engine) -> Option<Value> {
         "writer_groups": m.writer_groups,
         "writer_group_requests": m.writer_group_requests,
         "busy_replies": BUSY.load(Ordering::Relaxed),
+        "turn_repeats": REPEATS.load(Ordering::Relaxed),
         "superblock_installs": m.superblock_installs,
         "replayed_records": m.replayed_records,
         "window_reads": m.window_reads,
@@ -253,19 +292,37 @@ pub fn append(engine: &Engine, tenant: &str, body: Vec<u8>) -> Response {
     match parsed {
         Ok((agent, session, key, turns)) => {
             let scope = Scope { tenant: tenant.to_owned(), agent, session };
+            let seen: Vec<(usize, u64)> =
+                turns.iter().map(|t| (t.content.len(), hash(&t.content))).collect();
             let started = std::time::Instant::now();
-            let response = append_response(engine.append(&scope, turns, Some(&key)));
+            let result = engine.append(&scope, turns, Some(&key));
+            let elapsed = started.elapsed();
+            // Dedup and lost receipts tell nothing about new turns.
+            let fresh = result.as_ref().is_ok_and(|receipt| !receipt.deduplicated);
+            let response = append_response(result);
             if response.status == 200 {
-                let elapsed = started.elapsed();
-                let seconds = elapsed.as_secs_f64();
-                let bucket = ACK_BUCKETS.iter().position(|le| seconds <= *le).unwrap_or(13);
-                ACKS[bucket].fetch_add(1, Ordering::Relaxed);
-                ACK_NANOS.fetch_add(elapsed.as_nanos() as u64, Ordering::Relaxed);
+                ACK_SECONDS.record(elapsed.as_secs_f64());
+            }
+            if fresh {
+                for (len, hash) in seen {
+                    TURN_BYTES.record(len as f64);
+                    if RECENT[(hash % 4096) as usize].swap(hash, Ordering::Relaxed) == hash {
+                        REPEATS.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
             }
             response
         }
         Err(message) => invalid(message),
     }
+}
+
+/// Never 0, the empty slot.
+fn hash(content: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    content.hash(&mut hasher);
+    hasher.finish().max(1)
 }
 
 fn string(fields: &mut Map<String, Value>, name: &str) -> Result<String, String> {

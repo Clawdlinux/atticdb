@@ -22,6 +22,11 @@ fn append_window_and_retry_over_both_listeners() {
     let dir = Dir::new();
     let engine = sim_engine(&disk, None, 100);
     let running = serve(engine.clone(), &dir, MAX_CONNECTIONS);
+    let repeats = || {
+        let (_, stats) = running.vias[1].call(None, None, "GET", "/v1/stats", None);
+        stats["turn_repeats"].as_u64().unwrap()
+    };
+    let before = repeats();
     let mut firsts = Vec::new();
     for via in &running.vias {
         let name = via.name();
@@ -111,6 +116,9 @@ fn append_window_and_retry_over_both_listeners() {
         }
         firsts.push((name, first_body, first));
     }
+    // The second listener's "hello" and three 100-byte turns repeat the first's. Other
+    // tests share the counter, so this is a lower bound.
+    assert!(repeats() - before >= 4, "repeats counted: {before} then {}", repeats());
 
     // Only direct Rust API writes can store content that is not UTF-8.
     let raw = Scope { tenant: "a".into(), agent: "a".into(), session: "raw".into() };
@@ -494,6 +502,7 @@ fn health_tracks_engine_state() {
         assert!(text.lines().any(|got| got == line), "{line}: {text}");
     }
     value("zerodb_checkpoint_snapshot_lock_seconds");
+    assert!(value("zerodb_turn_content_bytes_bucket{le=\"64\"}").parse::<u64>().unwrap() >= 1);
     let count = value("zerodb_append_ack_seconds_count");
     assert_eq!(value("zerodb_append_ack_seconds_bucket{le=\"+Inf\"}"), count, "{text}");
     assert!(count.parse::<u64>().unwrap() >= 1, "the committed append is counted: {text}");
