@@ -15,7 +15,7 @@ const USAGE: &str = "usage:
   zerodb recover --truncate-at <lsn> --data-dir <dir>
   zerodb stats --url unix:///path | --data-dir <dir>
   zerodb load --url unix:///path|http://127.0.0.1:<port> [--token-file <path>] [--writers <n>]
-              [--turns <n>] [--batch <n>] [--size <bytes>]
+              [--turns <n>] [--batch <n>] [--size <bytes>] [--think <ms>]
   zerodb verify --data-dir <dir> [--scratch <dir>]
   zerodb dump --data-dir <dir> [--scratch <dir>] [--from <lsn>] [--limit <n>]
   zerodb mcp [--url unix:///path|http://127.0.0.1:<port>] [--data-dir <dir>] [--config <path>]
@@ -37,7 +37,15 @@ fn main() -> ExitCode {
             "recover" => flags(rest, &["--truncate-at", "--data-dir"], &[]).and_then(recover),
             "stats" => flags(rest, &["--url", "--data-dir"], &[]).and_then(stats),
             "load" => {
-                let valued = ["--url", "--token-file", "--writers", "--turns", "--batch", "--size"];
+                let valued = [
+                    "--url",
+                    "--token-file",
+                    "--writers",
+                    "--turns",
+                    "--batch",
+                    "--size",
+                    "--think",
+                ];
                 flags(rest, &valued, &[]).and_then(load)
             }
             "verify" => flags(rest, &["--data-dir", "--scratch"], &[]).and_then(verify),
@@ -153,10 +161,14 @@ fn load(mut flags: HashMap<String, String>) -> Option<u8> {
     };
     let (writers, turns) = (number("--writers", 1)?, number("--turns", 10_000)?);
     let (batch, size) = (number("--batch", 1)?, number("--size", 256)?);
+    // Pauses up to 2x think must stay under the server's 10 s head timeout.
+    let think = flags.remove("--think").map_or(Some(0), |text| text.parse().ok())?;
     // At most the server's connection cap and the tape's batch cap.
     let split = writers.checked_mul(batch).filter(|n| turns % n == 0);
-    if writers > zerodb::serve::MAX_CONNECTIONS || batch > 1024 || split.is_none() {
-        let rule = "--turns must divide by --writers * --batch; writers <= 256, batch <= 1024";
+    if writers > zerodb::serve::MAX_CONNECTIONS || batch > 1024 || split.is_none() || think > 4_000
+    {
+        let rule = "--turns must divide by --writers * --batch; writers <= 256, batch <= 1024, \
+            think <= 4000 ms";
         return Some(usage(rule));
     }
     let url = match Url::parse(&flags.remove("--url")?) {
@@ -170,7 +182,15 @@ fn load(mut flags: HashMap<String, String>) -> Option<u8> {
             .and_then(|text| zerodb::config::Token::new(text).map_err(str::to_owned)),
     };
     match token {
-        Ok(token) => Some(zerodb::ops::load(url, &token, writers, turns, batch, size)),
+        Ok(token) => Some(zerodb::ops::load(
+            url,
+            &token,
+            writers,
+            turns,
+            batch,
+            size,
+            std::time::Duration::from_millis(think),
+        )),
         Err(error) => Some(usage(&error)),
     }
 }

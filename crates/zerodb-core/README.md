@@ -341,10 +341,7 @@ The bare baseline reuses M1's framing, segment preallocation, append, and sync c
 It preframes the same turn codec, metadata, transaction footer, and byte counts.
 Its fixed headers exclude hashing and caller preparation, as in M1.
 All paths use the same content-size trace and transaction batching.
-Bare and Tape share the same adaptive coalescer.
-`TapeOptions::coalescing_window` defaults to 200 us. Zero disables waiting. Larger values are rejected.
-It targets the largest of the previous 64 groups until that bounded timeout.
-After waiting, it drains ready arrivals without blocking again.
+Bare and Tape group the same way: everything queued when the writer wakes, with no wait for more.
 Group boundaries still depend on scheduling. Every path reports its observed request-group size.
 Tape computes frame CRCs after reserving each transaction's segment and offset.
 Periodic superblocks run on a helper using only published, already-synced LSNs.

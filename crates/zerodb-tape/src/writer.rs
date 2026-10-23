@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// A batch's acknowledgement and persistence requirements.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -95,8 +95,6 @@ pub struct TapeOptions {
     pub server_address: Option<String>,
     /// Replay records strictly above this checkpoint watermark. Zero replays the entire tape.
     pub replay_from_lsn: u64,
-    /// Maximum group-formation wait. Zero disables waiting. Cannot exceed 200 microseconds.
-    pub coalescing_window: Duration,
     /// Maximum active-write interval between superblock requests. Must be nonzero.
     pub superblock_interval: Duration,
     /// Published tape bytes between superblock requests, including roll padding. Must be nonzero.
@@ -119,7 +117,6 @@ impl Default for TapeOptions {
             segment_size: DEFAULT_SEGMENT_SIZE,
             server_address: None,
             replay_from_lsn: 0,
-            coalescing_window: Duration::from_micros(200),
             superblock_interval: Duration::from_secs(30),
             superblock_bytes: 256 * 1024 * 1024,
             lsn_index_bytes: DEFAULT_BUDGET,
@@ -377,9 +374,6 @@ impl<S: StateMachine> WriterCore<S> {
         path: impl AsRef<Path>,
         opts: TapeOptions,
     ) -> Result<(Self, RecoveryReport)> {
-        if opts.coalescing_window > Duration::from_micros(200) {
-            return Err(Error::Configuration("coalescing window exceeds 200 microseconds".into()));
-        }
         if opts.superblock_interval.is_zero() || opts.superblock_bytes == 0 {
             return Err(Error::Configuration(
                 "superblock interval and byte limit must be positive".into(),
@@ -872,55 +866,6 @@ impl<S: StateMachine> WriterCore<S> {
     }
 }
 
-/// Bounded adaptive group formation, shared with the bare benchmark driver.
-#[derive(Debug)]
-pub struct Coalescer {
-    window: Duration,
-    recent: VecDeque<usize>,
-}
-impl Coalescer {
-    /// Creates a driver with at most 200 microseconds of waiting per group.
-    pub fn new(window: Duration) -> Self {
-        Self { window: window.min(Duration::from_micros(200)), recent: VecDeque::new() }
-    }
-    /// Drains ready requests, then waits for the largest of the previous 64 groups.
-    pub fn collect<T>(&mut self, receiver: &mpsc::Receiver<T>, first: T) -> Vec<T> {
-        let mut group = vec![first];
-        group.extend(receiver.try_iter());
-        self.collect_with(
-            group,
-            |wait| receiver.recv_timeout(wait).ok(),
-            || receiver.try_iter().collect(),
-        )
-    }
-    fn collect_with<T>(
-        &mut self,
-        mut group: Vec<T>,
-        mut receive: impl FnMut(Duration) -> Option<T>,
-        mut ready: impl FnMut() -> Vec<T>,
-    ) -> Vec<T> {
-        let target = self.recent.iter().copied().max().unwrap_or(1);
-        let start = Instant::now();
-        while group.len() < target && !self.window.is_zero() {
-            let remaining = self.window.saturating_sub(start.elapsed());
-            if remaining.is_zero() {
-                break;
-            }
-            match receive(remaining) {
-                Some(request) => group.push(request),
-                None => break,
-            }
-        }
-        // Scheduling can outlast the wait budget. Include arrivals without another blocking wait.
-        group.extend(ready());
-        self.recent.push_back(group.len());
-        if self.recent.len() > 64 {
-            self.recent.pop_front();
-        }
-        group
-    }
-}
-
 /// Installs due superblocks, then keeps one spare segment ready.
 struct MaintenanceWorker {
     sender: Option<mpsc::SyncSender<()>>,
@@ -1039,7 +984,6 @@ impl<S: StateMachine> Tape<S> {
     {
         #[cfg(feature = "sim")]
         let inline = opts.inline_sim;
-        let mut coalescer = Coalescer::new(opts.coalescing_window);
         let (mut core, report) = WriterCore::open_with(state_machine, io, clock, path, opts)?;
         let reads = core.reads.clone();
         // Fill the first spare before any write, so no open-time fill races the writer.
@@ -1063,7 +1007,8 @@ impl<S: StateMachine> Tape<S> {
         let maintenance = MaintenanceWorker::start(&core)?;
         let thread = std::thread::Builder::new().name("zerodb-writer".into()).spawn(move || {
             while let Ok(request) = receiver.recv() {
-                for request in coalescer.collect(&receiver, request) {
+                // Group what queued during the last sync. Waiting for more only adds latency.
+                for request in std::iter::once(request).chain(receiver.try_iter()) {
                     core.enqueue(request);
                 }
                 core.step();
@@ -1282,51 +1227,5 @@ mod tests {
         assert_eq!(later.recv().unwrap().unwrap_err().outcome, Outcome::NotCommitted);
         assert_eq!(core.durable_lsn(), 0);
         assert!(core.read(1).unwrap().is_none());
-    }
-
-    #[test]
-    fn coalescing_targets_recent_groups_and_bounds_waiting() {
-        let mut groups = Coalescer::new(std::time::Duration::from_micros(200));
-        groups.recent.push_back(3);
-        let mut next = [2, 3].into_iter();
-        assert_eq!(
-            groups.collect_with(
-                vec![1],
-                |wait| {
-                    assert!(wait <= std::time::Duration::from_micros(200));
-                    next.next()
-                },
-                Vec::new
-            ),
-            vec![1, 2, 3]
-        );
-        groups.window = std::time::Duration::ZERO;
-        assert_eq!(
-            groups.collect_with(vec![1], |_| panic!("zero disables waiting"), Vec::new),
-            vec![1]
-        );
-        groups.window = std::time::Duration::from_micros(200);
-        let mut calls = 0;
-        assert_eq!(
-            groups.collect_with(
-                vec![1],
-                |_| {
-                    calls += 1;
-                    None
-                },
-                Vec::new
-            ),
-            vec![1]
-        );
-        assert_eq!(calls, 1);
-    }
-
-    #[test]
-    fn coalescing_drains_ready_requests_when_waiting_expires() {
-        let mut groups = Coalescer::new(Duration::from_micros(200));
-        groups.recent.push_back(3);
-        let group = groups.collect_with(vec![1], |_| None, || vec![2, 3]);
-        assert_eq!(group, vec![1, 2, 3]);
-        assert_eq!(groups.recent.back(), Some(&3));
     }
 }

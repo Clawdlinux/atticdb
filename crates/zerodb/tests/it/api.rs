@@ -402,6 +402,14 @@ fn auth_and_host_rules() {
     assert!(head.starts_with("HTTP/1.1 503 "), "{wire}");
     let busy = json!({"outcome": "not_committed", "error": "busy"});
     assert_eq!(serde_json::from_str::<Value>(body).unwrap(), busy);
+    // Stats count it. Ask over an accepted connection, since the cap is still full.
+    use std::io::{Read, Write};
+    let mut conn = &idle[0];
+    conn.write_all(b"GET /v1/stats HTTP/1.1\r\nConnection: close\r\n\r\n").unwrap();
+    let mut wire = String::new();
+    conn.read_to_string(&mut wire).unwrap();
+    let stats: Value = serde_json::from_str(wire.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert!(stats["busy_replies"].as_u64().unwrap() >= 1, "{wire}");
     drop(idle);
     // Shutdown needs no connection to the socket path, which may be gone or replaced.
     std::fs::remove_file(path).unwrap();
