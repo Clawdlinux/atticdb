@@ -2,6 +2,10 @@
 
 Run on 2026-10-23. Raw rows: [h2h-nvme.tsv](h2h-nvme.tsv) and [h2h-premium-v2.tsv](h2h-premium-v2.tsv). Runbook: [h2h.sh](h2h.sh).
 
+![Durable acks per second and p99 latency, by disk and writer count](h2h.svg)
+
+Redraw with `python3 bench/h2h_chart.py`.
+
 ## The question
 
 How fast can each system acknowledge a write that survives power loss? Agents write that way: one append, wait for the ack, next append. So every client here is closed-loop with one request in flight, and every system acks only after `fsync`.
