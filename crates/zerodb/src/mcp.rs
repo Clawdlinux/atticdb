@@ -65,6 +65,46 @@ pub fn start(flags: HashMap<String, String>) -> u8 {
     }
 }
 
+/// Runs one tool from a shell, with arguments from `--<name>` flags. Prints the tool's
+/// `structuredContent` as one JSON line. Exits 0, 1 when nothing was written or a read
+/// failed, 2 for a bad flag, or 3 when a write's outcome is unknown.
+pub fn command(tool: &str, mut flags: HashMap<String, String>) -> u8 {
+    let mut args = json!({});
+    for name in ["content", "role", "key", "prefix", "after"] {
+        if let Some(value) = flags.remove(&format!("--{name}")) {
+            args[name] = json!(value);
+        }
+    }
+    for (flag, name) in [("--n", "n"), ("--limit", "limit"), ("--max-bytes", "max_bytes")] {
+        match flags.remove(flag).map(|text| text.parse::<u64>()) {
+            Some(Ok(number)) => args[name] = json!(number),
+            Some(Err(_)) => {
+                eprintln!("zerodb: {flag} must be a whole number");
+                return 2;
+            }
+            None => {}
+        }
+    }
+    if flags.remove("--delete").is_some() {
+        args["delete"] = json!(true);
+    }
+    let result = match Adapter::new(flags) {
+        Ok(mut adapter) => adapter.call(tool, &args).unwrap_or_default(),
+        Err(message) => tool_error(message),
+    };
+    if result["isError"] != true {
+        println!("{}", result["structuredContent"]);
+        return 0;
+    }
+    let text = result["content"][0]["text"].as_str().unwrap_or_default();
+    eprintln!("zerodb: {text}");
+    if text.starts_with("unknown:") {
+        3
+    } else {
+        1
+    }
+}
+
 impl Adapter {
     fn new(mut flags: HashMap<String, String>) -> Result<Self, String> {
         let url = flags.remove("--url").as_deref().map(Url::parse).transpose()?;
@@ -145,17 +185,27 @@ impl Adapter {
                 })
             }
             "tools/list" if self.initialized => tools(),
-            "tools/call" if self.initialized => match params["name"].as_str() {
-                Some("memory_append") => self.append(&params["arguments"]),
-                Some("memory_recent") => self.recent(&params["arguments"]),
-                Some("fact_set") => self.fact_set(&params["arguments"]),
-                Some("fact_get") => self.fact_get(&params["arguments"]),
-                Some("fact_list") => self.fact_list(&params["arguments"]),
-                _ => return Some(rpc_error(id, -32602, "unknown tool")),
-            },
+            "tools/call" if self.initialized => {
+                let name = params["name"].as_str().unwrap_or_default();
+                match self.call(name, &params["arguments"]) {
+                    Some(result) => result,
+                    None => return Some(rpc_error(id, -32602, "unknown tool")),
+                }
+            }
             _ => return Some(rpc_error(id, -32601, "method not found")),
         };
         Some(json!({"jsonrpc": "2.0", "id": id, "result": result}))
+    }
+
+    fn call(&mut self, name: &str, args: &Value) -> Option<Value> {
+        Some(match name {
+            "memory_append" => self.append(args),
+            "memory_recent" => self.recent(args),
+            "fact_set" => self.fact_set(args),
+            "fact_get" => self.fact_get(args),
+            "fact_list" => self.fact_list(args),
+            _ => return None,
+        })
     }
 
     fn append(&mut self, args: &Value) -> Value {

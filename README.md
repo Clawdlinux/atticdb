@@ -49,6 +49,22 @@ For an MCP client, point it at `zerodb mcp`. Use absolute paths. It starts the s
 The model gets five tools: `memory_append` and `memory_recent` for sessions, and `fact_set`, `fact_get` and `fact_list` for keys.
 `fact_set` takes `content`, or `delete: true`. The later write wins, so a correction replaces the old rule.
 
+The same five tools work from a shell. Each prints one JSON line, the tool's result, so `jq` and agents can read it:
+
+```sh
+export ZERODB_TOKEN=$TOKEN
+Z="--url unix://$PWD/data/zerodb.sock --agent planner --session run-1"
+zerodb append $Z --content "hi" --role user          # {"committed":true,"deduplicated":false,"lsn":4,"seq":2}
+zerodb recent $Z --n 10                              # {"truncated":false,"turns":[...]}
+zerodb fact set $Z --key repo/payments/retry-rule --content "Retry 3 times, then fail."
+zerodb fact get $Z --key repo/payments/retry-rule    # {"fact":{"agent":"planner","content":...}}
+zerodb fact list $Z --prefix repo/ --limit 50        # {"facts":[...],"next":null}
+zerodb fact set $Z --key repo/payments/retry-rule --delete
+```
+
+They take the same connection flags as `zerodb mcp`, and retry a write with one key until `--retry-deadline` (default 30 s).
+Exit 0 means done. Exit 1 means nothing was written, or a read failed. Exit 3 means a write may or may not be saved, and repeating it may duplicate it. Exit 2 is a usage error.
+
 ## Keys
 
 Each tenant has one key space. Every agent with the tenant's token sees the same keys.
@@ -86,6 +102,7 @@ The [decision log](docs/design/0002-decision-log.md) explains the choices.
 - `zerodb load`: closed-loop append load against a server, with ack latency percentiles. `--think <ms>` (at most 4000) pauses each writer a random 0 to 2x that between writes, like an agent's model call.
 - `zerodb verify` and `zerodb dump`: check a stopped data directory on a copy. Verify names the LSN of damage. Dump lists records without content.
 - `zerodb mcp`: a stdio MCP adapter with 5 tools. It finds the running server or starts one, and retries with one key per call.
+- `zerodb append`, `recent` and `fact set|get|list`: the same 5 tools from a shell, one JSON line each.
 - A Python client in [clients/python](clients/python/README.md), standard library only.
 - Trusted code in sandboxes and microVMs can reach the server through its Unix socket. See [Sandboxed agents](#sandboxed-agents) and [sandboxes.md](docs/deploy/sandboxes.md).
 
