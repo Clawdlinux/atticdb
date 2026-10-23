@@ -51,28 +51,38 @@ impl Entry {
 #[derive(Debug)]
 pub(crate) struct Dedup {
     pub(crate) entries: BTreeMap<u64, Arc<Entry>>,
-    lookup: HashMap<DedupKey, u64>,
+    /// Sharded so a growing map rehashes 1/64 of its keys at a time, under the state lock.
+    lookup: Vec<HashMap<DedupKey, u64>>,
     tenants: BTreeMap<u32, BTreeSet<u64>>,
     per_tenant: usize,
     global: usize,
+}
+
+const SHARDS: usize = 64;
+
+fn shard(key: &DedupKey) -> usize {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    hasher.finish() as usize % SHARDS
 }
 
 impl Dedup {
     pub(crate) fn new(per_tenant: usize, global: usize) -> Self {
         Self {
             entries: BTreeMap::new(),
-            lookup: HashMap::new(),
+            lookup: (0..SHARDS).map(|_| HashMap::new()).collect(),
             tenants: BTreeMap::new(),
             per_tenant,
             global,
         }
     }
     pub(crate) fn get(&self, key: &DedupKey) -> Option<&Arc<Entry>> {
-        self.lookup.get(key).and_then(|age| self.entries.get(age))
+        self.lookup[shard(key)].get(key).and_then(|age| self.entries.get(age))
     }
     pub(crate) fn remove(&mut self, age: u64) -> Option<Arc<Entry>> {
         let entry = self.entries.remove(&age)?;
-        self.lookup.remove(&entry.key);
+        self.lookup[shard(&entry.key)].remove(&entry.key);
         if let Some(ages) = self.tenants.get_mut(&entry.key.0) {
             ages.remove(&age);
             if ages.is_empty() {
@@ -88,12 +98,12 @@ impl Dedup {
         if self.per_tenant == 0 || self.global == 0 {
             return;
         }
-        if let Some(&age) = self.lookup.get(&entry.key) {
+        if let Some(&age) = self.lookup[shard(&entry.key)].get(&entry.key) {
             self.remove(age);
         }
         let tenant = entry.key.0;
         let age = entry.age();
-        self.lookup.insert(entry.key.clone(), age);
+        self.lookup[shard(&entry.key)].insert(entry.key.clone(), age);
         self.tenants.entry(tenant).or_default().insert(age);
         self.entries.insert(age, entry);
         while self.tenants.get(&tenant).is_some_and(|ages| ages.len() > self.per_tenant) {
