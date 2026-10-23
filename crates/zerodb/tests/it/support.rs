@@ -213,6 +213,7 @@ pub struct Process {
     pub child: Child,
     stdout: Arc<Mutex<String>>,
     stderr: Arc<Mutex<String>>,
+    readers: Vec<std::thread::JoinHandle<()>>,
 }
 
 impl Process {
@@ -225,22 +226,23 @@ impl Process {
     /// Runs a command with stdout and stderr collected.
     pub fn start(command: &mut Command) -> Self {
         let mut child = command.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
-        let collect = |stream: Box<dyn Read + Send>| {
+        let mut readers = Vec::new();
+        let mut collect = |stream: Box<dyn Read + Send>| {
             let sink = Arc::new(Mutex::new(String::new()));
             let lines = BufReader::new(stream).lines();
             let writer = sink.clone();
-            std::thread::spawn(move || {
+            readers.push(std::thread::spawn(move || {
                 for line in lines.map_while(Result::ok) {
                     let mut sink = writer.lock().unwrap();
                     sink.push_str(&line);
                     sink.push('\n');
                 }
-            });
+            }));
             sink
         };
         let stdout = collect(Box::new(child.stdout.take().unwrap()));
         let stderr = collect(Box::new(child.stderr.take().unwrap()));
-        Self { child, stdout, stderr }
+        Self { child, stdout, stderr, readers }
     }
 
     /// Complete lines printed to stdout so far.
@@ -281,8 +283,11 @@ impl Process {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             if let Some(status) = self.child.try_wait().unwrap() {
-                // The reader threads see end of file once the process is gone.
-                std::thread::sleep(Duration::from_millis(50));
+                // A fixed sleep lost stderr on a busy runner. Readers end at the pipes' EOF.
+                while !self.readers.iter().all(std::thread::JoinHandle::is_finished) {
+                    assert!(Instant::now() < deadline, "pipes still open: {}", self.output());
+                    std::thread::sleep(Duration::from_millis(5));
+                }
                 return (status, self.output());
             }
             assert!(Instant::now() < deadline, "did not exit: {}", self.output());

@@ -383,6 +383,11 @@ impl DataDir {
         }
         let path = self.segment_path(id);
         let spare = self.path.join("spare.zdb");
+        if self.segments.is_empty() {
+            // The first segment is made at open, off the write path, so zero-fill it too.
+            // A failed or skipped fill falls back to preallocation below.
+            let _ = make_spare(self.io.clone(), &self.path, size, 0, &Mutex::new(()));
+        }
         if self.io.exists(&spare)? {
             self.io.rename(&spare, &path).map_err(SegmentPrepareError::before_manifest)?;
         } else {
