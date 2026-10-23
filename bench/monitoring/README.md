@@ -11,7 +11,8 @@ On the bench VM, with zerodb serving from `/mnt/nvme/z`:
 
 ```sh
 cd bench/monitoring
-ZERODB_SOCKET_DIR=/mnt/nvme/z docker compose up -d
+export ZERODB_SOCKET_DIR=/mnt/nvme/z   # every compose command needs it, `down` included
+docker compose up -d
 ```
 
 Prometheus can't scrape a Unix socket, so `socat` bridges `zerodb.sock` to `127.0.0.1:9425`.

@@ -5,3 +5,5 @@ datasources:
     type: prometheus
     url: http://127.0.0.1:9090
     isDefault: true
+    # Match the 1 s scrapes. Grafana's default 15 s step leaves gaps in short runs.
+    jsonData: {timeInterval: 1s}
