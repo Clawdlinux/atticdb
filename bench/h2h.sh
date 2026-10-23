@@ -78,7 +78,7 @@ sqlite() {
 
 {
     echo "# $(uname -sr) $(findmnt -no SOURCE,FSTYPE --target "$DISK")"
-    echo "# zerodb $(git rev-parse --short HEAD), memtier $("$MEMTIER" --version | head -1)"
+    echo "# zerodb ${H2H_ZERODB_REV:-$(git rev-parse --short HEAD)}, memtier $("$MEMTIER" --version | head -1)"
     for name in redis valkey dicedb; do echo "# $("$TOOLS/$name/src/$name-server" --version)"; done
     echo "# sqlite $(python3 -c 'import sqlite3; print(sqlite3.sqlite_version)')"
     printf 'system\twriters\trep\tturns_per_sec\tp50_us\tp99_us\tp999_us\n'
