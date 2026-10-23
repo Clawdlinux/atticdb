@@ -21,7 +21,9 @@ fn byte_threshold_and_segment_roll_install_the_superblock() {
         let options = Options { superblock_bytes: budget, ..opts(size) };
         let (mut core, _) =
             WriterCore::open(io.clone(), Arc::new(SimClock::default()), "db", options).unwrap();
-        io.events.lock().unwrap().clear();
+        let opened = std::mem::take(&mut *io.events.lock().unwrap());
+        let first = "rename db/spare.zdb db/seg-0000000000000001.zdb".to_owned();
+        assert!(opened.contains(&first), "{case}: first segment zero-filled: {opened:?}");
         for lsn in 1..=count {
             let reply =
                 submit(&mut core, vec![record(Kind::Turn, 1, b"hello")], Durability::Durable);
