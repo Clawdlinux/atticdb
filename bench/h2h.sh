@@ -33,9 +33,9 @@ cargo build -q --release -p zerodb
 ZDB=target/release/zerodb
 MEMTIER=$TOOLS/memtier/memtier_benchmark
 
-# Prints `turns_per_sec p50_us p99_us p999_us` from `key=value` lines on stdin.
+# Prints `turns_per_sec p50_us p99_us p999_us max_us` from `key=value` lines on stdin.
 pick() {
-    awk -F= '{v[$1]=$2} END {print v["turns_per_sec"], v["p50_us"], v["p99_us"], v["p999_us"]}'
+    awk -F= '{v[$1]=$2} END {print v["turns_per_sec"], v["p50_us"], v["p99_us"], v["p999_us"], v["max_us"]}'
 }
 
 zerodb() {
@@ -67,7 +67,8 @@ resp() {
 import json, sys
 totals = json.load(open(sys.argv[1]))["ALL STATS"]["Totals"]
 lat = totals["Percentile Latencies"]
-print(totals["Ops/sec"], *(lat[k] * 1000 for k in ("p50.00", "p99.00", "p99.90")))
+print(totals["Ops/sec"], *(lat[k] * 1000 for k in ("p50.00", "p99.00", "p99.90")),
+      totals["Max Latency"] * 1000)
 PY
 }
 
@@ -81,11 +82,11 @@ sqlite() {
     echo "# zerodb ${H2H_ZERODB_REV:-$(git rev-parse --short HEAD)}, memtier $("$MEMTIER" --version | head -1)"
     for name in redis valkey dicedb; do echo "# $("$TOOLS/$name/src/$name-server" --version)"; done
     echo "# sqlite $(python3 -c 'import sqlite3; print(sqlite3.sqlite_version)')"
-    printf 'system\twriters\trep\tturns_per_sec\tp50_us\tp99_us\tp999_us\n'
+    printf 'system\twriters\trep\tturns_per_sec\tp50_us\tp99_us\tp999_us\tmax_us\n'
 } >"$OUT"
 for rep in $(seq "$REPS"); do
     for writers in $WRITERS; do
-        for system in zerodb redis valkey dicedb sqlite; do
+        for system in ${H2H_SYSTEMS:-zerodb redis valkey dicedb sqlite}; do
             case $system in
                 zerodb) row=$(zerodb "$writers") ;;
                 sqlite) row=$(sqlite "$writers") ;;
@@ -103,8 +104,9 @@ rows = [l.split("\t") for l in open(sys.argv[1]) if l[0] != "#" and not l.starts
 runs = collections.defaultdict(list)
 for system, writers, _, *values in rows:
     runs[(int(writers), system)].append([float(v) for v in values])
-print("| Writers | System | Turns/s | p50 µs | p99 µs | p99.9 µs |\n|---|---|---|---|---|---|")
+print("| Writers | System | Turns/s | p50 µs | p99 µs | p99.9 µs | max µs |")
+print("|---|---|---|---|---|---|---|")
 for (writers, system), values in sorted(runs.items()):
-    tps, p50, p99, p999 = (statistics.median(column) for column in zip(*values))
-    print(f"| {writers} | {system} | {tps:,.0f} | {p50:,.0f} | {p99:,.0f} | {p999:,.0f} |")
+    tps, p50, p99, p999, top = (statistics.median(column) for column in zip(*values))
+    print(f"| {writers} | {system} | {tps:,.0f} | {p50:,.0f} | {p99:,.0f} | {p999:,.0f} | {top:,.0f} |")
 PY
