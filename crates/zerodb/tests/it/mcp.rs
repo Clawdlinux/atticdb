@@ -565,7 +565,9 @@ fn unknown_outcome_never_downgrades() {
     let dir = Dir::new();
     let token = init_config(&dir);
     let data = dir.0.join("d");
-    let serve = ["serve", "--config", "c.json", "--data-dir", "d", "--listen", "none"];
+    // The test reads request lines to see the unknown answer and the rejected retries.
+    let serve =
+        ["serve", "--config", "c.json", "--data-dir", "d", "--listen", "none", "--log-requests"];
     let url = format!("unix://{}", data.join(zerodb::listen::SOCKET_NAME).display());
     for (case, restart) in [("restarted after 1 s", true), ("no restart, 3 s deadline", false)] {
         let mut server = support::Process::spawn(&dir.0, &serve);
