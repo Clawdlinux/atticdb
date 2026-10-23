@@ -1,7 +1,9 @@
 # Agents in sandboxes and microVMs
 
 Run `zerodb serve` on the host or in a sidecar. Never run it inside a disposable sandbox.
-Agents inside sandboxes reach it through its Unix socket.
+By default the harness outside the sandbox holds memory, and sandboxed code gets no access (D79).
+This guide is for agents inside sandboxes that reach it through its Unix socket.
+A token grants its whole tenant. Use these recipes only for code you trust with that tenant, or give each sandbox a tenant of its own.
 There is no container image yet.
 
 ## Give the socket its own directory

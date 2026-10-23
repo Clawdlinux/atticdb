@@ -56,6 +56,16 @@ Agents keep their own keys apart with prefixes, for example `repo/<area>/<topic>
 A prefix is a byte prefix: `repo/pay` matches `repo/payments/...`. End a prefix with `/` for path semantics.
 Keys are 1 to 1024 bytes. They travel in JSON bodies and query strings, never in URL paths.
 
+## Sandboxed agents
+
+By default, the harness holds memory. The harness is the trusted loop that calls the model and starts sandboxes.
+It runs beside zerodb, reads the window and facts, puts them in the prompt, and appends the results.
+Code in the microVM or container gets no token and no socket, so it cannot query zerodb directly.
+The harness still picks the session and fact keys itself. `zerodb mcp` lets the model name any session, so do not give it to a model you do not trust with the whole tenant.
+Sandboxes can die or be snapshotted. Memory survives and moves between agents, because one zerodb serves them all.
+
+A token grants a whole tenant. Direct access from a sandbox ([sandboxes.md](docs/deploy/sandboxes.md)) is for code you trust with that tenant, or with a tenant of its own.
+
 ## Why
 
 We want memory that keeps acknowledged writes and stays fast as history grows.
@@ -77,7 +87,7 @@ The [decision log](docs/design/0002-decision-log.md) explains the choices.
 - `zerodb verify` and `zerodb dump`: check a stopped data directory on a copy. Verify names the LSN of damage. Dump lists records without content.
 - `zerodb mcp`: a stdio MCP adapter with 5 tools. It finds the running server or starts one, and retries with one key per call.
 - A Python client in [clients/python](clients/python/README.md), standard library only.
-- Agents in sandboxes and microVMs reach the server through its Unix socket. See [sandboxes.md](docs/deploy/sandboxes.md).
+- Trusted code in sandboxes and microVMs can reach the server through its Unix socket. See [Sandboxed agents](#sandboxed-agents) and [sandboxes.md](docs/deploy/sandboxes.md).
 
 Frame v2 uses a 40-byte header instead of 104 bytes. Its footer payload is 32 bytes.
 Record LSNs and transaction IDs are dense. Footers repeat the final record LSN.
