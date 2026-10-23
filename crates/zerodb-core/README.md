@@ -28,7 +28,7 @@ let recent = engine.window(&scope, WindowQuery::Last(8))?;
 
 Sequences start at 1. `Since { seq, limit }` includes `seq`. Sequence 0 starts at 1.
 `Last(0)` returns nothing. An unknown scope also returns nothing.
-Windows pin a durable LSN and read each returned turn once.
+Windows pin a durable LSN and read each returned turn once. They cost O(returned), not O(history).
 The `window_reads` metric counts those `Tape::read` calls.
 `window_budget(scope, query, max_bytes)` caps the sum of `content` and `meta` bytes.
 `Last` keeps the newest turns that fit. `Since` keeps the oldest. Turns come back in sequence order.
@@ -51,7 +51,7 @@ Preparation and publication parse borrowed payload views without copying turn co
 Location-bound frame CRCs cover every payload, including assigned sequences.
 Changing an agent, role, metadata, content, or batch boundary produces a conflict.
 Retries return the original transaction, turn LSNs, and sequences.
-They set `Appended::deduplicated`. Fresh commits leave it false.
+They set `Appended::deduplicated`, also after reopen. Fresh commits leave it false.
 Cached writer replies carry 1 marker byte after the 8-byte sequence. Dedup entries and checkpoints keep 8 bytes.
 Keys outside the count window are new requests.
 `dedup_window_effective` reports the smallest retained count among tenants with retained keys.
@@ -121,6 +121,7 @@ A larger `fact_history` at open replays the tape. A smaller one trims on load.
 Install clears a key's dirty mark only if its newest LSN did not change after the snapshot.
 When at least half the keys are dirty, the snapshot walks the whole map.
 An S3 binary aborts replay on a `Fact` frame, so it cannot open a directory with facts.
+`Forget` has a v1 codec. The engine rejects it until S5.
 
 ## Health
 

@@ -8,6 +8,7 @@ The current format and scope are defined in [0003](../../docs/design/0003-slim-v
 Import storage types from `zerodb_tape`.
 `Tape::open(io, clock, directory, options)` locks the directory and starts the writer.
 `Tape::open_with(state_machine, io, clock, directory, options)` also attaches application state.
+`Tape::open` uses `NoopStateMachine`.
 Real directories must already exist.
 `TapeOptions::server_address` is written into `LOCK`. `zerodb serve` puts its instance id and socket path there.
 
@@ -32,7 +33,7 @@ Production builds do not enable them by default.
 
 ## Frame v2
 
-Fields are little-endian. The fixed header occupies 40 bytes.
+Fields are little-endian. The fixed header occupies 40 bytes. Frame v1 used 104.
 
 ```text
 u32 crc32c
@@ -53,6 +54,7 @@ The segment ID comes from the manifest, not a parsed filename.
 Copying a valid frame to another location invalidates its CRC.
 Frames at a reused location also need a matching transaction footer.
 CRC32C detects damage, not malicious edits. Someone with directory write access can forge frames and footers.
+There are no hash chains, signatures or tamper-evidence guarantees.
 
 Kinds are Turn 1, Fact 2, Forget 3, Footer 5 and TenantCreate 6.
 Kind 4 is reserved.
@@ -86,6 +88,8 @@ Unknown versions, malformed lengths and invalid structures are rejected.
 
 Caller-side preparation checks sizes. The writer assigns LSNs and reserves the final disk location before calculating CRCs.
 `StateMachine::prepare` may rewrite a batch, reject it, or return a cached reply.
+The writer runs it once per batch, in queue order. `PreparedBatch::records_mut()` exposes the records to rewrite.
+`Prepare::Reject` and `Prepare::Reply` write nothing.
 `prepare` must not grow a batch past its submitted encoded size. Shrinking and equal-size rewrites are allowed.
 Rewrites are validated before framing against the size budgeted by the free-space check and segment reservations.
 Growth fails before writing and poisons the writer, even when it fits a reserved segment.
@@ -95,7 +99,7 @@ Preparation reservations must stay private until publication.
 The writer syncs every dirty segment in the group before calling `publish`.
 It advances the durable LSN only after publication, then releases replies.
 Cached replies share that sync and publication outcome.
-A failed write or sync poisons the writer. Later appends are rejected.
+A failed write or sync poisons the writer. A failed sync returns `Unknown`. Later appends are rejected.
 Reads retain the published view.
 
 At open, the free-space floor defaults to `min(1 GiB, 5% of total volume bytes)`.
@@ -172,6 +176,9 @@ A failed writeback can leave readable clean-cache bytes that another sync cannot
 Rewriting re-dirties those bytes. Retained roll padding is also rewritten.
 Only after recovery syncs can open advance the durable floor.
 Checkpoints reduce application replay, not the full tape CRC scan.
+Open time therefore grows with log size. There is no compaction yet.
+Ordered `replay` callbacks start only after recovery has verified and synced the tape.
+Set `TapeOptions::replay_from_lsn` to the loaded checkpoint watermark. Replay covers records above it.
 
 ### Explicit operator cut
 
