@@ -41,3 +41,14 @@ Stop it with `docker compose down`.
 
 Quantiles come from histogram buckets of 50 µs to 1 s, so they are approximate within a bucket.
 `zerodb load` reports exact percentiles. Use it for results and this dashboard for watching.
+
+## Watch, then measure with it down
+
+The stack changes what it watches. On an L8s v3 with 8 vCPUs, `zerodb load` against local NVMe, every run with all four containers up landed in a slow mode (16 of 16):
+
+| Load | Stack down | Stack up |
+|---|---|---|
+| 16 writers, no think | 55.8k acks/s, p50 274 µs | 30.2k acks/s, p50 509 µs |
+| 64 writers, 5 ms think | p50 132 µs | p50 356 µs |
+
+Without the stack, 2 of about 40 runs hit the same slow mode. No single container caused it. Run `docker compose stop` before runs you publish, and report medians of at least 3.
