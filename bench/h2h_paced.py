@@ -32,9 +32,16 @@ def zerodb_request(writer, i, body):
     return head.encode() + payload
 
 
+def recv(conn):
+    data = conn.recv(4096)
+    if not data:
+        raise RuntimeError("connection closed before the reply")
+    return data
+
+
 def read_resp(conn, buf):
     while b"\r\n" not in buf:
-        buf += conn.recv(4096)
+        buf += recv(conn)
     line, buf = buf.split(b"\r\n", 1)
     if not line.startswith(b":"):
         raise RuntimeError(f"reply {line!r}")
@@ -43,11 +50,11 @@ def read_resp(conn, buf):
 
 def read_http(conn, buf):
     while b"\r\n\r\n" not in buf:
-        buf += conn.recv(4096)
+        buf += recv(conn)
     head, buf = buf.split(b"\r\n\r\n", 1)
     length = next(int(l.split(b":")[1]) for l in head.split(b"\r\n") if l.lower().startswith(b"content-length:"))
     while len(buf) < length:
-        buf += conn.recv(4096)
+        buf += recv(conn)
     if not head.startswith(b"HTTP/1.1 200 "):
         raise RuntimeError(f"reply {head[:40]!r} {buf[:length]!r}")
     return buf[length:]

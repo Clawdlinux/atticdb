@@ -21,7 +21,9 @@ def writer(path, index, rows, size, think):
     body, samples, rng = os.urandom(size), [], random.Random(index)
     start = time.perf_counter()
     for _ in range(rows):
-        time.sleep(rng.uniform(0, 2 * think / 1000))
+        # sleep(0) still yields, which would slow the closed loop.
+        if think:
+            time.sleep(rng.uniform(0, 2 * think / 1000))
         sent = time.perf_counter()
         db.execute("INSERT INTO turns(body) VALUES (?)", (body,))
         samples.append(time.perf_counter() - sent)
