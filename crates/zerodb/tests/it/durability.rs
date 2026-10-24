@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use zerodb::listen::SOCKET_NAME;
 use zerodb::outcome::{parse, Outcome};
 
@@ -227,66 +227,86 @@ impl Drop for Done<'_> {
     }
 }
 
+/// A Unix stream that, at its first read, says the request is written and then waits
+/// until the test has killed the server.
+struct Gate(UnixStream, Option<(Sender<()>, Receiver<()>)>);
+
+impl Read for Gate {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if let Some((written, killed)) = self.1.take() {
+            written.send(()).unwrap();
+            killed.recv().unwrap();
+        }
+        self.0.read(buf)
+    }
+}
+
+impl Write for Gate {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.write(buf)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()
+    }
+}
+
+impl zerodb::http::Stream for Gate {
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        self.0.set_read_timeout(timeout)
+    }
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        self.0.set_write_timeout(timeout)
+    }
+    fn shutdown(&self, how: Shutdown) -> io::Result<()> {
+        self.0.shutdown(how)
+    }
+}
+
 /// One append attempt, as a plain HTTP client sees it.
-fn append(socket: &Path, token: &str, content: &str, gate: Option<Gate>) -> Call {
+fn append(
+    socket: &Path,
+    token: &str,
+    content: &str,
+    gate: Option<(Sender<()>, Receiver<()>)>,
+) -> Call {
     let body = append_body("s", content, content);
     let (outcome, reply) = post(socket, token, "/v1/append", &body, gate);
     (content.into(), outcome, reply["seqs"][0].as_u64())
 }
 
-/// Says the request is written, then waits until the test has killed the server.
-type Gate = (Sender<()>, Receiver<()>);
-
-/// One write attempt: its outcome, and the reply when one was read. A `gate` opens
-/// between writing the request and reading the reply.
+/// One write attempt: its outcome, and the reply when one was read.
 fn post(
     socket: &Path,
     token: &str,
     target: &str,
     body: &Value,
-    gate: Option<Gate>,
+    gate: Option<(Sender<()>, Receiver<()>)>,
 ) -> (Outcome, Value) {
-    let Ok(mut stream) = UnixStream::connect(socket) else {
+    let Ok(stream) = UnixStream::connect(socket) else {
         return (Outcome::NotCommitted, Value::Null);
     };
-    let body = body.to_string();
-    let length = body.len();
-    let request = format!(
-        "POST {target} HTTP/1.1\r\nAuthorization: Bearer {token}\r\nContent-Length: {length}\r\n\
-         Connection: close\r\n\r\n{body}"
+    let auth = format!("Bearer {token}");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let headers = [("Authorization", auth.as_str())];
+    let reply = zerodb::http::exchange(
+        &mut Gate(stream, gate),
+        "POST",
+        target,
+        &headers,
+        body.to_string().as_bytes(),
+        deadline,
+        1 << 20,
     );
-    let sent = stream.write_all(request.as_bytes());
-    if let Some((written, killed)) = gate {
-        written.send(()).unwrap();
-        killed.recv().unwrap();
+    // `exchange` validates the head and length. A malformed reply is a server bug, so it
+    // panics. Only a cut-off reply is an unknown outcome.
+    match reply {
+        Ok(reply) => {
+            let reply: Value = serde_json::from_slice(&reply.body).unwrap();
+            (parse(reply["outcome"].as_str().unwrap()).unwrap(), reply)
+        }
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => panic!("bad reply: {error}"),
+        Err(_) => (Outcome::Unknown, Value::Null),
     }
-    // macOS fails `setsockopt` with EINVAL once the peer has closed. The read then
-    // returns at once, so the error is ignored.
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
-    let mut reply = Vec::new();
-    if sent.and_then(|_| stream.read_to_end(&mut reply)).is_err() || reply.is_empty() {
-        // Cut off before any reply, so the request may have been applied.
-        return (Outcome::Unknown, Value::Null);
-    }
-    // A reply that is there but malformed is a server bug, not an unknown outcome.
-    let text = String::from_utf8_lossy(&reply);
-    let Some(at) = reply.windows(4).position(|w| w == b"\r\n\r\n") else {
-        // Killed partway through the head.
-        return (Outcome::Unknown, Value::Null);
-    };
-    let at = at + 4;
-    let head = String::from_utf8_lossy(&reply[..at]);
-    let length = head.lines().find_map(|line| line.strip_prefix("Content-Length: "));
-    let length: usize = length.and_then(|n| n.parse().ok()).unwrap_or_else(|| panic!("{text}"));
-    if reply.len() - at < length {
-        // Killed between the head and the body.
-        return (Outcome::Unknown, Value::Null);
-    }
-    assert_eq!(reply.len() - at, length, "body longer than Content-Length: {text}");
-    let reply: Value =
-        serde_json::from_slice(&reply[at..]).unwrap_or_else(|e| panic!("{e}: {text}"));
-    let outcome = reply["outcome"].as_str().and_then(parse);
-    (outcome.unwrap_or_else(|| panic!("no outcome: {text}")), reply)
 }
 
 #[test]

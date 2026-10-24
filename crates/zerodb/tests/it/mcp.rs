@@ -17,16 +17,24 @@ fn contents(result: &Value) -> Vec<&str> {
     turns.iter().map(|turn| turn["content"].as_str().unwrap()).collect()
 }
 
-/// Checks a committed tool result: `seq` for an append, `lsn` for a fact write. Returns it.
-fn committed(result: &Value, case: &str) -> u64 {
+/// Checks a committed `memory_append` result. Returns its `seq`.
+fn appended(result: &Value, case: &str) -> u64 {
+    receipt(result, "seq", &["committed", "deduplicated", "lsn", "seq"], case)
+}
+
+/// Checks a committed `fact_set` result. Returns its `lsn`.
+fn fact_written(result: &Value, case: &str) -> u64 {
+    receipt(result, "lsn", &["committed", "deduplicated", "lsn"], case)
+}
+
+/// Checks a committed tool result with exactly the fields in `shape`. Returns field `id`.
+fn receipt(result: &Value, id: &str, shape: &[&str], case: &str) -> u64 {
     let content = &result["structuredContent"];
-    let id = if content["seq"].is_null() { "lsn" } else { "seq" };
     let n = content[id].as_u64().unwrap_or_else(|| panic!("{case}: {result}"));
     assert_eq!(text(result), format!("committed {id}={n}"), "{case}");
     assert!(content["lsn"].is_u64() && result["isError"].is_null(), "{case}");
     let keys: Vec<&String> = content.as_object().unwrap().keys().collect();
-    let shape = ["committed", "deduplicated", "lsn", "seq"];
-    assert_eq!(keys, shape[..if id == "seq" { 4 } else { 3 }], "{case}: one shape");
+    assert_eq!(keys, shape, "{case}: receipt shape");
     n
 }
 
@@ -168,12 +176,12 @@ fn tool_calls_over_stdio() {
     assert!(recent["properties"]["session"].is_object() && recent["required"].is_null());
 
     let one = mcp.call("memory_append", json!({"content": "one", "meta": {"k": 1}}));
-    let first = committed(&one, "default session");
+    let first = appended(&one, "default session");
     assert_eq!(one["structuredContent"]["deduplicated"], false);
     let two = mcp.call("memory_append", json!({"content": "two", "role": "user", "session": "s2"}));
-    committed(&two, "session argument");
+    appended(&two, "session argument");
     let three = mcp.call("memory_append", json!({"content": "three"}));
-    assert_eq!(committed(&three, "second append"), first + 1, "seqs follow in a session");
+    assert_eq!(appended(&three, "second append"), first + 1, "seqs follow in a session");
 
     let window = mcp.call("memory_recent", json!({"n": 1}));
     assert_eq!(contents(&window), ["three"], "n keeps the newest");
@@ -193,10 +201,10 @@ fn tool_calls_over_stdio() {
     assert_eq!(server["turns"][0]["content"], "two");
 
     let first = mcp.call("fact_set", json!({"key": "repo/a", "content": "one"}));
-    let lsn = committed(&first, "first set");
+    let lsn = fact_written(&first, "first set");
     assert_eq!(first["structuredContent"]["deduplicated"], false);
     let second = mcp.call("fact_set", json!({"key": "repo/a", "content": "two", "meta": {"k": 2}}));
-    assert!(committed(&second, "second set") > lsn);
+    assert!(fact_written(&second, "second set") > lsn);
     let got = mcp.call("fact_get", json!({"key": "repo/a"}));
     let fact = &got["structuredContent"]["fact"];
     assert_eq!(
@@ -204,14 +212,14 @@ fn tool_calls_over_stdio() {
         ("two", &json!("two"), &json!({"k": 2}))
     );
     assert_eq!(fact["agent"], "ag", "fact_set writes as --agent");
-    committed(&mcp.call("fact_set", json!({"key": "repo/a", "delete": true})), "delete");
+    fact_written(&mcp.call("fact_set", json!({"key": "repo/a", "delete": true})), "delete");
     let got = mcp.call("fact_get", json!({"key": "repo/a"}));
     assert_eq!(
         (text(&got), &got["structuredContent"]),
         ("no current value", &json!({"fact": null}))
     );
     for key in ["repo/b", "repo/c"] {
-        committed(&mcp.call("fact_set", json!({"key": key, "content": key})), key);
+        fact_written(&mcp.call("fact_set", json!({"key": key, "content": key})), key);
     }
     let page = mcp.call("fact_list", json!({"prefix": "repo/", "limit": 1}));
     assert_eq!(text(&page), "repo/b: repo/b\nmore: call again with after=repo/b");
@@ -224,7 +232,7 @@ fn tool_calls_over_stdio() {
     );
     let page = mcp.call("fact_list", json!({"prefix": "repo/", "after": "repo/b"}));
     assert_eq!((text(&page), &page["structuredContent"]["next"]), ("repo/c: repo/c", &Value::Null));
-    committed(&mcp.call("fact_set", json!({"key": "e", "content": ""})), "empty");
+    fact_written(&mcp.call("fact_set", json!({"key": "e", "content": ""})), "empty");
     assert_eq!(text(&mcp.call("fact_get", json!({"key": "e"}))), "(empty)");
     // Keys count toward `max_bytes`, so a page of escaped NULs fits the response cap.
     let nul = |n| "\0".repeat(n);
@@ -385,12 +393,12 @@ fn launch_race_starts_one_server() {
         mcp.post_call("memory_append", json!({"content": "race"}));
     }
     for mcp in &mut racers {
-        committed(&mcp.response()["result"], "racer");
+        appended(&mcp.response()["result"], "racer");
     }
     // JSON escapes each NUL to 6 bytes, so a 2 MiB window is a 12 MiB response.
     let nul = "\0".repeat(1 << 20);
     for _ in 0..2 {
-        committed(&racers[0].call("memory_append", json!({"content": nul})), "NUL");
+        appended(&racers[0].call("memory_append", json!({"content": nul})), "NUL");
     }
     let window = racers[0].call("memory_recent", json!({"n": 2, "max_bytes": 2 << 20}));
     assert_eq!(contents(&window), [nul.as_str(); 2], "{}", text(&window).len());
@@ -480,7 +488,7 @@ fn launch_race_starts_one_server() {
         }
         let mut mcp = Mcp::start(&dir.0, &args, None);
         mcp.handshake();
-        committed(&mcp.call("memory_append", json!({"content": case})), case);
+        appended(&mcp.call("memory_append", json!({"content": case})), case);
         let stderr = mcp.process.stderr();
         assert!(stderr.contains(refusal), "{case}: {stderr}");
         assert_ne!(lock_field(&data, "instance="), old, "{case}: the adapter started a server");
@@ -529,7 +537,7 @@ fn launch_race_starts_one_server() {
         drop(slow);
         let (status, output) = holder.wait();
         assert_eq!(status.code(), Some(70), "{output}");
-        committed(&mcp.response()["result"], "after the slow holder");
+        appended(&mcp.response()["result"], "after the slow holder");
         assert_eq!(mcp.close().0.code(), Some(0));
     }
 
@@ -539,7 +547,7 @@ fn launch_race_starts_one_server() {
     let mut mcp =
         Mcp::start(&dir.0, &["--config", "c2.json", "--tenant", "a", "--data-dir", "B"], None);
     mcp.handshake();
-    committed(&mcp.call("memory_append", json!({"content": "b"})), "--data-dir B");
+    appended(&mcp.call("memory_append", json!({"content": "b"})), "--data-dir B");
     let socket = dir.0.join("B").join(zerodb::listen::SOCKET_NAME);
     assert_eq!(lock_field(&dir.0.join("B"), "unix="), format!("{}", socket.display()));
     assert!(!dir.0.join("A").exists(), "the config's directory is untouched");
@@ -559,17 +567,17 @@ fn unknown_outcome_never_downgrades() {
     let mut mcp =
         Mcp::start(&dir.0, &["--config", "c.json", "--tenant", "a", "--data-dir", "d"], None);
     mcp.handshake();
-    committed(&mcp.call("memory_append", json!({"content": "warm"})), "warm");
+    appended(&mcp.call("memory_append", json!({"content": "warm"})), "warm");
     std::fs::write(data.join(zerodb::fault::TRIGGER), "").unwrap();
     let result = mcp.call("memory_append", json!({"content": "x"}));
-    committed(&result, "after the poison exit");
+    appended(&result, "after the poison exit");
     assert_eq!(result["structuredContent"]["deduplicated"], true, "{result}");
     let stderr = mcp.process.stderr();
     assert!(stderr.contains("exited: exit status: 70"), "the server exited on poison: {stderr}");
     assert_eq!(contents(&mcp.call("memory_recent", json!({}))), ["warm", "x"], "one copy");
     std::fs::write(data.join(zerodb::fault::TRIGGER), "").unwrap();
     let result = mcp.call("fact_set", json!({"key": "rule", "content": "x"}));
-    committed(&result, "fact_set after the poison exit");
+    fact_written(&result, "fact_set after the poison exit");
     assert_eq!(result["structuredContent"]["deduplicated"], true, "{result}");
     let exits = mcp.process.stderr().matches("exited: exit status: 70").count();
     assert_eq!(exits, 2, "the server exited on poison again");
@@ -604,7 +612,7 @@ fn unknown_outcome_never_downgrades() {
             server = support::Process::spawn(&dir.0, &serve);
             server.ready();
             let result = mcp.response()["result"].clone();
-            committed(&result, case);
+            appended(&result, case);
             assert_eq!(result["structuredContent"]["deduplicated"], true, "{case}: {result}");
             let window = mcp.call("memory_recent", json!({}));
             assert_eq!(contents(&window).iter().filter(|c| **c == case).count(), 1, "{case}");
