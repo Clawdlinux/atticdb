@@ -78,7 +78,7 @@ Failures print the seed, the capacity plan and the command that reproduces the r
 Killing LazyFS drops them, as a power cut does. Each round cuts power at a random moment or at a chosen syscall, such as before a segment `fsync` or after a `MANIFEST` rename.
 After each cut it runs `zerodb verify` on the raw directory, reopens, and checks that every acknowledged turn is back at its sequence, sequences are dense, and no batch is partial.
 
-The `deep` workflow runs it nightly with 60 cuts, and on pull requests that touch `zerodb-tape/src` with 20. It needs Linux and FUSE:
+The `deep` workflow runs it nightly as 3 parallel runs of 20 cuts, and once with 20 cuts on pull requests that touch `zerodb-tape/src` or the harness. It needs Linux and FUSE:
 
 ```sh
 tests/crash/build-lazyfs.sh ~/lazyfs

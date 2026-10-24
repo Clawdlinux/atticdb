@@ -138,6 +138,7 @@ def check(client, attempted, durable):
         for seq, content in turns:
             batch = content.split("/", 1)[0]
             assert batch in attempted, f"{session}: turn {seq} was never written"
+            assert batch.startswith(f"{session}."), f"{session}: turn {seq} belongs to {batch}"
             batches.setdefault(batch, []).append((seq, content))
         # Each batch is back whole, contiguous, and with its turns in the order written.
         for batch, got in batches.items():

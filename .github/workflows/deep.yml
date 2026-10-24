@@ -7,8 +7,8 @@ on:
   workflow_dispatch:
     inputs:
       rounds:
-        description: Power cuts
-        default: "60"
+        description: Power cuts per run
+        default: "20"
       seed:
         description: Power-loss seed, empty for random
         default: ""
@@ -25,9 +25,15 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
 jobs:
+  # Each round rereads all data so far, so long runs slow down. Nightly runs 3 fresh 20-cut
+  # runs in parallel instead of 1 long one. 20 cuts take about 10 minutes.
   power-loss:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        run: ${{ fromJSON((github.event_name == 'pull_request' || inputs.seed != '') && '[1]' || '[1, 2, 3]') }}
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install
@@ -45,12 +51,12 @@ jobs:
       - run: python3 tests/crash/power_loss.py --lazyfs ~/lazyfs
         env:
           LD_LIBRARY_PATH: /home/runner/lazyfs/libs/libpcache/build
-          ZERODB_CRASH_ROUNDS: ${{ inputs.rounds || (github.event_name == 'schedule' && '60') || '20' }}
+          ZERODB_CRASH_ROUNDS: ${{ inputs.rounds || '20' }}
           ZERODB_CRASH_SEED: ${{ inputs.seed }}
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: power-loss-logs
+          name: power-loss-logs-${{ matrix.run }}
           path: |
             target/power-loss/*.log
             target/power-loss/*.out
