@@ -1356,3 +1356,44 @@ On managed disks an ack costs one device write round trip: about 1.9 ms on Premi
 The engine adds 1% to 5% over a bare `pwrite` plus `fdatasync`. Zero-fill does not change 1 or 4 writers there, and adds 28% throughput at 16.
 On local NVMe the round trip is about 60 µs, so the journal commit that zero-fill removes was most of the ack.
 Ultra Disk was not available in zone 3.
+
+## #52 writer hot path A/B (2026-10-24)
+
+Azure Standard_L8s_v3, local NVMe, ext4. G1 at 16, 64 and 128 writers, 5 reps each.
+Systems ran interleaved in one VM session, because of #48. Redis is the control.
+Ratio is the median of per-rep throughput ratios to `main` (`8a66c83`), with min to max in brackets.
+Writer µs/append is writer thread CPU time per append.
+
+| Writers | System | Turns/s | p99 µs | p99.9 µs | Writer µs/append | Ratio |
+|---|---|---|---|---|---|---|
+| 16 | main | 48,587 | 508 | 696 | 15.12 | 1.000 |
+| | hash once (#55) | 50,471 | 448 | 536 | 14.25 | 1.041 |
+| | pwrite (#54) | 48,886 | 510 | 666 | 14.88 | 1.006 |
+| | reply wakeups (#53) | 48,435 | 520 | 676 | 12.75 | 1.002 |
+| | Redis | 42,612 | 574 | 643 | - | 0.926 |
+| 64 | main | 64,135 | 1,782 | 2,899 | 12.06 | 1.000 |
+| | hash once | 67,028 | 1,316 | 2,078 | 11.25 | 1.051 (1.037-1.053) |
+| | pwrite | 64,791 | 1,774 | 3,034 | 11.84 | 1.011 (1.004-1.013) |
+| | reply wakeups | 65,022 | 1,790 | 3,278 | 9.03 | 1.013 (1.004-1.016) |
+| | Redis | 73,970 | 1,610 | 1,717 | - | 1.144 |
+| 128 | main | 66,550 | 3,563 | 8,702 | 11.16 | 1.000 |
+| | hash once | 69,458 | 2,611 | 8,346 | 10.34 | 1.044 (1.027-1.062) |
+| | pwrite | 67,178 | 3,606 | 8,441 | 10.97 | 1.010 (1.008-1.014) |
+| | reply wakeups | 68,116 | 3,481 | 8,095 | 8.14 | 1.028 (0.990-1.037) |
+| | Redis | 79,116 | 3,134 | 3,304 | - | 1.195 |
+
+Writer syscalls at 128 writers, 640k appends, from `perf stat`:
+
+| System | write | lseek | pwrite64 | futex | fdatasync |
+|---|---|---|---|---|---|
+| main | 641,771 | 641,771 | 0 | 803,469 | 8,284 |
+| pwrite | 0 | 0 | 641,771 | unchanged | unchanged |
+| reply wakeups | unchanged | unchanged | 0 | 89,631 | 11,186 |
+| hash once | unchanged | unchanged | 0 | 775,534 | unchanged |
+
+Hashing once gives the most: 4% to 5% throughput and about 27% lower p99 at 64 and 128 writers.
+Reply wakeups cut writer futex calls 9x and writer CPU per append about 27%.
+Throughput barely moves, though. Groups get smaller, so there are more `fdatasync` calls. The load client also shares the 8 vCPUs.
+`pwrite` halves write syscalls for 1%. So syscalls are not the bottleneck, and coalescing a group into 1 write is deferred.
+Redis is still 14% to 20% ahead at 64 and 128 writers.
+VM time was about 20 minutes, roughly $0.22.
