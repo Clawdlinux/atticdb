@@ -16,7 +16,7 @@ How fast can each system acknowledge a write that survives power loss? Every cli
 
 ## Setup
 
-- Azure Standard_L8s_v3 (8 vCPU), Linux 7.0, ext4, a freshly formatted disk per pass.
+- Azure Standard_L8s_v3 (8 vCPU), Linux 7.0, ext4.
 - 2 disks: the VM's local NVMe, and a Premium SSD v2 managed disk. The managed disk has 128 GiB, 3,000 IOPS, 125 MB/s and host caching off.
 - Closed loop: 5,000 appends of 256 bytes per writer, at 1, 4 and 16 writers.
 - Agent-shaped: 1,000 appends per writer at 64 writers with 5 ms think. 100 per writer at 256 writers with 50 ms think.
@@ -125,7 +125,7 @@ Under agent load zerodb has the best p50 and p99.9 of the 4 servers. Its p50 is 
 
 Runs on this VM land in a fast or a slow mode at random. Steal time stays 0. The 4 servers often move together. On NVMe at 256 writers with 50 ms think, reps 1 and 2 were fast for all 4. Their p99 was 225 to 301 µs. Rep 3 was slow for all 4: 636 to 765 µs. SQLite, in process, shows no slow reps here. On NVMe its acks and p99 stay within 16% across reps.
 
-Rep 1 at 1 writer on NVMe was slow on acks for zerodb, Redis and Valkey: 4,404, 1,928 and 5,512/s. Their medians are 9,799, 8,110 and 8,434. It was the first rep after a fresh format, so it may be warm-up. Each rep ran the systems in a fixed order: zerodb, Redis, Valkey, DiceDB, SQLite. So zerodb always took the first, coldest slot.
+Rep 1 at 1 writer on NVMe was slow on acks for zerodb, Redis and Valkey: 4,404, 1,928 and 5,512/s. Their medians are 9,799, 8,110 and 8,434. Rep 1 was the first load of the whole run, so it may be warm-up. Each rep ran the systems in a fixed order: zerodb, Redis, Valkey, DiceDB, SQLite. So zerodb always ran first.
 
 A per-append trace of zerodb found every stage slower together in slow runs. That includes `fdatasync`, which went from 26 to 65 µs. No single wait in zerodb explains it. [#48](https://github.com/Clawdlinux/zerodb/issues/48) tracks the cause.
 
@@ -146,7 +146,7 @@ With 1 client zerodb's 16-writer NVMe p99 beat Redis, Valkey and DiceDB in 7 of 
 | valkey | 55,287 | 42,928 | 383 | 573 |
 | dicedb | 57,439 | 44,693 | 367 | 547 |
 
-The Python client costs more CPU than memtier, on the same 8 vCPUs. We haven't measured why the Redis family loses more. The 2 runs are on different days and zerodb revisions (`d40f048`, `02b43e5`), so treat these deltas as rough.
+The Python client likely costs more CPU than memtier on the same 8 vCPUs. We haven't measured why the Redis family loses more. The 2 runs are on different days and zerodb revisions (`d40f048`, `02b43e5`), so treat these deltas as rough.
 
 ## Not covered
 
