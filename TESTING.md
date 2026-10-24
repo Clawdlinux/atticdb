@@ -81,8 +81,11 @@ After each cut it runs `zerodb verify` on the raw directory, reopens, and checks
 The `deep` workflow runs it nightly with 60 cuts, and on pull requests that touch `zerodb-tape/src` with 20. It needs Linux and FUSE:
 
 ```sh
-ZERODB_CRASH_SEED=<seed> python3 tests/crash/power_loss.py --lazyfs <lazyfs checkout>
+tests/crash/build-lazyfs.sh ~/lazyfs
+ZERODB_CRASH_SEED=<seed> python3 tests/crash/power_loss.py --lazyfs ~/lazyfs
 ```
+
+The build script pins LazyFS and adds `statfs`. Without it FUSE reports 0 free bytes, and zerodb's disk-full floor keeps it read-only.
 
 LazyFS passes metadata calls such as `rename` straight to the disk below, so it cannot catch a missing directory sync. It has no `fallocate`, so segments use the zero-fill fallback there.
 The same nightly job runs both sims on 20,000 new seeds each night.

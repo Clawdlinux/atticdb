@@ -24,8 +24,6 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 env:
   CARGO_TERM_COLOR: always
-  # LazyFS has no tagged release with the current fault fixes, so pin a commit.
-  LAZYFS_REF: fa7d32ee9710d55a7e529ac3c375f6616563c78b
 jobs:
   power-loss:
     runs-on: ubuntu-24.04
@@ -40,12 +38,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/lazyfs
-          key: lazyfs-${{ env.LAZYFS_REF }}-ubuntu-24.04
+          key: lazyfs-${{ hashFiles('tests/crash/build-lazyfs.sh') }}-ubuntu-24.04
       - if: steps.lazyfs.outputs.cache-hit != 'true'
-        run: |
-          git clone -q https://github.com/dsrhaslab/lazyfs ~/lazyfs
-          git -C ~/lazyfs checkout -q --detach "$LAZYFS_REF"
-          (cd ~/lazyfs/libs/libpcache && ./build.sh) && (cd ~/lazyfs/lazyfs && ./build.sh)
+        run: tests/crash/build-lazyfs.sh ~/lazyfs
       - run: cargo build --locked --release -p zerodb
       - run: python3 tests/crash/power_loss.py --lazyfs ~/lazyfs
         env:
