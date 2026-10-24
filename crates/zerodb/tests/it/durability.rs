@@ -297,8 +297,14 @@ fn post(
         deadline,
         1 << 20,
     );
-    match reply.map(|reply| serde_json::from_slice::<Value>(&reply.body).unwrap()) {
-        Ok(reply) => (parse(reply["outcome"].as_str().unwrap()).unwrap(), reply),
+    // `exchange` validates the head and length. A malformed reply is a server bug, so it
+    // panics. Only a cut-off reply is an unknown outcome.
+    match reply {
+        Ok(reply) => {
+            let reply: Value = serde_json::from_slice(&reply.body).unwrap();
+            (parse(reply["outcome"].as_str().unwrap()).unwrap(), reply)
+        }
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => panic!("bad reply: {error}"),
         Err(_) => (Outcome::Unknown, Value::Null),
     }
 }
