@@ -109,22 +109,31 @@ class Rig:
             os.remove(self.sock)
 
 
-def write(client, rng, session, stop, attempted, acked, errors):
-    while not stop.is_set():
-        batch = f"{session}.{rng.getrandbits(48):x}"
-        sizes = [rng.choice(SIZES) for _ in range(rng.randint(1, 4))]
-        contents = [f"{batch}/{j}|".ljust(size, "x") for j, size in enumerate(sizes)]
-        attempted[batch] = contents
-        try:
-            receipt = client.append("a", session, [{"role": "user", "content": c} for c in contents])
-        except Error as error:
-            errors.append(str(error))
-            return
-        acked.extend(zip(receipt["seqs"], contents))
+def write(client, rng, session, stop, attempted, acked, committed, errors, crashes):
+    """Appends until stopped or cut. Any unexpected exception goes to `crashes`."""
+    try:
+        while not stop.is_set():
+            batch = f"{session}.{rng.getrandbits(48):x}"
+            sizes = [rng.choice(SIZES) for _ in range(rng.randint(1, 4))]
+            contents = [f"{batch}/{j}|".ljust(size, "x") for j, size in enumerate(sizes)]
+            attempted[batch] = contents
+            try:
+                receipt = client.append("a", session, [{"role": "user", "content": c} for c in contents])
+            except Error as error:
+                errors.append(str(error))
+                return
+            # Durable, but the server could not rebuild the receipt: check the batch by name.
+            if receipt["seqs"] is None:
+                committed.add(batch)
+            else:
+                acked.extend(zip(receipt["seqs"], contents))
+    except BaseException as error:  # noqa: BLE001
+        crashes.append(f"{session}: {error!r}")
 
 
-def check(client, attempted, durable):
-    """Durable turns are back at their sequences, sequences are dense, batches are whole."""
+def check(client, attempted, durable, committed):
+    """Durable turns are back at their sequences, sequences are dense, batches are whole.
+    Every batch in `committed` is back, though its sequences are unknown."""
     for session, expected in durable.items():
         turns, since = [], 1
         while page := client.window("a", session, since_seq=since, limit=1000, max_bytes=8 << 20)["turns"]:
@@ -145,6 +154,8 @@ def check(client, attempted, durable):
             seqs = [seq for seq, _ in got]
             assert seqs == list(range(seqs[0], seqs[0] + len(got))), f"{session}: batch {batch} has gaps {seqs}"
             assert [c for _, c in got] == attempted[batch], f"{session}: batch {batch} differs at {seqs}"
+        missing = sorted(b for b in committed if b.startswith(f"{session}.") and b not in batches)
+        assert not missing, f"{session}: committed batches without receipts are gone: {missing[:3]}"
         # Reopen syncs what recovery keeps, so the next cut must keep it too.
         durable[session] = turns
 
@@ -161,17 +172,18 @@ def main():
         p.error("--rounds must be at least 1")
     args.lazyfs, args.bin, args.work = map(os.path.abspath, (args.lazyfs, args.bin, args.work))
     rng, rig = random.Random(args.seed), Rig(args)
-    attempted, durable, cuts = {}, {f"w{i}": [] for i in range(WRITERS)}, []
+    attempted, durable, committed, cuts = {}, {f"w{i}": [] for i in range(WRITERS)}, set(), []
     print(f"seed={args.seed} rounds={args.rounds}", flush=True)
     try:
         for round_ in range(args.rounds + 1):
             rig.start()
-            check(rig.client(), attempted, durable)
+            check(rig.client(), attempted, durable, committed)
             if round_ == args.rounds:
                 break
-            stop, acked, errors = threading.Event(), {s: [] for s in durable}, []
-            threads = [threading.Thread(target=write, args=(rig.client(), random.Random(rng.getrandbits(64)),
-                                                            s, stop, attempted, acked[s], errors)) for s in durable]
+            stop, acked, errors, crashes = threading.Event(), {s: [] for s in durable}, [], []
+            threads = [threading.Thread(target=write, args=(rig.client(), random.Random(rng.getrandbits(64)), s,
+                                                            stop, attempted, acked[s], committed, errors, crashes))
+                       for s in durable]
             for t in threads:
                 t.start()
             time.sleep(rng.uniform(0.2, 1.5))
@@ -179,6 +191,7 @@ def main():
             stop.set()
             for t in threads:
                 t.join()
+            assert not crashes, f"writer thread failed: {crashes[0]}"
             # A round without acks proves nothing, so it fails.
             assert any(acked.values()), f"no write acknowledged: {errors[:1]} " \
                 f"{open(f'{args.work}/serve.log').read()[-600:]}"
