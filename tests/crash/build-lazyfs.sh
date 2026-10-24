@@ -17,7 +17,7 @@ cat >>lazyfs/src/lazyfs.cpp <<'EOF'
 #include <sys/statvfs.h>
 
 // Added by zerodb's build-lazyfs.sh: the backing filesystem's space.
-int LazyFS::lfs_statfs (const char* path, struct statvfs* stbuf) {
+int lazyfs::LazyFS::lfs_statfs (const char* path, struct statvfs* stbuf) {
     return statvfs (path, stbuf) == -1 ? -errno : 0;
 }
 EOF
