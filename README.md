@@ -47,17 +47,22 @@ Exit 3 means the write may have landed. Running the command again uses a new key
 
 ## Numbers
 
-Durable appends, `fsync` before every ack, Azure L8s v3, medians of 3. Full tables: [bench/H2H.md](bench/H2H.md).
+Durable appends, `fsync` before every ack, Azure L8s v3. Medians of 7 interleaved reps, 1 client for every server. Full tables: [bench/H2H.md](bench/H2H.md).
 
 | Local NVMe, 16 writers, closed loop | zerodb | redis | valkey | dicedb |
 |---|---|---|---|---|
-| Acks/s | 54,784 | 52,922 | 55,287 | 57,439 |
-| p99 µs | 462 | 407 | 383 | 367 |
+| Acks/s | 48,611 | 44,572 | 42,928 | 44,693 |
+| p99 µs | 502 | 549 | 573 | 547 |
 
-At 16 or more writers on local NVMe, zerodb ties the Redis family on throughput. Its p99 is the worst of the 4 servers in every such run.
-At 64 writers with 5 ms think it has the best p50, 149 µs against 184 to 186. Its p99 is 598 µs against 342 to 560.
-At 256 writers with 50 ms think its p99 is 631 µs. Redis and Valkey get 303 and 302. [#47](https://github.com/Clawdlinux/zerodb/issues/47) tracks the NVMe p99 gap. With 1 writer, in-process SQLite is fastest: 19,746 acks/s against zerodb's 10,218.
-On Premium SSD v2, zerodb leads the Redis family on acks/s, p50 and p99 in every run. At 16 writers it acks 10,083/s against redis 4,047.
+Of the 4 servers, zerodb has the best closed-loop acks/s and p99 on both disks. On Premium SSD v2 it beats Redis, Valkey and DiceDB in every cell. At 16 writers it acks 9,328/s against 5,086 to 5,151. On local NVMe it's mixed:
+- Closed loop, 1 and 4 writers: zerodb beats Redis, Valkey and DiceDB on every median. It acks 9,799 and 24,516/s, against at most 8,436 and 18,444.
+- Closed loop, 16 writers: Redis and DiceDB have a lower p50, 299 and 300 µs against 305. zerodb's p99.9 and max are the worst of the 4: 674 and 1,210 µs. The others get 604 to 624 and 810 to 947.
+- Agent-shaped, 64 writers at 5 ms think and 256 at 50 ms: best p50, 148 and 138 µs. The others get 182 to 184 and 140 to 145. Its p99.9 is best too: 786 and 736 against 964 to 1,053 and 2,103 to 2,758.
+- zerodb's agent-shaped p99 median trails. At 64 writers it's 416 µs against Redis's 382. At 256 it's 558 against DiceDB's 348 and Valkey's 496. [#47](https://github.com/Clawdlinux/zerodb/issues/47) tracks it.
+- Those medians sit inside run-to-run noise. At 256 writers zerodb's p99 ranged 225 to 636 µs and DiceDB's 289 to 1,078. Per rep in the TSVs, zerodb's 256-writer p99 beat Redis in 7 of 7. It beat Valkey in 4 and DiceDB in 5.
+- At 256 writers zerodb's max is the worst, 8,698 µs against 7,392 to 8,039. Acks/s ties, since think time sets the rate. zerodb's median is lowest, by 0.5 to 1.6 acks/s.
+
+In-process SQLite wins some cells. At 1 writer on NVMe it acks 19,410/s against zerodb's 9,799. Its p50 is lower at every NVMe load: 32 µs at 1 writer, 57 and 68 under agent load. On NVMe its p99 is lower at 4 and 16 writers, and its p99.9 at 16. On Premium SSD v2 its closed-loop p50 is lower, and its p99 and p99.9 at 4 and 16.
 
 ## How it works
 
