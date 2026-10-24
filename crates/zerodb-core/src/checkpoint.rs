@@ -246,11 +246,11 @@ fn load_inner(io: &dyn Io, dir: &Path, opts: &EngineOptions) -> Result<State> {
                         return Err(corrupt());
                     }
                     let scope = if tag == 3 { Scope::Session(scope) } else { Scope::Fact(scope) };
-                    state.dedup.insert(Entry {
-                        key: DedupKey(tenant, scope, key),
+                    state.dedup.insert(Entry::new(
+                        DedupKey(tenant, scope, key),
                         digest,
-                        committed: Committed::Durable { txn, first_lsn, last_lsn, reply },
-                    });
+                        Committed::Durable { txn, first_lsn, last_lsn, reply },
+                    ));
                 }
                 4 => {
                     let tenant = cur.u32()?;
@@ -1142,20 +1142,20 @@ mod tests {
                 .map(|i| CheckpointFile { name: format!("old-{i}"), len: 0, digest: [0; 32] })
                 .collect();
             for age in 2..10_002 {
-                state.dedup.insert(Entry {
-                    key: DedupKey(
+                state.dedup.insert(Entry::new(
+                    DedupKey(
                         1,
                         Scope::Session(format!("{:0128}", (age - 2) / 5000)),
                         format!("{age:0128}"),
                     ),
-                    digest: [1; 32],
-                    committed: Committed::Durable {
+                    [1; 32],
+                    Committed::Durable {
                         txn: 1,
                         first_lsn: age,
                         last_lsn: age,
                         reply: (((age - 2) % 5000) + 1).to_le_bytes().to_vec(),
                     },
-                });
+                ));
             }
         }
         let io = FaultIo::new(SimDisk::new(30), usize::MAX);
