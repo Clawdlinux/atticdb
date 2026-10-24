@@ -1359,7 +1359,7 @@ Ultra Disk was not available in zone 3.
 
 ## #52 writer hot path A/B (2026-10-24)
 
-Azure Standard_L8s_v3, local NVMe, ext4. G1 at 16, 64 and 128 writers, 5 reps each.
+Azure Standard_L8s_v3, local NVMe, ext4. Closed-loop durable 256-byte appends through the server, 1 `bench/h2h_paced.py` client, 16, 64 and 128 writers, 5 reps each. This is not the in-process G1 harness.
 Systems ran interleaved in one VM session, because of #48. Redis is the control.
 Ratio is the median of per-rep throughput ratios to `main` (`8a66c83`), with min to max in brackets.
 Writer µs/append is writer thread CPU time per append.
