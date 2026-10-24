@@ -4,144 +4,144 @@
 <text x="60" y="68" font-size="14" font-weight="600">Premium SSD v2: Durable acks per second (higher is better)</text>
 <line x1="60" y1="300" x2="480" y2="300" stroke="#999"/>
 <text x="130.0" y="316" font-size="11" text-anchor="middle">1 writer</text>
-<rect x="74.0" y="275.9" width="20.2" height="24.1" fill="#e4572e"/>
-<text x="84.1" y="272.9" font-size="8" text-anchor="middle">1,271</text>
-<rect x="96.4" y="290.7" width="20.2" height="9.3" fill="#5b6c8f"/>
-<text x="106.5" y="287.7" font-size="8" text-anchor="middle">490</text>
-<rect x="118.8" y="290.7" width="20.2" height="9.3" fill="#8aa1c7"/>
-<text x="128.9" y="287.7" font-size="8" text-anchor="middle">492</text>
-<rect x="141.2" y="290.8" width="20.2" height="9.2" fill="#b8c4dd"/>
-<text x="151.3" y="287.8" font-size="8" text-anchor="middle">487</text>
-<rect x="163.6" y="278.2" width="20.2" height="21.8" fill="#76b041"/>
-<text x="173.7" y="275.2" font-size="8" text-anchor="middle">1,150</text>
+<rect x="74.0" y="276.1" width="20.2" height="23.9" fill="#e4572e"/>
+<text x="84.1" y="273.1" font-size="8" text-anchor="middle">1,167</text>
+<rect x="96.4" y="290.4" width="20.2" height="9.6" fill="#5b6c8f"/>
+<text x="106.5" y="287.4" font-size="8" text-anchor="middle">466</text>
+<rect x="118.8" y="290.3" width="20.2" height="9.7" fill="#8aa1c7"/>
+<text x="128.9" y="287.3" font-size="8" text-anchor="middle">472</text>
+<rect x="141.2" y="290.3" width="20.2" height="9.7" fill="#b8c4dd"/>
+<text x="151.3" y="287.3" font-size="8" text-anchor="middle">473</text>
+<rect x="163.6" y="276.6" width="20.2" height="23.4" fill="#76b041"/>
+<text x="173.7" y="273.6" font-size="8" text-anchor="middle">1,143</text>
 <text x="270.0" y="316" font-size="11" text-anchor="middle">4 writers</text>
-<rect x="214.0" y="243.3" width="20.2" height="56.7" fill="#e4572e"/>
-<text x="224.1" y="240.3" font-size="8" text-anchor="middle">2,986</text>
-<rect x="236.4" y="281.2" width="20.2" height="18.8" fill="#5b6c8f"/>
-<text x="246.5" y="278.2" font-size="8" text-anchor="middle">993</text>
-<rect x="258.8" y="281.7" width="20.2" height="18.3" fill="#8aa1c7"/>
-<text x="268.9" y="278.7" font-size="8" text-anchor="middle">966</text>
+<rect x="214.0" y="246.3" width="20.2" height="53.7" fill="#e4572e"/>
+<text x="224.1" y="243.3" font-size="8" text-anchor="middle">2,619</text>
+<rect x="236.4" y="279.0" width="20.2" height="21.0" fill="#5b6c8f"/>
+<text x="246.5" y="276.0" font-size="8" text-anchor="middle">1,022</text>
+<rect x="258.8" y="280.8" width="20.2" height="19.2" fill="#8aa1c7"/>
+<text x="268.9" y="277.8" font-size="8" text-anchor="middle">936</text>
 <rect x="281.2" y="280.9" width="20.2" height="19.1" fill="#b8c4dd"/>
-<text x="291.3" y="277.9" font-size="8" text-anchor="middle">1,007</text>
-<rect x="303.6" y="273.0" width="20.2" height="27.0" fill="#76b041"/>
-<text x="313.7" y="270.0" font-size="8" text-anchor="middle">1,425</text>
+<text x="291.3" y="277.9" font-size="8" text-anchor="middle">932</text>
+<rect x="303.6" y="272.5" width="20.2" height="27.5" fill="#76b041"/>
+<text x="313.7" y="269.5" font-size="8" text-anchor="middle">1,342</text>
 <text x="410.0" y="316" font-size="11" text-anchor="middle">16 writers</text>
 <rect x="354.0" y="108.7" width="20.2" height="191.3" fill="#e4572e"/>
-<text x="364.1" y="105.7" font-size="8" text-anchor="middle">10,083</text>
-<rect x="376.4" y="223.2" width="20.2" height="76.8" fill="#5b6c8f"/>
-<text x="386.5" y="220.2" font-size="8" text-anchor="middle">4,047</text>
-<rect x="398.8" y="223.7" width="20.2" height="76.3" fill="#8aa1c7"/>
-<text x="408.9" y="220.7" font-size="8" text-anchor="middle">4,024</text>
-<rect x="421.2" y="225.8" width="20.2" height="74.2" fill="#b8c4dd"/>
-<text x="431.3" y="222.8" font-size="8" text-anchor="middle">3,910</text>
-<rect x="443.6" y="271.4" width="20.2" height="28.6" fill="#76b041"/>
-<text x="453.7" y="268.4" font-size="8" text-anchor="middle">1,508</text>
+<text x="364.1" y="105.7" font-size="8" text-anchor="middle">9,328</text>
+<rect x="376.4" y="194.4" width="20.2" height="105.6" fill="#5b6c8f"/>
+<text x="386.5" y="191.4" font-size="8" text-anchor="middle">5,151</text>
+<rect x="398.8" y="195.5" width="20.2" height="104.5" fill="#8aa1c7"/>
+<text x="408.9" y="192.5" font-size="8" text-anchor="middle">5,096</text>
+<rect x="421.2" y="195.7" width="20.2" height="104.3" fill="#b8c4dd"/>
+<text x="431.3" y="192.7" font-size="8" text-anchor="middle">5,086</text>
+<rect x="443.6" y="270.8" width="20.2" height="29.2" fill="#76b041"/>
+<text x="453.7" y="267.8" font-size="8" text-anchor="middle">1,421</text>
 <text x="60" y="408" font-size="14" font-weight="600">Premium SSD v2: p99 ack latency, µs (lower is better)</text>
 <line x1="60" y1="640" x2="480" y2="640" stroke="#999"/>
 <text x="130.0" y="656" font-size="11" text-anchor="middle">1 writer</text>
-<rect x="74.0" y="586.8" width="20.2" height="53.2" fill="#e4572e"/>
-<text x="84.1" y="583.8" font-size="8" text-anchor="middle">1,574</text>
-<rect x="96.4" y="532.5" width="20.2" height="107.5" fill="#5b6c8f"/>
-<text x="106.5" y="529.5" font-size="8" text-anchor="middle">3,183</text>
-<rect x="118.8" y="533.0" width="20.2" height="107.0" fill="#8aa1c7"/>
-<text x="128.9" y="530.0" font-size="8" text-anchor="middle">3,167</text>
-<rect x="141.2" y="532.5" width="20.2" height="107.5" fill="#b8c4dd"/>
-<text x="151.3" y="529.5" font-size="8" text-anchor="middle">3,183</text>
-<rect x="163.6" y="554.2" width="20.2" height="85.8" fill="#76b041"/>
-<text x="173.7" y="551.2" font-size="8" text-anchor="middle">2,541</text>
+<rect x="74.0" y="589.1" width="20.2" height="50.9" fill="#e4572e"/>
+<text x="84.1" y="586.1" font-size="8" text-anchor="middle">1,514</text>
+<rect x="96.4" y="531.4" width="20.2" height="108.6" fill="#5b6c8f"/>
+<text x="106.5" y="528.4" font-size="8" text-anchor="middle">3,231</text>
+<rect x="118.8" y="532.0" width="20.2" height="108.0" fill="#8aa1c7"/>
+<text x="128.9" y="529.0" font-size="8" text-anchor="middle">3,214</text>
+<rect x="141.2" y="532.3" width="20.2" height="107.7" fill="#b8c4dd"/>
+<text x="151.3" y="529.3" font-size="8" text-anchor="middle">3,204</text>
+<rect x="163.6" y="560.5" width="20.2" height="79.5" fill="#76b041"/>
+<text x="173.7" y="557.5" font-size="8" text-anchor="middle">2,365</text>
 <text x="270.0" y="656" font-size="11" text-anchor="middle">4 writers</text>
-<rect x="214.0" y="561.0" width="20.2" height="79.0" fill="#e4572e"/>
-<text x="224.1" y="558.0" font-size="8" text-anchor="middle">2,339</text>
-<rect x="236.4" y="449.8" width="20.2" height="190.2" fill="#5b6c8f"/>
-<text x="246.5" y="446.8" font-size="8" text-anchor="middle">5,631</text>
-<rect x="258.8" y="448.7" width="20.2" height="191.3" fill="#8aa1c7"/>
-<text x="268.9" y="445.7" font-size="8" text-anchor="middle">5,663</text>
-<rect x="281.2" y="451.9" width="20.2" height="188.1" fill="#b8c4dd"/>
-<text x="291.3" y="448.9" font-size="8" text-anchor="middle">5,567</text>
-<rect x="303.6" y="564.2" width="20.2" height="75.8" fill="#76b041"/>
-<text x="313.7" y="561.2" font-size="8" text-anchor="middle">2,245</text>
+<rect x="214.0" y="560.4" width="20.2" height="79.6" fill="#e4572e"/>
+<text x="224.1" y="557.4" font-size="8" text-anchor="middle">2,366</text>
+<rect x="236.4" y="452.8" width="20.2" height="187.2" fill="#5b6c8f"/>
+<text x="246.5" y="449.8" font-size="8" text-anchor="middle">5,568</text>
+<rect x="258.8" y="451.0" width="20.2" height="189.0" fill="#8aa1c7"/>
+<text x="268.9" y="448.0" font-size="8" text-anchor="middle">5,622</text>
+<rect x="281.2" y="448.7" width="20.2" height="191.3" fill="#b8c4dd"/>
+<text x="291.3" y="445.7" font-size="8" text-anchor="middle">5,691</text>
+<rect x="303.6" y="574.1" width="20.2" height="65.9" fill="#76b041"/>
+<text x="313.7" y="571.1" font-size="8" text-anchor="middle">1,960</text>
 <text x="410.0" y="656" font-size="11" text-anchor="middle">16 writers</text>
-<rect x="354.0" y="553.8" width="20.2" height="86.2" fill="#e4572e"/>
-<text x="364.1" y="550.8" font-size="8" text-anchor="middle">2,553</text>
-<rect x="376.4" y="455.2" width="20.2" height="184.8" fill="#5b6c8f"/>
-<text x="386.5" y="452.2" font-size="8" text-anchor="middle">5,471</text>
-<rect x="398.8" y="453.0" width="20.2" height="187.0" fill="#8aa1c7"/>
-<text x="408.9" y="450.0" font-size="8" text-anchor="middle">5,535</text>
-<rect x="421.2" y="453.0" width="20.2" height="187.0" fill="#b8c4dd"/>
-<text x="431.3" y="450.0" font-size="8" text-anchor="middle">5,535</text>
-<rect x="443.6" y="580.8" width="20.2" height="59.2" fill="#76b041"/>
-<text x="453.7" y="577.8" font-size="8" text-anchor="middle">1,752</text>
+<rect x="354.0" y="548.1" width="20.2" height="91.9" fill="#e4572e"/>
+<text x="364.1" y="545.1" font-size="8" text-anchor="middle">2,734</text>
+<rect x="376.4" y="465.4" width="20.2" height="174.6" fill="#5b6c8f"/>
+<text x="386.5" y="462.4" font-size="8" text-anchor="middle">5,195</text>
+<rect x="398.8" y="466.5" width="20.2" height="173.5" fill="#8aa1c7"/>
+<text x="408.9" y="463.5" font-size="8" text-anchor="middle">5,161</text>
+<rect x="421.2" y="469.8" width="20.2" height="170.2" fill="#b8c4dd"/>
+<text x="431.3" y="466.8" font-size="8" text-anchor="middle">5,063</text>
+<rect x="443.6" y="583.0" width="20.2" height="57.0" fill="#76b041"/>
+<text x="453.7" y="580.0" font-size="8" text-anchor="middle">1,696</text>
 <text x="540" y="68" font-size="14" font-weight="600">Local NVMe: Durable acks per second (higher is better)</text>
 <line x1="540" y1="300" x2="960" y2="300" stroke="#999"/>
 <text x="610.0" y="316" font-size="11" text-anchor="middle">1 writer</text>
-<rect x="554.0" y="266.0" width="20.2" height="34.0" fill="#e4572e"/>
-<text x="564.1" y="263.0" font-size="8" text-anchor="middle">10,218</text>
-<rect x="576.4" y="270.7" width="20.2" height="29.3" fill="#5b6c8f"/>
-<text x="586.5" y="267.7" font-size="8" text-anchor="middle">8,787</text>
-<rect x="598.8" y="270.9" width="20.2" height="29.1" fill="#8aa1c7"/>
-<text x="608.9" y="267.9" font-size="8" text-anchor="middle">8,738</text>
-<rect x="621.2" y="270.2" width="20.2" height="29.8" fill="#b8c4dd"/>
-<text x="631.3" y="267.2" font-size="8" text-anchor="middle">8,940</text>
-<rect x="643.6" y="234.2" width="20.2" height="65.8" fill="#76b041"/>
-<text x="653.7" y="231.2" font-size="8" text-anchor="middle">19,746</text>
+<rect x="554.0" y="261.4" width="20.2" height="38.6" fill="#e4572e"/>
+<text x="564.1" y="258.4" font-size="8" text-anchor="middle">9,799</text>
+<rect x="576.4" y="268.1" width="20.2" height="31.9" fill="#5b6c8f"/>
+<text x="586.5" y="265.1" font-size="8" text-anchor="middle">8,110</text>
+<rect x="598.8" y="266.8" width="20.2" height="33.2" fill="#8aa1c7"/>
+<text x="608.9" y="263.8" font-size="8" text-anchor="middle">8,434</text>
+<rect x="621.2" y="266.8" width="20.2" height="33.2" fill="#b8c4dd"/>
+<text x="631.3" y="263.8" font-size="8" text-anchor="middle">8,436</text>
+<rect x="643.6" y="223.6" width="20.2" height="76.4" fill="#76b041"/>
+<text x="653.7" y="220.6" font-size="8" text-anchor="middle">19,410</text>
 <text x="750.0" y="316" font-size="11" text-anchor="middle">4 writers</text>
-<rect x="694.0" y="206.5" width="20.2" height="93.5" fill="#e4572e"/>
-<text x="704.1" y="203.5" font-size="8" text-anchor="middle">28,072</text>
-<rect x="716.4" y="234.6" width="20.2" height="65.4" fill="#5b6c8f"/>
-<text x="726.5" y="231.6" font-size="8" text-anchor="middle">19,628</text>
-<rect x="738.8" y="234.7" width="20.2" height="65.3" fill="#8aa1c7"/>
-<text x="748.9" y="231.7" font-size="8" text-anchor="middle">19,595</text>
-<rect x="761.2" y="235.0" width="20.2" height="65.0" fill="#b8c4dd"/>
-<text x="771.3" y="232.0" font-size="8" text-anchor="middle">19,513</text>
-<rect x="783.6" y="225.6" width="20.2" height="74.4" fill="#76b041"/>
-<text x="793.7" y="222.6" font-size="8" text-anchor="middle">22,333</text>
+<rect x="694.0" y="203.5" width="20.2" height="96.5" fill="#e4572e"/>
+<text x="704.1" y="200.5" font-size="8" text-anchor="middle">24,516</text>
+<rect x="716.4" y="231.1" width="20.2" height="68.9" fill="#5b6c8f"/>
+<text x="726.5" y="228.1" font-size="8" text-anchor="middle">17,504</text>
+<rect x="738.8" y="227.4" width="20.2" height="72.6" fill="#8aa1c7"/>
+<text x="748.9" y="224.4" font-size="8" text-anchor="middle">18,444</text>
+<rect x="761.2" y="228.6" width="20.2" height="71.4" fill="#b8c4dd"/>
+<text x="771.3" y="225.6" font-size="8" text-anchor="middle">18,149</text>
+<rect x="783.6" y="212.8" width="20.2" height="87.2" fill="#76b041"/>
+<text x="793.7" y="209.8" font-size="8" text-anchor="middle">22,162</text>
 <text x="890.0" y="316" font-size="11" text-anchor="middle">16 writers</text>
-<rect x="834.0" y="117.5" width="20.2" height="182.5" fill="#e4572e"/>
-<text x="844.1" y="114.5" font-size="8" text-anchor="middle">54,784</text>
-<rect x="856.4" y="123.7" width="20.2" height="176.3" fill="#5b6c8f"/>
-<text x="866.5" y="120.7" font-size="8" text-anchor="middle">52,922</text>
-<rect x="878.8" y="115.9" width="20.2" height="184.1" fill="#8aa1c7"/>
-<text x="888.9" y="112.9" font-size="8" text-anchor="middle">55,287</text>
-<rect x="901.2" y="108.7" width="20.2" height="191.3" fill="#b8c4dd"/>
-<text x="911.3" y="105.7" font-size="8" text-anchor="middle">57,439</text>
-<rect x="923.6" y="211.3" width="20.2" height="88.7" fill="#76b041"/>
-<text x="933.7" y="208.3" font-size="8" text-anchor="middle">26,626</text>
+<rect x="834.0" y="108.7" width="20.2" height="191.3" fill="#e4572e"/>
+<text x="844.1" y="105.7" font-size="8" text-anchor="middle">48,611</text>
+<rect x="856.4" y="124.6" width="20.2" height="175.4" fill="#5b6c8f"/>
+<text x="866.5" y="121.6" font-size="8" text-anchor="middle">44,572</text>
+<rect x="878.8" y="131.1" width="20.2" height="168.9" fill="#8aa1c7"/>
+<text x="888.9" y="128.1" font-size="8" text-anchor="middle">42,928</text>
+<rect x="901.2" y="124.1" width="20.2" height="175.9" fill="#b8c4dd"/>
+<text x="911.3" y="121.1" font-size="8" text-anchor="middle">44,693</text>
+<rect x="923.6" y="201.9" width="20.2" height="98.1" fill="#76b041"/>
+<text x="933.7" y="198.9" font-size="8" text-anchor="middle">24,936</text>
 <text x="540" y="408" font-size="14" font-weight="600">Local NVMe: p99 ack latency, µs (lower is better)</text>
 <line x1="540" y1="640" x2="960" y2="640" stroke="#999"/>
 <text x="610.0" y="656" font-size="11" text-anchor="middle">1 writer</text>
-<rect x="554.0" y="585.8" width="20.2" height="54.2" fill="#e4572e"/>
-<text x="564.1" y="582.8" font-size="8" text-anchor="middle">131</text>
-<rect x="576.4" y="567.6" width="20.2" height="72.4" fill="#5b6c8f"/>
-<text x="586.5" y="564.6" font-size="8" text-anchor="middle">175</text>
-<rect x="598.8" y="567.6" width="20.2" height="72.4" fill="#8aa1c7"/>
-<text x="608.9" y="564.6" font-size="8" text-anchor="middle">175</text>
-<rect x="621.2" y="570.9" width="20.2" height="69.1" fill="#b8c4dd"/>
-<text x="631.3" y="567.9" font-size="8" text-anchor="middle">167</text>
-<rect x="643.6" y="573.6" width="20.2" height="66.4" fill="#76b041"/>
-<text x="653.7" y="570.6" font-size="8" text-anchor="middle">160</text>
+<rect x="554.0" y="597.3" width="20.2" height="42.7" fill="#e4572e"/>
+<text x="564.1" y="594.3" font-size="8" text-anchor="middle">128</text>
+<rect x="576.4" y="578.5" width="20.2" height="61.5" fill="#5b6c8f"/>
+<text x="586.5" y="575.5" font-size="8" text-anchor="middle">184</text>
+<rect x="598.8" y="582.7" width="20.2" height="57.3" fill="#8aa1c7"/>
+<text x="608.9" y="579.7" font-size="8" text-anchor="middle">172</text>
+<rect x="621.2" y="580.1" width="20.2" height="59.9" fill="#b8c4dd"/>
+<text x="631.3" y="577.1" font-size="8" text-anchor="middle">179</text>
+<rect x="643.6" y="587.7" width="20.2" height="52.3" fill="#76b041"/>
+<text x="653.7" y="584.7" font-size="8" text-anchor="middle">157</text>
 <text x="750.0" y="656" font-size="11" text-anchor="middle">4 writers</text>
-<rect x="694.0" y="556.9" width="20.2" height="83.1" fill="#e4572e"/>
-<text x="704.1" y="553.9" font-size="8" text-anchor="middle">201</text>
-<rect x="716.4" y="524.6" width="20.2" height="115.4" fill="#5b6c8f"/>
-<text x="726.5" y="521.6" font-size="8" text-anchor="middle">279</text>
-<rect x="738.8" y="521.3" width="20.2" height="118.7" fill="#8aa1c7"/>
-<text x="748.9" y="518.3" font-size="8" text-anchor="middle">287</text>
-<rect x="761.2" y="521.3" width="20.2" height="118.7" fill="#b8c4dd"/>
-<text x="771.3" y="518.3" font-size="8" text-anchor="middle">287</text>
-<rect x="783.6" y="583.5" width="20.2" height="56.5" fill="#76b041"/>
-<text x="793.7" y="580.5" font-size="8" text-anchor="middle">137</text>
+<rect x="694.0" y="568.3" width="20.2" height="71.7" fill="#e4572e"/>
+<text x="704.1" y="565.3" font-size="8" text-anchor="middle">214</text>
+<rect x="716.4" y="538.5" width="20.2" height="101.5" fill="#5b6c8f"/>
+<text x="726.5" y="535.5" font-size="8" text-anchor="middle">304</text>
+<rect x="738.8" y="540.4" width="20.2" height="99.6" fill="#8aa1c7"/>
+<text x="748.9" y="537.4" font-size="8" text-anchor="middle">298</text>
+<rect x="761.2" y="536.3" width="20.2" height="103.7" fill="#b8c4dd"/>
+<text x="771.3" y="533.3" font-size="8" text-anchor="middle">310</text>
+<rect x="783.6" y="592.2" width="20.2" height="47.8" fill="#76b041"/>
+<text x="793.7" y="589.2" font-size="8" text-anchor="middle">143</text>
 <text x="890.0" y="656" font-size="11" text-anchor="middle">16 writers</text>
-<rect x="834.0" y="448.7" width="20.2" height="191.3" fill="#e4572e"/>
-<text x="844.1" y="445.7" font-size="8" text-anchor="middle">462</text>
-<rect x="856.4" y="471.6" width="20.2" height="168.4" fill="#5b6c8f"/>
-<text x="866.5" y="468.6" font-size="8" text-anchor="middle">407</text>
-<rect x="878.8" y="481.5" width="20.2" height="158.5" fill="#8aa1c7"/>
-<text x="888.9" y="478.5" font-size="8" text-anchor="middle">383</text>
-<rect x="901.2" y="488.2" width="20.2" height="151.8" fill="#b8c4dd"/>
-<text x="911.3" y="485.2" font-size="8" text-anchor="middle">367</text>
-<rect x="923.6" y="588.9" width="20.2" height="51.1" fill="#76b041"/>
-<text x="933.7" y="585.9" font-size="8" text-anchor="middle">124</text>
-<text x="60" y="734" font-size="12" fill="#444">SQLite p99 hides lock stalls: its slowest ack at 16 writers took 49.1 s on Premium SSD v2 and 2.8 s on Local NVMe. Medians of 3 runs, Azure L8s_v3.</text>
+<rect x="834.0" y="472.3" width="20.2" height="167.7" fill="#e4572e"/>
+<text x="844.1" y="469.3" font-size="8" text-anchor="middle">502</text>
+<rect x="856.4" y="456.6" width="20.2" height="183.4" fill="#5b6c8f"/>
+<text x="866.5" y="453.6" font-size="8" text-anchor="middle">549</text>
+<rect x="878.8" y="448.7" width="20.2" height="191.3" fill="#8aa1c7"/>
+<text x="888.9" y="445.7" font-size="8" text-anchor="middle">573</text>
+<rect x="901.2" y="457.3" width="20.2" height="182.7" fill="#b8c4dd"/>
+<text x="911.3" y="454.3" font-size="8" text-anchor="middle">547</text>
+<rect x="923.6" y="598.4" width="20.2" height="41.6" fill="#76b041"/>
+<text x="933.7" y="595.4" font-size="8" text-anchor="middle">124</text>
+<text x="60" y="734" font-size="12" fill="#444">SQLite p99 hides lock stalls: its slowest ack at 16 writers took 46.8 s on Premium SSD v2 and 2.8 s on Local NVMe. Medians of 3 runs, Azure L8s_v3.</text>
 <rect x="60" y="754" width="12" height="12" fill="#e4572e"/>
 <text x="76" y="764" font-size="12">zerodb</text>
 <rect x="150" y="754" width="12" height="12" fill="#5b6c8f"/>
