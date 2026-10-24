@@ -1,6 +1,6 @@
 """Durable appends, 1 in flight per writer. With think, each writer first sleeps a uniform 0 to 2x.
 
-One process per writer, one raw socket each, so every system pays the same client cost.
+1 process per writer, 1 raw socket each, the same client for every system.
 Speaks RESP (RPUSH) to Redis-family servers and HTTP (POST /v1/append) to zerodb.
 Usage: h2h_paced.py resp|zerodb <unix socket> <writers> <requests per writer> <bytes> <think ms>
 Think 0 is a closed loop.
