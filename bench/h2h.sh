@@ -5,8 +5,9 @@
 # H2H_THINK=<ms> each writer sleeps a uniform 0 to 2x that before each write, like an agent.
 # Builds pinned Redis, Valkey and DiceDB into $H2H_TOOLS on first run.
 # Systems run in a new random order each rep, so none always goes first (#48). The summary
-# gives each system's per-rep throughput ratio to $H2H_CONTROL: a slow VM mode hits every
-# system in the rep, so the ratio cancels it. H2H_SERVER_CPUS and H2H_CLIENT_CPUS, such as
+# gives each system's per-rep throughput ratio to $H2H_CONTROL. A slow mode cancels in the
+# ratio only when it slows every system alike, so read it with the absolute numbers and its
+# range. H2H_SERVER_CPUS and H2H_CLIENT_CPUS, such as
 # 0-7 and 8-15, pin servers and the client to separate vCPUs. SQLite runs in the client.
 set -euo pipefail
 DISK=$(realpath "${1:?usage: bench/h2h.sh <dir on the disk under test> [label]}")
@@ -56,8 +57,8 @@ pick() {
     awk -F= '{v[$1]=$2} END {print v["turns_per_sec"], v["p50_us"], v["p99_us"], v["p999_us"], v["max_us"]}'
 }
 
-# Busy and total jiffies across all CPUs.
-cpu() { awk '/^cpu /{t=0; for(i=2;i<=NF;i++) t+=$i; print t-$5-$6, t}' /proc/stat; }
+# Busy and total jiffies across all CPUs. Fields 2 to 9 only: guest time is already in user.
+cpu() { awk '/^cpu /{t=0; for(i=2;i<=9;i++) t+=$i; print t-$5-$6, t}' /proc/stat; }
 
 zerodb() {
     local data=$DISK/zerodb

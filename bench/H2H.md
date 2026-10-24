@@ -133,7 +133,7 @@ With 3 reps, the mode a run landed in decided p99. In 8 adjacent pairs at 256 wr
 
 Agent-shaped p99 medians still move a lot between runs. Read the p99 range next to the median.
 
-The summary now also gives each system's throughput as a ratio to Redis within the same rep, `H2H_CONTROL`. A slow mode hits every system in the rep, so the ratio stays put when the absolute numbers move. Compare systems by that ratio.
+The summary now also gives each system's throughput as a ratio to Redis within the same rep, `H2H_CONTROL`, with its range across reps. When a slow mode slows every system in the rep by a similar share, the ratio stays put while the absolute numbers move. That doesn't always hold. In the 2026-10-24 client-isolation run, zerodb's ratio still ranged 0.80 to 0.90 at 128 writers. Read the ratio next to the absolute numbers and its range.
 
 ## Client
 
