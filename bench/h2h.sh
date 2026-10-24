@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
-# Head-to-head: durable 256-byte appends, acknowledged only after fsync, closed-loop clients.
+# Head-to-head: durable 256-byte appends, acknowledged only after fsync, 1 request in flight.
 # Linux only. Usage: bench/h2h.sh <directory on the disk under test> [label]
-# H2H_THINK=<ms> paces writers like agents between model calls: each sleeps a uniform 0 to 2x
-# that before each write. zerodb and the Redis family then share one driver, h2h_paced.py,
-# since memtier's rate limit fires every connection on the same clock.
-# Builds pinned Redis, Valkey, DiceDB and memtier_benchmark into $H2H_TOOLS on first run.
+# Every server gets the same client, h2h_paced.py: 1 process and socket per writer. With
+# H2H_THINK=<ms> each writer sleeps a uniform 0 to 2x that before each write, like an agent.
+# Builds pinned Redis, Valkey and DiceDB into $H2H_TOOLS on first run.
 set -euo pipefail
 DISK=$(realpath "${1:?usage: bench/h2h.sh <dir on the disk under test> [label]}")
 LABEL=${2:-$(basename "$DISK")}
 cd "$(dirname "$0")/.."
-REPS=${H2H_REPS:-3}
+REPS=${H2H_REPS:-7}
 WRITERS=${H2H_WRITERS:-"1 4 16"}
 PER=${H2H_PER_WRITER:-5000}
 THINK=${H2H_THINK:-0}
@@ -28,16 +27,11 @@ mkdir -p "$TOOLS"
 fetch redis redis/redis 8.10.2
 fetch valkey valkey-io/valkey 9.1.2
 fetch dicedb dicedb/dicedb 1.0.0
-fetch memtier RedisLabs/memtier_benchmark 2.5.2
 for name in redis valkey dicedb; do
     [ -x "$TOOLS/$name/src/$name-server" ] || make -C "$TOOLS/$name" -j"$(nproc)" >/dev/null 2>&1
 done
-if [ ! -x "$TOOLS/memtier/memtier_benchmark" ]; then
-    (cd "$TOOLS/memtier" && autoreconf -ivf && ./configure && make -j"$(nproc)") >/dev/null 2>&1
-fi
 cargo build -q --release -p zerodb
 ZDB=target/release/zerodb
-MEMTIER=$TOOLS/memtier/memtier_benchmark
 
 # Waits for a server's socket. Fails with its log if the server exits first.
 wait_socket() {
@@ -62,13 +56,8 @@ zerodb() {
     "$ZDB" serve --config "$TMP/c.json" --data-dir "$data" --listen none >"$TMP/serve.log" 2>&1 &
     local pid=$! status=0
     wait_socket $pid "$data/zerodb.sock" "$TMP/serve.log"
-    if [ "$THINK" = 0 ]; then
-        "$ZDB" load --url "unix://$data/zerodb.sock" --token-file "$TMP/token" \
-            --writers "$1" --turns $(($1 * PER)) --size $SIZE >"$TMP/load" || status=$?
-    else
-        ZERODB_TOKEN=$(cat "$TMP/token") python3 bench/h2h_paced.py zerodb "$data/zerodb.sock" \
-            "$1" "$PER" $SIZE "$THINK" >"$TMP/load" || status=$?
-    fi
+    ZERODB_TOKEN=$(cat "$TMP/token") python3 bench/h2h_paced.py zerodb "$data/zerodb.sock" \
+        "$1" "$PER" $SIZE "$THINK" >"$TMP/load" || status=$?
     kill $pid && wait $pid || true
     # A failed run must not become a row.
     [ $status = 0 ] && pick <"$TMP/load"
@@ -82,32 +71,10 @@ resp() {
         --appendonly yes --appendfsync always --logfile "$data/log" &
     local pid=$! status=0
     wait_socket $pid "$sock" "$data/log"
-    rm -f "$TMP/m.json"
-    if [ "$THINK" = 0 ]; then
-        "$MEMTIER" --unix-socket="$sock" --protocol=redis --clients="$1" --threads=1 --pipeline=1 \
-            --requests="$PER" --data-size=$SIZE --command="RPUSH __key__ __data__" \
-            --command-key-pattern=R --key-prefix=s --key-minimum=1 --key-maximum=64 \
-            --hide-histogram --print-percentiles=50,99,99.9 --json-out-file="$TMP/m.json" \
-            >"$TMP/memtier.log" 2>&1 || status=$?
-    else
-        python3 bench/h2h_paced.py resp "$sock" "$1" "$PER" $SIZE "$THINK" \
-            >"$TMP/load" 2>"$TMP/memtier.log" || status=$?
-    fi
-    # memtier counts error replies, such as MISCONF after an AOF failure, as operations.
-    local errors
-    errors=$("$TOOLS/$2/src/$2-cli" -s "$sock" info stats | tr -d '\r' |
-        awk -F: '/^total_error_replies:/ {print $2}')
-    [ "$errors" = 0 ] || { echo "$2: $errors error replies" >&2 && status=1; }
+    # The driver fails on any reply but an integer, such as MISCONF after an AOF failure.
+    python3 bench/h2h_paced.py resp "$sock" "$1" "$PER" $SIZE "$THINK" >"$TMP/load" || status=$?
     kill $pid && wait $pid || true
-    [ $status = 0 ] || { cat "$TMP/memtier.log" >&2 && return $status; }
-    [ "$THINK" = 0 ] || { pick <"$TMP/load" && return; }
-    python3 - "$TMP/m.json" <<'PY'
-import json, sys
-totals = json.load(open(sys.argv[1]))["ALL STATS"]["Totals"]
-lat = totals["Percentile Latencies"]
-print(totals["Ops/sec"], *(lat[k] * 1000 for k in ("p50.00", "p99.00", "p99.90")),
-      totals["Max Latency"] * 1000)
-PY
+    [ $status = 0 ] && pick <"$TMP/load"
 }
 
 sqlite() {
@@ -117,7 +84,7 @@ sqlite() {
 
 {
     echo "# $(uname -sr) $(findmnt -no SOURCE,FSTYPE --target "$DISK"), think ${THINK} ms"
-    echo "# zerodb ${H2H_ZERODB_REV:-$(git rev-parse --short HEAD)}, memtier $("$MEMTIER" --version | head -1)"
+    echo "# zerodb ${H2H_ZERODB_REV:-$(git rev-parse --short HEAD)}, client bench/h2h_paced.py, $REPS reps"
     for name in redis valkey dicedb; do echo "# $("$TOOLS/$name/src/$name-server" --version)"; done
     echo "# sqlite $(python3 -c 'import sqlite3; print(sqlite3.sqlite_version)')"
     printf 'system\twriters\trep\tturns_per_sec\tp50_us\tp99_us\tp999_us\tmax_us\n'

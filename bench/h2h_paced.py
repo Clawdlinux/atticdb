@@ -1,8 +1,9 @@
-"""Agent-paced durable appends: each writer sleeps a uniform 0 to 2x think, then sends one.
+"""Durable appends, 1 in flight per writer. With think, each writer first sleeps a uniform 0 to 2x.
 
 One process per writer, one raw socket each, so every system pays the same client cost.
 Speaks RESP (RPUSH) to Redis-family servers and HTTP (POST /v1/append) to zerodb.
 Usage: h2h_paced.py resp|zerodb <unix socket> <writers> <requests per writer> <bytes> <think ms>
+Think 0 is a closed loop.
 zerodb reads its token from ZERODB_TOKEN.
 """
 
@@ -68,7 +69,9 @@ def writer(proto, path, index, requests, size, think):
     rng = random.Random(index)
     start = time.perf_counter()
     for i in range(requests):
-        time.sleep(rng.uniform(0, 2 * think / 1000))
+        # sleep(0) still yields, which would slow the closed loop.
+        if think:
+            time.sleep(rng.uniform(0, 2 * think / 1000))
         data = request(index, i, body)
         sent = time.perf_counter()
         conn.sendall(data)
