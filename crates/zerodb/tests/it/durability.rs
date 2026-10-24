@@ -282,6 +282,7 @@ fn post(
         // Killed between the head and the body.
         return (Outcome::Unknown, Value::Null);
     }
+    assert_eq!(reply.len() - at, length, "body longer than Content-Length: {text}");
     let reply: Value =
         serde_json::from_slice(&reply[at..]).unwrap_or_else(|e| panic!("{e}: {text}"));
     let outcome = reply["outcome"].as_str().and_then(parse);

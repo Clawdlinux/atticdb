@@ -293,9 +293,12 @@ impl<I: Io> Io for HookIo<I> {
         self.opened(p, self.run_undo(Op::Open(p), || self.inner.open(p), close))
     }
     fn close(&self, f: FileId) -> Result<()> {
-        self.run(Op::Close(&self.path(f)), || self.inner.close(f))?;
-        lock(&self.files)?.remove(&f);
-        Ok(())
+        // Untracked as soon as the storage releases it, even if a later hook fails.
+        self.run(Op::Close(&self.path(f)), || {
+            self.inner.close(f)?;
+            lock(&self.files)?.remove(&f);
+            Ok(())
+        })
     }
     fn write_at(&self, f: FileId, off: u64, d: &[u8]) -> Result<()> {
         self.run(Op::Write(&self.path(f), f, off, d), || self.inner.write_at(f, off, d))
