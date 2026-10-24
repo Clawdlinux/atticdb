@@ -118,21 +118,11 @@ pub(crate) fn shrink_after_space_check(io: &HookIo, capacity: u64) {
     });
 }
 
-/// Makes segment and spare `allocate` calls only set the length, like a filesystem without
-/// preallocation. Index files keep real allocations. They are never synced, so an undone
-/// allocation could come back in their crash image.
+/// Makes every `allocate` only set the length, like a filesystem without preallocation.
 pub(crate) fn sparse_allocations(io: &HookIo) {
     let disk = io.inner.clone();
     io.add(move |op, next| match op {
-        Op::Allocate(path, len) if !op.name().starts_with("LSN-") => {
-            let file = disk.open(path)?;
-            let old = disk.len(file)?.min(len);
-            next()?;
-            // Return the blocks the real allocation reserved past the old end.
-            disk.set_len(file, old)?;
-            disk.set_len(file, len)?;
-            disk.close(file)
-        }
+        Op::Allocate(_, file, len) => disk.set_len(file, len),
         _ => next(),
     });
 }

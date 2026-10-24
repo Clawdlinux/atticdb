@@ -18,7 +18,7 @@ pub enum Op<'a> {
     Read(&'a Path, u64, usize),
     Len(&'a Path),
     SetLen(&'a Path, u64),
-    Allocate(&'a Path, u64),
+    Allocate(&'a Path, FileId, u64),
     Available(&'a Path),
     Total(&'a Path),
     SyncData(&'a Path),
@@ -42,7 +42,7 @@ impl<'a> Op<'a> {
             | Read(p, ..)
             | Len(p)
             | SetLen(p, _)
-            | Allocate(p, _)
+            | Allocate(p, ..)
             | Available(p)
             | Total(p)
             | SyncData(p)
@@ -96,7 +96,7 @@ impl std::fmt::Display for Op<'_> {
             Op::Create(_) => write!(f, "create {p}"),
             Op::Write(_, _, off, _) => write!(f, "write {p} {off}"),
             Op::SetLen(_, n) => write!(f, "resize {p} {n}"),
-            Op::Allocate(_, n) => write!(f, "allocate {p} {n}"),
+            Op::Allocate(_, _, n) => write!(f, "allocate {p} {n}"),
             Op::SyncData(_) => write!(f, "sync {p}"),
             Op::SyncDir(_) => write!(f, "dir-sync {p}"),
             Op::Rename(_, to) => write!(f, "rename {p} {}", to.display()),
@@ -114,7 +114,8 @@ type Hook = dyn Fn(Op<'_>, Next<'_>) -> Result<()> + Send + Sync;
 ///
 /// A hook gets the call and `next`. It can return an error without calling `next`,
 /// call `next` and replace its result, or do work before and after it. A hook that
-/// returns `Ok` without calling `next` fails the call, because no value exists.
+/// returns `Ok` without calling `next` replaces a call that returns nothing, such as
+/// `allocate`. For a call that returns a value it fails the call, because no value exists.
 /// The first hook added runs outermost, except [`HookIo::fail_once`] faults, which
 /// run before every observer, so observers never see injected calls.
 pub struct HookIo<I = SimDisk> {
@@ -199,15 +200,22 @@ impl<I: Io> HookIo<I> {
     }
 
     fn run<T>(&self, op: Op<'_>, call: impl FnMut() -> Result<T>) -> Result<T> {
-        self.run_undo(op, call, drop)
+        self.run_undo(op, call, drop, None)
+    }
+
+    /// Like `run`, for calls that return nothing, so a hook may replace them.
+    fn run_unit(&self, op: Op<'_>, call: impl FnMut() -> Result<()>) -> Result<()> {
+        self.run_undo(op, call, drop, Some(()))
     }
 
     /// Like `run`. When a hook fails after the call produced a value, `undo` releases it.
+    /// `skipped` is the result when a hook returns `Ok` without calling `next`.
     fn run_undo<T>(
         &self,
         op: Op<'_>,
         mut call: impl FnMut() -> Result<T>,
         undo: impl FnOnce(T),
+        skipped: Option<T>,
     ) -> Result<T> {
         fn chain(hooks: &[Arc<Hook>], op: Op<'_>, last: Next<'_>) -> Result<()> {
             match hooks.split_first() {
@@ -228,9 +236,8 @@ impl<I: Io> HookIo<I> {
                 Err(error)
             }
             (Err(error), None) => Err(error),
-            (Ok(()), None) => {
-                Err(Error::Io(std::io::ErrorKind::Other, format!("hook skipped {op}")))
-            }
+            (Ok(()), None) => skipped
+                .ok_or_else(|| Error::Io(std::io::ErrorKind::Other, format!("hook skipped {op}"))),
         }
     }
 
@@ -286,22 +293,22 @@ impl<I> std::fmt::Debug for HookIo<I> {
 impl<I: Io> Io for HookIo<I> {
     fn create(&self, p: &Path) -> Result<FileId> {
         let close = |f| drop(self.inner.close(f));
-        self.opened(p, self.run_undo(Op::Create(p), || self.inner.create(p), close))
+        self.opened(p, self.run_undo(Op::Create(p), || self.inner.create(p), close, None))
     }
     fn open(&self, p: &Path) -> Result<FileId> {
         let close = |f| drop(self.inner.close(f));
-        self.opened(p, self.run_undo(Op::Open(p), || self.inner.open(p), close))
+        self.opened(p, self.run_undo(Op::Open(p), || self.inner.open(p), close, None))
     }
     fn close(&self, f: FileId) -> Result<()> {
         // Untracked as soon as the storage releases it, even if a later hook fails.
-        self.run(Op::Close(&self.path(f)), || {
+        self.run_unit(Op::Close(&self.path(f)), || {
             self.inner.close(f)?;
             lock(&self.files)?.remove(&f);
             Ok(())
         })
     }
     fn write_at(&self, f: FileId, off: u64, d: &[u8]) -> Result<()> {
-        self.run(Op::Write(&self.path(f), f, off, d), || self.inner.write_at(f, off, d))
+        self.run_unit(Op::Write(&self.path(f), f, off, d), || self.inner.write_at(f, off, d))
     }
     fn read_at(&self, f: FileId, off: u64, d: &mut [u8]) -> Result<usize> {
         let path = self.path(f);
@@ -312,10 +319,10 @@ impl<I: Io> Io for HookIo<I> {
         self.run(Op::Len(&self.path(f)), || self.inner.len(f))
     }
     fn set_len(&self, f: FileId, n: u64) -> Result<()> {
-        self.run(Op::SetLen(&self.path(f), n), || self.inner.set_len(f, n))
+        self.run_unit(Op::SetLen(&self.path(f), n), || self.inner.set_len(f, n))
     }
     fn allocate(&self, f: FileId, n: u64) -> Result<()> {
-        self.run(Op::Allocate(&self.path(f), n), || self.inner.allocate(f, n))
+        self.run_unit(Op::Allocate(&self.path(f), f, n), || self.inner.allocate(f, n))
     }
     fn available_bytes(&self, p: &Path) -> Result<u64> {
         self.run(Op::Available(p), || self.inner.available_bytes(p))
@@ -324,16 +331,16 @@ impl<I: Io> Io for HookIo<I> {
         self.run(Op::Total(p), || self.inner.total_bytes(p))
     }
     fn sync_data(&self, f: FileId) -> Result<()> {
-        self.run(Op::SyncData(&self.path(f)), || self.inner.sync_data(f))
+        self.run_unit(Op::SyncData(&self.path(f)), || self.inner.sync_data(f))
     }
     fn sync_dir(&self, p: &Path) -> Result<()> {
-        self.run(Op::SyncDir(p), || self.inner.sync_dir(p))
+        self.run_unit(Op::SyncDir(p), || self.inner.sync_dir(p))
     }
     fn rename(&self, a: &Path, b: &Path) -> Result<()> {
-        self.run(Op::Rename(a, b), || self.inner.rename(a, b))
+        self.run_unit(Op::Rename(a, b), || self.inner.rename(a, b))
     }
     fn remove(&self, p: &Path) -> Result<()> {
-        self.run(Op::Remove(p), || self.inner.remove(p))
+        self.run_unit(Op::Remove(p), || self.inner.remove(p))
     }
     fn list(&self, p: &Path) -> Result<Vec<PathBuf>> {
         self.run(Op::List(p), || self.inner.list(p))
