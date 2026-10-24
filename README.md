@@ -54,7 +54,7 @@ Durable appends, `fsync` before every ack, Azure L8s v3. Medians of 7 interleave
 | Acks/s | 48,611 | 44,572 | 42,928 | 44,693 |
 | p99 µs | 502 | 549 | 573 | 547 |
 
-Of the 4 servers, zerodb has the best closed-loop acks/s and p99 on both disks. On Premium SSD v2 it beats Redis, Valkey and DiceDB in every cell. At 16 writers it acks 9,328/s against 5,086 to 5,151. On local NVMe it isn't best everywhere:
+Of the 4 servers, zerodb has the best closed-loop acks/s and p99 on both disks. On Premium SSD v2 it beats Redis, Valkey and DiceDB in every cell. At 16 writers it acks 9,328/s against 5,086 to 5,151. On local NVMe it's mixed:
 - Closed loop, 1 and 4 writers: zerodb beats Redis, Valkey and DiceDB on every median. It acks 9,799 and 24,516/s, against at most 8,436 and 18,444.
 - Closed loop, 16 writers: Redis and DiceDB have a lower p50, 299 and 300 µs against 305. zerodb's p99.9 and max are the worst of the 4: 674 and 1,210 µs. The others get 604 to 624 and 810 to 947.
 - Agent-shaped, 64 writers at 5 ms think and 256 at 50 ms: best p50, 148 and 138 µs. The others get 182 to 184 and 140 to 145. Its p99.9 is best too: 786 and 736 against 964 to 1,053 and 2,103 to 2,758.

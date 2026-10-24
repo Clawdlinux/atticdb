@@ -125,7 +125,7 @@ Under agent load zerodb has the best p50 and p99.9 of the 4 servers. Its p50 is 
 
 Runs on this VM land in a fast or a slow mode at random. Steal time stays 0. The 4 servers often move together. On NVMe at 256 writers with 50 ms think, reps 1 and 2 were fast for all 4. Their p99 was 225 to 301 µs. Rep 3 was slow for all 4: 636 to 765 µs. SQLite, in process, shows no slow reps here. On NVMe its acks and p99 stay within 16% across reps.
 
-Rep 1 at 1 writer on NVMe was slow on acks for zerodb, Redis and Valkey: 4,404, 1,928 and 5,512/s. Their medians are 9,799, 8,110 and 8,434. Rep 1 was the first load of the whole run, so it may be warm-up. Each rep ran the systems in a fixed order: zerodb, Redis, Valkey, DiceDB, SQLite. So zerodb always ran first.
+Rep 1 at 1 writer on NVMe was slow on acks for zerodb, Redis and Valkey: 4,404, 1,928 and 5,512/s. Their medians are 9,799, 8,110 and 8,434. Rep 1 was the first load of the whole run, so it may be warm-up. Each rep ran the systems in a fixed order: zerodb, Redis, Valkey, DiceDB, SQLite. So zerodb always ran first. Any warm-up effect hits zerodb's slot first.
 
 A per-append trace of zerodb found every stage slower together in slow runs. That includes `fdatasync`, which went from 26 to 65 µs. No single wait in zerodb explains it. [#48](https://github.com/Clawdlinux/zerodb/issues/48) tracks the cause.
 
@@ -150,4 +150,4 @@ The Python client likely costs more CPU than memtier on the same 8 vCPUs. We hav
 
 ## Not covered
 
-PostgreSQL, Ultra Disk, replicated setups, reads, payloads other than 256 bytes, and writes without `fsync`. Also a randomized system order within each rep.
+PostgreSQL, Ultra Disk, replicated setups, reads, payloads other than 256 bytes, and writes without `fsync`. The harness also runs systems in a fixed order within each rep.
