@@ -109,7 +109,7 @@ class Rig:
             os.remove(self.sock)
 
 
-def write(client, rng, session, stop, attempted, acked):
+def write(client, rng, session, stop, attempted, acked, errors):
     while not stop.is_set():
         batch = f"{session}.{rng.getrandbits(48):x}"
         sizes = [rng.choice(SIZES) for _ in range(rng.randint(1, 4))]
@@ -117,7 +117,8 @@ def write(client, rng, session, stop, attempted, acked):
         attempted[batch] = contents
         try:
             receipt = client.append("a", session, [{"role": "user", "content": c} for c in contents])
-        except Error:
+        except Error as error:
+            errors.append(str(error))
             return
         acked.extend(zip(receipt["seqs"], contents))
 
@@ -163,9 +164,9 @@ def main():
             check(rig.client(), attempted, durable)
             if round_ == args.rounds:
                 break
-            stop, acked = threading.Event(), {s: [] for s in durable}
+            stop, acked, errors = threading.Event(), {s: [] for s in durable}, []
             threads = [threading.Thread(target=write, args=(rig.client(), random.Random(rng.getrandbits(64)),
-                                                            s, stop, attempted, acked[s])) for s in durable]
+                                                            s, stop, attempted, acked[s], errors)) for s in durable]
             for t in threads:
                 t.start()
             time.sleep(rng.uniform(0.2, 1.5))
@@ -173,6 +174,9 @@ def main():
             stop.set()
             for t in threads:
                 t.join()
+            # A round without acks proves nothing, so it fails.
+            assert any(acked.values()), f"no write acknowledged: {errors[:1]} " \
+                f"{open(f'{args.work}/serve.log').read()[-600:]}"
             for s, turns in acked.items():
                 durable[s] = sorted(set(durable[s]) | set(turns))
             done = subprocess.run([args.bin, "verify", "--data-dir", f"{rig.root}/d", "--scratch",
