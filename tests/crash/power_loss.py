@@ -70,7 +70,8 @@ class Rig:
             [f"{self.args.lazyfs}/lazyfs/build/lazyfs", self.mnt, "--config-path", f"{w}/lazyfs.toml",
              "-o", "allow_other", "-o", "modules=subdir", "-o", f"subdir={self.root}", "-f"],
             stdout=subprocess.DEVNULL, stderr=open(f"{w}/lazyfs.out", "ab"))
-        wait(lambda: os.path.ismount(self.mnt), "LazyFS mount")
+        wait(lambda: self.fs.poll() is not None or os.path.ismount(self.mnt), "LazyFS mount")
+        assert os.path.ismount(self.mnt), f"LazyFS did not mount: {open(f'{w}/lazyfs.out').read()[-800:]}"
         log = open(f"{w}/serve.log", "ab")
         self.db = subprocess.Popen(
             [self.args.bin, "serve", "--config", f"{w}/c.json", "--data-dir", f"{self.mnt}/d",

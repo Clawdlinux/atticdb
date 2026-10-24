@@ -56,7 +56,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: power-loss-logs
-          path: target/power-loss/*.log
+          path: |
+            target/power-loss/*.log
+            target/power-loss/*.out
           if-no-files-found: ignore
 
   sims:
