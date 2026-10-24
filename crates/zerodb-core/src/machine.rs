@@ -1,5 +1,5 @@
 use crate::checkpoint::{read_page, Command};
-use crate::dedup::{digest, Dedup, DedupKey, Entry, Scope};
+use crate::dedup::{digest, hash_key, Dedup, DedupKey, Entry, Scope};
 use crate::error::{lock, Result};
 use crate::fact;
 use crate::facts::{current, FactKey, Rev};
@@ -135,14 +135,15 @@ impl Machine {
             }
             None => [0; 32],
         };
-        let dedup_key = idem.map(|id| DedupKey(tenant, scope, id));
+        // Hashed once. The staged entry keeps the hash for publication and eviction.
+        let dedup_key = idem.map(|id| DedupKey(tenant, scope, id)).map(|key| (hash_key(&key), key));
         let mut state = lock(&self.state)?;
         if let Some(error) = &state.failure {
             return Err(error.clone());
         }
-        if let Some(entry) =
-            dedup_key.as_ref().and_then(|key| self.dedup.get(key).or_else(|| state.dedup.get(key)))
-        {
+        if let Some(entry) = dedup_key.as_ref().and_then(|(hash, key)| {
+            self.dedup.get_hashed(*hash, key).or_else(|| state.dedup.get_hashed(*hash, key))
+        }) {
             let Committed::Durable { txn, first_lsn, last_lsn, mut reply } =
                 entry.resolve(digest)?;
             reply.push(REPLY_DEDUPLICATED);
@@ -194,8 +195,9 @@ impl Machine {
         self.txn = txn;
         let reply = seq.map_or_else(Vec::new, |seq| seq.to_le_bytes().to_vec());
         batch.set_reply(reply.clone());
-        if let Some(key) = dedup_key {
+        if let Some((hash, key)) = dedup_key {
             self.dedup.insert(Entry {
+                hash,
                 key,
                 digest,
                 committed: Committed::Durable { txn, first_lsn, last_lsn, reply },
@@ -318,16 +320,16 @@ impl Machine {
     ) {
         self.hash.update(&(payload.len() as u32).to_le_bytes());
         self.hash.update(payload);
-        state.dedup.insert(Entry {
+        state.dedup.insert(Entry::new(
             key,
-            digest: *self.hash.finalize().as_bytes(),
-            committed: Committed::Durable {
+            *self.hash.finalize().as_bytes(),
+            Committed::Durable {
                 txn: record.txn,
                 first_lsn: self.first_lsn,
                 last_lsn: record.lsn,
                 reply,
             },
-        });
+        ));
     }
 }
 fn tape_error(error: EngineError) -> Error {
@@ -578,16 +580,16 @@ mod tests {
         initial.published_lsn = 3;
         initial.txn = 1;
         for age in 2..=3 {
-            initial.dedup.insert(Entry {
-                key: DedupKey(1, Scope::Session(age.to_string()), "old".into()),
-                digest: [0; 32],
-                committed: Committed::Durable {
+            initial.dedup.insert(Entry::new(
+                DedupKey(1, Scope::Session(age.to_string()), "old".into()),
+                [0; 32],
+                Committed::Durable {
                     txn: 1,
                     first_lsn: age,
                     last_lsn: age,
                     reply: 1u64.to_le_bytes().to_vec(),
                 },
-            });
+            ));
         }
         let shared = Arc::new(Mutex::new(initial));
         let mut machine =
