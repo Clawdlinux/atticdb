@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1020" height="780" font-family="Helvetica, Arial, sans-serif">
 <rect width="1020" height="780" fill="white"/>
-<text x="60" y="28" font-size="17" font-weight="700">Durable 256-byte appends, ack after fsync, closed-loop writers</text>
+<text x="60" y="28" font-size="17" font-weight="700">Durable 256-byte appends, ack after fsync, closed loop, 1 client for every server</text>
 <text x="60" y="68" font-size="14" font-weight="600">Premium SSD v2: Durable acks per second (higher is better)</text>
 <line x1="60" y1="300" x2="480" y2="300" stroke="#999"/>
 <text x="130.0" y="316" font-size="11" text-anchor="middle">1 writer</text>
@@ -141,7 +141,7 @@
 <text x="911.3" y="454.3" font-size="8" text-anchor="middle">547</text>
 <rect x="923.6" y="598.4" width="20.2" height="41.6" fill="#76b041"/>
 <text x="933.7" y="595.4" font-size="8" text-anchor="middle">124</text>
-<text x="60" y="734" font-size="12" fill="#444">SQLite p99 hides lock stalls: its slowest ack at 16 writers took 46.8 s on Premium SSD v2 and 2.8 s on Local NVMe. Medians of 3 runs, Azure L8s_v3.</text>
+<text x="60" y="734" font-size="12" fill="#444">SQLite p99 hides lock stalls: its slowest ack at 16 writers took 46.8 s on Premium SSD v2 and 2.8 s on Local NVMe. Medians of 7 interleaved reps, Azure L8s_v3.</text>
 <rect x="60" y="754" width="12" height="12" fill="#e4572e"/>
 <text x="76" y="764" font-size="12">zerodb</text>
 <rect x="150" y="754" width="12" height="12" fill="#5b6c8f"/>

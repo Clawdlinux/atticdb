@@ -47,17 +47,19 @@ Exit 3 means the write may have landed. Running the command again uses a new key
 
 ## Numbers
 
-Durable appends, `fsync` before every ack, Azure L8s v3, medians of 3. Full tables: [bench/H2H.md](bench/H2H.md).
+Durable appends, `fsync` before every ack, Azure L8s v3. Medians of 7 interleaved reps, 1 client for every server. Full tables: [bench/H2H.md](bench/H2H.md).
 
 | Local NVMe, 16 writers, closed loop | zerodb | redis | valkey | dicedb |
 |---|---|---|---|---|
-| Acks/s | 54,784 | 52,922 | 55,287 | 57,439 |
-| p99 µs | 462 | 407 | 383 | 367 |
+| Acks/s | 48,611 | 44,572 | 42,928 | 44,693 |
+| p99 µs | 502 | 549 | 573 | 547 |
 
-At 16 or more writers on local NVMe, zerodb ties the Redis family on throughput. Its p99 is the worst of the 4 servers in every such run.
-At 64 writers with 5 ms think it has the best p50, 149 µs against 184 to 186. Its p99 is 598 µs against 342 to 560.
-At 256 writers with 50 ms think its p99 is 631 µs. Redis and Valkey get 303 and 302. [#47](https://github.com/Clawdlinux/zerodb/issues/47) tracks the NVMe p99 gap. With 1 writer, in-process SQLite is fastest: 19,746 acks/s against zerodb's 10,218.
-On Premium SSD v2, zerodb leads the Redis family on acks/s, p50 and p99 in every run. At 16 writers it acks 10,083/s against redis 4,047.
+zerodb's p50 there is mid-pack, 305 µs against 299 to 311. Its p99.9 and max are the worst of the 4: 674 and 1,210 µs. The others get 604 to 624 and 810 to 947.
+At 1 and 4 writers zerodb leads the 4 servers on every median. It acks 9,799 and 24,516/s, against at most 8,436 and 18,444.
+64 writers, 5 ms think: zerodb p50 148 µs against 182 to 184. p99 median 416, range 273 to 521. Redis is lower at 382, range 336 to 567. p99.9 786 against 964 to 1,053.
+256 writers, 50 ms think: zerodb p50 138 µs against 140 to 145. p99 median 558, range 225 to 636. DiceDB and Valkey are lower at 348 and 496. p99.9 736 against 2,103 to 2,758. zerodb's max is the worst, 8,698 µs.
+With 1 writer, in-process SQLite acks 19,410/s against zerodb's 9,799, at p50 32 µs against 94. At 4 and 16 writers its p50 and p99 stay below zerodb's, with fewer acks.
+On Premium SSD v2 zerodb beats the Redis family in every cell of every run. At 16 writers it acks 9,328/s against 5,086 to 5,151.
 
 ## How it works
 
