@@ -83,23 +83,10 @@ fn fail_sync(io: &HookIo, after: bool) -> Arc<AtomicUsize> {
 
 /// Arms the plan's `StorageFull` on the next data-segment write or sync.
 fn storage_full(io: &HookIo, plan: &CapacityPlan) {
-    let (fault, disk, last) = (StorageFullFault::default(), io.inner.clone(), Mutex::new(None));
+    let (fault, disk) = (StorageFullFault::default(), io.inner.clone());
     fault.arm(plan);
     io.add(move |op, next| {
-        match op {
-            Op::Write(path, file, _, data) if op.is_segment() => {
-                fault.opened(path, file);
-                *last.lock().unwrap() = Some(file);
-                fault.before_write(&disk, file, data.len());
-            }
-            // Any written segment handle stands for this one. Only its kind matters.
-            Op::SyncData(_) if op.is_segment() => {
-                if let Some(file) = *last.lock().unwrap() {
-                    fault.before_sync(&disk, file);
-                }
-            }
-            _ => {}
-        }
+        fault.before(&disk, &op);
         next()
     });
 }

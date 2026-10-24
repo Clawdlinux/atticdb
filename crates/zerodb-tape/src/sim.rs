@@ -9,11 +9,11 @@ pub use crate::recovery::{recover, Recovered};
 pub use crate::segment::{SegmentWriter, DEFAULT_SEGMENT_SIZE};
 pub use crate::writer::{PreparedBatch, WriteRequest, WriterCore};
 use crate::{
-    Clock, Committed, CommittedRecord, Durability, Error, FileId, HookIo, Io, Kind, Op, Outcome,
-    Prepare, RecordInput, RecoveryReport, Result, SimDisk, StateMachine, Tape,
-    TapeOptions as Options, WriteResult,
+    Clock, Committed, CommittedRecord, Durability, Error, HookIo, Io, Kind, Op, Outcome, Prepare,
+    RecordInput, RecoveryReport, Result, SimDisk, StateMachine, Tape, TapeOptions as Options,
+    WriteResult,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -145,7 +145,6 @@ impl CapacityPlan {
 /// Targets data-segment I/O, after preflight metadata and application preparation.
 #[derive(Debug, Default)]
 pub struct StorageFullFault {
-    segments: Mutex<BTreeSet<FileId>>,
     write_seed: AtomicU64,
     write: AtomicBool,
     sync: AtomicBool,
@@ -153,23 +152,6 @@ pub struct StorageFullFault {
 }
 
 impl StorageFullFault {
-    /// Tracks segment handles separately from manifest and checkpoint files.
-    pub fn opened(&self, path: &Path, file: FileId) {
-        if path.file_name().unwrap().to_str().unwrap().starts_with("seg-") {
-            self.segments.lock().unwrap().insert(file);
-        }
-    }
-
-    /// Stops tracking a closed handle.
-    pub fn closed(&self, file: FileId) {
-        self.segments.lock().unwrap().remove(&file);
-    }
-
-    /// Reports whether an open handle belongs to a data segment.
-    pub fn is_segment(&self, file: FileId) -> bool {
-        self.segments.lock().unwrap().contains(&file)
-    }
-
     /// Arms a single data-write or data-sync error.
     pub fn arm(&self, plan: &CapacityPlan) {
         self.written.store(false, Ordering::SeqCst);
@@ -180,32 +162,30 @@ impl StorageFullFault {
         self.sync.store(plan.write_seed.is_none(), Ordering::SeqCst);
     }
 
-    /// Arms the disk's partial-write budget at the first prepared data write.
-    pub fn before_write(&self, disk: &SimDisk, file: FileId, first_write_len: usize) {
-        if !self.write.load(Ordering::SeqCst) && !self.sync.load(Ordering::SeqCst) {
-            return;
-        }
-        if self.is_segment(file) {
-            if self.sync.load(Ordering::SeqCst) {
-                self.written.store(true, Ordering::SeqCst);
+    /// Applies the armed error to a segment write or sync. Call it in a hook before `next`.
+    ///
+    /// A write error sets the disk's partial-write budget at the first data write.
+    /// A sync error waits until data has been written.
+    pub fn before(&self, disk: &SimDisk, op: &Op<'_>) {
+        match *op {
+            Op::Write(.., data) if op.is_segment() => {
+                if self.sync.load(Ordering::SeqCst) {
+                    self.written.store(true, Ordering::SeqCst);
+                }
+                if self.write.swap(false, Ordering::SeqCst) {
+                    assert!(data.len() >= MIN_TRANSACTION_BYTES);
+                    let seed = self.write_seed.load(Ordering::SeqCst);
+                    disk.enospc_after_bytes(Rng::new(seed).below(data.len())).unwrap();
+                }
             }
-            if self.write.swap(false, Ordering::SeqCst) {
-                assert!(first_write_len >= MIN_TRANSACTION_BYTES);
-                let partial_write_budget_limit = first_write_len;
-                let budget = Rng::new(self.write_seed.load(Ordering::SeqCst))
-                    .below(partial_write_budget_limit);
-                disk.enospc_after_bytes(budget).unwrap();
+            Op::SyncData(_)
+                if op.is_segment()
+                    && self.written.load(Ordering::SeqCst)
+                    && self.sync.swap(false, Ordering::SeqCst) =>
+            {
+                disk.storage_full_next_sync().unwrap();
             }
-        }
-    }
-
-    /// Arms the disk's typed sync error after data has been written.
-    pub fn before_sync(&self, disk: &SimDisk, file: FileId) {
-        if !self.written.load(Ordering::SeqCst) || !self.sync.load(Ordering::SeqCst) {
-            return;
-        }
-        if self.is_segment(file) && self.sync.swap(false, Ordering::SeqCst) {
-            disk.storage_full_next_sync().unwrap();
+            _ => {}
         }
     }
 }
@@ -473,22 +453,13 @@ struct CrashIo {
 
 impl CrashIo {
     fn new(disk: SimDisk) -> Self {
-        // StorageFullFault tracks segments by handle. Hooks see paths, so one id stands for all.
-        const SEGMENT: FileId = FileId(u64::MAX);
         let faults = Arc::new(Faults::default());
-        faults.storage_full.opened(Path::new("seg-"), SEGMENT);
         let (f, d) = (faults.clone(), disk.clone());
         let hooks = HookIo::new(disk.clone()).with(move |op, next| {
             if op.is_sync() && tick(&f.fail_sync) {
                 d.fail_next_sync()?;
             }
-            match op {
-                Op::Write(.., bytes) if op.is_segment() => {
-                    f.storage_full.before_write(&d, SEGMENT, bytes.len());
-                }
-                Op::SyncData(_) if op.is_segment() => f.storage_full.before_sync(&d, SEGMENT),
-                _ => {}
-            }
+            f.storage_full.before(&d, &op);
             let result = next();
             if op.mutates() && tick(&f.cut) {
                 *f.image.lock().unwrap() = Some(d.crash()?);
