@@ -1425,3 +1425,24 @@ Reply wakeups cut writer futex calls 9x and writer CPU per append about 27%. NVM
 No change regresses p99 on Premium SSD v2. Its 64-writer runs were noisy for every system.
 Redis is still 10% to 21% ahead on NVMe at 64 and 128 writers. On Premium SSD v2 zerodb leads, because each Redis ack pays 2 device round trips.
 VM time was about 20 minutes for the first NVMe session and about 18 for the second plus Premium SSD v2, roughly $0.55 in all.
+
+## Client on its own vCPUs (2026-10-24)
+
+Azure Standard_L16s_v3, centralindia zone 3, local NVMe, ext4. `bench/h2h.sh` at `daa2f25` on `main`'s server code, 256-byte durable appends, no think, 5 reps.
+The server always ran on vCPUs 0-7. The client ran on 0-7 (shared) or 8-15 (split). The 2 configs alternated in random order each rep.
+
+| Writers | Client vCPUs | zerodb turns/s | Redis turns/s | zerodb p99.9 µs | Redis p99.9 µs | zerodb / Redis, per rep |
+|---|---|---|---|---|---|---|
+| 16 | shared | 39,740 | 27,779 | 1,071 | 1,711 | 1.43 (1.05-1.45) |
+| 16 | split | 43,731 | 27,930 | 1,015 | 1,636 | 1.54 (1.19-1.65) |
+| 64 | shared | 59,555 | 59,079 | 3,321 | 2,711 | 1.01 (0.90-1.01) |
+| 64 | split | 70,579 | 73,239 | 2,970 | 2,282 | 0.96 (0.84-0.98) |
+| 128 | shared | 65,608 | 74,435 | 10,096 | 3,553 | 0.88 (0.80-0.90) |
+| 128 | split | 82,395 | 93,000 | 9,844 | 3,306 | 0.88 (0.83-0.91) |
+
+Split over shared, median of per-rep ratios: zerodb 1.11, 1.19 and 1.28 at 16, 64 and 128 writers. Redis 1.03, 1.24 and 1.27.
+A shared client costs both servers about a fifth of their throughput at 64 and 128 writers. It does not explain zerodb's gap to Redis, which holds at 0.88 at 128 writers.
+The p99.9 gap at 128 writers, about 10 ms against 3.5 ms, is also server-side.
+Absolute numbers moved 25% while the per-rep ratio held, which is why `h2h.sh` now reports it.
+Redis at 16 writers is lower here than on the L8s_v3 runs, 28k against 43k. We haven't looked into why. These rows are not comparable with the L8s_v3 tables above.
+VM time was about 7 minutes, roughly $0.20.
