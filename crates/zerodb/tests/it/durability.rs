@@ -270,8 +270,11 @@ fn post(
     }
     // A reply that is there but malformed is a server bug, not an unknown outcome.
     let text = String::from_utf8_lossy(&reply);
-    let at = reply.windows(4).position(|w| w == b"\r\n\r\n");
-    let at = at.unwrap_or_else(|| panic!("no end of head: {text}")) + 4;
+    let Some(at) = reply.windows(4).position(|w| w == b"\r\n\r\n") else {
+        // Killed partway through the head.
+        return (Outcome::Unknown, Value::Null);
+    };
+    let at = at + 4;
     let head = String::from_utf8_lossy(&reply[..at]);
     let length = head.lines().find_map(|line| line.strip_prefix("Content-Length: "));
     let length: usize = length.and_then(|n| n.parse().ok()).unwrap_or_else(|| panic!("{text}"));

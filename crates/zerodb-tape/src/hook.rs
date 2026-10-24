@@ -198,7 +198,17 @@ impl<I: Io> HookIo<I> {
         lock(&self.files).ok().and_then(|f| f.get(&file).cloned()).unwrap_or_default()
     }
 
-    fn run<T>(&self, op: Op<'_>, mut call: impl FnMut() -> Result<T>) -> Result<T> {
+    fn run<T>(&self, op: Op<'_>, call: impl FnMut() -> Result<T>) -> Result<T> {
+        self.run_undo(op, call, drop)
+    }
+
+    /// Like `run`. When a hook fails after the call produced a value, `undo` releases it.
+    fn run_undo<T>(
+        &self,
+        op: Op<'_>,
+        mut call: impl FnMut() -> Result<T>,
+        undo: impl FnOnce(T),
+    ) -> Result<T> {
         fn chain(hooks: &[Arc<Hook>], op: Op<'_>, last: Next<'_>) -> Result<()> {
             match hooks.split_first() {
                 None => last(),
@@ -207,11 +217,21 @@ impl<I: Io> HookIo<I> {
         }
         let hooks = lock(&self.hooks)?.clone();
         let mut out = None;
-        chain(&hooks, op, &mut || {
+        let chained = chain(&hooks, op, &mut || {
             out = Some(call()?);
             Ok(())
-        })?;
-        out.ok_or_else(|| Error::Io(std::io::ErrorKind::Other, format!("hook skipped {op}")))
+        });
+        match (chained, out) {
+            (Ok(()), Some(value)) => Ok(value),
+            (Err(error), Some(value)) => {
+                undo(value);
+                Err(error)
+            }
+            (Err(error), None) => Err(error),
+            (Ok(()), None) => {
+                Err(Error::Io(std::io::ErrorKind::Other, format!("hook skipped {op}")))
+            }
+        }
     }
 
     fn opened(&self, path: &Path, file: Result<FileId>) -> Result<FileId> {
@@ -265,10 +285,12 @@ impl<I> std::fmt::Debug for HookIo<I> {
 
 impl<I: Io> Io for HookIo<I> {
     fn create(&self, p: &Path) -> Result<FileId> {
-        self.opened(p, self.run(Op::Create(p), || self.inner.create(p)))
+        let close = |f| drop(self.inner.close(f));
+        self.opened(p, self.run_undo(Op::Create(p), || self.inner.create(p), close))
     }
     fn open(&self, p: &Path) -> Result<FileId> {
-        self.opened(p, self.run(Op::Open(p), || self.inner.open(p)))
+        let close = |f| drop(self.inner.close(f));
+        self.opened(p, self.run_undo(Op::Open(p), || self.inner.open(p), close))
     }
     fn close(&self, f: FileId) -> Result<()> {
         self.run(Op::Close(&self.path(f)), || self.inner.close(f))?;
