@@ -3,7 +3,9 @@
 use crate::{Error, Result};
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions, TryLockError};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::Read;
+#[cfg(not(unix))]
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -140,18 +142,38 @@ impl Io for StdIo {
         Ok(())
     }
 
+    /// Unix uses one positional `pwrite` loop. Other platforms seek, then write.
     fn write_at(&self, file: FileId, off: u64, data: &[u8]) -> Result<()> {
         let file = self.file(file)?;
-        let mut file = lock(&file)?;
-        file.seek(SeekFrom::Start(off))?;
-        Ok(file.write_all(data)?)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileExt;
+            let file = lock(&file)?;
+            Ok(file.write_all_at(data, off)?)
+        }
+        #[cfg(not(unix))]
+        {
+            let mut file = lock(&file)?;
+            file.seek(SeekFrom::Start(off))?;
+            Ok(file.write_all(data)?)
+        }
     }
 
+    /// Unix uses one positional `pread`. Other platforms seek, then read.
     fn read_at(&self, file: FileId, off: u64, data: &mut [u8]) -> Result<usize> {
         let file = self.file(file)?;
-        let mut file = lock(&file)?;
-        file.seek(SeekFrom::Start(off))?;
-        Ok(file.read(data)?)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileExt;
+            let file = lock(&file)?;
+            Ok(file.read_at(data, off)?)
+        }
+        #[cfg(not(unix))]
+        {
+            let mut file = lock(&file)?;
+            file.seek(SeekFrom::Start(off))?;
+            Ok(file.read(data)?)
+        }
     }
 
     fn len(&self, file: FileId) -> Result<u64> {
