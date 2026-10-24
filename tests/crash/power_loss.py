@@ -59,7 +59,7 @@ class Rig:
         with open(f"{w}/lazyfs.toml", "w") as f:
             f.write(f'[faults]\nfifo_path="{self.fifo}"\n[cache]\napply_eviction=false\n'
                     '[cache.simple]\ncustom_size="4GB"\nblocks_per_page=1\n'
-                    f'[file system]\nlog_all_operations=false\nlogfile="{w}/lazyfs.log"\n')
+                    f'[filesystem]\nlog_all_operations=false\nlogfile="{w}/lazyfs.log"\n')
         with os.fdopen(os.open(f"{w}/c.json", os.O_WRONLY | os.O_CREAT, 0o600), "w") as f:
             json.dump({"tenants": [{"name": "a", "token": TOKEN}]}, f)
         self.fs = self.db = None
