@@ -8,16 +8,16 @@ Redraw with `python3 bench/h2h_chart.py`. The chart shows the closed-loop runs.
 
 ## The question
 
-How fast can each system acknowledge a write that survives power loss? Every client has one request in flight, and every system acks only after `fsync`.
+How fast can each system acknowledge a write that survives power loss? Every client has 1 request in flight, and every system acks only after `fsync`.
 
-Two loads:
+2 loads:
 - **Closed loop.** Each writer sends its next append as soon as the last one is acked. This finds the ceiling.
 - **Agent-shaped.** Agents call a model between writes. Each writer sleeps a uniform 0 to 2x the think time before every append. The sleep is seeded by the writer's index, so every system sees the same arrivals.
 
 ## Setup
 
 - Azure Standard_L8s_v3 (8 vCPU), Linux 7.0, ext4, a freshly formatted disk per pass.
-- Two disks: the VM's local NVMe, and a Premium SSD v2 managed disk. The managed disk has 128 GiB, 3,000 IOPS, 125 MB/s and host caching off.
+- 2 disks: the VM's local NVMe, and a Premium SSD v2 managed disk. The managed disk has 128 GiB, 3,000 IOPS, 125 MB/s and host caching off.
 - Closed loop: 5,000 appends of 256 bytes per writer, at 1, 4 and 16 writers.
 - Agent-shaped: 1,000 appends per writer at 64 writers with 5 ms think. 100 per writer at 256 writers with 50 ms think.
 - 7 reps, interleaved. Each rep runs all 5 systems before the next rep starts. Every run gets a fresh data directory.
@@ -26,25 +26,25 @@ Two loads:
 
 | System | Version | Durability setting | Workload | Client |
 |---|---|---|---|---|
-| zerodb | `02b43e5` | Always: group commit, ack after `fdatasync` | `POST /v1/append`, one session per writer | [h2h_paced.py](h2h_paced.py), HTTP over the Unix socket |
-| Redis | 8.10.2 | `appendonly yes`, `appendfsync always` | `RPUSH`, one key per writer | [h2h_paced.py](h2h_paced.py), RESP over the Unix socket |
+| zerodb | `02b43e5` | Always: group commit, ack after `fdatasync` | `POST /v1/append`, 1 session per writer | [h2h_paced.py](h2h_paced.py), HTTP over the Unix socket |
+| Redis | 8.10.2 | `appendonly yes`, `appendfsync always` | `RPUSH`, 1 key per writer | [h2h_paced.py](h2h_paced.py), RESP over the Unix socket |
 | Valkey | 9.1.2 | Same | Same | Same |
 | DiceDB | 1.0.0 (Valkey 8.0.6 fork) | Same | Same | Same |
-| SQLite | 3.45.1 | WAL, `synchronous=FULL`, one row per transaction | `INSERT` | [h2h_sqlite.py](h2h_sqlite.py), in process, one process and connection per writer |
+| SQLite | 3.45.1 | WAL, `synchronous=FULL`, 1 row per transaction | `INSERT` | [h2h_sqlite.py](h2h_sqlite.py), in process, 1 process and 1 connection per writer |
 
 Dragonfly is not timed. It has no append-only file, so it cannot acknowledge a write after `fsync` ([docs](https://www.dragonflydb.io/docs/managing-dragonfly/aof)).
 
-`h2h_paced.py` runs one process and one raw socket per writer. It speaks RESP to the Redis family and HTTP to zerodb. So every server pays the same client cost. Think 0 is the closed loop.
+`h2h_paced.py` runs 1 process and 1 raw socket per writer. It speaks RESP to the Redis family and HTTP to zerodb. So every server pays the same client cost. Think 0 is the closed loop.
 
-## One client
+## 1 client
 
-Earlier versions of this page used 2 clients. zerodb's closed loop ran `zerodb load`, which drives 16 writers from 16 OS threads. The Redis family ran a load tool with 16 connections on 1 thread. On 8 vCPUs, zerodb's client took CPU from zerodb's own server. Those pages said zerodb had the worst p99 at 16 or more writers. That was the client.
+Earlier closed-loop runs drove the Redis family with memtier_benchmark, 16 connections on 1 thread. zerodb's ran `zerodb load`, 16 writers on 16 OS threads. On 8 vCPUs, zerodb's client likely took CPU from zerodb's own server. Those pages said zerodb had the worst p99 at 16 or more writers. At 16 writers in closed loop, that was the client. Agent-shaped runs already used 1 client. The noise section covers those.
 
-With one client, 7 back-to-back pairs at 16 writers on NVMe measured this:
+With 1 client, 7 back-to-back pairs at 16 writers on NVMe measured this:
 - zerodb: about 48.5k acks/s, p99 about 475 µs.
 - Redis: about 43.6k acks/s, p99 about 563 µs.
 
-The 7-rep tables below agree. At 16 writers on NVMe, zerodb's p99 was below Redis's in 7 of 7 reps.
+The 7-rep tables below agree. Per rep in the TSVs, zerodb's 16-writer NVMe p99 beat all 3 Redis-family servers in 7 of 7 reps.
 
 ## Premium SSD v2
 
@@ -118,23 +118,23 @@ Agent-shaped:
 
 ## Why
 
-- **One device round trip, not two.** An append that grows a file makes `fdatasync` also commit the size change to the ext4 journal. Redis-family AOF grows on every write, so each ack costs about 2 round trips. On Premium SSD v2 their 1-writer p50 is 2.1 ms. zerodb writes into zero-filled, preallocated segments (D78). SQLite mostly rewrites its WAL in place. Both pay 1 round trip: 0.8 and 0.7 ms.
+- **1 device round trip, not 2.** An append that grows a file makes `fdatasync` also commit the size change to the ext4 journal. Redis-family AOF grows on every write, so each ack costs about 2 round trips. On Premium SSD v2 their 1-writer p50 is 2.1 ms. zerodb writes into zero-filled, preallocated segments (D78). SQLite mostly rewrites its WAL in place. Both pay 1 round trip: 0.8 and 0.7 ms.
 - **Group commit.** zerodb syncs once for all queued writers and never waits on a timer (D80). On Premium SSD v2, 16 writers ack 9,328/s. That's 8x its 1-writer rate. The Redis family groups too and grows 11x, from a lower base. But every group still pays 2 round trips, so it tops out at 5,086 to 5,151/s.
-- **SQLite serializes writers.** Its writers take 1 lock, and a loser sleeps in the busy handler before it retries. So p50 stays low while throughput stops growing. On NVMe it goes from 19,410 to 24,936 acks/s between 1 and 16 writers. The max at 16 writers reaches 2.8 s on NVMe and 46.8 s on Premium SSD v2. The percentiles hide it: p99.9 at 16 writers on NVMe is still 648 µs. Under agent load the stalls reach p99. That's 33 ms at 64 writers on NVMe and 2.1 s at 256 writers on Premium SSD v2.
-- **SQLite has no socket.** It runs in the writer's process. On NVMe with 1 writer that wins: 19,410 acks/s and a 32 µs p50. zerodb gets 9,799 and 94 µs, including an HTTP round trip over the Unix socket. SQLite also keeps a lower p50 and p99 than zerodb at 4 and 16 writers on NVMe. Its p99.9 is lower at 16 too. It acks fewer writes: 24,936/s against 48,611 at 16 writers.
+- **SQLite serializes writers.** Its writers take 1 lock, and a loser sleeps in the busy handler before it retries. So p50 stays low while throughput barely grows. From 1 to 16 writers it grows 1.3x on NVMe and 1.2x on Premium SSD v2. The max at 16 writers reaches 2.8 s on NVMe and 46.8 s on Premium SSD v2. The percentiles hide it: p99.9 at 16 writers on NVMe is still 648 µs. Under agent load the stalls reach p99. That's 33 ms at 64 writers on NVMe and 2.1 s at 256 writers on Premium SSD v2.
+- **SQLite has no socket.** It runs in the writer's process. On NVMe with 1 writer that wins: 19,410 acks/s and a 32 µs p50. zerodb gets 9,799 and 94 µs, including an HTTP round trip over the Unix socket. SQLite also keeps a lower p50 and p99 than zerodb at 4 and 16 writers on NVMe. Its p99.9 is lower at 16 too. Under agent load on NVMe its p50 is lower as well: 57 and 68 µs. It acks fewer writes: 24,936/s against 48,611 at 16 writers.
 - **Retry keys no longer stall the writer.** Each doubling of the per-tenant retry-key map used to rehash every key under the state lock. That stalled the writer and pushed up zerodb's p99.9 under agent load. #43 shards the map 64 ways (D81). zerodb's p99.9 under agent load on NVMe is now 786 and 736 µs. The Redis family gets 964 to 2,758 µs.
-- **On Premium SSD v2 zerodb beats the Redis family in every cell.** It acks 1.8x to 2.8x as many writes in closed loop. In every run its worst p99 rep beats their best one. Under agent load its p50 is 1.3 ms against 2.8 to 3.1 ms. In closed loop SQLite has a lower p50 at every writer count. Its p99 and p99.9 are lower at 4 and 16 writers.
-- **On NVMe closed loop zerodb leads at p99, not at every percentile.** At 16 writers it acks 48,611/s against 42,928 to 44,693. Its p99 is 502 µs against 547 to 573. Its p50 of 305 µs sits inside the others' 299 to 311. Its p99.9 and max are the worst of the 4 servers: 674 and 1,210 µs. The others get 604 to 624 and 810 to 947. At 1 and 4 writers zerodb leads the 4 servers on every median.
-- **Agent-shaped on NVMe: best p50 and p99.9, mixed p99.** zerodb's p50 is 148 µs at 64 writers against 182 to 184. At 256 writers it's 138 against 140 to 145. Its p99 median trails Redis at 64 writers: 416 against 382 µs. At 256 writers DiceDB and Valkey have lower medians: 348 and 496 against 558. The ranges overlap: zerodb 225 to 636, DiceDB 289 to 1,078. zerodb's max at 256 writers is the worst of the 4: 8,698 µs against 7,392 to 8,039. The think time sets acks/s here, so all 4 tie.
-- **Thread handoffs.** Each append hops from a connection thread to the writer thread and back. Waking an idle vCPU costs a hypervisor exit. Pinning every server thread to 1 vCPU gives 1 writer a steady 71 µs p50 (D82). It also costs acks at 16 writers, so zerodb doesn't pin. D82 saw 85 to 222 µs unpinned. Here zerodb's 1-writer p50 ranged 86 to 214 µs over 7 reps. The slowest was rep 1, a slow rep for Redis and Valkey too.
+- **On Premium SSD v2 zerodb beats the Redis family in every cell.** It acks 1.8x to 2.8x as many writes in closed loop. In every run its worst p99 rep beats their best rep. Under agent load its p50 is 1.3 ms against 2.8 to 3.1 ms. In closed loop SQLite has a lower p50 at every writer count. Its p99 and p99.9 are lower at 4 and 16 writers.
+- **On NVMe closed loop zerodb leads the 4 servers at p99, not at every percentile.** At 16 writers it acks 48,611/s against 42,928 to 44,693. Its p99 is 502 µs against 547 to 573. Redis and DiceDB have a lower p50: 299 and 300 against 305 µs. Its p99.9 and max are the worst of the 4 servers: 674 and 1,210 µs. The others get 604 to 624 and 810 to 947. At 1 and 4 writers zerodb leads the 4 servers on every median.
+- **Agent-shaped on NVMe: best p50 and p99.9 of the 4 servers, mixed p99.** zerodb's p50 is 148 µs at 64 writers against 182 to 184. At 256 writers it's 138 against 140 to 145. Its p99 median trails Redis at 64 writers: 416 against 382 µs. At 256 writers DiceDB and Valkey have lower medians: 348 and 496 against 558. The ranges overlap: zerodb 225 to 636, DiceDB 289 to 1,078. zerodb's max at 256 writers is the worst of the 4: 8,698 µs against 7,392 to 8,039. The think time sets acks/s here, so all 4 tie. At 256 writers zerodb's median is lowest, by 0.5 to 1.6 acks/s.
+- **Thread handoffs.** Each append hops from a connection thread to the writer thread and back. Waking an idle vCPU costs a hypervisor exit. Pinning every server thread to 1 vCPU gives 1 writer a steady 71 µs p50 (D82). It also costs acks at 16 writers, so zerodb doesn't pin. D82 saw 85 to 222 µs unpinned. Here zerodb's 1-writer p50 ranged 86 to 214 µs over 7 reps. The slowest was rep 1, slow on acks for Redis and Valkey too.
 
 ## Run-to-run noise
 
-Runs on this VM land in a fast or a slow mode at random. It hits every system, and steal time stays 0. Rep 1 at 1 writer on NVMe shows it. zerodb, Redis and Valkey acked 4,404, 1,928 and 5,512/s. Their medians are 9,799, 8,110 and 8,434.
+Runs on this VM land in a fast or a slow mode at random. It hits all 4 servers, and steal time stays 0. Rep 1 at 1 writer on NVMe shows it. zerodb, Redis and Valkey acked 4,404, 1,928 and 5,512/s. Their medians are 9,799, 8,110 and 8,434. SQLite, in process, shows no slow reps here. On NVMe its acks and p99 stay within 16% across reps.
 
 A per-append trace of zerodb found every stage slower together in slow runs. That includes `fdatasync`, which went from 26 to 65 µs. No single wait in zerodb explains it. [#48](https://github.com/Clawdlinux/zerodb/issues/48) tracks the cause.
 
-With 3 reps, the mode a run landed in decided p99. In 8 adjacent pairs at 256 writers with 50 ms think, zerodb had the lower p99 in 6 ([#47](https://github.com/Clawdlinux/zerodb/issues/47)). So the harness now runs 7 reps, interleaved. In these tables zerodb's p99 beat Redis's in 7 of 7 reps at 256 writers. At 64 writers it did in 5 of 7.
+With 3 reps, the mode a run landed in decided p99. In 8 adjacent pairs at 256 writers with 50 ms think, zerodb had the lower p99 in 6 ([#47](https://github.com/Clawdlinux/zerodb/issues/47)). So the harness now runs 7 reps, interleaved. Per rep in the TSVs, zerodb's 256-writer p99 beat Redis in 7 of 7 reps. It beat Valkey in 4 and DiceDB in 5. At 64 writers it beat each in 5 of 7.
 
 Agent-shaped p99 medians still move a lot between runs. Read the p99 range next to the median.
 

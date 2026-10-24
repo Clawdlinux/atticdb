@@ -67,7 +67,7 @@ def main():
             x, y = pad + col * (w + pad), 80 + row * (h + 2 * pad)
             parts += panel(x, y, w, h, f"{name}: {label}", data, metric)
     parts.append(f'<text x="{pad}" y="{height - 46}" font-size="12" fill="#444">'
-                 f"SQLite p99 hides lock stalls: its slowest ack at 16 writers took "
+                 f"SQLite p99 hides lock stalls. Its slowest ack at 16 writers took "
                  f"{' and '.join(stalls)}. Medians of {min(reps)} interleaved reps, Azure L8s_v3.</text>")
     lx = pad
     for system in SYSTEMS:
