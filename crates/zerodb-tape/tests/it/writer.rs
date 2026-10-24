@@ -10,6 +10,7 @@ use zerodb_tape::{
 use crate::support;
 use std::sync::atomic::Ordering;
 use support::ObservedIo;
+use zerodb_tape::{HookIo, Op};
 
 #[test]
 fn byte_threshold_and_segment_roll_install_the_superblock() {
@@ -17,11 +18,12 @@ fn byte_threshold_and_segment_roll_install_the_superblock() {
         [("byte threshold", 4096, 300, 3), ("segment roll", 200, 256 * 1024 * 1024, 2)]
     {
         eprintln!("case: {case}");
-        let io = Arc::new(ObservedIo::new(35));
+        let io = Arc::new(HookIo::sim(35));
+        let events = io.record();
         let options = Options { superblock_bytes: budget, ..opts(size) };
         let (mut core, _) =
             WriterCore::open(io.clone(), Arc::new(SimClock::default()), "db", options).unwrap();
-        let opened = std::mem::take(&mut *io.events.lock().unwrap());
+        let opened = std::mem::take(&mut *events.lock().unwrap());
         let first = "rename db/spare.zdb db/seg-0000000000000001.zdb".to_owned();
         assert!(opened.contains(&first), "{case}: first segment zero-filled: {opened:?}");
         for lsn in 1..=count {
@@ -32,25 +34,24 @@ fn byte_threshold_and_segment_roll_install_the_superblock() {
             assert!(core.read(lsn).unwrap().is_some(), "{case}, ack={lsn}");
             core.update_superblock().unwrap();
             assert_eq!(
-                superblock(&io, size),
+                superblock(&io.inner, size),
                 if lsn == count { count } else { 0 },
                 "{case}, lsn={lsn}"
             );
         }
-        assert_eq!(superblock_installs(&io), 1, "{case}");
+        assert_eq!(superblock_installs(&events), 1, "{case}");
         drop(core);
-        assert!(io.handles.lock().unwrap().is_empty(), "{case}");
+        assert_eq!(io.open_files(), 0, "{case}");
     }
 }
 
 #[test]
 fn clock_threshold_rate_limits_superblock_installs_off_the_reply_path() {
-    let io = Arc::new(ObservedIo::new(35));
+    let io = Arc::new(HookIo::sim(35));
     let clock = Arc::new(SimClock::default());
     let (mut core, _) = WriterCore::open(io.clone(), clock.clone(), "db", opts(4096)).unwrap();
-    io.syncs.store(0, Ordering::SeqCst);
-    io.events.lock().unwrap().clear();
-    for (case, lsn, advance, boundary, syncs) in [
+    let (syncs, events) = (io.tally(|op| matches!(op, Op::SyncData(_)) as u64), io.record());
+    for (case, lsn, advance, boundary, syncs_now) in [
         ("before threshold", 1, 29_999_999_999, 0, 1),
         ("at threshold", 2, 1, 2, 2),
         ("rate limited", 3, 0, 2, 4),
@@ -60,15 +61,15 @@ fn clock_threshold_rate_limits_superblock_installs_off_the_reply_path() {
         core.step();
         reply.try_recv().unwrap().unwrap();
         assert!(core.read(lsn).unwrap().is_some(), "{case}");
-        assert_eq!(io.syncs.load(Ordering::SeqCst), syncs, "{case}: reply path");
+        assert_eq!(syncs.load(Ordering::SeqCst), syncs_now, "{case}: reply path");
         clock.advance(advance);
         core.update_superblock().unwrap();
-        assert_eq!(superblock(&io, 4096), boundary, "{case}");
+        assert_eq!(superblock(&io.inner, 4096), boundary, "{case}");
     }
-    assert_eq!(io.syncs.load(Ordering::SeqCst), 4);
-    assert_eq!(superblock_installs(&io), 1);
+    assert_eq!(syncs.load(Ordering::SeqCst), 4);
+    assert_eq!(superblock_installs(&events), 1);
     drop(core);
-    assert!(io.handles.lock().unwrap().is_empty());
+    assert_eq!(io.open_files(), 0);
 }
 
 #[test]
@@ -107,9 +108,9 @@ fn superblock_sync_failures_preserve_acknowledgements_and_poison_writes() {
         }
         assert!(core.is_poisoned(), "{case}");
         assert_eq!(core.durable_lsn(), durable_lsn, "{case}");
-        assert_eq!(superblock_installs(&io), 0, "{case}");
+        assert_eq!(superblock_installs(&io.events), 0, "{case}");
         drop(core);
-        assert_eq!(superblock(&io, 4096), 0, "{case}");
+        assert_eq!(superblock(&io.disk, 4096), 0, "{case}");
         assert!(io.handles.lock().unwrap().is_empty(), "{case}");
     }
 }
@@ -159,7 +160,7 @@ fn open_and_shutdown_install_superblocks_with_bounded_rewrites() {
             );
             // Open fills a spare. Shutdown joins the worker, which refills after each roll.
             assert!(io.disk.exists(std::path::Path::new("db/spare.zdb")).unwrap(), "{label}");
-            assert_eq!(superblock(&io, 1024), session + 1, "{label}");
+            assert_eq!(superblock(&io.disk, 1024), session + 1, "{label}");
             let image = Arc::new(io.disk.crash().unwrap());
             let (tape, report) =
                 Tape::open(image.clone(), clock.clone(), "db", opts.clone()).unwrap();
@@ -188,7 +189,7 @@ fn open_and_shutdown_install_superblocks_with_bounded_rewrites() {
         io.events.lock().unwrap().clear();
         let (core, report) = WriterCore::open(io.clone(), clock, "db", opts).unwrap();
         assert_eq!(report.durable_lsn, sessions + 1, "{case}: recovered survivor");
-        assert_eq!(superblock(&io, 1024), sessions + 1, "{case}");
+        assert_eq!(superblock(&io.disk, 1024), sessions + 1, "{case}");
         assert_eq!(&core.read(sessions + 1).unwrap().unwrap().payload, b"hello", "{case}");
         let events = io.events.lock().unwrap();
         let rewritten = events.iter().position(|e| e.starts_with("write db/seg-")).unwrap();

@@ -351,8 +351,8 @@ pub(crate) fn receipt(txn: u64, lsn: u64) -> zerodb_tape::Committed {
 }
 
 #[track_caller]
-pub(crate) fn superblock(io: &ObservedIo, size: u64) -> u64 {
-    zerodb_tape::sim::DataDir::open(std::sync::Arc::new(io.disk.crash().unwrap()), "db", None, size)
+pub(crate) fn superblock(disk: &SimDisk, size: u64) -> u64 {
+    zerodb_tape::sim::DataDir::open(std::sync::Arc::new(disk.crash().unwrap()), "db", None, size)
         .unwrap()
         .superblock()
 }
@@ -599,13 +599,9 @@ pub(crate) mod storage {
 }
 
 #[track_caller]
-pub(crate) fn superblock_installs(io: &ObservedIo) -> usize {
-    io.events
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|event| event.as_str() == "rename db/SUPERBLOCK.tmp db/SUPERBLOCK")
-        .count()
+pub(crate) fn superblock_installs(events: &Mutex<Vec<String>>) -> usize {
+    let installs = |e: &&String| e.as_str() == "rename db/SUPERBLOCK.tmp db/SUPERBLOCK";
+    events.lock().unwrap().iter().filter(installs).count()
 }
 
 #[cfg(target_os = "linux")]
