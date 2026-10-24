@@ -227,13 +227,17 @@ impl PreparedBatch {
 /// A prepared transaction and its acknowledgement channel.
 pub struct WriteRequest {
     batch: PreparedBatch,
-    reply: mpsc::Sender<WriteResult>,
+    reply: mpsc::SyncSender<WriteResult>,
 }
+
+/// A computed reply the writer has not yet sent.
+type Ack = (mpsc::SyncSender<WriteResult>, WriteResult);
 
 impl WriteRequest {
     /// Creates an enqueueable request and its reply receiver.
     pub fn new(batch: PreparedBatch) -> (Self, mpsc::Receiver<WriteResult>) {
-        let (reply, receiver) = mpsc::channel();
+        // Each request gets exactly 1 reply. The slot is allocated here, not on the writer.
+        let (reply, receiver) = mpsc::sync_channel(1);
         (Self { batch, reply }, receiver)
     }
 }
@@ -600,6 +604,13 @@ impl<S: StateMachine> WriterCore<S> {
 
     /// Writes queued transactions and syncs before durable replies.
     pub fn step(&mut self) {
+        for (reply, result) in self.step_acks() {
+            let _ = reply.send(result);
+        }
+    }
+
+    /// Like `step`, but returns the group's synced replies for the caller to send.
+    fn step_acks(&mut self) -> Vec<Ack> {
         if !self.queue.is_empty() {
             self.reads.groups.fetch_add(1, Ordering::Relaxed);
             self.reads.grouped_requests.fetch_add(self.queue.len() as u64, Ordering::Relaxed);
@@ -621,7 +632,7 @@ impl<S: StateMachine> WriterCore<S> {
                     Ok(guard) => guard,
                     Err(error) => {
                         self.reject_storage_group(error);
-                        return;
+                        return Vec::new();
                     }
                 };
                 let floor = match self.free_space_floor {
@@ -636,7 +647,7 @@ impl<S: StateMachine> WriterCore<S> {
                         Err(error) => {
                             self.reads.read_only.store(true, Ordering::Release);
                             self.reject_group(error);
-                            return;
+                            return Vec::new();
                         }
                     },
                 };
@@ -644,7 +655,7 @@ impl<S: StateMachine> WriterCore<S> {
                     lsn.checked_add(r.batch.records.len() as u64)
                 }) else {
                     self.reject_group(Error::Rejected("lsn_index"));
-                    return;
+                    return Vec::new();
                 };
                 let index_space =
                     lock(&self.reads.index).and_then(|index| index.reservation_bytes(highest_lsn));
@@ -652,7 +663,7 @@ impl<S: StateMachine> WriterCore<S> {
                     Ok(bytes) => bytes,
                     Err(error) => {
                         self.reject_storage_group(error);
-                        return;
+                        return Vec::new();
                     }
                 };
                 let needed = self
@@ -664,13 +675,13 @@ impl<S: StateMachine> WriterCore<S> {
                     Ok(free) if free.checked_sub(needed).is_none_or(|left| left < floor) => {
                         self.reads.read_only.store(true, Ordering::Release);
                         self.reject_group(Error::DiskFull);
-                        return;
+                        return Vec::new();
                     }
                     Ok(_) => self.reads.read_only.store(false, Ordering::Release),
                     Err(error) => {
                         self.reads.read_only.store(true, Ordering::Release);
                         self.reject_group(error);
-                        return;
+                        return Vec::new();
                     }
                 }
                 let reserved =
@@ -685,7 +696,7 @@ impl<S: StateMachine> WriterCore<S> {
                     } else {
                         self.reject_storage_group(error);
                     }
-                    return;
+                    return Vec::new();
                 }
                 if let Err(error) =
                     self.segments.prepare_group(self.queue.iter().map(|r| r.batch.size as u64))
@@ -697,12 +708,12 @@ impl<S: StateMachine> WriterCore<S> {
                         }
                         SegmentPrepareError::Storage(error) => self.reject_storage_group(error),
                     }
-                    return;
+                    return Vec::new();
                 }
                 // Activate the first placement before application preparation.
                 if let Err(error) = self.segments.reserve_batch(self.queue[0].batch.size) {
                     self.reject_storage_group(error);
-                    return;
+                    return Vec::new();
                 }
             }
         }
@@ -758,25 +769,32 @@ impl<S: StateMachine> WriterCore<S> {
         }
         self.segments.finish_group();
         if self.is_poisoned() {
-            for (reply, _) in replies {
-                let _ = reply
-                    .send(Err(WriteError { kind: Error::Poisoned, outcome: Outcome::Unknown }));
-            }
-            return;
+            return replies
+                .into_iter()
+                .map(|(reply, _)| {
+                    (reply, Err(WriteError { kind: Error::Poisoned, outcome: Outcome::Unknown }))
+                })
+                .collect();
         }
         if replies.is_empty() {
-            return;
+            return Vec::new();
         }
         let result = self.segments.sync().and_then(|()| self.publish());
         if result.is_err() {
             self.reads.poisoned.store(true, Ordering::Release);
         }
-        for (reply, committed) in replies {
-            let _ = reply.send(match &result {
-                Ok(()) => Ok(committed),
-                Err(error) => Err(WriteError { kind: error.clone(), outcome: Outcome::Unknown }),
-            });
-        }
+        replies
+            .into_iter()
+            .map(|(reply, committed)| {
+                let result = match &result {
+                    Ok(()) => Ok(committed),
+                    Err(error) => {
+                        Err(WriteError { kind: error.clone(), outcome: Outcome::Unknown })
+                    }
+                };
+                (reply, result)
+            })
+            .collect()
     }
 
     fn reject_storage_group(&mut self, error: Error) {
@@ -1005,19 +1023,33 @@ impl<S: StateMachine> Tape<S> {
         }
         let (sender, receiver) = mpsc::channel();
         let maintenance = MaintenanceWorker::start(&core)?;
+        // Sends synced replies, so the writer pays 1 wake per group instead of 1 per request.
+        let (acks, acked) = mpsc::channel::<Vec<Ack>>();
+        let replier = std::thread::Builder::new().name("zerodb-reply".into()).spawn(move || {
+            for group in acked {
+                for (reply, result) in group {
+                    let _ = reply.send(result);
+                }
+            }
+        })?;
         let thread = std::thread::Builder::new().name("zerodb-writer".into()).spawn(move || {
             while let Ok(request) = receiver.recv() {
                 // Group what queued during the last sync. Waiting for more only adds latency.
                 for request in std::iter::once(request).chain(receiver.try_iter()) {
                     core.enqueue(request);
                 }
-                core.step();
+                let group = core.step_acks();
+                if !group.is_empty() {
+                    let _ = acks.send(group);
+                }
                 // A roll moves the synced segment, so it is always due and wakes the spare fill.
                 if core.superblock_due() {
                     core.note_superblock_request();
                     maintenance.wake();
                 }
             }
+            drop(acks);
+            let _ = replier.join();
             // Join periodic installs before the final synchronous install. Never regress the boundary.
             drop(maintenance);
             let _ = core.shutdown();
