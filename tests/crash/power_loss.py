@@ -136,12 +136,14 @@ def check(client, attempted, durable):
         assert not lost, f"{session}: {len(lost)} durable turns lost or changed, first seqs {lost[:5]}"
         batches = {}
         for seq, content in turns:
-            batch, j = content.split("|", 1)[0].split("/")
-            assert content in attempted.get(batch, ()), f"{session}: turn {seq} was never written"
-            batches.setdefault(batch, []).append(seq)
-        for batch, seqs in batches.items():
-            whole = list(range(seqs[0], seqs[0] + len(attempted[batch])))
-            assert seqs == whole, f"{session}: batch {batch} is partial at {seqs}"
+            batch = content.split("/", 1)[0]
+            assert batch in attempted, f"{session}: turn {seq} was never written"
+            batches.setdefault(batch, []).append((seq, content))
+        # Each batch is back whole, contiguous, and with its turns in the order written.
+        for batch, got in batches.items():
+            seqs = [seq for seq, _ in got]
+            assert seqs == list(range(seqs[0], seqs[0] + len(got))), f"{session}: batch {batch} has gaps {seqs}"
+            assert [c for _, c in got] == attempted[batch], f"{session}: batch {batch} differs at {seqs}"
         # Reopen syncs what recovery keeps, so the next cut must keep it too.
         durable[session] = turns
 
@@ -154,6 +156,8 @@ def main():
     p.add_argument("--rounds", type=int, default=int(os.environ.get("ZERODB_CRASH_ROUNDS") or 20))
     p.add_argument("--seed", type=int, default=int(os.environ.get("ZERODB_CRASH_SEED") or time.time_ns() % 2**32))
     args = p.parse_args()
+    if args.rounds < 1:
+        p.error("--rounds must be at least 1")
     args.lazyfs, args.bin, args.work = map(os.path.abspath, (args.lazyfs, args.bin, args.work))
     rng, rig = random.Random(args.seed), Rig(args)
     attempted, durable, cuts = {}, {f"w{i}": [] for i in range(WRITERS)}, []
