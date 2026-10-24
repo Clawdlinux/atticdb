@@ -29,12 +29,18 @@ pub(crate) fn digest<'a>(payloads: impl IntoIterator<Item = &'a [u8]>) -> Digest
 
 #[derive(Clone, Debug)]
 pub(crate) struct Entry {
+    /// `hash_key(&key)`, kept so staging, publication and eviction never rehash.
+    pub(crate) hash: u64,
     pub(crate) key: DedupKey,
     pub(crate) digest: Digest,
     pub(crate) committed: Committed,
 }
 
 impl Entry {
+    pub(crate) fn new(key: DedupKey, digest: Digest, committed: Committed) -> Self {
+        Self { hash: hash_key(&key), key, digest, committed }
+    }
+
     pub(crate) fn resolve(&self, digest: Digest) -> Result<Committed> {
         if self.digest == digest {
             Ok(self.committed.clone())
@@ -103,8 +109,10 @@ pub(crate) fn hash_key(key: &DedupKey) -> u64 {
     STATE.get_or_init(RandomState::new).hash_one(key)
 }
 
+/// Bits 32 to 37. `HashMap` takes its 7-bit tag from the top bits and its bucket from the
+/// low bits, and `Prehashed` passes the hash through, so the shard must use neither.
 fn shard(hash: u64) -> usize {
-    (hash >> 58) as usize % SHARDS
+    (hash >> 32) as usize % SHARDS
 }
 
 impl Dedup {
@@ -130,7 +138,7 @@ impl Dedup {
     }
     pub(crate) fn remove(&mut self, age: u64) -> Option<Arc<Entry>> {
         let entry = self.entries.remove(&age)?;
-        self.unlink(hash_key(&entry.key), age);
+        self.unlink(entry.hash, age);
         if let Some(ages) = self.tenants.get_mut(&entry.key.0) {
             ages.remove(&age);
             if ages.is_empty() {
@@ -172,7 +180,7 @@ impl Dedup {
         if self.per_tenant == 0 || self.global == 0 {
             return;
         }
-        let hash = hash_key(&entry.key);
+        let hash = entry.hash;
         if let Some(old) = self.get_hashed(hash, &entry.key).map(|e| e.age()) {
             self.remove(old);
         }
@@ -212,16 +220,9 @@ mod tests {
     }
 
     fn entry(key: DedupKey, age: u64) -> Entry {
-        Entry {
-            key,
-            digest: digest([b"x".as_slice()]),
-            committed: Committed::Durable {
-                txn: age,
-                first_lsn: age,
-                last_lsn: age,
-                reply: vec![],
-            },
-        }
+        let committed =
+            Committed::Durable { txn: age, first_lsn: age, last_lsn: age, reply: vec![] };
+        Entry::new(key, digest([b"x".as_slice()]), committed)
     }
 
     #[test]
