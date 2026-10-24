@@ -1,5 +1,7 @@
+use std::collections::hash_map::RandomState;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::Arc;
+use std::hash::{BuildHasher, BuildHasherDefault, Hasher};
+use std::sync::{Arc, OnceLock};
 use zerodb_tape::{Committed, Digest};
 
 use crate::error::Result;
@@ -51,38 +53,84 @@ impl Entry {
 #[derive(Debug)]
 pub(crate) struct Dedup {
     pub(crate) entries: BTreeMap<u64, Arc<Entry>>,
-    /// Sharded so a growing map rehashes 1/64 of its keys at a time, under the state lock.
-    lookup: Vec<HashMap<DedupKey, u64>>,
+    /// Key hash to entry age. Sharded so a growing map rehashes 1/64 of its keys at a
+    /// time, under the state lock. Equality is checked on the stored entry's full key.
+    lookup: Vec<HashMap<u64, Ages, BuildHasherDefault<Prehashed>>>,
     tenants: BTreeMap<u32, BTreeSet<u64>>,
     per_tenant: usize,
     global: usize,
 }
 
+/// Ages sharing one 64-bit key hash. More than one only on a real collision.
+#[derive(Debug)]
+enum Ages {
+    One(u64),
+    Many(Vec<u64>),
+}
+
+impl Ages {
+    fn as_slice(&self) -> &[u64] {
+        match self {
+            Ages::One(age) => std::slice::from_ref(age),
+            Ages::Many(ages) => ages,
+        }
+    }
+}
+
 const SHARDS: usize = 64;
 
-fn shard(key: &DedupKey) -> usize {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    key.hash(&mut hasher);
-    hasher.finish() as usize % SHARDS
+/// Passes a precomputed u64 through. Only `lookup` uses it, keyed by `hash_key`.
+#[derive(Default)]
+struct Prehashed(u64);
+
+impl Hasher for Prehashed {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, _: &[u8]) {
+        unreachable!("lookup keys are u64")
+    }
+    fn write_u64(&mut self, n: u64) {
+        self.0 = n;
+    }
+}
+
+/// One keyed SipHash per key. Random keys per process, so a tenant cannot pick
+/// idempotency keys that collide. Shared by every `Dedup`, so one hash serves both
+/// the committed and the staged window.
+pub(crate) fn hash_key(key: &DedupKey) -> u64 {
+    static STATE: OnceLock<RandomState> = OnceLock::new();
+    STATE.get_or_init(RandomState::new).hash_one(key)
+}
+
+fn shard(hash: u64) -> usize {
+    (hash >> 58) as usize % SHARDS
 }
 
 impl Dedup {
     pub(crate) fn new(per_tenant: usize, global: usize) -> Self {
         Self {
             entries: BTreeMap::new(),
-            lookup: (0..SHARDS).map(|_| HashMap::new()).collect(),
+            lookup: (0..SHARDS).map(|_| HashMap::default()).collect(),
             tenants: BTreeMap::new(),
             per_tenant,
             global,
         }
     }
     pub(crate) fn get(&self, key: &DedupKey) -> Option<&Arc<Entry>> {
-        self.lookup[shard(key)].get(key).and_then(|age| self.entries.get(age))
+        self.get_hashed(hash_key(key), key)
+    }
+    pub(crate) fn get_hashed(&self, hash: u64, key: &DedupKey) -> Option<&Arc<Entry>> {
+        self.lookup[shard(hash)]
+            .get(&hash)?
+            .as_slice()
+            .iter()
+            .filter_map(|age| self.entries.get(age))
+            .find(|entry| entry.key == *key)
     }
     pub(crate) fn remove(&mut self, age: u64) -> Option<Arc<Entry>> {
         let entry = self.entries.remove(&age)?;
-        self.lookup[shard(&entry.key)].remove(&entry.key);
+        self.unlink(hash_key(&entry.key), age);
         if let Some(ages) = self.tenants.get_mut(&entry.key.0) {
             ages.remove(&age);
             if ages.is_empty() {
@@ -91,6 +139,32 @@ impl Dedup {
         }
         Some(entry)
     }
+    fn unlink(&mut self, hash: u64, age: u64) {
+        let map = &mut self.lookup[shard(hash)];
+        match map.get_mut(&hash) {
+            Some(Ages::One(a)) if *a == age => {
+                map.remove(&hash);
+            }
+            Some(Ages::Many(ages)) => {
+                ages.retain(|&a| a != age);
+                if let [last] = ages[..] {
+                    map.insert(hash, Ages::One(last));
+                }
+            }
+            _ => {}
+        }
+    }
+    fn link(&mut self, hash: u64, age: u64) {
+        let map = &mut self.lookup[shard(hash)];
+        match map.remove(&hash) {
+            None => map.insert(hash, Ages::One(age)),
+            Some(Ages::One(a)) => map.insert(hash, Ages::Many(vec![a, age])),
+            Some(Ages::Many(mut ages)) => {
+                ages.push(age);
+                map.insert(hash, Ages::Many(ages))
+            }
+        };
+    }
     pub(crate) fn insert(&mut self, entry: Entry) {
         self.insert_arc(Arc::new(entry));
     }
@@ -98,12 +172,13 @@ impl Dedup {
         if self.per_tenant == 0 || self.global == 0 {
             return;
         }
-        if let Some(&age) = self.lookup[shard(&entry.key)].get(&entry.key) {
-            self.remove(age);
+        let hash = hash_key(&entry.key);
+        if let Some(old) = self.get_hashed(hash, &entry.key).map(|e| e.age()) {
+            self.remove(old);
         }
         let tenant = entry.key.0;
         let age = entry.age();
-        self.lookup[shard(&entry.key)].insert(entry.key.clone(), age);
+        self.link(hash, age);
         self.tenants.entry(tenant).or_default().insert(age);
         self.entries.insert(age, entry);
         while self.tenants.get(&tenant).is_some_and(|ages| ages.len() > self.per_tenant) {
@@ -125,5 +200,90 @@ impl Dedup {
     }
     pub(crate) fn effective_window(&self) -> usize {
         self.tenants.values().map(BTreeSet::len).min().unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(tenant: u32, name: &str) -> DedupKey {
+        DedupKey(tenant, Scope::Fact(name.into()), "op".into())
+    }
+
+    fn entry(key: DedupKey, age: u64) -> Entry {
+        Entry {
+            key,
+            digest: digest([b"x".as_slice()]),
+            committed: Committed::Durable {
+                txn: age,
+                first_lsn: age,
+                last_lsn: age,
+                reply: vec![],
+            },
+        }
+    }
+
+    #[test]
+    fn hash_is_stable_within_process() {
+        assert_eq!(hash_key(&key(1, "a")), hash_key(&key(1, "a")));
+        assert_ne!(hash_key(&key(1, "a")), hash_key(&key(2, "a")));
+    }
+
+    #[test]
+    fn insert_get_replace_remove() {
+        let mut d = Dedup::new(10, 10);
+        d.insert(entry(key(1, "a"), 1));
+        d.insert(entry(key(1, "b"), 2));
+        assert_eq!(d.get(&key(1, "a")).map(|e| e.age()), Some(1));
+        d.insert(entry(key(1, "a"), 3));
+        assert_eq!(d.get(&key(1, "a")).map(|e| e.age()), Some(3));
+        assert_eq!(d.entries.len(), 2);
+        d.remove(3);
+        assert!(d.get(&key(1, "a")).is_none());
+        assert_eq!(d.get(&key(1, "b")).map(|e| e.age()), Some(2));
+        assert!(d.lookup.iter().map(HashMap::len).sum::<usize>() == 1);
+    }
+
+    #[test]
+    fn eviction_unlinks_lookup() {
+        let mut d = Dedup::new(2, 3);
+        for (age, name) in ["a", "b", "c"].into_iter().enumerate() {
+            d.insert(entry(key(1, name), age as u64));
+        }
+        assert!(d.get(&key(1, "a")).is_none());
+        d.insert(entry(key(2, "x"), 10));
+        d.insert(entry(key(3, "y"), 11));
+        assert_eq!(d.entries.len(), 3);
+        assert!(d.get(&key(1, "b")).is_none());
+        assert_eq!(d.lookup.iter().map(HashMap::len).sum::<usize>(), 3);
+    }
+
+    #[test]
+    fn colliding_hashes_compare_full_key() {
+        let mut d = Dedup::new(10, 10);
+        let (a, b) = (key(1, "a"), key(1, "b"));
+        d.entries.insert(1, Arc::new(entry(a.clone(), 1)));
+        d.entries.insert(2, Arc::new(entry(b.clone(), 2)));
+        d.link(7, 1);
+        d.link(7, 2);
+        assert_eq!(d.get_hashed(7, &a).map(|e| e.age()), Some(1));
+        assert_eq!(d.get_hashed(7, &b).map(|e| e.age()), Some(2));
+        assert!(d.get_hashed(7, &key(1, "c")).is_none());
+        d.unlink(7, 1);
+        assert!(d.get_hashed(7, &a).is_none());
+        assert_eq!(d.get_hashed(7, &b).map(|e| e.age()), Some(2));
+        d.unlink(7, 2);
+        assert!(d.lookup[shard(7)].is_empty());
+    }
+
+    #[test]
+    fn hash_serves_both_instances() {
+        let mut committed = Dedup::new(10, 10);
+        let staged = Dedup::new(10, 10);
+        committed.insert(entry(key(1, "a"), 1));
+        let h = hash_key(&key(1, "a"));
+        assert!(staged.get_hashed(h, &key(1, "a")).is_none());
+        assert_eq!(committed.get_hashed(h, &key(1, "a")).map(|e| e.age()), Some(1));
     }
 }

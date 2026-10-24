@@ -1,5 +1,5 @@
 use crate::checkpoint::{read_page, Command};
-use crate::dedup::{digest, Dedup, DedupKey, Entry, Scope};
+use crate::dedup::{digest, hash_key, Dedup, DedupKey, Entry, Scope};
 use crate::error::{lock, Result};
 use crate::fact;
 use crate::facts::{current, FactKey, Rev};
@@ -140,9 +140,10 @@ impl Machine {
         if let Some(error) = &state.failure {
             return Err(error.clone());
         }
-        if let Some(entry) =
-            dedup_key.as_ref().and_then(|key| self.dedup.get(key).or_else(|| state.dedup.get(key)))
-        {
+        if let Some(entry) = dedup_key.as_ref().and_then(|key| {
+            let hash = hash_key(key);
+            self.dedup.get_hashed(hash, key).or_else(|| state.dedup.get_hashed(hash, key))
+        }) {
             let Committed::Durable { txn, first_lsn, last_lsn, mut reply } =
                 entry.resolve(digest)?;
             reply.push(REPLY_DEDUPLICATED);
