@@ -1454,11 +1454,13 @@ Stage times come from the `/v1/stats` writer timers added in #62. CPU by thread 
 
 Writer stages on `main` with #53 to #55, 2 runs each, the run-to-run spread under 3%:
 
-| Writers | Turns/s | Requests/group | Write µs/append | Sync µs/group | Publish µs/append | Writer stages busy |
-|---|---|---|---|---|---|---|
-| 16 | 51,528 | 5.3 | 6.4 | 49 | 2.2 | 88% |
-| 64 | 70,066 | 25.3 | 7.2 | 114 | 2.1 | 94% |
-| 128 | 74,451 | 56.3 | 7.9 | 202 | 1.6 | 95% |
+| Writers | Turns/s | Requests/group | Write µs/append | Sync µs/group | Publish µs/append | Writer stages busy, at turns/s | Same, over the whole run |
+|---|---|---|---|---|---|---|---|
+| 16 | 51,528 | 5.3 | 6.4 | 49 | 2.2 | 92% | 88% |
+| 64 | 70,066 | 25.3 | 7.2 | 114 | 2.1 | 97% | 94% |
+| 128 | 74,451 | 56.3 | 7.9 | 202 | 1.6 | 97% | 95% |
+
+The first busy column is `turns/s × (write + publish + sync / requests per group)`, over the client's timed window. The second divides the stage totals by the wall time of the whole client run, which includes Python start-up and connecting.
 
 CPU per append by thread at 128 writers: connection threads 35.9 µs, writer 6.0, reply 3.1, other threads 1.8. The writer waited for a CPU 40% of the run.
 In the connection threads, kernel wake and switch code (`_raw_spin_unlock_irqrestore`, `finish_task_switch`) took 23% of samples. #64 tracks moving connections to an event loop.
