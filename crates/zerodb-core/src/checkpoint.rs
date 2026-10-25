@@ -445,15 +445,18 @@ impl<'a> CheckpointBuffer<'a> {
     }
     fn flush(&mut self) -> Result<()> {
         if !self.bytes.is_empty() {
-            // On Linux, sync every 1 MiB. One sync at the end wrote the whole file back in a
-            // burst, and tape syncs on write-through NVMe queued behind it for up to 10 ms.
-            // The spare fill does the same (D78). A macOS sync is a full device flush.
+            // On Linux, sync what is written before each further 1 MiB. One sync at the end
+            // wrote the whole file back in a burst, and tape syncs on write-through NVMe queued
+            // behind it for up to 10 ms. The spare fill does the same (D78). `save` syncs the
+            // last chunk, so a file of 1 MiB or less is written as before. A macOS sync is a
+            // full device flush.
             let step = if cfg!(target_os = "linux") { 1 << 20 } else { self.bytes.len() };
             for (i, chunk) in self.bytes.chunks(step).enumerate() {
-                self.io.write_at(self.file, self.offset + (i * step) as u64, chunk)?;
-                if cfg!(target_os = "linux") {
+                let at = self.offset + (i * step) as u64;
+                if cfg!(target_os = "linux") && at > 0 {
                     self.io.sync_data(self.file)?;
                 }
+                self.io.write_at(self.file, at, chunk)?;
             }
             self.hash.update(&self.bytes);
             self.offset += self.bytes.len() as u64;
