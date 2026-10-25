@@ -1494,12 +1494,12 @@ VM time across these sessions was about 26 minutes, roughly $0.35. 10 of those m
 
 Azure Standard_L8s_v3, centralindia zone 3, local NVMe, ext4. The NVMe reports `write_cache: write through` with scheduler `none`. Closed-loop durable 256-byte appends, 1 `bench/h2h_paced.py` client, 8,000 appends per writer, 3 interleaved reps with Redis as a control.
 
-A scratch build logged every tape sync of 1 ms or more, and the start and end of each spare fill and checkpoint save. The 2 run at about the same time: a roll starts a fill, and a checkpoint starts every 64 MiB of state, which grows about as fast as the tape. They covered 6% to 8% of each run. On `main` before #66:
+A scratch build logged every tape sync of 1 ms or more, and the start and end of each spare fill and checkpoint save. The 2 run at about the same time: a roll starts a fill, and a checkpoint starts every 64 MiB of state, which grows about as fast as the tape. Fill windows covered 5% to 8% of each run, checkpoint windows 4% to 6%, and they mostly overlapped. On `main` before #66, 8 runs per writer count:
 
 | Writers | Tape syncs ≥ 1 ms | In a fill or checkpoint window | Tape syncs ≥ 5 ms | In a window |
 |---|---|---|---|---|
-| 64 | 28 | 20 | 7 | 5 |
-| 128 | 49 | 41 | 14 | 13 |
+| 64 | 42 | 35 | 9 | 7 |
+| 128 | 99 | 87 | 22 | 19 |
 
 A delta checkpoint is about 16 MB at 128 writers. It was written in 4 MiB buffers and synced once at the end, so it went back to the device in one burst. Chunk size against the same base, with tracing:
 
