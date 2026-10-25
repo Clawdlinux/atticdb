@@ -1489,3 +1489,35 @@ The longest-group gauges found the p99.9 stall at 128 writers: the checkpoint sn
 At 128 writers p99.9 fell 30% and max 46%. At 64 writers p99.9 is noise. Per-rep ranges overlap: 2,663 to 4,481 µs before and 2,297 to 4,939 after. The worst 64-writer max came in a rep whose longest write stage was 5.5 ms, so that stall wasn't in the write stage. An earlier run recorded a 26 ms `fdatasync`.
 In this session zerodb's throughput ratio to Redis was 1.12 at 64 writers and 1.00 at 128. Redis varied from 58K to 72K turns/s at 64 writers across reps.
 VM time across these sessions was about 26 minutes, roughly $0.35. 10 of those minutes were a VM waiting for SSH after the allowed source IP changed. The run script now updates the rule before it starts the VM.
+
+## Checkpoint writeback bursts (2026-10-25)
+
+Azure Standard_L8s_v3, centralindia zone 3, local NVMe, ext4. The NVMe reports `write_cache: write through` with scheduler `none`. Closed-loop durable 256-byte appends, 1 `bench/h2h_paced.py` client, 8,000 appends per writer, 3 interleaved reps with Redis as a control.
+
+A scratch build logged every tape sync of 1 ms or more, and the start and end of each spare fill and checkpoint save. The 2 run at about the same time: a roll starts a fill, and a checkpoint starts every 64 MiB of state, which grows about as fast as the tape. Fill windows covered 5% to 8% of each run, checkpoint windows 4% to 6%, and they mostly overlapped. On `main` before #66, 8 runs per writer count:
+
+| Writers | Tape syncs ≥ 1 ms | In a fill or checkpoint window | Tape syncs ≥ 5 ms | In a window |
+|---|---|---|---|---|
+| 64 | 42 | 35 | 9 | 7 |
+| 128 | 99 | 87 | 22 | 19 |
+
+A delta checkpoint is about 16 MB at 128 writers. It was written in 4 MiB buffers and synced once at the end, so it went back to the device in one burst. Chunk size against the same base, with tracing:
+
+| Writers | Checkpoint sync | p99.9 median µs | Tape syncs ≥ 1 ms | ≥ 5 ms |
+|---|---|---|---|---|
+| 64 | once at the end | 4,536 | 14 | 2 |
+| 64 | per 4 MiB | 2,988 | 28 | 0 |
+| 64 | per 1 MiB | 2,029 | 4 | 0 |
+| 128 | once at the end | 7,294 | 38 | 6 |
+| 128 | per 4 MiB | 5,240 | 76 | 1 |
+| 128 | per 1 MiB | 3,652 | 13 | 1 |
+
+Per 4 MiB swapped 1 long stall for several shorter ones, and at 64 writers that raised p99.9 in an earlier session, 2,156 to 3,312 µs. #66 syncs before each further 1 MiB (D85). Merged `main` (`f1338da`) against its parent (`f27d576`), no tracing:
+
+| Writers | p99.9 µs | p99 µs | Writer's longest sync | Turns/s ratio | Redis p99.9 µs |
+|---|---|---|---|---|---|
+| 64 | 3,453 → 1,791 | 1,306 → 1,310 | 5.0 → 0.8 ms | 0.999 (0.997-1.006) | 2,284 |
+| 128 | 7,020 → 3,382 | 2,463 → 2,419 | 5.8 → 1.2 ms | 0.998 (0.993-1.013) | 3,888 |
+
+zerodb's p99.9 and p99 are now below Redis's at 64 and 128 writers in this session. Max latency did not improve: 9.9 to 12.3 ms for zerodb, 11.0 to 15.2 ms for Redis. A few tape syncs of 10 ms or more fell outside both windows. Their source is not known.
+VM time across these 5 sessions was about 24 minutes, roughly $0.32.
