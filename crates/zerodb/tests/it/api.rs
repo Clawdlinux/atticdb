@@ -444,9 +444,13 @@ fn health_tracks_engine_state() {
         line.and_then(|line| line.split(' ').nth(1)).unwrap_or_else(|| panic!("{name}: {text}"))
     };
     assert_eq!((value("zerodb_read_only"), value("zerodb_facts")), ("1", "1"), "{text}");
-    for line in ["# TYPE zerodb_writer_groups_total counter", "# TYPE zerodb_facts gauge"] {
+    let types = ["writer_groups_total counter", "facts gauge", "writer_sync_seconds_total counter"];
+    for line in types.map(|t| format!("# TYPE zerodb_{t}")) {
         assert!(text.lines().any(|got| got == line), "{line}: {text}");
     }
+    let written: f64 = value("zerodb_writer_write_seconds_total").parse().unwrap();
+    assert!(written > 0.0, "the committed appends' writer time is counted: {text}");
+    value("zerodb_writer_sync_max_seconds");
     value("zerodb_checkpoint_snapshot_lock_seconds");
     assert!(value("zerodb_turn_content_bytes_bucket{le=\"64\"}").parse::<u64>().unwrap() >= 1);
     let count = value("zerodb_append_ack_seconds_count");

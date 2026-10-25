@@ -128,8 +128,8 @@ pub fn stats(engine: &Engine, instance: &str) -> Response {
     Response::json(200, &fields)
 }
 
-/// `/v1/stats` counters. Its other numbers are gauges, and `_ns` maxima become seconds.
-const COUNTERS: [&str; 13] = [
+/// `/v1/stats` counters. Its other numbers are gauges, and other `_ns` maxima become seconds.
+const COUNTERS: [&str; 17] = [
     "writer_groups",
     "writer_group_requests",
     "superblock_installs",
@@ -143,6 +143,10 @@ const COUNTERS: [&str; 13] = [
     "tape_index_dirty_page_evictions",
     "busy_replies",
     "turn_repeats",
+    "writer_write_ns",
+    "writer_sync_ns",
+    "writer_publish_ns",
+    "writer_reply_ns",
 ];
 
 /// A Prometheus histogram over fixed upper bounds, with one more bucket past the last.
@@ -207,13 +211,15 @@ pub fn metrics(engine: &Engine) -> Response {
     };
     for (key, value) in fields.as_object().into_iter().flatten() {
         let Some(number) = value.as_u64() else { continue };
+        let counter = COUNTERS.contains(&key.as_str());
         match key.strip_suffix("_ns") {
+            Some(base) if counter => {
+                add(&format!("{base}_seconds_total"), "counter", &(number as f64 / 1e9).to_string())
+            }
             Some(base) => {
                 add(&format!("{base}_seconds"), "gauge", &(number as f64 / 1e9).to_string())
             }
-            None if COUNTERS.contains(&key.as_str()) => {
-                add(&format!("{key}_total"), "counter", &number.to_string())
-            }
+            None if counter => add(&format!("{key}_total"), "counter", &number.to_string()),
             None => add(key, "gauge", &number.to_string()),
         }
     }
@@ -238,6 +244,13 @@ pub fn stats_fields(engine: &Engine) -> Option<Value> {
         "hot_page_bytes": m.hot_page_bytes,
         "writer_groups": m.writer_groups,
         "writer_group_requests": m.writer_group_requests,
+        "writer_write_ns": m.writer_stages.write_ns,
+        "writer_sync_ns": m.writer_stages.sync_ns,
+        "writer_publish_ns": m.writer_stages.publish_ns,
+        "writer_reply_ns": m.writer_stages.reply_ns,
+        "writer_write_max_ns": m.writer_stages.write_max_ns,
+        "writer_sync_max_ns": m.writer_stages.sync_max_ns,
+        "writer_publish_max_ns": m.writer_stages.publish_max_ns,
         "busy_replies": BUSY.load(Ordering::Relaxed),
         "turn_repeats": REPEATS.load(Ordering::Relaxed),
         "superblock_installs": m.superblock_installs,

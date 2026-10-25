@@ -374,6 +374,9 @@ fn partial_write_commits_only_the_complete_prefix() {
         }
         assert!(core.is_poisoned(), "{case}");
         assert_eq!(core.durable_lsn(), durable, "{case}");
+        let stages = core.stage_times();
+        assert!(stages.write_ns > 0 && stages.write_max_ns > 0, "{case}: the group is timed");
+        assert!(resize_fails || stages.sync_ns > 0, "{case}: the prefix sync is timed");
         assert!(core.read(durable + 1).unwrap().is_none(), "{case}");
         if reserve_fails && !resize_fails {
             assert_eq!(io.inner.available_bytes(db).unwrap(), 3072, "{case}: sparse tail");
