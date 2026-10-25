@@ -283,6 +283,32 @@ struct ReadState {
 }
 
 impl ReadState {
+    /// Adds one group's write, sync and publish stages, ending now.
+    fn record_stages(&self, start: Instant, written: Instant, sync_end: Instant) {
+        let stages = [written - start, sync_end - written, sync_end.elapsed()];
+        for (i, stage) in stages.iter().enumerate() {
+            let ns = stage.as_nanos() as u64;
+            self.stage_ns[i].fetch_add(ns, Ordering::Relaxed);
+            self.stage_max_ns[i].fetch_max(ns, Ordering::Relaxed);
+        }
+    }
+
+    fn stage_times(&self) -> StageTimes {
+        let [write_ns, sync_ns, publish_ns, reply_ns] =
+            self.stage_ns.each_ref().map(|ns| ns.load(Ordering::Relaxed));
+        let [write_max_ns, sync_max_ns, publish_max_ns] =
+            self.stage_max_ns.each_ref().map(|ns| ns.load(Ordering::Relaxed));
+        StageTimes {
+            write_ns,
+            sync_ns,
+            publish_ns,
+            reply_ns,
+            write_max_ns,
+            sync_max_ns,
+            publish_max_ns,
+        }
+    }
+
     fn scan(&self, from_lsn: u64) -> impl Iterator<Item = Result<CommittedRecord>> + '_ {
         let end = self.durable_lsn.load(Ordering::Acquire);
         let mut next = Some(from_lsn);
@@ -495,6 +521,11 @@ impl<S: StateMachine> WriterCore<S> {
     /// Returns the last record visible to durable readers.
     pub fn durable_lsn(&self) -> u64 {
         self.reads.durable_lsn.load(Ordering::Acquire)
+    }
+
+    /// Writer stage times summed over committed groups since open.
+    pub fn stage_times(&self) -> StageTimes {
+        self.reads.stage_times()
     }
 
     /// Reports whether a storage failure requires reopening.
@@ -776,10 +807,14 @@ impl<S: StateMachine> WriterCore<S> {
                     let result = if matches!(error, Error::SyncFailed(_)) {
                         Err(error.clone())
                     } else {
-                        self.segments
-                            .discard_partial()
-                            .and_then(|()| self.segments.sync())
-                            .and_then(|()| self.publish())
+                        // The complete prefix commits, so its stages count like any group.
+                        let discarded = self.segments.discard_partial();
+                        let written = Instant::now();
+                        let synced = discarded.and_then(|()| self.segments.sync());
+                        let sync_end = Instant::now();
+                        let result = synced.and_then(|()| self.publish());
+                        self.reads.record_stages(start, written, sync_end);
+                        result
                     };
                     let outcome =
                         if result.is_err() { Outcome::Unknown } else { Outcome::NotCommitted };
@@ -813,12 +848,7 @@ impl<S: StateMachine> WriterCore<S> {
         if result.is_err() {
             self.reads.poisoned.store(true, Ordering::Release);
         }
-        let stages = [written - start, sync_end - written, sync_end.elapsed()];
-        for (i, stage) in stages.iter().enumerate() {
-            let ns = stage.as_nanos() as u64;
-            self.reads.stage_ns[i].fetch_add(ns, Ordering::Relaxed);
-            self.reads.stage_max_ns[i].fetch_max(ns, Ordering::Relaxed);
-        }
+        self.reads.record_stages(start, written, sync_end);
         replies
             .into_iter()
             .map(|(reply, committed)| {
@@ -1195,19 +1225,7 @@ impl<S: StateMachine> Tape<S> {
 
     /// Writer stage times summed over committed groups since open.
     pub fn stage_times(&self) -> StageTimes {
-        let [write_ns, sync_ns, publish_ns, reply_ns] =
-            self.reads.stage_ns.each_ref().map(|ns| ns.load(Ordering::Relaxed));
-        let [write_max_ns, sync_max_ns, publish_max_ns] =
-            self.reads.stage_max_ns.each_ref().map(|ns| ns.load(Ordering::Relaxed));
-        StageTimes {
-            write_ns,
-            sync_ns,
-            publish_ns,
-            reply_ns,
-            write_max_ns,
-            sync_max_ns,
-            publish_max_ns,
-        }
+        self.reads.stage_times()
     }
 
     /// Successful runtime superblock installs, excluding initialization and recovery before open returns.
