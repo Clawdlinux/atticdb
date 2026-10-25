@@ -450,6 +450,7 @@ fn health_tracks_engine_state() {
     }
     let written: f64 = value("zerodb_writer_write_seconds_total").parse().unwrap();
     assert!(written > 0.0, "the committed appends' writer time is counted: {text}");
+    value("zerodb_writer_sync_max_seconds");
     value("zerodb_checkpoint_snapshot_lock_seconds");
     assert!(value("zerodb_turn_content_bytes_bucket{le=\"64\"}").parse::<u64>().unwrap() >= 1);
     let count = value("zerodb_append_ack_seconds_count");

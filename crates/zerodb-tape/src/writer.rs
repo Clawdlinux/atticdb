@@ -254,6 +254,12 @@ pub struct StageTimes {
     pub publish_ns: u64,
     /// Sending replies to waiting callers, on the reply thread. Zero for inline cores.
     pub reply_ns: u64,
+    /// The longest single group's write stage.
+    pub write_max_ns: u64,
+    /// The longest single group's sync.
+    pub sync_max_ns: u64,
+    /// The longest single group's publish.
+    pub publish_max_ns: u64,
 }
 
 struct ReadState {
@@ -268,6 +274,8 @@ struct ReadState {
     superblock_installs: AtomicU64,
     /// Writer time per stage, summed over committed groups. See [`StageTimes`].
     stage_ns: [AtomicU64; 4],
+    /// The longest single group in each writer stage.
+    stage_max_ns: [AtomicU64; 3],
     /// Held while checking and claiming disk space.
     space: Mutex<()>,
     /// The resolved free-space floor, or `u64::MAX` while unknown.
@@ -424,6 +432,7 @@ impl<S: StateMachine> WriterCore<S> {
             grouped_requests: AtomicU64::new(0),
             superblock_installs: AtomicU64::new(0),
             stage_ns: Default::default(),
+            stage_max_ns: Default::default(),
             space: Mutex::new(()),
             floor: AtomicU64::new(free_space_floor.unwrap_or(u64::MAX)),
         });
@@ -805,8 +814,10 @@ impl<S: StateMachine> WriterCore<S> {
             self.reads.poisoned.store(true, Ordering::Release);
         }
         let stages = [written - start, sync_end - written, sync_end.elapsed()];
-        for (total, stage) in self.reads.stage_ns.iter().zip(stages) {
-            total.fetch_add(stage.as_nanos() as u64, Ordering::Relaxed);
+        for (i, stage) in stages.iter().enumerate() {
+            let ns = stage.as_nanos() as u64;
+            self.reads.stage_ns[i].fetch_add(ns, Ordering::Relaxed);
+            self.reads.stage_max_ns[i].fetch_max(ns, Ordering::Relaxed);
         }
         replies
             .into_iter()
@@ -1186,7 +1197,17 @@ impl<S: StateMachine> Tape<S> {
     pub fn stage_times(&self) -> StageTimes {
         let [write_ns, sync_ns, publish_ns, reply_ns] =
             self.reads.stage_ns.each_ref().map(|ns| ns.load(Ordering::Relaxed));
-        StageTimes { write_ns, sync_ns, publish_ns, reply_ns }
+        let [write_max_ns, sync_max_ns, publish_max_ns] =
+            self.reads.stage_max_ns.each_ref().map(|ns| ns.load(Ordering::Relaxed));
+        StageTimes {
+            write_ns,
+            sync_ns,
+            publish_ns,
+            reply_ns,
+            write_max_ns,
+            sync_max_ns,
+            publish_max_ns,
+        }
     }
 
     /// Successful runtime superblock installs, excluding initialization and recovery before open returns.
