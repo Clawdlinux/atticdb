@@ -1521,3 +1521,35 @@ Per 4 MiB swapped 1 long stall for several shorter ones, and at 64 writers that 
 
 zerodb's p99.9 and p99 are now below Redis's at 64 and 128 writers in this session. Max latency did not improve: 9.9 to 12.3 ms for zerodb, 11.0 to 15.2 ms for Redis. A few tape syncs of 10 ms or more fell outside both windows. Their source is not known.
 VM time across these 5 sessions was about 24 minutes, roughly $0.32.
+
+## Where the remaining max latency comes from (2026-10-25)
+
+Azure Standard_L8s_v3, centralindia zone 3, local NVMe, ext4, `main` at `557bb89` (after #66). Closed-loop durable 256-byte appends, 1 `bench/h2h_paced.py` client, 8,000 appends per writer.
+
+**Tape syncs are no longer slow.** `perf` recorded every writer `fdatasync` with its block requests, its sleeps and wakeups, and the other writes to the device. That covered 4 runs, 9 s each, about 42,700 syncs in all. No sync took 5 ms or more. The slowest took 4.7 ms. The writer's own block requests had a p99 of 0.59 to 0.62 ms. So the 10 ms+ syncs outside the checkpoint and fill windows, reported in the previous section, did not recur after #66. Their source was not identified.
+
+**Server-side ack latency** (`append_ack_seconds`, timed around `engine.append` only):
+
+| Writers | Run | Client p99.9 µs | Client max µs | Server acks over 5 ms | Over 10 ms | Writer's longest group (write / sync / publish) | Checkpoint lock max |
+|---|---|---|---|---|---|---|---|
+| 64 | plain | 1,911 | 7,545 | 192 | 0 | 6.2 / 0.7 / 5.2 ms | 5.3 ms |
+| 64 | under `perf sched` | 2,316 | 10,176 | 192 | 0 | 6.1 / 0.9 / 0.9 ms | 5.2 ms |
+| 128 | plain | 4,637 | 10,175 | 988 | 0 | 6.5 / 5.2 / 1.2 ms | 5.4 ms |
+| 128 | under `perf sched` | 4,134 | 11,262 | 769 | 10 | 6.4 / 1.3 / 1.1 ms | 5.1 ms |
+
+Redis at 128 writers in the same session: p99.9 3,705 µs, max 9,685 µs.
+
+The runs had about 3 and 6 checkpoints, at about 160K appends each. 192 is 3 × 64 and 769 is 6 × 128 + 1. So each checkpoint stalls every waiting writer once, while its snapshot holds the state lock for about 5 ms. Locally, about 95% of that hold is cloning the retry-key entries since the last checkpoint. A full snapshot, every 8th checkpoint, copies the whole window. Locally that took 8.7 ms with 1M keys. These runs never reach one. #69 tracks both.
+
+`perf sched latency` found no wakeup-to-run delay over 2.6 ms for the writer, reply or kernel threads. The client max sits at most a few ms above the server's own ack time.
+
+**Race check for #62, #63 and #66.**
+- #66 adds syncs only inside `save`, after the snapshot's lock is released, on a file only that save writes. Page locations in it are published after the file and manifest are synced. A failed sync takes the same cleanup path a failed write always took.
+- #63's range relies on the only production insert keying entries by `entry.age()` (`dedup.rs`). A mutant that skips one entry past the watermark fails 2 integration tests and the engine sim.
+- On Linux, with `557bb89`:
+  - `zerodb-core` integration tests: 12 of 12 runs passed.
+  - `zerodb-tape` integration tests: 5 of 5 runs passed.
+  - `engine_sim` and the tape sim on 3,000 fresh seeds, from 896,821,577,000: both passed.
+  - The nightly deep run on `f1338da` passed: 3 power-loss runs and 20,000 sim seeds per sim.
+
+The first of these sessions was cut off by the VM's daily auto-shutdown at 18:00 UTC, losing the raw traces. The run script now checks the time left before starting the VM. VM time across both sessions was about 20 minutes, roughly $0.27.
