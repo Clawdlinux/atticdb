@@ -186,6 +186,8 @@ pub struct Metrics {
     pub writer_groups: u64,
     /// Requests handled by those steps, including cached replies and rejections.
     pub writer_group_requests: u64,
+    /// Writer time per stage, summed over committed groups during this open.
+    pub writer_stages: zerodb_tape::StageTimes,
     /// Successful runtime superblock installs during this open.
     pub superblock_installs: u64,
     /// Application records replayed during this open.
@@ -944,6 +946,7 @@ impl Engine {
             checkpoint_pending_bytes: state.bytes.saturating_sub(state.checkpoint_bytes),
             writer_groups: self.tape.group_stats().0,
             writer_group_requests: self.tape.group_stats().1,
+            writer_stages: self.tape.stage_times(),
             superblock_installs: self.tape.superblock_installs(),
             replayed_records: state.replayed,
             checkpoint_warnings: state.warnings,

@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// A batch's acknowledgement and persistence requirements.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -242,6 +242,20 @@ impl WriteRequest {
     }
 }
 
+/// Where writer time goes, in nanoseconds summed over committed groups since open.
+/// Groups rejected before writing are not counted.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct StageTimes {
+    /// Space checks, application preparation and segment writes.
+    pub write_ns: u64,
+    /// `fdatasync` of every segment the group touched.
+    pub sync_ns: u64,
+    /// LSN index inserts and application publication.
+    pub publish_ns: u64,
+    /// Sending replies to waiting callers, on the reply thread. Zero for inline cores.
+    pub reply_ns: u64,
+}
+
 struct ReadState {
     io: Arc<dyn Io>,
     path: PathBuf,
@@ -252,6 +266,8 @@ struct ReadState {
     groups: AtomicU64,
     grouped_requests: AtomicU64,
     superblock_installs: AtomicU64,
+    /// Writer time per stage, summed over committed groups. See [`StageTimes`].
+    stage_ns: [AtomicU64; 4],
     /// Held while checking and claiming disk space.
     space: Mutex<()>,
     /// The resolved free-space floor, or `u64::MAX` while unknown.
@@ -407,6 +423,7 @@ impl<S: StateMachine> WriterCore<S> {
             groups: AtomicU64::new(0),
             grouped_requests: AtomicU64::new(0),
             superblock_installs: AtomicU64::new(0),
+            stage_ns: Default::default(),
             space: Mutex::new(()),
             floor: AtomicU64::new(free_space_floor.unwrap_or(u64::MAX)),
         });
@@ -611,6 +628,7 @@ impl<S: StateMachine> WriterCore<S> {
 
     /// Like `step`, but returns the group's synced replies for the caller to send.
     fn step_acks(&mut self) -> Vec<Ack> {
+        let start = Instant::now();
         if !self.queue.is_empty() {
             self.reads.groups.fetch_add(1, Ordering::Relaxed);
             self.reads.grouped_requests.fetch_add(self.queue.len() as u64, Ordering::Relaxed);
@@ -779,9 +797,16 @@ impl<S: StateMachine> WriterCore<S> {
         if replies.is_empty() {
             return Vec::new();
         }
-        let result = self.segments.sync().and_then(|()| self.publish());
+        let written = Instant::now();
+        let synced = self.segments.sync();
+        let sync_end = Instant::now();
+        let result = synced.and_then(|()| self.publish());
         if result.is_err() {
             self.reads.poisoned.store(true, Ordering::Release);
+        }
+        let stages = [written - start, sync_end - written, sync_end.elapsed()];
+        for (total, stage) in self.reads.stage_ns.iter().zip(stages) {
+            total.fetch_add(stage.as_nanos() as u64, Ordering::Relaxed);
         }
         replies
             .into_iter()
@@ -1025,11 +1050,15 @@ impl<S: StateMachine> Tape<S> {
         let maintenance = MaintenanceWorker::start(&core)?;
         // Sends synced replies, so the writer pays 1 wake per group instead of 1 per request.
         let (acks, acked) = mpsc::channel::<Vec<Ack>>();
+        let replied = reads.clone();
         let replier = std::thread::Builder::new().name("zerodb-reply".into()).spawn(move || {
             for group in acked {
+                let start = Instant::now();
                 for (reply, result) in group {
                     let _ = reply.send(result);
                 }
+                let spent = start.elapsed().as_nanos() as u64;
+                replied.stage_ns[3].fetch_add(spent, Ordering::Relaxed);
             }
         })?;
         let thread = std::thread::Builder::new().name("zerodb-writer".into()).spawn(move || {
@@ -1151,6 +1180,13 @@ impl<S: StateMachine> Tape<S> {
             self.reads.groups.load(Ordering::Relaxed),
             self.reads.grouped_requests.load(Ordering::Relaxed),
         )
+    }
+
+    /// Writer stage times summed over committed groups since open.
+    pub fn stage_times(&self) -> StageTimes {
+        let [write_ns, sync_ns, publish_ns, reply_ns] =
+            self.reads.stage_ns.each_ref().map(|ns| ns.load(Ordering::Relaxed));
+        StageTimes { write_ns, sync_ns, publish_ns, reply_ns }
     }
 
     /// Successful runtime superblock installs, excluding initialization and recovery before open returns.

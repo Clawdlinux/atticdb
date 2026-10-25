@@ -1221,6 +1221,9 @@ fn inline_group_publishes_once_and_replies_with_original_sequences() {
     let after = engine.metrics().unwrap();
     assert_eq!(after.writer_groups - before.writer_groups, 2);
     assert_eq!(after.writer_group_requests - before.writer_group_requests, 4);
+    let (stages, earlier) = (after.writer_stages, before.writer_stages);
+    assert!(stages.write_ns > earlier.write_ns, "the committed group's writes are timed");
+    assert_eq!(stages.reply_ns, 0, "an inline core sends its own replies");
     assert_eq!(engine.window(&scope, WindowQuery::Last(10)).unwrap().len(), 3);
 
     // One inline group of fact writes, held between publication and the durable watermark.
