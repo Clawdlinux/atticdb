@@ -1446,3 +1446,44 @@ The p99.9 gap at 128 writers, about 10 ms against 3.5 ms, is also server-side.
 Absolute numbers moved 25% while the per-rep ratio held, which is why `h2h.sh` now reports it.
 Redis at 16 writers is lower here than on the L8s_v3 runs, 28k against 43k. We haven't looked into why. These rows are not comparable with the L8s_v3 tables above.
 VM time was about 7 minutes, roughly $0.20.
+
+## Writer stage timers, CPU by thread and the checkpoint stall (2026-10-25)
+
+Azure Standard_L8s_v3, centralindia zone 3, local NVMe, ext4. Closed-loop durable 256-byte appends, 1 `bench/h2h_paced.py` client, 5,000 appends per writer unless noted.
+Stage times come from the `/v1/stats` writer timers added in #62. CPU by thread comes from `/proc/<pid>/task/*/stat`. Runqueue wait comes from `/proc/<pid>/task/<tid>/schedstat`.
+
+Writer stages on `main` with #53 to #55, 2 runs each, the run-to-run spread under 3%:
+
+| Writers | Turns/s | Requests/group | Write µs/append | Sync µs/group | Publish µs/append | Writer stages busy |
+|---|---|---|---|---|---|---|
+| 16 | 51,528 | 5.3 | 6.4 | 49 | 2.2 | 88% |
+| 64 | 70,066 | 25.3 | 7.2 | 114 | 2.1 | 94% |
+| 128 | 74,451 | 56.3 | 7.9 | 202 | 1.6 | 95% |
+
+CPU per append by thread at 128 writers: connection threads 35.9 µs, writer 6.0, reply 3.1, other threads 1.8. The writer waited for a CPU 40% of the run.
+In the connection threads, kernel wake and switch code (`_raw_spin_unlock_irqrestore`, `finish_task_switch`) took 23% of samples. #64 tracks moving connections to an event loop.
+
+Connection threads at lower priority, 3 interleaved reps, Redis as a control, ratio to nice 0 within each rep:
+
+| Writers | Nice | Writer runqueue wait | Turns/s ratio | p99 µs | p99.9 µs |
+|---|---|---|---|---|---|
+| 64 | 0 | 36% | 1.000 | 1,280 | 2,044 |
+| 64 | 10 | 27% | 1.026 (1.021-1.030) | 1,636 | 2,594 |
+| 64 | 19 | 21% | 0.999 (0.984-1.002) | 2,397 | 4,587 |
+| 128 | 0 | 40% | 1.000 | 2,427 | 8,068 |
+| 128 | 5 | 38% | 0.976 (0.970-0.987) | 2,816 | 8,556 |
+| 128 | 10 | 31% | 0.971 (0.967-0.972) | 3,211 | 8,721 |
+| 128 | 19 | 18% | 0.961 (0.949-0.962) | 4,931 | 11,523 |
+
+Lower priority gave the writer more CPU and made p99 worse at every writer count. Throughput fell at 128 writers. Not adopted (D84).
+
+The longest-group gauges found the p99.9 stall at 128 writers: the checkpoint snapshot held the state lock for 15 to 20 ms. The writer's longest write stage matched it, at 17 to 22 ms. A delta snapshot walked the whole dedup window to pick the entries past the watermark. #63 reads them as a range instead. 8,000 appends per writer, 3 interleaved reps against the same base with the timers, Redis as a control:
+
+| Writers | Lock hold max | Longest write stage | p99.9 µs | max µs | Turns/s ratio |
+|---|---|---|---|---|---|
+| 64 | 11.4 → 5.3 ms | 11.4 → 5.5 ms | 2,794 → 4,120 | 13,804 → 19,213 | 0.998 (0.998-1.000) |
+| 128 | 20.5 → 5.2 ms | 22.2 → 5.7 ms | 9,953 → 6,995 | 24,678 → 13,234 | 1.007 (0.995-1.008) |
+
+At 128 writers p99.9 fell 30% and max 46%. At 64 writers p99.9 is noise. Per-rep ranges overlap: 2,663 to 4,481 µs before and 2,297 to 4,939 after. The worst 64-writer max came in a rep whose longest write stage was 5.5 ms, so that stall wasn't in the write stage. An earlier run recorded a 26 ms `fdatasync`.
+In this session zerodb's throughput ratio to Redis was 1.12 at 64 writers and 1.00 at 128. Redis varied from 58K to 72K turns/s at 64 writers across reps.
+VM time across these sessions was about 26 minutes, roughly $0.35. 10 of those minutes were a VM waiting for SSH after the allowed source IP changed. The run script now updates the rule before it starts the VM.
