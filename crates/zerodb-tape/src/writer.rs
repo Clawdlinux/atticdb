@@ -524,6 +524,7 @@ impl<S: StateMachine> WriterCore<S> {
     }
 
     /// Writer stage times summed over committed groups since open.
+    #[cfg(any(test, feature = "sim"))]
     pub fn stage_times(&self) -> StageTimes {
         self.reads.stage_times()
     }
