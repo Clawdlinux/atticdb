@@ -3,6 +3,21 @@
 Agent memory database in Rust. It stores turn history per session and keyed facts. A write is acked only after it is synced to disk.
 Status: early. Don't run it in production. Built so far: the tape, session engine, disk-full handling, server and facts (S1 to S4).
 
+## Where to run it
+
+macOS and Linux only. Windows isn't supported. No release binaries yet, so build from source as below. 1-command install and connect is planned in [#71](https://github.com/Clawdlinux/zerodb/issues/71).
+
+Every write is acked only after `fdatasync`, so the disk under the data directory sets your write latency. Keep it on a local disk:
+
+| Data directory on | Status |
+|---|---|
+| Local NVMe or SATA SSD | Tested on NVMe with Linux ext4. An ack costs about 1 device round trip, about 60 µs on NVMe. macOS APFS is tested for development |
+| Network block SSD, such as Azure Premium SSD v2 or P30 | Tested with Linux ext4. An ack costs 1 device round trip: about 1.9 ms on Premium SSD v2 and 4.4 ms on P30 |
+| HDD | Untested. It should work, but each ack waits for a sync to a spinning disk, which takes milliseconds |
+| NFS, SMB, FUSE mounts, or folders synced by iCloud Drive, Dropbox, OneDrive or Google Drive | Don't. `fsync` and `flock` guarantees vary on these, and sync clients copy files while they're being written |
+
+The data directory must be mode `0700` (D75). Below a free-space floor zerodb goes read-only and keeps serving reads (I14).
+
 ## Quick start
 
 ```sh
