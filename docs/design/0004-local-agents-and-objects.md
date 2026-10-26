@@ -34,7 +34,7 @@ Each assumption is marked, so it can be confirmed or corrected before its phase 
 - **Q2 (A5):** should capture redact anything, such as env-var-shaped secrets, before writing? The default plan is no redaction, documented loudly, with capture off by default.
 - **Q3 (A6):** does anyone need zerodb to talk to their own S3 or MinIO, or to serve S3 clients? If yes, that's a separate track, with its own evidence.
 - **Q4 (A2):** is 1 GiB per object enough, or is long video a real use?
-- **Q5:** should an object's bytes be shared across tenants on the same machine when they're identical? The plan says no, see C2.
+- **Q5:** identical bytes stored by 2 tenants share 1 file, each with its own ref (C-objects). Is that acceptable, or should tenants never share files, at the cost of duplicate bytes?
 
 ## What exists today
 
@@ -56,7 +56,8 @@ Each assumption is marked, so it can be confirmed or corrected before its phase 
 - **A-connect:** `zerodb connect <claude-code|codex|cursor|claude-desktop> [--project]`. It creates the home if it's missing, then registers `zerodb mcp` with the harness.
   - Where the harness has its own command, use it: `claude mcp add`, `codex mcp add`.
   - Otherwise, merge into its JSON config with a timestamped backup.
-  - Running it twice changes nothing. It prints exactly what it changed. `zerodb disconnect <harness>` undoes it.
+  - Running it twice changes nothing. It prints exactly what it changed.
+  - `zerodb disconnect <harness>` removes only what zerodb added: its MCP entry and, with capture, its hooks, found by name. Other settings and servers, including ones added after `connect`, stay. The backup is kept for manual recovery and never restored automatically.
   - The token stays in zerodb's own config and is never written into a harness file. `zerodb mcp` reads the token from zerodb's config, so the harness config holds no secret.
 - **A-doctor:** `zerodb doctor` checks:
   - the binary version and the home's permissions;
@@ -73,7 +74,7 @@ Each assumption is marked, so it can be confirmed or corrected before its phase 
 
 `zerodb connect claude-code --capture` also installs hooks.
 - **SessionStart:** injects the project session's last N turns and the facts under `project/<name>/` as extra context, within a byte budget.
-- **UserPromptSubmit and Stop:** append the user prompt and the assistant reply. Each append's `idem_key` comes from the session id and the turn's position in `transcript_path`. So a re-run hook can't write a turn twice.
+- **UserPromptSubmit and Stop:** append the user prompt and the assistant reply. Each captured turn's `meta` records its harness session id and its position in `transcript_path`. Before appending, the hook reads the session's newest turn and skips every transcript entry at or below that position. That cursor lives on the tape, so a re-run hook can't write a turn twice, even after the turn's `idem_key` has left the bounded dedup window (I6). The `idem_key`, built from the same session id and position, still covers 2 hooks racing on the same entry.
 - **PreCompact:** appends anything not yet captured before the harness compacts its context.
 
 Each hook is a short `zerodb` subcommand with a hard timeout. If zerodb is down, the hook exits 0 and the session goes on without memory. Capture never blocks the agent.
@@ -85,7 +86,7 @@ Other harnesses use the MCP tools only, until they have equivalent hooks.
 - **C-objects:** a local, content-addressed object store in the data directory.
   - **Write:** `PUT /v1/objects` streams a body with a `Content-Type`. The server writes `objects/tmp/<random>`, hashes it while writing, then `fsync`s. It renames it to `objects/sha256/<2 hex>/<62 hex>` and `fsync`s the directory. Then it appends an `ObjectRef {tenant, digest, bytes, mime}` record to the tape. The ack comes after that record is durable. The reply is `{"object":"sha256:<hex>","bytes":N}`.
   - **Read:** `GET /v1/objects/sha256:<hex>` streams the bytes, only if the caller's tenant holds a live ref. Turns and facts point at objects through `refs`, using an `object:` URL.
-  - **Retries:** the same bytes give the same digest, so a retried put is safe and needs no `idem_key`.
+  - **Retries:** a put carries an `idem_key`, like every other write (I6). Within the dedup window, a retry returns the original result and writes nothing, even if the ref was forgotten in between. So a lost reply can't bring back a forgotten object. After eviction a retry writes a new ref, as I6 allows for every write. The digest only dedups the file on disk.
   - **Limits:** 1 GiB per object by default, configurable. Objects count against the free-space floor, which is checked before writing.
   - **Forget (I10):** forgetting a ref hides the object from that tenant. Bytes stay on disk until compaction exists, like turns today. Tenants never share a ref. Identical bytes stored by 2 tenants share 1 file, but each tenant's ref is separate (Q5).
   - **Crashes:** a crash after the rename but before the ref leaves an unreferenced file. It's invisible, and a later sweep removes it. A ref can never point at a missing file, because the file is synced first.
@@ -103,7 +104,7 @@ Why not the S3 protocol: SigV4 auth, multipart upload and bucket semantics are a
 
 ### Track D: compression (evidence-gated)
 
-- **Gate:** dogfood data (#46) shows text turns would save 30% or more of disk, at under 5% append throughput.
+- **Gate:** dogfood data (#46) shows text turns would save 30% or more of disk, and compression costs under 5% of append throughput at 16 and 64 writers on NVMe.
 - **Candidate:** per-record zstd above a size threshold, marked by a frame flag. That's a format version bump plus 1 dependency.
 - **Objects:** compressed by MIME type, skipping types that are already compressed: JPEG, PNG, MP4, ZIP.
 - Without the data, nothing here gets built.
@@ -125,8 +126,8 @@ Deferred, with the evidence that would reopen each:
 
 ## Testing
 
-- **connect and doctor:** run against a temporary `HOME`, with stub `claude` and `codex` binaries on `PATH`. Assert the exact config diff, that a second run changes nothing, and that `disconnect` restores the backup.
-- **Capture hooks:** feed recorded hook JSON into the subcommands. Assert that no turn is written twice across repeated runs, and that zerodb being down exits 0 within the timeout.
+- **connect and doctor:** run against a temporary `HOME`, with stub `claude` and `codex` binaries on `PATH`. Assert the exact config diff and that a second run changes nothing. Between `connect` and `disconnect`, add another MCP server and change a setting. Assert that `disconnect` removes only zerodb's entries and keeps both changes.
+- **Capture hooks:** feed recorded hook JSON into the subcommands. Assert that no turn is written twice across repeated runs, including after the dedup window has evicted their keys (a test with a tiny window). Assert that zerodb being down exits 0 within the timeout.
 - **Objects:**
   - a sim case for a crash at every step of the put;
   - a power-loss case in `tests/crash/power_loss.py`;
@@ -142,5 +143,8 @@ Deferred, with the evidence that would reopen each:
 | Capture is opt-in | Capture by default | Transcripts hold secrets. Users must choose to store them |
 | Objects live in a content-addressed store beside the tape, with refs on the tape | Objects as tape records, or an S3 protocol server | Frame cap, recovery cost and streaming rule out the tape. S3 is a large surface nobody has asked for |
 | Hide, not erase, for objects | Reference counting with delete now | Matches I10 and the deferred compaction. Erase needs the same GC compaction will |
+| Object puts carry an `idem_key` | Dedup by digest only | A digest can't tell a retry from a new put after a forget. The `idem_key` keeps a lost reply from restoring forgotten content |
+| Capture keeps a cursor on the tape | Rely on `idem_key` only | The dedup window is bounded (I6). A cursor in the session's turns survives eviction and restarts |
+| `disconnect` removes only zerodb's entries | Restore the backup | A restore would drop anything the user changed after `connect` |
 | No outbound network calls | Fetch link contents, or call remote stores | Keeps zerodb local and predictable. Links stay references |
 | Compression only on dogfood evidence | Ship zstd now | #36 chose to measure first. A frame flag is a format commitment |
