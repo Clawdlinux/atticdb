@@ -8,7 +8,7 @@ Agent context is more than text. It's files, folders, images, video, links and t
 
 ## Short answer
 
-- **1 namespace, yes. 1 durability, no.** One daemon can own naming, tenancy, quotas and forget for every kind of context. Each class still needs its own data path and its own durability rule. No working system unifies KV durability with durable data, and the reasons hold for us too.
+- **1 namespace, yes. 1 durability rule, not worth it.** One daemon can own naming, tenancy, quotas and forget for every kind of context. Each class still gets its own data path. KV is recomputable, so syncing it buys no correctness and costs disk bandwidth. We choose an unsynced KV tier. That's a design choice, not a hard limit.
 - **Durable text, facts and links:** done today, or planned in 0004 (#73).
 - **Files, folders and objects:** feasible. #73 plus folder manifests.
 - **Branch-aware memory:** feasible by indexing repo memory files per branch. Git stays the source of truth.
@@ -29,7 +29,7 @@ Each row is the data path for 1 read of stored context. "Hop" means a process, p
 | zerodb today | Turns, facts, retry keys | Agent → MCP or HTTP on a local socket → connection thread → writer → `pwrite` + `fdatasync` → NVMe | Yes, fsync before ack | Shipped |
 
 What the prior art says:
-- **Every KV system keeps KV in a separate, evictable tier.** None fsyncs KV before using it. Loss costs a recompute, not data.
+- **Every KV system treats KV as a cache.** It's evictable and recomputable, and losing it costs a recompute, not data. Some backends are durable anyway, like Ceph objects. Durability there is the backend's property, not something the engine relies on.
 - **KV isn't portable.** A block is valid only for the exact weights, dtype, quantization, attention variant and parallel layout. LMCache's `CacheEngineKey` holds `model_name`, `world_size`, `worker_id`, `chunk_hash` and `dtype`. It has no tenant, no weights digest and no quantization. A shared store must add those to the key itself.
 - **Hops cost latency, not throughput.** The Ceph S3 path still moves about 60 GB/s from 1 host. `rados-nkv` removes the host bounce to cut per-IO latency, which matters for many small blocks.
 
@@ -76,15 +76,15 @@ Reading the tables:
 | Class | Holds | Durability | Key |
 |---|---|---|---|
 | Durable | Turns, facts, refs, folder manifests, branch index | `fdatasync` before ack. Today's tape | LSN |
-| Content | Files, chunks of large files, media, llama.cpp slot files | File synced before its ref is written (0004, Track C) | sha256 of content |
-| Ephemeral | KV blocks | Never synced. Evicted under a size cap | Tenant + model fingerprint + chunk hash |
+| Content | Files, chunks of large files, media | File synced before its ref is written (0004, Track C) | sha256 of content |
+| Ephemeral | KV blocks, llama.cpp slot files | Never synced. Evicted under a size cap and on forget | Tenant + model fingerprint + the engine's full block key (worker rank and chunk hash included) |
 
 Checked against our invariants and known attacks:
 - **Separate data paths.** KV moves GB/s in large blocks. The tape writer is bound by `fdatasync` and 1 thread (D83, D84). KV traffic must never pass through it. The ephemeral class gets its own files and its own threads, and shares only the namespace, tenancy and forget metadata.
 - **Tenancy.** KV is keyed per tenant, with no sharing across tenants. Shared prompt caches leak prompts through timing: 7 API providers, OpenAI included, were found sharing caches across users ([Gu et al., ICML 2025](https://arxiv.org/abs/2502.07776)). The cost is losing cross-tenant prefix hits, such as a common system prompt. On 1 machine there's usually 1 tenant anyway.
 - **Content dedup across tenants.** 0004 lets 2 tenants share 1 file for identical bytes (Q5), with separate refs. That's safe only while a put always streams and hashes the full body. Add 2 rules to #73: no "does this digest exist" call, and no upload that skips bytes because the client sent a digest. Either one would let a tenant probe for another tenant's files.
-- **Model fingerprint.** The engine doesn't supply it, so the connector must. That means a weights digest, dtype, quantization, attention variant and TP and PP layout, set in connector config. A wrong fingerprint returns stale KV. The engine then produces wrong output with no error, so this is a correctness issue, not a perf one.
-- **Forget (I10).** KV derived from forgotten turns is derived content. The rule: a forget evicts that tenant's KV for every model. It's coarse, but KV is recomputable, so the only cost is one slower prefill. Tracking which blocks came from which session is not worth it at our scale.
+- **Model fingerprint.** The engine doesn't supply it, so the connector must. That means a weights digest, dtype, quantization, attention variant and TP and PP layout, set in connector config. A wrong fingerprint returns stale KV. The engine then produces wrong output with no error, so this is a correctness issue, not a perf one. The fingerprint prefixes the engine's full block key and never replaces it. The worker rank stays in, so tensor-parallel shards don't collide.
+- **Forget (I10).** KV derived from forgotten turns is derived content. The rule: a forget evicts that tenant's KV and slot files for every model. It's coarse, but KV is recomputable, so the only cost is one slower prefill. Tracking which blocks came from which session is not worth it at our scale.
 - **Folders.** A folder is a content-addressed manifest of `{path, mode, digest}` entries, like a Git tree. Versions share unchanged files. Forgetting a folder hides its refs. It doesn't cascade into files other refs still use, which matches how 0004 handles shared bytes.
 
 ## Integration surface
@@ -93,7 +93,7 @@ Smallest first.
 
 | Path | Work | Who it serves | Keeps the GPU path open? |
 |---|---|---|---|
-| llama.cpp slot files as objects | None beyond #73. `zerodb object put` on the slot file, `get` before restore | Local llama.cpp users | No |
+| llama.cpp slot files in the ephemeral class | A small put and get keyed like KV, unsynced, evicted on forget. Reuses #73's streaming code. Not plain objects: those survive a forget of their source turns (0004) | Local llama.cpp users | No |
 | LMCache `RemoteConnector` in the Python client | `exists`, `get`, `put`, `list`, `close` over the local socket, plus a fingerprint-and-tenant key prefix | vLLM and SGLang users via LMCache | Partly. LMCache can move to NIXL later |
 | NIXL backend plugin | A C++ plugin, as `rados-nkv` does | GPU-direct reads | Yes |
 | vLLM KV connector directly | Tied to vLLM internals | vLLM only | Yes |
@@ -130,7 +130,7 @@ Recommendation: option 2, with option 3's tag as a free first step. Capture hook
 | Folders | Yes | Manifests on top of objects | After C-objects |
 | Branch-aware memory | Yes | Option 2, with option 3's tag first | None |
 | KV for hosted models | No | Not storable. Provider-side only | None. It's a hard limit |
-| KV for self-hosted models | Yes | Slot files as objects first, then an LMCache connector | A self-hosted user, plus a measured TTFT win on their hardware |
+| KV for self-hosted models | Yes | Slot files in the ephemeral class first, then an LMCache connector | A self-hosted user, plus a measured TTFT win on their hardware |
 | GPU-direct and RDMA reads | Not yet | NIXL plugin | The KV tier is in use, a user needs lower per-IO latency, and we have GPU hardware |
 
 Ranked blockers:
