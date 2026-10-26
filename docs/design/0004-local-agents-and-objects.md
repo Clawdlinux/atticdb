@@ -38,7 +38,7 @@ Each assumption is marked, so it can be confirmed or corrected before its phase 
 
 ## What exists today
 
-- `zerodb mcp` starts the server if none is running, through the Unix socket in `LOCK`. It needs `--config`, `--tenant` and `--data-dir` as absolute paths.
+- `zerodb mcp` starts the server if none is running, through the Unix socket in `LOCK`. It needs a token: `ZERODB_TOKEN`, `--token-file`, or `--config` with `--tenant <name>`. It also needs a place to find the server: `--url`, `--data-dir`, or a config with `data_dir`. Relative paths are resolved against the working directory. The README asks for absolute paths in harness configs, because a harness can start `zerodb mcp` from any directory.
 - Turns: `content` is a JSON string, so UTF-8 only. Per turn, content is at most 4 MiB and `meta` at most 64 KiB.
 - `/metrics` already has `turn_content_bytes` (a size histogram) and `turn_repeats` (#36).
 - Storage tested: local NVMe on Linux ext4, and Azure Premium SSD v2 (network block SSD) on ext4. macOS APFS for development. Never tested: HDD, NFS, SMB, FUSE, cloud-synced folders.
@@ -49,7 +49,8 @@ Each assumption is marked, so it can be confirmed or corrected before its phase 
 
 - **A-install:** GitHub Release binaries for the 4 targets in A1, an `install.sh` that checks the SHA-256, and `cargo install` from the repo. Homebrew later.
 - **A-home:** with no flags, zerodb uses a per-user home:
-  - `$XDG_DATA_HOME/zerodb` on Linux, `~/Library/Application Support/zerodb` on macOS;
+  - on Linux, `$XDG_DATA_HOME/zerodb` when that variable is set and not empty, else `$HOME/.local/share/zerodb`, as the XDG spec says;
+  - on macOS, `~/Library/Application Support/zerodb`;
   - inside it, a `0600` config with tenant `me` and the data directory.
 
   Every existing flag still overrides. `zerodb mcp` with no flags then just works.
@@ -78,7 +79,8 @@ Each assumption is marked, so it can be confirmed or corrected before its phase 
   - Each captured turn's `meta` records its harness session id and its position in `transcript_path`.
   - A fact `capture/<harness session id>` holds that session's cursor: the last captured position and the zerodb seq of its turn. Facts are never evicted, so the cursor survives the bounded dedup window (I6) and restarts.
   - A hook reads the cursor fact, then reads the project session's turns after that seq and keeps those whose `meta` names this harness session. The highest position among them wins. This covers a crash between appending turns and updating the fact. Facts can't share a batch with turns (D76), so the 2 writes can't be atomic. Then the hook appends the entries past the cursor, and moves the cursor with a conditional put (`if_lsn`).
-  - The `idem_key`, built from the harness session id and position, covers 2 hooks racing on the same entry. The conditional put makes the slower hook re-read the cursor.
+  - The whole cycle runs under an exclusive `flock` on `<home>/capture/<harness session id>.lock`: read the cursor, reconcile, append, move the cursor. So 2 hooks for the same harness session never overlap. Hooks run on the harness's machine, the same one as zerodb's home. A hook that can't get the lock within its timeout exits 0. Nothing is lost, because the next hook resumes from the cursor.
+  - The `idem_key` from the harness session id and position, and the conditional put (`if_lsn`), stay as a second guard.
 - **PreCompact:** appends anything not yet captured before the harness compacts its context.
 
 Each hook is a short `zerodb` subcommand with a hard timeout. If zerodb is down, the hook exits 0 and the session goes on without memory. Capture never blocks the agent.
@@ -97,7 +99,7 @@ Other harnesses use the MCP tools only, until they have equivalent hooks.
   - **Crashes:** a crash after the rename but before the ref leaves an unreferenced file. It's invisible, and a later sweep removes it. A ref can never point at a missing file, because the file is synced first.
 - **C-mcp:**
   - `object_put {path}`: the adapter streams a local file. The model never sends base64.
-  - `object_get {object}`: returns MCP image content for images under a size cap. Otherwise it writes the object to a path the caller names and returns that path.
+  - `object_get {object, path?}`: an image under a size cap comes back as MCP image content, and `path` is optional. Anything else needs `path`. zerodb writes the object there, refuses to overwrite an existing file, and returns the path. Without `path` it returns an error with the object's size and type, so the caller can choose where it goes. It never writes to a default location.
   - Shell: `zerodb object put <file>` and `zerodb object get <object> -o <file>`. The Python client gets matching calls.
 
 Why objects live outside the tape:
@@ -132,7 +134,7 @@ Deferred, with the evidence that would reopen each:
 ## Testing
 
 - **connect and doctor:** run against a temporary `HOME`, with stub `claude` and `codex` binaries on `PATH`. Assert the exact config diff and that a second run changes nothing. Between `connect` and `disconnect`, add another MCP server and change a setting. Assert that `disconnect` removes only zerodb's entries and keeps both changes.
-- **Capture hooks:** feed recorded hook JSON into the subcommands. Assert that no turn is written twice across repeated runs, including after the dedup window has evicted their keys (a test with a tiny window). Interleave 2 harness sessions and a manual MCP append in 1 project session, and assert each transcript is captured exactly once. Kill the hook between the append and the cursor update, then rerun. Assert that zerodb being down exits 0 within the timeout.
+- **Capture hooks:** feed recorded hook JSON into the subcommands. Assert that no turn is written twice across repeated runs, including after the dedup window has evicted their keys (a test with a tiny window). Interleave 2 harness sessions and a manual MCP append in 1 project session, and assert each transcript is captured exactly once. Kill the hook between the append and the cursor update, then rerun. Run 2 hooks for the same harness session at once, with a tiny dedup window, and assert no duplicate. Assert that zerodb being down exits 0 within the timeout.
 - **Objects:**
   - a sim case for a crash at every step of the put, including the first-use directory setup;
   - a power-loss case in `tests/crash/power_loss.py`, starting from a data directory with no `objects/` yet;
@@ -149,7 +151,7 @@ Deferred, with the evidence that would reopen each:
 | Objects live in a content-addressed store beside the tape, with refs on the tape | Objects as tape records, or an S3 protocol server | Frame cap, recovery cost and streaming rule out the tape. S3 is a large surface nobody has asked for |
 | Hide, not erase, for objects | Reference counting with delete now | Matches I10 and the deferred compaction. Erase needs the same GC compaction will |
 | Object puts carry an `idem_key` | Dedup by digest only | A digest can't tell a retry from a new put after a forget. The `idem_key` keeps a lost reply from restoring forgotten content |
-| Capture keeps a cursor fact per harness session, reconciled with the turns after it | Rely on `idem_key` only, or use the project session's newest turn | The dedup window is bounded (I6). Several harness sessions and manual appends share a project session, so its newest turn isn't this transcript's cursor |
+| Capture keeps a cursor fact per harness session, reconciled with the turns after it, under a per-session file lock | Rely on `idem_key` only, or use the project session's newest turn | The dedup window is bounded (I6). Several harness sessions and manual appends share a project session, so its newest turn isn't this transcript's cursor. Without the lock, 2 overlapping hooks can both append once a key is evicted |
 | Object directories are created and synced once, before any ref | Create shards on first use | A put that creates a shard would also have to sync its parent. Doing it once removes the case |
 | `disconnect` removes only zerodb's entries | Restore the backup | A restore would drop anything the user changed after `connect` |
 | No outbound network calls | Fetch link contents, or call remote stores | Keeps zerodb local and predictable. Links stay references |
