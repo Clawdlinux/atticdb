@@ -71,8 +71,9 @@ What the disk gives:
 | DeepSeek-V3, copy per TP rank | 56 GB | 28 GB | 34 / 68 |
 
 Reading the tables:
-- **Consumer GPU with local NVMe:** break-even is 0.54 GB/s, far below 1 Gen4 drive's 7.88 GB/s link limit. This is where a local KV tier pays off most, and it needs no RDMA.
-- **H100 class:** 1 Gen4 drive is near break-even. It takes 2 to 4 striped drives, or a fast network, to win clearly. Storing MLA's latent once per TP rank pushes DeepSeek-V3 to 24 GB/s, so a KV tier for MLA models must store 1 copy.
+- **Consumer GPU with local NVMe:** break-even is 0.54 GB/s. Even 1 Lsv3 disk's rated 2 GB/s clears it. This is where a local KV tier pays off most, and it needs no RDMA.
+- **H100 class depends on model and layout.** 8B on 1 GPU and 1-copy DeepSeek-V3 need about 3 GB/s, or 2 Lsv3 disks. 70B on 8 GPUs needs 7.4 GB/s, or 4. A copy per TP rank pushes DeepSeek-V3 to 24 GB/s, past even L80s_v3's 20 GB/s. Storing 1 copy is the optimization that cuts it 8x.
+- These compare against rated disk throughput. The real number is end-to-end restore throughput, which must be measured.
 - **Capacity isn't the limit.** 1 disk holds 34 to 546 long sessions.
 - The gain for consumer GPUs comes from slow compute, not fast storage. That favors a plain file path over GPU-direct work.
 
@@ -141,7 +142,7 @@ Recommendation: option 2, with option 3's tag as a free first step. Capture hook
 Ranked blockers:
 1. **Hosted models don't expose KV.** Our first users get nothing from a KV tier. This is a hard limit, not a gap we can close.
 2. **No model fingerprint in engine keys.** It's solvable in connector config. A mistake there gives silently wrong output.
-3. **Bandwidth at the high end.** On H100-class GPUs, 1 Gen4 drive is near break-even. Consumer GPUs are fine.
+3. **Bandwidth at the high end.** On H100-class GPUs the model needs 3 to 7.4 GB/s, depending on model and layout, or 24 GB/s for MLA stored per TP rank. That's 2 to 4 Lsv3 disks, or more. Consumer GPUs clear it on 1 disk.
 4. **Write-path isolation.** KV must never touch the tape writer. That's a design rule, and easy to keep from day 1.
 5. **Hardware for GPU-direct.** Our GPU quota is 0. ND A100 v4 is $27.20 per hour and ND H100 v5 is $98.32 per hour. Whether Azure supports GPUDirect Storage is unverified. The `rados-nkv` GPU path is a prototype, and its NIXL plugin is a draft.
 
