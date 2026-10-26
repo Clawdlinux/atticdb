@@ -12,7 +12,7 @@ Agent context is more than text. It's files, folders, images, video, links and t
 - **Durable text, facts and links:** done today, or planned in 0004 (#73).
 - **Files, folders and objects:** feasible. #73 plus folder manifests.
 - **Branch-aware memory:** feasible by indexing repo memory files per branch. Git stays the source of truth.
-- **KV cache:** feasible only for self-hosted models. Hosted-model agents (Claude Code, Codex) can't export their KV, so a KV tier does nothing for them. Deferred behind an evidence gate.
+- **KV cache:** feasible only for self-hosted models. What counts is the inference backend, not the harness. A hosted API keeps the KV, so a KV tier does nothing for agents on one. Deferred behind an evidence gate.
 - **RDMA and GPU-direct reads:** later. They need GPU hardware we don't have, and the reference design is a prototype.
 
 ## Verified prior art
@@ -22,25 +22,26 @@ Each row is the data path for 1 read of stored context. "Hop" means a process, p
 | System | What it stores | Read path | Durable? | Status |
 |---|---|---|---|---|
 | vLLM + LMCache + Ceph RGW ([Ceph blog, 2025-12](https://ceph.io/en/news/blog/2025/vllm-kv-caching/)) | KV blocks as S3 objects | GPU ← pinned host buffer (NIXL) ← S3 over TCP ← RGW ← RADOS ← OSD ← NVMe | Ceph object, but used as a cache | Measured: up to 23x lower TTFT, nearly 60 GB/s of S3 traffic from 1 host |
-| `rados-nkv` ([Ceph blog, 2026-06](https://ceph.io/en/news/blog/2026/for-whom-the-door-bell-tolls/)) | KV blocks as NVMe key-value pairs | GPU doorbell → QEMU MMIO bridge → SPDK vfio-user NVMe-KV → librados → OSD. Payload DMA goes straight into GPU memory | Ceph object | Prototype. 136 µs for 1 warm 4 KiB GPU-initiated read on AMD, in a QEMU guest. NIXL plugin under review ([ai-dynamo/nixl#1717](https://github.com/ai-dynamo/nixl/pull/1717)). Builds on BaM ([arXiv 2203.04910](https://arxiv.org/abs/2203.04910)) |
+| `rados-nkv` ([Ceph blog, 2026-06](https://ceph.io/en/news/blog/2026/for-whom-the-door-bell-tolls/)) | KV blocks as NVMe key-value pairs | GPU doorbell → QEMU MMIO bridge → SPDK vfio-user NVMe-KV → librados → OSD. Payload DMA goes straight into GPU memory | Ceph object | Prototype. 136 µs for 1 warm 4 KiB GPU-initiated read on AMD, in a QEMU guest. Builds on BaM ([arXiv 2203.04910](https://arxiv.org/abs/2203.04910)). The NIXL plugin is a separate, draft PR ([ai-dynamo/nixl#1753](https://github.com/ai-dynamo/nixl/pull/1753)). It moves data between host DRAM and the KV namespace, not straight into GPU memory |
 | llama.cpp server ([README](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md)) | 1 slot's KV as a file | `POST /slots/{id}?action=restore` ← file in `--slot-save-path` ← local fs | A plain file | Shipped |
 | LMCache local disk or remote connector ([`RemoteConnector`](https://github.com/LMCache/LMCache/blob/dev/lmcache/v1/storage_backend/connector/base_connector.py)) | KV chunks | GPU ← host RAM ← backend (`exists`, `get`, `put`, `list`, batched variants) | Backend decides | Shipped. Backends include Redis, Mooncake, 3FS, S3, Azure and local fs |
 | Postgres + Git + SQLite (Yash Agarwal's team, field input below) | Global memory in Postgres. Per-project memory as Markdown in the repo | Agent tool → Postgres. Files → Git → indexer → SQLite | Yes | In production for 1 team |
-| zerodb today | Turns, facts, retry keys | Agent → MCP or HTTP on a local socket → connection thread → writer → `pwrite` + `fdatasync` → NVMe | Yes, fsync before ack | Shipped |
+| zerodb today | Turns, facts, retry keys | Agent → MCP or HTTP on a local socket → connection thread → engine index → `Tape::read` → page cache or NVMe. Reads skip the writer | Yes. Writes sync before ack | Shipped |
 
 What the prior art says:
 - **Every KV system treats KV as a cache.** It's evictable and recomputable, and losing it costs a recompute, not data. Some backends are durable anyway, like Ceph objects. Durability there is the backend's property, not something the engine relies on.
 - **KV isn't portable.** A block is valid only for the exact weights, dtype, quantization, attention variant and parallel layout. LMCache's `CacheEngineKey` holds `model_name`, `world_size`, `worker_id`, `chunk_hash` and `dtype`. It has no tenant, no weights digest and no quantization. A shared store must add those to the key itself.
-- **Hops cost latency, not throughput.** The Ceph S3 path still moves about 60 GB/s from 1 host. `rados-nkv` removes the host bounce to cut per-IO latency, which matters for many small blocks.
+- **Hops cost latency, not throughput.** The Ceph S3 path still moves about 60 GB/s from 1 host. The `rados-nkv` GPU prototype removes the host bounce to cut per-IO latency, which matters for many small blocks.
 
 ## Hosted versus self-hosted inference
 
 This is the biggest finding, and it's not an engineering problem.
-- Claude Code and Codex run on hosted models. The provider holds the KV cache. Anthropic's prompt cache is isolated per organization and workspace, lives 5 minutes by default or 1 hour at 2x write cost, and has no export API ([docs](https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching)).
+- Claude Code on Anthropic's API, and Codex on OpenAI's, run on hosted models. The provider holds the KV cache. Anthropic's prompt cache is isolated per organization and workspace, lives 5 minutes by default or 1 hour at 2x write cost, and has no export API ([docs](https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching)).
 - So a local KV tier can't help a hosted-model agent. The only lever there is sending the same prompt prefix, so the provider's cache hits. That's a prompt-layout concern, not storage.
 - A KV tier helps only when the user runs the model: llama.cpp, vLLM or SGLang on their own GPU.
+- So eligibility depends on the configured backend, not the harness. Codex can also run local models (`--oss`, with Ollama or LM Studio). Then it depends on whether that engine can save and load KV.
 
-Our first target user is Claude Code (0004, Q1). For that user, the KV class adds nothing.
+Our first target user is Claude Code on Anthropic's API (0004, Q1). For that user, the KV class adds nothing.
 
 ## Bandwidth and capacity model
 
@@ -95,7 +96,7 @@ Smallest first.
 |---|---|---|---|
 | llama.cpp slot files in the ephemeral class | A small put and get keyed like KV, unsynced, evicted on forget. Reuses #73's streaming code. Not plain objects: those survive a forget of their source turns (0004) | Local llama.cpp users | No |
 | LMCache `RemoteConnector` in the Python client | `exists`, `get`, `put`, `list`, `close` over the local socket, plus a fingerprint-and-tenant key prefix | vLLM and SGLang users via LMCache | Partly. LMCache can move to NIXL later |
-| NIXL backend plugin | A C++ plugin, as `rados-nkv` does | GPU-direct reads | Yes |
+| NIXL backend plugin | A C++ plugin, as nixl#1753 does for `rados-nkv` | GPU-direct reads | Yes |
 | vLLM KV connector directly | Tied to vLLM internals | vLLM only | Yes |
 
 LMCache already ships a local-disk backend. On 1 machine, zerodb's connector adds only tenancy, forget and quotas. That's real for a shared box, but thin for 1 user. It's another reason to wait for a user.
@@ -138,7 +139,7 @@ Ranked blockers:
 2. **No model fingerprint in engine keys.** It's solvable in connector config. A mistake there gives silently wrong output.
 3. **Bandwidth at the high end.** On H100-class GPUs, 1 Gen4 drive is near break-even. Consumer GPUs are fine.
 4. **Write-path isolation.** KV must never touch the tape writer. That's a design rule, and easy to keep from day 1.
-5. **Hardware for GPU-direct.** Our GPU quota is 0. ND A100 v4 is $27.20 per hour and ND H100 v5 is $98.32 per hour. Whether Azure supports GPUDirect Storage is unverified. `rados-nkv` is a prototype.
+5. **Hardware for GPU-direct.** Our GPU quota is 0. ND A100 v4 is $27.20 per hour and ND H100 v5 is $98.32 per hour. Whether Azure supports GPUDirect Storage is unverified. The `rados-nkv` GPU path is a prototype, and its NIXL plugin is a draft.
 
 New design ideas worth keeping:
 - **Forget that reaches derived data.** A forget evicts derived KV and hides object and folder refs, under 1 tenancy model. No system we found does this across classes.
