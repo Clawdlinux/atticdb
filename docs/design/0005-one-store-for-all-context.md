@@ -49,12 +49,15 @@ Assumptions: prefill costs about 2 × active parameters FLOPs per token. GPUs ru
 
 KV bytes per token = 2 × layers × KV heads × head dim × bytes per element. DeepSeek-V3 stores a 576-wide latent per layer (MLA).
 
+Parallel layout: GQA models split KV heads across tensor-parallel ranks, so 8 ranks together hold 1 copy. MLA's latent doesn't split by head. Under plain TP=8, vLLM keeps a full copy on every rank ([vLLM blog](https://vllm.ai/blog/2026-08-07-decode-context-parallelism)). The DeepSeek rows show both: 1 stored copy restored to every rank, and 1 copy stored per rank. Whether a given connector stores 1 copy for MLA is unverified.
+
 | Model | KV per token (fp16) | Hardware | Prefill per token | Load beats recompute above |
 |---|---|---|---|---|
 | Llama 3.1 8B | 128 KiB | 1× RTX 4090 | 242 µs | 0.54 GB/s |
 | Llama 3.1 8B | 128 KiB | 1× H100 | 40 µs | 3.2 GB/s |
 | Llama 3 70B | 320 KiB | 8× H100 | 44 µs | 7.4 GB/s |
-| DeepSeek-V3 | 68.6 KiB | 8× H100 | 23 µs | 3.0 GB/s |
+| DeepSeek-V3, 1 copy | 68.6 KiB | 8× H100 | 23 µs | 3.0 GB/s |
+| DeepSeek-V3, copy per TP rank | 549 KiB | 8× H100 | 23 µs | 24 GB/s |
 
 What the disk gives:
 - A PCIe 4.0 x4 NVMe link tops out at 7.88 GB/s.
@@ -64,12 +67,13 @@ What the disk gives:
 |---|---|---|---|
 | Llama 3.1 8B | 13.1 GB | 6.6 GB | 146 / 293 |
 | Llama 3 70B | 32.8 GB | 16.4 GB | 59 / 117 |
-| DeepSeek-V3 | 7.0 GB | 3.5 GB | 273 / 546 |
+| DeepSeek-V3, 1 copy | 7.0 GB | 3.5 GB | 273 / 546 |
+| DeepSeek-V3, copy per TP rank | 56 GB | 28 GB | 34 / 68 |
 
 Reading the tables:
-- **Consumer GPU with local NVMe:** 1 drive beats recompute by about 10x. This is where a local KV tier pays off most, and it needs no RDMA.
-- **H100 class:** 1 Gen4 drive is near break-even. It takes 2 to 4 striped drives, or a fast network, to win clearly.
-- **Capacity isn't the limit.** 1 disk holds 59 to 546 long sessions.
+- **Consumer GPU with local NVMe:** break-even is 0.54 GB/s, far below 1 Gen4 drive's 7.88 GB/s link limit. This is where a local KV tier pays off most, and it needs no RDMA.
+- **H100 class:** 1 Gen4 drive is near break-even. It takes 2 to 4 striped drives, or a fast network, to win clearly. Storing MLA's latent once per TP rank pushes DeepSeek-V3 to 24 GB/s, so a KV tier for MLA models must store 1 copy.
+- **Capacity isn't the limit.** 1 disk holds 34 to 546 long sessions.
 - The gain for consumer GPUs comes from slow compute, not fast storage. That favors a plain file path over GPU-direct work.
 
 ## Data model: 3 classes, 1 namespace
