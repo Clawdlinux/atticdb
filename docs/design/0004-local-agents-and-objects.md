@@ -74,14 +74,16 @@ Each assumption is marked, so it can be confirmed or corrected before its phase 
 ### Track B: automatic capture (Claude Code)
 
 `zerodb connect claude-code --capture` also installs hooks.
-- **SessionStart:** injects the project session's last N turns and the facts under `project/<name>/` as extra context, within a byte budget.
-- **UserPromptSubmit and Stop:** append the user prompt and the assistant reply. Progress is tracked per harness session, not per project, because several harness sessions and manual MCP appends can share a project session.
-  - Each captured turn's `meta` records its harness session id and its position in `transcript_path`.
-  - A fact `capture/<harness session id>` holds that session's cursor: the last captured position and the zerodb seq of its turn. Facts are never evicted, so the cursor survives the bounded dedup window (I6) and restarts.
-  - A hook reads the cursor fact, then reads the project session's turns after that seq and keeps those whose `meta` names this harness session. The highest position among them wins. This covers a crash between appending turns and updating the fact. Facts can't share a batch with turns (D76), so the 2 writes can't be atomic. Then the hook appends the entries past the cursor, and moves the cursor with a conditional put (`if_lsn`).
+- **SessionStart:** injects the last N turns of the project's newest capture session, plus the facts under `project/<name>/`, as extra context within a byte budget.
+- **UserPromptSubmit and Stop:** append the user prompt and the assistant reply. Each harness session captures into its own zerodb session, `<project session>/<harness session id>`. So progress for one transcript never depends on how busy the rest of the project is.
+  - Each captured turn's `meta` records its position in `transcript_path`.
+  - A fact `capture/<harness session id>` holds the cursor: the last captured position and the zerodb seq of its turn. Facts are never evicted, so the cursor survives the bounded dedup window (I6) and restarts.
+  - A hook reads the cursor, then reads its own session's turns after that seq. Only this harness session writes there, and each hook run appends at most 64 entries. So that read is at most 1 page of 64 turns, and it always fits in the hook timeout. The highest position found wins. This covers a crash between appending turns and moving the cursor. Facts can't share a batch with turns (D76), so the 2 writes can't be atomic.
+  - Then the hook appends up to 64 entries past the cursor, and moves the cursor with a conditional put (`if_lsn`). A transcript further behind catches up over later hooks.
   - The whole cycle runs under an exclusive `flock` on `<home>/capture/<harness session id>.lock`: read the cursor, reconcile, append, move the cursor. So 2 hooks for the same harness session never overlap. Hooks run on the harness's machine, the same one as zerodb's home. A hook that can't get the lock within its timeout exits 0. Nothing is lost, because the next hook resumes from the cursor.
   - The `idem_key` from the harness session id and position, and the conditional put (`if_lsn`), stay as a second guard.
   - **The stated bound.** A killed hook's append can still be in flight when the lock is released. If the next hook reconciles before it commits, both carry the same `idem_key`. Whichever is prepared second returns the first's result, so no duplicate is written. A duplicate needs the first one's key evicted between those 2 prepares. That takes the tenant writing more than its dedup window, 1M keys by default, within about 1 hook timeout. The guarantee is therefore exactly once, unless a tenant writes over 1M keys during a hook's few-second timeout. We accept and document that, rather than add a server-side fence.
+  - A fact `project/<name>/latest-capture` names the newest capture session. SessionStart reads it to find the turns to inject.
 - **PreCompact:** appends anything not yet captured before the harness compacts its context.
 
 Each hook is a short `zerodb` subcommand with a hard timeout. If zerodb is down, the hook exits 0 and the session goes on without memory. Capture never blocks the agent.
@@ -96,7 +98,7 @@ Other harnesses use the MCP tools only, until they have equivalent hooks.
   - **Read:** `GET /v1/objects/sha256:<hex>` streams the bytes, only if the caller's tenant holds a live ref. Turns and facts point at objects through `refs`, using an `object:` URL.
   - **Retries:** a put carries an `idem_key`, like every other write (I6). Within the dedup window, a retry returns the original result and writes nothing, even if the ref was forgotten in between. So a lost reply can't bring back a forgotten object. After eviction a retry writes a new ref, as I6 allows for every write. The digest only dedups the file on disk.
   - **Limits:** 1 GiB per object by default, configurable. Objects count against the free-space floor, which is checked before writing.
-  - **Forget (I10):** forgetting a ref hides the object from that tenant. Bytes stay on disk until compaction exists, like turns today. Tenants never share a ref. Identical bytes stored by 2 tenants share 1 file, but each tenant's ref is separate (Q5).
+  - **Forget (I10):** `forget` gets an object selector, `object: sha256:<hex>`. It hides every ref the tenant holds to that digest at or below the forget's LSN, so 2 earlier puts of the same bytes are both hidden. A put after the forget makes a new, visible ref, just as an append after a forget makes a new turn. Forgetting a turn that points at an object hides the turn, not the object. Bytes stay on disk until compaction exists, like turns today. Tenants never share a ref. Identical bytes stored by 2 tenants share 1 file, but each tenant's refs are separate (Q5).
   - **Crashes:** a crash after the rename but before the ref leaves an unreferenced file. It's invisible, and a later sweep removes it. A ref can never point at a missing file, because the file is synced first.
 - **C-mcp:**
   - `object_put {path}`: the adapter streams a local file. The model never sends base64.
@@ -135,11 +137,11 @@ Deferred, with the evidence that would reopen each:
 ## Testing
 
 - **connect and doctor:** run against a temporary `HOME`, with stub `claude` and `codex` binaries on `PATH`. Assert the exact config diff and that a second run changes nothing. Between `connect` and `disconnect`, add another MCP server and change a setting. Assert that `disconnect` removes only zerodb's entries and keeps both changes.
-- **Capture hooks:** feed recorded hook JSON into the subcommands. Assert that no turn is written twice across repeated runs, including after the dedup window has evicted their keys (a test with a tiny window). Interleave 2 harness sessions and a manual MCP append in 1 project session, and assert each transcript is captured exactly once. Kill the hook between the append and the cursor update, then rerun. Run 2 hooks for the same harness session at once, with a tiny dedup window, and assert no duplicate. Kill a hook while its append is in flight, run the next hook at once with the default window, and assert no duplicate. Assert that zerodb being down exits 0 within the timeout.
+- **Capture hooks:** feed recorded hook JSON into the subcommands. Assert that no turn is written twice across repeated runs, including after the dedup window has evicted their keys (a test with a tiny window). Interleave 2 harness sessions and a manual MCP append in 1 project, and assert each transcript is captured exactly once into its own session. Fill the project session with 10,000 other turns between 2 hooks, and assert the hook still finishes within its timeout. Kill the hook between the append and the cursor update, then rerun. Run 2 hooks for the same harness session at once, with a tiny dedup window, and assert no duplicate. Kill a hook while its append is in flight, run the next hook at once with the default window, and assert no duplicate. Assert that zerodb being down exits 0 within the timeout.
 - **Objects:**
   - a sim case for a crash at every step of the put, including the first-use directory setup;
   - a power-loss case in `tests/crash/power_loss.py`, starting from a data directory with no `objects/` yet;
-  - forget hiding the object from every read path;
+  - forget hiding the object from every read path, after 2 independent puts of the same bytes, and a put after the forget being visible again;
   - free-space floor rejection before any bytes are written.
 
 ## Decision log (proposed)
@@ -152,7 +154,8 @@ Deferred, with the evidence that would reopen each:
 | Objects live in a content-addressed store beside the tape, with refs on the tape | Objects as tape records, or an S3 protocol server | Frame cap, recovery cost and streaming rule out the tape. S3 is a large surface nobody has asked for |
 | Hide, not erase, for objects | Reference counting with delete now | Matches I10 and the deferred compaction. Erase needs the same GC compaction will |
 | Object puts carry an `idem_key` | Dedup by digest only | A digest can't tell a retry from a new put after a forget. The `idem_key` keeps a lost reply from restoring forgotten content |
-| Capture keeps a cursor fact per harness session, reconciled with the turns after it, under a per-session file lock | Rely on `idem_key` only, or use the project session's newest turn | The dedup window is bounded (I6). Several harness sessions and manual appends share a project session, so its newest turn isn't this transcript's cursor. Without the lock, 2 overlapping hooks can both append once a key is evicted |
+| Each harness session captures into its own zerodb session, with a cursor fact, reconciled under a per-session file lock | Rely on `idem_key` only, or share the project session and scan it | The dedup window is bounded (I6). A shared session makes reconciliation scan other sessions' turns, without a bound. A session of its own bounds it to 1 page. Without the lock, 2 overlapping hooks can both append once a key is evicted |
+| Object forget hides every ref the tenant holds to the digest, up to the forget's LSN | Hide only 1 ref | 2 puts of the same bytes would leave the object readable through the other ref |
 | A killed hook's in-flight append relies on the dedup window, with the bound stated | A server-side capture fence | A duplicate needs over 1M writes from 1 tenant within a few-second hook timeout. A fence is a new server mechanism for a case the window already bounds |
 | Object directories are created and synced once, before any ref | Create shards on first use | A put that creates a shard would also have to sync its parent. Doing it once removes the case |
 | `disconnect` removes only zerodb's entries | Restore the backup | A restore would drop anything the user changed after `connect` |
