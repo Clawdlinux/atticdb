@@ -1,7 +1,7 @@
 # 0004: Local agents and rich context
 
 Status: proposed, 2026-10-26. Nothing here is built. Each phase starts only after its open questions are answered.
-Tracking: the uber issues linked in [Phases](#phases).
+Tracking: uber issues #71 (P1), #72 (P2), #73 (P3) and #74 (P4).
 
 ## Understanding
 
@@ -112,10 +112,10 @@ Why not the S3 protocol: SigV4 auth, multipart upload and bucket semantics are a
 
 | Phase | Scope | Gate to start | Format change |
 |---|---|---|---|
-| P1 | Track A: install, home, `connect`, `doctor`, README storage guidance | Q1 answered | No |
-| P2 | Track B: Claude Code capture, A-sessions | P1 shipped, Q2 answered | No |
-| P3 | Track C: links, then objects | S5 forget (#45) designed, so object refs follow I10. Q3 to Q5 answered | Yes, a new record kind |
-| P4 | Track D: compression | Dogfood numbers from #46 meet the gate | Yes, a frame flag |
+| P1 (#71) | Track A: install, home, `connect`, `doctor`, README storage guidance | Q1 answered | No |
+| P2 (#72) | Track B: Claude Code capture, A-sessions | P1 shipped, Q2 answered | No |
+| P3 (#73) | Track C: links, then objects | S5 forget (#45) designed, so object refs follow I10. Q3 to Q5 answered | Yes, a new record kind |
+| P4 (#74) | Track D: compression | Dogfood numbers from #46 meet the gate | Yes, a frame flag |
 
 Deferred, with the evidence that would reopen each:
 - **Remote object tiering:** a user's object store outgrows a local disk.
