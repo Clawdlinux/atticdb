@@ -106,6 +106,7 @@ Other harnesses use the MCP tools only, until they have equivalent hooks.
   - **Retries:** a put carries an `idem_key`, like every other write (I6). Within the dedup window, a retry returns the original result and writes nothing, even if the ref was forgotten in between. So a lost reply can't bring back a forgotten object. After eviction a retry writes a new ref, as I6 allows for every write. The digest only dedups the file on disk.
   - **Limits:** 1 GiB per object by default, configurable. Objects count against the free-space floor, which is checked before writing.
   - **Forget (I10):** `forget` gets an object selector, `object: sha256:<hex>`. It hides every ref the tenant holds to that digest at or below the forget's LSN, so 2 earlier puts of the same bytes are both hidden. A put after the forget makes a new, visible ref, just as an append after a forget makes a new turn. Forgetting a turn that points at an object hides the turn, not the object. Bytes stay on disk until compaction exists, like turns today. Tenants never share a ref. Identical bytes stored by 2 tenants share 1 file, but each tenant's refs are separate (Q5).
+  - **No probing:** a put always streams and hashes the full body. There's no call that asks whether a digest exists, and no upload that skips bytes because the client sent a digest. Either would let a tenant probe for another tenant's files (0005).
   - **Crashes:** a crash after the rename but before the ref leaves an unreferenced file. It's invisible, and a later sweep removes it. A ref can never point at a missing file, because the file is synced first.
 - **C-mcp:**
   - **File access is limited to allowed roots.** `object_put` and `object_get` take host paths, and a model could ask for `~/.ssh/id_rsa` or write over a dotfile. So each path is resolved with symlinks first, then must fall inside an allowed root. The roots are listed in zerodb's config under `object_roots`. `zerodb connect --project` adds that project directory. A user-level connect adds none. With no roots, both tools return an error that says how to add one, and `zerodb object` on the shell still works. A path outside every root is refused. The adapter never asks the model to approve it, because the user wasn't asked.
@@ -141,6 +142,7 @@ Deferred, with the evidence that would reopen each:
 - **S3-compatible API:** a user wants an S3 client to read or write zerodb.
 - **Windows:** a user asks.
 - **Fetching and snapshotting link contents:** dogfood shows dead links lose context that mattered.
+- **KV cache tier and folders:** see 0005. KV waits for a self-hosted-model user. Folders follow objects.
 
 ## Testing
 
