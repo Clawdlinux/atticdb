@@ -21,6 +21,7 @@ const USAGE: &str = "usage:
   zerodb mcp <connect>
   zerodb append <connect> --content <text> [--role user|assistant|tool]
   zerodb recent <connect> [--n <n>] [--max-bytes <n>]
+  zerodb search <connect> --query <words> [--limit <n>] [--before <lsn>] [--max-bytes <n>]
   zerodb fact set <connect> --key <key> (--content <text> | --delete)
   zerodb fact get <connect> --key <key>
   zerodb fact list <connect> --prefix <prefix> [--after <key>] [--limit <n>] [--max-bytes <n>]
@@ -28,7 +29,7 @@ const USAGE: &str = "usage:
              [--tenant <name>] [--token-file <path>] [--agent <name>] [--session <name>]
              [--retry-deadline <n>s|<n>ms]
   The token comes from --token-file, ZERODB_TOKEN, or the config entry for --tenant.
-  append, recent and fact print one JSON line. They exit 1 when nothing was written,
+  append, recent, search and fact print one JSON line. They exit 1 when nothing was written,
   3 when a write may or may not be saved.";
 
 /// Flags of every command that talks to a server as a tenant.
@@ -75,6 +76,9 @@ fn main() -> ExitCode {
             "mcp" => flags(rest, &CONNECT, &[]).map(zerodb::mcp::start),
             "append" => tool(rest, "memory_append", &["--content", "--role"], &[]),
             "recent" => tool(rest, "memory_recent", &["--n", "--max-bytes"], &[]),
+            "search" => {
+                tool(rest, "memory_search", &["--query", "--limit", "--before", "--max-bytes"], &[])
+            }
             "fact" => match rest.split_first().map(|(verb, rest)| (verb.as_str(), rest)) {
                 Some(("set", rest)) => {
                     tool(rest, "fact_set", &["--key", "--content"], &["--delete"])

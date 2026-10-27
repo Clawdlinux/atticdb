@@ -1,6 +1,6 @@
 //! HTTP routes: `POST /v1/append`, `GET /v1/window`, `GET /healthz`, and the fact routes
 //! `POST /v1/facts/put`, `POST /v1/facts/delete`, `GET /v1/facts/get`,
-//! `GET /v1/facts/history` and `GET /v1/facts/list`. Fact keys travel in bodies and query
+//! `GET /v1/facts/history`, `GET /v1/facts/list`, and `GET /v1/search`. Fact keys travel in bodies and query
 //! strings, never in paths. `GET /v1/stats` answers on the Unix socket only.
 
 use crate::auth::{self, Auth};
@@ -10,8 +10,8 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use zerodb_core::{
-    Appended, Engine, EngineError, ErrorKind, FactQuery, FactWritten, Health, NewFact, NewTurn,
-    Revision, Role, Scope, StoredFact, Turn, WindowQuery,
+    Appended, Engine, EngineError, ErrorKind, FactQuery, FactWritten, Health, Hit, NewFact,
+    NewTurn, Revision, Role, Scope, SearchQuery, StoredFact, Turn, WindowQuery,
 };
 use zerodb_tape::{Error, Outcome};
 
@@ -21,6 +21,9 @@ pub const MAX_WINDOW_TURNS: usize = 1000;
 pub const DEFAULT_WINDOW_BYTES: usize = 1 << 20;
 /// Largest `max_bytes` of a window.
 pub const MAX_WINDOW_BYTES: usize = 8 << 20;
+/// Records one search call visits at most. A full scan costs about 12 µs per record on
+/// macOS, so a call stays near 1 s. `next` resumes below them.
+pub const SEARCH_VISITS: usize = 100_000;
 /// Largest response body. JSON escapes a budgeted byte to at most 6 (`\u0000`). Fixed fields
 /// cost at most 151 bytes per item, so 4,096 items and a 6 KiB `next` fit in the 1 MiB rest.
 pub const MAX_RESPONSE_BYTES: u64 = 6 * MAX_WINDOW_BYTES as u64 + (1 << 20);
@@ -55,9 +58,11 @@ pub enum Route {
     FactHistory,
     /// `GET /v1/facts/list`.
     FactList,
+    /// `GET /v1/search`.
+    Search,
 }
 
-const ROUTES: [(&str, &str, Route); 8] = [
+const ROUTES: [(&str, &str, Route); 9] = [
     ("GET", "/healthz", Route::Health),
     ("POST", "/v1/append", Route::Append),
     ("GET", "/v1/window", Route::Window),
@@ -66,6 +71,7 @@ const ROUTES: [(&str, &str, Route); 8] = [
     ("GET", "/v1/facts/get", Route::FactGet),
     ("GET", "/v1/facts/history", Route::FactHistory),
     ("GET", "/v1/facts/list", Route::FactList),
+    ("GET", "/v1/search", Route::Search),
 ];
 
 /// Checks a head before its body is read: `Host` on TCP, then the token. Returns the
@@ -574,6 +580,47 @@ pub fn fact_read(engine: &Engine, tenant: &str, route: Route, target: &str) -> R
     answer.unwrap_or_else(|message| {
         Response::json(400, &json!({"error": "invalid_input", "message": message}))
     })
+}
+
+/// `GET /v1/search?q=&before=&limit=&max_bytes=`. Hits are newest first. Pass `next` as
+/// `before` for the next page.
+pub fn search(engine: &Engine, tenant: &str, target: &str) -> Response {
+    let query = (|| {
+        let mut params = params(target)?;
+        let query = params.remove("q").filter(|q| !q.trim().is_empty());
+        let query = query.ok_or("q is required")?;
+        let before = number(params.remove("before"), "before")?;
+        let limit = number(params.remove("limit"), "limit")?.map_or(10, |n| cap(n, 100)).max(1);
+        let max_bytes = number(params.remove("max_bytes"), "max_bytes")?;
+        let max_bytes = max_bytes.map_or(DEFAULT_WINDOW_BYTES, |n| cap(n, MAX_WINDOW_BYTES));
+        if !params.is_empty() || query.len() > 1024 {
+            return Err("unknown query parameter, or q over 1024 bytes".to_owned());
+        }
+        Ok(SearchQuery { query, before, limit, max_bytes, visits: SEARCH_VISITS })
+    })();
+    match query {
+        Ok(query) => send(engine.search(tenant, query), |page| {
+            let hits: Vec<_> = page.hits.into_iter().map(hit_json).collect();
+            json!({"hits": hits, "next": page.next})
+        }),
+        Err(message) => Response::json(400, &json!({"error": "invalid_input", "message": message})),
+    }
+}
+
+fn hit_json(hit: Hit) -> Value {
+    match hit {
+        Hit::Turn { agent, session, turn } => {
+            let mut out = turn_json(turn);
+            (out["kind"], out["agent"], out["session"]) =
+                (json!("turn"), json!(agent), json!(session));
+            out
+        }
+        Hit::Fact(fact) => {
+            let mut out = fact_json(fact);
+            out["kind"] = json!("fact");
+            out
+        }
+    }
 }
 
 fn parse_window(tenant: &str, target: &str) -> Result<(Scope, WindowQuery, usize), String> {

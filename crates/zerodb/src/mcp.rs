@@ -1,5 +1,6 @@
-//! `zerodb mcp`: an MCP server on stdio with five tools, `memory_append`,
-//! `memory_recent`, `fact_set`, `fact_get` and `fact_list`, backed by a zerodb server.
+//! `zerodb mcp`: an MCP server on stdio with six tools, `memory_append`,
+//! `memory_recent`, `fact_set`, `fact_get`, `fact_list` and `memory_search`, backed by a
+//! zerodb server.
 //!
 //! Newline-delimited JSON-RPC 2.0 on stdin and stdout, logs on stderr. One request at a
 //! time, so when stdin closes the call in progress has finished. The model never sees
@@ -70,12 +71,14 @@ pub fn start(flags: HashMap<String, String>) -> u8 {
 /// failed, 2 for a bad flag, or 3 when a write's outcome is unknown.
 pub fn command(tool: &str, mut flags: HashMap<String, String>) -> u8 {
     let mut args = json!({});
-    for name in ["content", "role", "key", "prefix", "after"] {
+    for name in ["content", "role", "key", "prefix", "after", "query"] {
         if let Some(value) = flags.remove(&format!("--{name}")) {
             args[name] = json!(value);
         }
     }
-    for (flag, name) in [("--n", "n"), ("--limit", "limit"), ("--max-bytes", "max_bytes")] {
+    let numbers =
+        [("--n", "n"), ("--limit", "limit"), ("--max-bytes", "max_bytes"), ("--before", "before")];
+    for (flag, name) in numbers {
         match flags.remove(flag).map(|text| text.parse::<u64>()) {
             Some(Ok(number)) => args[name] = json!(number),
             Some(Err(_)) => {
@@ -201,6 +204,7 @@ impl Adapter {
         Some(match name {
             "memory_append" => self.append(args),
             "memory_recent" => self.recent(args),
+            "memory_search" => self.search(args),
             "fact_set" => self.fact_set(args),
             "fact_get" => self.fact_get(args),
             "fact_list" => self.fact_list(args),
@@ -320,6 +324,24 @@ impl Adapter {
         let target =
             format!("/v1/window?agent={agent}&session={session}&last={n}&max_bytes={max_bytes}");
         self.read("memory_recent", &target, "turns", turns)
+    }
+
+    fn search(&mut self, args: &Value) -> Value {
+        let target = (|| {
+            let query = string(args, "query")?.ok_or("query is required")?;
+            let (limit, max_bytes) =
+                (number(args, "limit", 10)?.clamp(1, 50), number(args, "max_bytes", 64 << 10)?);
+            let mut target =
+                format!("/v1/search?q={}&limit={limit}&max_bytes={max_bytes}", encode(&query));
+            if !args["before"].is_null() {
+                target += &format!("&before={}", number(args, "before", 0)?);
+            }
+            Ok::<_, String>(target)
+        })();
+        match target {
+            Ok(target) => self.read("memory_search", &target, "hits", hits),
+            Err(message) => tool_error(message),
+        }
     }
 
     /// Sends a read until it is answered. The reply field `field` marks success.
@@ -468,6 +490,22 @@ fn tools() -> Value {
                 "required": ["prefix"],
             },
         },
+        {
+            "name": "memory_search",
+            "description": "Find past turns and facts by words, across every session and agent. \
+                Every word must appear, ignoring case, as part of a word or a whole one. Newest \
+                first. Use it when you don't know the fact key or the session.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10},
+                    "before": {"type": "integer", "minimum": 1},
+                    "max_bytes": {"type": "integer", "minimum": 0, "default": 65536},
+                },
+                "required": ["query"],
+            },
+        },
     ]})
 }
 
@@ -552,6 +590,32 @@ fn facts(reply: &Value) -> Value {
         text.push(format!("more: call again with after={next}"));
     }
     answer(text.join("\n"), json!({"facts": facts, "next": reply["next"]}))
+}
+
+fn hits(reply: &Value) -> Value {
+    let hits = reply["hits"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let field = |hit: &Value, name: &str| hit[name].as_str().unwrap_or_default().to_owned();
+    let mut text: Vec<String> = hits
+        .iter()
+        .map(|hit| match hit["kind"].as_str() {
+            Some("fact") => format!("[fact {}] {}", field(hit, "key"), field(hit, "content")),
+            _ => format!(
+                "[{}/{} #{} {}] {}",
+                field(hit, "agent"),
+                field(hit, "session"),
+                hit["seq"],
+                field(hit, "role"),
+                field(hit, "content")
+            ),
+        })
+        .collect();
+    if text.is_empty() {
+        text.push("no matches".into());
+    }
+    if let Some(next) = reply["next"].as_u64() {
+        text.push(format!("more: call again with before={next}"));
+    }
+    answer(text.join("\n"), json!({"hits": hits, "next": reply["next"]}))
 }
 
 fn failed(outcome: Outcome, detail: &str) -> Value {

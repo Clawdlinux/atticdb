@@ -55,6 +55,7 @@ Send `Authorization: Bearer <token>`. The token picks the tenant. On TCP the `Ho
 |---|---|---|
 | `POST /v1/append` | `{"agent", "session", "idem_key", "turns": [{"role", "content", "meta"?}]}` | `{"outcome": "committed", "deduplicated", "txn", "first_lsn", "last_lsn", "seqs"}` |
 | `GET /v1/window` | `?agent=&session=` plus `last=N`, or `since_seq=S` with an optional `limit=N`. Optional `max_bytes=B` | `{"turns": [{"seq", "lsn", "commit_time_ns", "role", "content", "meta"}], "truncated"}` |
+| `GET /v1/search` | `?q=` words, plus optional `limit=N` (default 10, cap 100), `before=LSN` and `max_bytes=B` | `{"hits": [{"kind": "turn", "agent", "session", "seq", "lsn", "commit_time_ns", "role", "content", "meta"} or {"kind": "fact", "key", "lsn", "commit_time_ns", "agent", "content", "meta"}], "next"}` |
 | `GET /healthz` | No token | `{"status": "ok" or "read_only", "instance"}`. 503 with `"poisoned"` |
 | `GET /v1/stats` | Unix socket only, no token | One flat object: `instance`, `health`, `durable_lsn`, tenant and fact counts, writer groups, checkpoint and lock timings, tape-index memory. Counters cover this open |
 | `GET /metrics` | Unix socket only, no token | The same numbers in Prometheus text format 0.0.4: counters as `zerodb_<name>_total`, gauges as `zerodb_<name>`, `_ns` maxima as `_seconds`, `zerodb_read_only`, the `zerodb_append_ack_seconds` histogram of committed appends (50 µs to 1 s), and the `zerodb_turn_content_bytes` histogram of new turns (64 B to 4 MiB). `turn_repeats` counts new turns whose content matches one of about 4,096 recent hashes, a lower bound on exact repeats |
@@ -65,6 +66,7 @@ Send `Authorization: Bearer <token>`. The token picks the tenant. On TCP the `Ho
 
 - `role` is `system`, `user`, `assistant` or `tool`. `meta` is a JSON object, at most 64 KiB. `idem_key` is required, 1 to 128 bytes.
 - `last` and `limit` are capped at 1,000. `max_bytes` defaults to 1 MiB and is capped at 8 MiB. Turns are never cut. `truncated` says the budget, not the query, ended the window.
+- Search walks records newest first. A turn matches when its content holds every word of `q`, ignoring case, as a substring. A fact matches on its key or content, and only its current value counts: a superseded value never shows. A fact changed while a call runs may be missing from that call, like any record written after it started. A call visits at most 100,000 records. Pass `next` as `before` to go on. `next` is null once the walk reaches the oldest record.
 - Content that is not UTF-8, only possible from direct Rust API writes, comes back with U+FFFD and `"lossy": true`.
 - `Transfer-Encoding` gets 501. `Expect: 100-continue` works. A bad `Host`, a bad token or an oversized body gets its error before the body is read, and the connection closes.
 
@@ -99,7 +101,7 @@ Branch on `outcome`, never on the status alone. One call is one `idem_key`, reus
 ## `zerodb mcp`
 
 Newline-delimited JSON-RPC 2.0 on stdin and stdout. Logs go to stderr. It exits 0 when stdin closes.
-Tools: `memory_append {content, role?, session?, meta?}` and `memory_recent {n?, session?, max_bytes?}`.
+Tools: `memory_append {content, role?, session?, meta?}`, `memory_recent {n?, session?, max_bytes?}`, the fact tools, and `memory_search {query, limit?, before?, max_bytes?}`.
 `--agent` defaults to `mcp` and `--session` to `default`. A tool may pass `session`. The tenant still comes from the token.
 The token comes from `--token-file`, `ZERODB_TOKEN`, or the config entry for `--tenant`. A token file must be 0600 and yours.
 

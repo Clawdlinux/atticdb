@@ -36,7 +36,7 @@ That appends over TCP and reads over the Unix socket. A repeated `idem_key` retu
 
 ## MCP
 
-`zerodb mcp` gives the model `memory_append`, `memory_recent`, `fact_set`, `fact_get` and `fact_list`. Use absolute paths. It starts the server if none is running.
+`zerodb mcp` gives the model `memory_append`, `memory_recent`, `fact_set`, `fact_get`, `fact_list` and `memory_search`. Search finds turns and current facts by words, across every session, newest first. Use absolute paths. It starts the server if none is running.
 The model can read and write any session in the tenant. Don't give it to a model you don't trust with the whole tenant.
 
 ```json
@@ -45,7 +45,7 @@ The model can read and write any session in the tenant. Don't give it to a model
 
 ## Shell verbs
 
-The same 5 tools run from a shell, with `zerodb mcp`'s connection flags. Each prints 1 JSON line. `fact set --delete` deletes.
+The same 6 tools run from a shell, with `zerodb mcp`'s connection flags. Each prints 1 JSON line. `fact set --delete` deletes.
 
 ```sh
 export ZERODB_TOKEN=$TOKEN
@@ -55,6 +55,7 @@ zerodb recent $Z --n 10                              # {"truncated":false,"turns
 zerodb fact set $Z --key repo/payments/retry-rule --content "Retry 3 times, then fail."
 zerodb fact get $Z --key repo/payments/retry-rule    # {"fact":{"agent":"planner","content":...}}
 zerodb fact list $Z --prefix repo/ --limit 50        # {"facts":[...],"next":null}
+zerodb search $Z --query "retry rule"                # {"hits":[...],"next":null}
 ```
 
 Each write picks 1 random `idem_key` and retries with it until `--retry-deadline` (default 30 s). Exit 0 means done. Exit 1 means nothing was written, or a read failed. Exit 2 is a usage error.
