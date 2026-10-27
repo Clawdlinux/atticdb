@@ -153,6 +153,7 @@ impl Shared {
                 Route::FactGet | Route::FactHistory | Route::FactList => {
                     api::fact_read(&self.engine, &tenant, route, &request.head.target)
                 }
+                Route::Search => api::search(&self.engine, &tenant, &request.head.target),
             };
             let _ = conn.respond(&response);
             self.log(&method, &path, &response, &tenant, started);

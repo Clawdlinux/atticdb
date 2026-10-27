@@ -8,6 +8,7 @@ use crate::session::{address, Key};
 use crate::state::State;
 use crate::turn::{decode, encode};
 use crate::{EngineError, EngineOptions, ErrorKind, NewTurn, Role};
+use std::collections::HashSet;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -150,6 +151,43 @@ pub enum WindowQuery {
         /// Maximum number of turns.
         limit: usize,
     },
+}
+/// A search: every word of `query` must appear, ignoring case, in a record.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SearchQuery {
+    /// Words separated by whitespace. Matched as substrings, so `deploy` finds `deployment`.
+    pub query: String,
+    /// Exclusive cursor: only records below this LSN. A previous page's `next`.
+    pub before: Option<u64>,
+    /// Maximum hits per page, at least 1.
+    pub limit: usize,
+    /// Content, meta and key bytes per page. The first hit is always returned.
+    pub max_bytes: usize,
+    /// Records to visit at most, which bounds the call's cost. `next` resumes below them.
+    pub visits: usize,
+}
+/// One search result.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Hit {
+    /// A turn and the session it belongs to.
+    Turn {
+        /// Agent identifier.
+        agent: String,
+        /// Session identifier.
+        session: String,
+        /// The turn.
+        turn: Turn,
+    },
+    /// A fact's current value.
+    Fact(StoredFact),
+}
+/// One page of hits, newest first.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SearchPage {
+    /// Matching turns and current facts, newest first.
+    pub hits: Vec<Hit>,
+    /// Pass as `before` to continue. None once the walk reached the oldest record.
+    pub next: Option<u64>,
 }
 /// A session window cut by a byte budget.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -886,6 +924,87 @@ impl Engine {
         Ok(FactPage { facts, next })
     }
 
+    /// Walks records newest first and returns turns and current facts that contain every
+    /// word of the query. Visits at most `query.visits` records; `next` resumes below them.
+    pub fn search(&self, tenant: &str, query: SearchQuery) -> Result<SearchPage> {
+        let words: Vec<String> = query.query.split_whitespace().map(str::to_lowercase).collect();
+        if query.limit == 0 || query.visits == 0 || words.is_empty() {
+            return Err(EngineError::rejected(ErrorKind::InvalidInput));
+        }
+        let (id, snapshot, current) = {
+            let Some((state, snapshot, id)) = self.fact_snapshot(tenant)? else {
+                return Ok(SearchPage::default());
+            };
+            let start = Bound::Included((id, String::new()));
+            let current: HashSet<u64> = (state.facts.map.range((start, Bound::Unbounded)))
+                .take_while(|((owner, _), _)| *owner == id)
+                .filter_map(|(_, revs)| visible(revs, snapshot).last().filter(|rev| !rev.deleted))
+                .map(|rev| rev.lsn)
+                .collect();
+            (id, snapshot, current)
+        };
+        let found = |fields: &[&[u8]]| {
+            let text: Vec<String> =
+                fields.iter().map(|field| String::from_utf8_lossy(field).to_lowercase()).collect();
+            words.iter().all(|word| text.iter().any(|field| field.contains(word.as_str())))
+        };
+        let top = query.before.map_or(snapshot, |before| before.saturating_sub(1).min(snapshot));
+        let (mut page, mut bytes) = (SearchPage::default(), 0usize);
+        for lsn in (1..=top).rev().take(query.visits) {
+            let Some(frame) = self.tape.read(lsn)? else { continue };
+            if frame.header.tenant_id != id {
+                continue;
+            }
+            let hit = match frame.header.kind {
+                Kind::Turn => {
+                    let corrupt = |_| EngineError::rejected(ErrorKind::CorruptIndex);
+                    let decoded = decode(&frame.payload).map_err(corrupt)?;
+                    if !found(&[&decoded.turn.content]) {
+                        continue;
+                    }
+                    let turn = Turn {
+                        lsn,
+                        seq: decoded.seq,
+                        commit_time_ns: frame.header.commit_time_ns,
+                        role: decoded.turn.role,
+                        content: decoded.turn.content,
+                        meta: decoded.turn.meta,
+                    };
+                    Hit::Turn { agent: decoded.agent_id, session: decoded.session_id, turn }
+                }
+                Kind::Fact if current.contains(&lsn) => {
+                    let corrupt = |_| EngineError::rejected(ErrorKind::CorruptIndex);
+                    let fact = crate::fact::decode(&frame.payload).map_err(corrupt)?;
+                    if !found(&[fact.key.as_bytes(), &fact.content]) {
+                        continue;
+                    }
+                    let rev = Rev { lsn, deleted: false };
+                    Hit::Fact(stored((rev, frame.header.commit_time_ns, fact)))
+                }
+                _ => continue,
+            };
+            let size = match &hit {
+                Hit::Turn { turn, .. } => turn.content.len() + turn.meta.len(),
+                Hit::Fact(fact) => fact.key.len() + fact.content.len() + fact.meta.len(),
+            };
+            bytes = bytes.saturating_add(size);
+            if bytes > query.max_bytes && !page.hits.is_empty() {
+                page.next = Some(lsn + 1);
+                return Ok(page);
+            }
+            page.hits.push(hit);
+            if page.hits.len() == query.limit {
+                break;
+            }
+        }
+        let low = top.saturating_sub(query.visits as u64);
+        page.next = match page.hits.len() == query.limit {
+            true => page.hits.last().map(Hit::lsn).filter(|&lsn| lsn > 1),
+            false => (low > 0).then_some(low + 1),
+        };
+        Ok(page)
+    }
+
     /// Takes the state lock, then the durable snapshot readers use, and resolves the tenant.
     fn fact_snapshot(&self, tenant: &str) -> Result<Option<(MutexGuard<'_, State>, u64, u32)>> {
         let state = lock(&self.state)?;
@@ -1035,6 +1154,16 @@ impl SimFact<'_> {
 
 /// A fact frame read for a revision, with its commit time.
 type ReadFact = (Rev, u64, Fact);
+
+impl Hit {
+    /// The record's LSN.
+    pub fn lsn(&self) -> u64 {
+        match self {
+            Self::Turn { turn, .. } => turn.lsn,
+            Self::Fact(fact) => fact.lsn,
+        }
+    }
+}
 
 fn stored((rev, commit_time_ns, fact): ReadFact) -> StoredFact {
     let Fact { key, agent, content, meta, .. } = fact;

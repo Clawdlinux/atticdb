@@ -18,6 +18,11 @@ fn contents(result: &Value) -> Vec<&str> {
 }
 
 /// Checks a committed `memory_append` result. Returns its `seq`.
+fn contents_of_hits(result: &Value) -> Vec<&str> {
+    let hits = result["structuredContent"]["hits"].as_array().unwrap();
+    hits.iter().map(|hit| hit["content"].as_str().unwrap()).collect()
+}
+
 fn appended(result: &Value, case: &str) -> u64 {
     receipt(result, "seq", &["committed", "deduplicated", "lsn", "seq"], case)
 }
@@ -151,7 +156,9 @@ fn tool_calls_over_stdio() {
     let tools = mcp.request("tools/list", json!({}))["result"]["tools"].clone();
     let names: Vec<&str> =
         tools.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["memory_append", "memory_recent", "fact_set", "fact_get", "fact_list"]);
+    let five = ["memory_append", "memory_recent", "fact_set", "fact_get", "fact_list"];
+    assert_eq!(names, [&five[..], &["memory_search"]].concat());
+    assert_eq!(tools[5]["inputSchema"]["required"], json!(["query"]));
     let (set, get, list) =
         (&tools[2]["inputSchema"], &tools[3]["inputSchema"], &tools[4]["inputSchema"]);
     assert_eq!((&set["required"], &get["required"]), (&json!(["key"]), &json!(["key"])));
@@ -177,6 +184,7 @@ fn tool_calls_over_stdio() {
 
     let one = mcp.call("memory_append", json!({"content": "one", "meta": {"k": 1}}));
     let first = appended(&one, "default session");
+    let first_turn = first;
     assert_eq!(one["structuredContent"]["deduplicated"], false);
     let two = mcp.call("memory_append", json!({"content": "two", "role": "user", "session": "s2"}));
     appended(&two, "session argument");
@@ -232,6 +240,19 @@ fn tool_calls_over_stdio() {
     );
     let page = mcp.call("fact_list", json!({"prefix": "repo/", "after": "repo/b"}));
     assert_eq!((text(&page), &page["structuredContent"]["next"]), ("repo/c: repo/c", &Value::Null));
+    // Search spans sessions and current facts, newest first; a deleted fact is gone.
+    let found = mcp.call("memory_search", json!({"query": "T"}));
+    let (found, seq) = (text(&found), first_turn + 1);
+    assert_eq!(found, format!("[s1 #{seq} assistant] three\n[s2 #1 user] two"));
+    assert_eq!(
+        text(&mcp.call("memory_search", json!({"query": "REPO/"}))),
+        "[fact repo/c] repo/c\n[fact repo/b] repo/b"
+    );
+    let page = mcp.call("memory_search", json!({"query": "t", "limit": 1}));
+    let before = page["structuredContent"]["next"].as_u64().unwrap();
+    assert!(text(&page).ends_with(&format!("more: call again with before={before}")));
+    let rest = mcp.call("memory_search", json!({"query": "t", "before": before}));
+    assert_eq!(contents_of_hits(&rest), ["two"]);
     fact_written(&mcp.call("fact_set", json!({"key": "e", "content": ""})), "empty");
     assert_eq!(text(&mcp.call("fact_get", json!({"key": "e"}))), "(empty)");
     // Keys count toward `max_bytes`, so a page of escaped NULs fits the response cap.
@@ -305,6 +326,7 @@ fn tool_calls_over_stdio() {
         (&["fact", "list", "--prefix", "sh/", "--limit", "5"], "/facts/0/key", json!("sh/k")),
         (&["fact", "set", "--key", "sh/k", "--delete"], "/committed", json!(true)),
         (&["fact", "get", "--key", "sh/k"], "", json!({"fact": null})),
+        (&["search", "--query", "HI", "--limit", "1"], "/hits/0/session", json!("sh")),
     ] {
         let (out, _) = cli(verb, 0);
         let printed: Value = serde_json::from_str(&out).unwrap();
