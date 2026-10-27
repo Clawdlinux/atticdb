@@ -358,6 +358,7 @@ impl Adapter {
             let reply = self.request(method, target, body, deadline);
             match judge(reply) {
                 Ok(result) => return result,
+                Err(result) if self.launch.stuck() => return result,
                 Err(result) if Instant::now() + backoff + MIN_ATTEMPT > deadline => return result,
                 Err(_) => std::thread::sleep(jitter(backoff)),
             }
