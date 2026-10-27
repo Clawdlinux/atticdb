@@ -8,7 +8,7 @@
 use crate::http::{self, Stream};
 use serde_json::Value;
 use std::fs::OpenOptions;
-use std::io::{self, ErrorKind, Read};
+use std::io::{self, ErrorKind, Read, Seek, SeekFrom};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::net::UnixStream;
@@ -63,6 +63,9 @@ pub struct Launch {
     next_spawn: Instant,
     backoff: Duration,
     refused: String,
+    /// Set when the last `connect` hit a start failure that a retry within the same
+    /// call cannot fix. The next call tries again.
+    stuck: bool,
 }
 
 impl Launch {
@@ -77,6 +80,7 @@ impl Launch {
             next_spawn: Instant::now(),
             backoff: FIRST_BACKOFF,
             refused,
+            stuck: false,
         }
     }
 
@@ -94,10 +98,21 @@ impl Launch {
             (None, Some(dir)) => dir.clone(),
             (None, None) => return Err(io::Error::other("no --url and no data directory")),
         };
+        self.stuck = false;
+        let log = dir.join("serve.log");
         loop {
             if let Some(Ok(Some(status))) = self.child.as_mut().map(Child::try_wait) {
                 eprintln!("zerodb mcp: started server exited: {status}");
                 self.child = None;
+                // 75 lost the lock race and 70 is a poison exit: both clear on a retry.
+                // Anything else is a start failure, such as a bad data directory.
+                if !matches!(status.code(), Some(75 | 70) | None) {
+                    self.stuck = true;
+                    let why = last_line(&log);
+                    return Err(io::Error::other(format!(
+                        "started server exited ({status}): {why}"
+                    )));
+                }
             }
             match discover(&dir, deadline) {
                 Ok(stream) => {
@@ -114,16 +129,20 @@ impl Launch {
             // server shutting down. So spawn again, with backoff, until one is trusted.
             if self.child.is_none() && Instant::now() >= self.next_spawn {
                 if let Some(config) = self.config.clone() {
-                    self.spawn(&dir, &config)?;
+                    self.spawn(&dir, &config).inspect_err(|_| self.stuck = true)?;
                 }
             }
             if Instant::now() >= deadline {
-                let log = dir.join("serve.log");
                 let message = format!("no trusted server in time, see {}", log.display());
                 return Err(io::Error::new(ErrorKind::TimedOut, message));
             }
             std::thread::sleep(POLL);
         }
+    }
+
+    /// Whether the last `connect` failed in a way a retry within the same call cannot fix.
+    pub fn stuck(&self) -> bool {
+        self.stuck
     }
 
     /// `zerodb serve` on the Unix socket only, outliving this adapter. The token stays
@@ -154,6 +173,20 @@ impl Launch {
         self.next_spawn = Instant::now() + self.backoff;
         self.backoff = (self.backoff * 2).min(MAX_BACKOFF);
         Ok(())
+    }
+}
+
+/// The last non-empty line in the log's final 4 KiB, or a pointer to the log.
+fn last_line(path: &Path) -> String {
+    let mut tail = Vec::new();
+    if let Ok(mut file) = crate::config::open_regular(OpenOptions::new().read(true), path) {
+        let len = file.metadata().map_or(0, |meta| meta.len());
+        let _ = file.seek(SeekFrom::Start(len.saturating_sub(4096)));
+        let _ = file.take(4096).read_to_end(&mut tail);
+    }
+    match String::from_utf8_lossy(&tail).lines().rev().find(|line| !line.trim().is_empty()) {
+        Some(line) => line.trim().to_owned(),
+        None => format!("see {}", path.display()),
     }
 }
 
