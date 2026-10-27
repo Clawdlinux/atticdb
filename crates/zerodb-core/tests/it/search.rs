@@ -1,6 +1,8 @@
 use crate::support::{open, options, scope};
 use std::sync::Arc;
-use zerodb_core::{Engine, ErrorKind, Hit, NewFact, NewTurn, Role, Scope, SearchQuery};
+use zerodb_core::{
+    Engine, EngineOptions, ErrorKind, Hit, NewFact, NewTurn, Role, Scope, SearchQuery,
+};
 use zerodb_tape::SimDisk;
 
 fn say(engine: &Engine, scope: &Scope, text: &str) {
@@ -76,4 +78,23 @@ fn search_finds_current_records_newest_first() {
         let kind = engine.search("tenant", bad).unwrap_err().kind;
         assert!(matches!(kind, ErrorKind::InvalidInput));
     }
+}
+
+#[test]
+fn search_never_shows_a_value_replaced_mid_walk() {
+    let engine = open(Arc::new(SimDisk::new(61)), EngineOptions { fact_history: 1, ..options() });
+    set(&engine, "k", "zebra v1");
+    for i in 0..4 {
+        say(&engine, &scope("s"), &format!("zebra turn {i}"));
+    }
+    let first = engine.search("tenant", SearchQuery { visits: 2, ..q("zebra") }).unwrap();
+    // 3 separate publications replace k, pruning the revision the first page saw as current.
+    for v in 2..5 {
+        set(&engine, "k", &format!("zebra v{v}"));
+    }
+    let rest = SearchQuery { visits: 2, before: first.next, ..q("zebra") };
+    let mut seen: Vec<String> = search(&engine, "tenant", rest);
+    seen.sort();
+    assert_eq!(seen, ["s:zebra turn 0", "s:zebra turn 1"], "v1 is gone, v4 came after the walk");
+    assert_eq!(search(&engine, "tenant", q("zebra"))[0], "k=zebra v4", "a new search sees v4");
 }

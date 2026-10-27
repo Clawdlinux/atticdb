@@ -934,11 +934,14 @@ impl Engine {
             Some((_, snapshot, id)) => (id, snapshot),
             None => return Ok(SearchPage::default()),
         };
-        // Only a key's newest revision at the snapshot counts, unless it is a tombstone.
+        // A fact counts only while it is its key's newest durable revision and not deleted,
+        // checked when the walk reaches it. So a superseded value never shows. The index keeps
+        // old revisions only for readers at the previous durable LSN, so a key changed during
+        // the walk may be missing from this call, like any record written after it started.
         let current = |key: &str, lsn: u64| -> Result<bool> {
             let state = lock(&self.state)?;
             let revs = state.facts.map.get(&(id, key.to_owned()));
-            let newest = revs.and_then(|revs| visible(revs, snapshot).last());
+            let newest = revs.and_then(|revs| visible(revs, self.tape.durable_lsn()).last());
             Ok(newest.is_some_and(|rev| rev.lsn == lsn && !rev.deleted))
         };
         let found = |fields: &[&[u8]]| {
