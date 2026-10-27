@@ -372,7 +372,8 @@ fn tool_calls_over_stdio() {
         assert_eq!(mcp.close().0.code(), Some(0));
     }
     // A start that cannot succeed fails at once with its reason, not at the deadline.
-    std::fs::DirBuilder::new().mode(0o755).create(dir.0.join("open")).unwrap();
+    std::fs::DirBuilder::new().mode(0o700).create(dir.0.join("open")).unwrap();
+    chmod(&dir.0.join("open"), 0o755);
     std::fs::DirBuilder::new().mode(0o700).create(dir.0.join("bad")).unwrap();
     std::fs::write(dir.0.join("bad/SUPERBLOCK"), [0xAB; 24]).unwrap();
     for (data, reason) in [("open", "must be a directory owned by"), ("bad", "exited")] {
