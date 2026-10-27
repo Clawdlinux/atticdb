@@ -21,9 +21,9 @@ pub const MAX_WINDOW_TURNS: usize = 1000;
 pub const DEFAULT_WINDOW_BYTES: usize = 1 << 20;
 /// Largest `max_bytes` of a window.
 pub const MAX_WINDOW_BYTES: usize = 8 << 20;
-/// Records one search call visits at most. A full scan costs about 12 µs per record on
-/// macOS, so a call stays near 1 s. `next` resumes below them.
-pub const SEARCH_VISITS: usize = 100_000;
+/// Records one search call visits at most. A walk costs about 1.3 µs per record on macOS,
+/// so a call stays near 1.3 s. `next` resumes below them.
+pub const SEARCH_VISITS: usize = 1_000_000;
 /// Largest response body. JSON escapes a budgeted byte to at most 6 (`\u0000`). Fixed fields
 /// cost at most 151 bytes per item, so 4,096 items and a 6 KiB `next` fit in the 1 MiB rest.
 pub const MAX_RESPONSE_BYTES: u64 = 6 * MAX_WINDOW_BYTES as u64 + (1 << 20);

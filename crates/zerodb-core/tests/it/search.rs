@@ -113,3 +113,18 @@ fn search_matches_plurals_of_words() {
         assert_eq!(search(&engine, "tenant", q(words)), expected, "{words}");
     }
 }
+
+#[test]
+fn reads_keep_order_across_segments() {
+    let engine = open(Arc::new(SimDisk::new(63)), options());
+    let pad = "x".repeat(1024);
+    let texts: Vec<String> = (0..300).map(|i| format!("zebra {i} {pad}")).collect();
+    texts.iter().for_each(|text| say(&engine, &scope("s"), text));
+    let newest_first: Vec<String> = texts.iter().rev().map(|text| format!("s:{text}")).collect();
+    let all = SearchQuery { limit: 1000, max_bytes: 8 << 20, ..q("zebra") };
+    assert_eq!(search(&engine, "tenant", all), newest_first, "300 KiB spans 5 segments of 64 KiB");
+    let window = engine.window(&scope("s"), zerodb_core::WindowQuery::Last(300)).unwrap();
+    let read: Vec<String> =
+        window.into_iter().map(|t| String::from_utf8(t.content).unwrap()).collect();
+    assert_eq!(read, texts);
+}

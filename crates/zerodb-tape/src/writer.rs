@@ -341,14 +341,26 @@ impl ReadState {
     }
 
     fn read(&self, lsn: u64) -> Result<Option<Frame>> {
+        self.read_with(&mut None, lsn)
+    }
+
+    /// Reads through `open`, the last segment handle this caller used, and keeps the one it
+    /// read from there. Durable bytes never change while the tape is open, and a handle stays
+    /// valid across rename, so a held handle reads what a fresh open would.
+    fn read_with(&self, open: &mut Option<(u64, Handle)>, lsn: u64) -> Result<Option<Frame>> {
         if lsn > self.durable_lsn.load(Ordering::Acquire) {
             return Ok(None);
         }
         let Some((segment, offset)) = lock(&self.index)?.get(lsn)? else {
             return Ok(None);
         };
-        let file =
-            Handle::open(self.io.clone(), &self.path.join(format!("seg-{segment:016}.zdb")))?;
+        let (_, file) = match open.take() {
+            Some(held) if held.0 == segment => open.insert(held),
+            _ => {
+                let path = self.path.join(format!("seg-{segment:016}.zdb"));
+                open.insert((segment, Handle::open(self.io.clone(), &path)?))
+            }
+        };
         let mut header = [0; HEADER_LEN];
         read_exact(self.io.as_ref(), file.id, offset, &mut header)?;
         let len = u32::from_le_bytes([header[4], header[5], header[6], header[7]]) as usize;
@@ -374,6 +386,25 @@ impl ReadState {
             ));
         }
         Ok(Some(frame))
+    }
+}
+
+/// Reads durable records, keeping the last segment it read open. See [`Tape::reader`].
+pub struct Reader<'a> {
+    reads: &'a ReadState,
+    open: Option<(u64, Handle)>,
+}
+
+impl std::fmt::Debug for Reader<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Reader").field("segment", &self.open.as_ref().map(|(s, _)| s)).finish()
+    }
+}
+
+impl Reader<'_> {
+    /// Reads a complete durable record, or returns `None` for an unpublished LSN.
+    pub fn read(&mut self, lsn: u64) -> Result<Option<Frame>> {
+        self.reads.read_with(&mut self.open, lsn)
     }
 }
 
@@ -1257,6 +1288,12 @@ impl<S: StateMachine> Tape<S> {
     /// Reads a complete durable record, or returns `None` for an unpublished LSN.
     pub fn read(&self, lsn: u64) -> Result<Option<Frame>> {
         self.reads.read(lsn)
+    }
+
+    /// A reader for many reads in a row. It keeps the last segment it read open, so a walk
+    /// through 1 segment opens it once. Use it within 1 call; don't keep it.
+    pub fn reader(&self) -> Reader<'_> {
+        Reader { reads: &self.reads, open: None }
     }
 
     /// Scans durable application records at or above `from_lsn`, in LSN order.

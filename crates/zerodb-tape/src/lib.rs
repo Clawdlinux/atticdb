@@ -43,6 +43,6 @@ pub use recovery::RecoveryReport;
 pub use simdisk::SimDisk;
 pub use state_machine::{CommittedRecord, NoopStateMachine, Prepare, StateMachine};
 pub use writer::{
-    Committed, Durability, Outcome, PreparedBatch, RecordInput, StageTimes, Tape, TapeOptions,
-    WriteError, WriteResult,
+    Committed, Durability, Outcome, PreparedBatch, Reader, RecordInput, StageTimes, Tape,
+    TapeOptions, WriteError, WriteResult,
 };
