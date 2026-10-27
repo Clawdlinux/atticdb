@@ -786,6 +786,7 @@ impl Engine {
         let mut bytes = 0usize;
         let mut truncated = false;
         let mut current: Option<(usize, Arc<Vec<u64>>)> = None;
+        let mut reader = self.tape.reader();
         for seq in seqs {
             let (page, offset) = address(seq);
             if current.as_ref().is_none_or(|(loaded, _)| *loaded != page) {
@@ -803,10 +804,8 @@ impl Engine {
                 }
             }
             self.reads.fetch_add(1, Ordering::Relaxed);
-            let frame = self
-                .tape
-                .read(lsn)?
-                .ok_or_else(|| EngineError::rejected(ErrorKind::CorruptIndex))?;
+            let frame =
+                reader.read(lsn)?.ok_or_else(|| EngineError::rejected(ErrorKind::CorruptIndex))?;
             let decoded = decode(&frame.payload)
                 .map_err(|_| EngineError::rejected(ErrorKind::CorruptIndex))?;
             if frame.header.kind != Kind::Turn
@@ -956,9 +955,9 @@ impl Engine {
                 .all(|(word, stem)| has(word) || stem.as_deref().is_some_and(has))
         };
         let top = query.before.map_or(snapshot, |before| before.saturating_sub(1).min(snapshot));
-        let (mut page, mut bytes) = (SearchPage::default(), 0usize);
+        let (mut page, mut bytes, mut reader) = (SearchPage::default(), 0usize, self.tape.reader());
         for lsn in (1..=top).rev().take(query.visits) {
-            let Some(frame) = self.tape.read(lsn)? else { continue };
+            let Some(frame) = reader.read(lsn)? else { continue };
             if frame.header.tenant_id != id {
                 continue;
             }
@@ -1027,10 +1026,10 @@ impl Engine {
         max_bytes: usize,
     ) -> Result<(Vec<ReadFact>, bool)> {
         let corrupt = || EngineError::rejected(ErrorKind::CorruptIndex);
-        let (mut read, mut bytes) = (Vec::new(), 0usize);
+        let (mut read, mut bytes, mut reader) = (Vec::new(), 0usize, self.tape.reader());
         for (key, rev) in revs {
             self.fact_reads.fetch_add(1, Ordering::Relaxed);
-            let frame = self.tape.read(rev.lsn)?.ok_or_else(corrupt)?;
+            let frame = reader.read(rev.lsn)?.ok_or_else(corrupt)?;
             let fact = crate::fact::decode(&frame.payload).map_err(|_| corrupt())?;
             if frame.header.kind != Kind::Fact
                 || frame.header.tenant_id != tenant
