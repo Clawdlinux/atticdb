@@ -8,7 +8,6 @@ use crate::session::{address, Key};
 use crate::state::State;
 use crate::turn::{decode, encode};
 use crate::{EngineError, EngineOptions, ErrorKind, NewTurn, Role};
-use std::collections::HashSet;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -931,17 +930,16 @@ impl Engine {
         if query.limit == 0 || query.visits == 0 || words.is_empty() {
             return Err(EngineError::rejected(ErrorKind::InvalidInput));
         }
-        let (id, snapshot, current) = {
-            let Some((state, snapshot, id)) = self.fact_snapshot(tenant)? else {
-                return Ok(SearchPage::default());
-            };
-            let start = Bound::Included((id, String::new()));
-            let current: HashSet<u64> = (state.facts.map.range((start, Bound::Unbounded)))
-                .take_while(|((owner, _), _)| *owner == id)
-                .filter_map(|(_, revs)| visible(revs, snapshot).last().filter(|rev| !rev.deleted))
-                .map(|rev| rev.lsn)
-                .collect();
-            (id, snapshot, current)
+        let (id, snapshot) = match self.fact_snapshot(tenant)? {
+            Some((_, snapshot, id)) => (id, snapshot),
+            None => return Ok(SearchPage::default()),
+        };
+        // Only a key's newest revision at the snapshot counts, unless it is a tombstone.
+        let current = |key: &str, lsn: u64| -> Result<bool> {
+            let state = lock(&self.state)?;
+            let revs = state.facts.map.get(&(id, key.to_owned()));
+            let newest = revs.and_then(|revs| visible(revs, snapshot).last());
+            Ok(newest.is_some_and(|rev| rev.lsn == lsn && !rev.deleted))
         };
         let found = |fields: &[&[u8]]| {
             let text: Vec<String> =
@@ -972,10 +970,10 @@ impl Engine {
                     };
                     Hit::Turn { agent: decoded.agent_id, session: decoded.session_id, turn }
                 }
-                Kind::Fact if current.contains(&lsn) => {
+                Kind::Fact => {
                     let corrupt = |_| EngineError::rejected(ErrorKind::CorruptIndex);
                     let fact = crate::fact::decode(&frame.payload).map_err(corrupt)?;
-                    if !found(&[fact.key.as_bytes(), &fact.content]) {
+                    if !found(&[fact.key.as_bytes(), &fact.content]) || !current(&fact.key, lsn)? {
                         continue;
                     }
                     let rev = Rev { lsn, deleted: false };

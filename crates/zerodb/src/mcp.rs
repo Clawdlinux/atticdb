@@ -600,7 +600,8 @@ fn hits(reply: &Value) -> Value {
         .map(|hit| match hit["kind"].as_str() {
             Some("fact") => format!("[fact {}] {}", field(hit, "key"), field(hit, "content")),
             _ => format!(
-                "[{} #{} {}] {}",
+                "[{}/{} #{} {}] {}",
+                field(hit, "agent"),
                 field(hit, "session"),
                 hit["seq"],
                 field(hit, "role"),

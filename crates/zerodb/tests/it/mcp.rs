@@ -243,7 +243,7 @@ fn tool_calls_over_stdio() {
     // Search spans sessions and current facts, newest first; a deleted fact is gone.
     let found = mcp.call("memory_search", json!({"query": "T"}));
     let (found, seq) = (text(&found), first_turn + 1);
-    assert_eq!(found, format!("[s1 #{seq} assistant] three\n[s2 #1 user] two"));
+    assert_eq!(found, format!("[ag/s1 #{seq} assistant] three\n[ag/s2 #1 user] two"));
     assert_eq!(
         text(&mcp.call("memory_search", json!({"query": "REPO/"}))),
         "[fact repo/c] repo/c\n[fact repo/b] repo/b"
@@ -253,6 +253,15 @@ fn tool_calls_over_stdio() {
     assert!(text(&page).ends_with(&format!("more: call again with before={before}")));
     let rest = mcp.call("memory_search", json!({"query": "t", "before": before}));
     assert_eq!(contents_of_hits(&rest), ["two"]);
+    // 2 agents share session s1, so each heading names its agent.
+    let other = support::append_body("s1", "z1", "zebra one");
+    assert_eq!(running.vias[1].a("POST", "/v1/append", Some(&other)).0, 200);
+    appended(&mcp.call("memory_append", json!({"content": "zebra two"})), "zebra");
+    let (found, seq) = (mcp.call("memory_search", json!({"query": "zebra"})), first_turn + 2);
+    assert_eq!(
+        text(&found),
+        format!("[ag/s1 #{seq} assistant] zebra two\n[a/s1 #1 user] zebra one")
+    );
     fact_written(&mcp.call("fact_set", json!({"key": "e", "content": ""})), "empty");
     assert_eq!(text(&mcp.call("fact_get", json!({"key": "e"}))), "(empty)");
     // Keys count toward `max_bytes`, so a page of escaped NULs fits the response cap.
