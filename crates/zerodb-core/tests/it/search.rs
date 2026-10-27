@@ -98,3 +98,18 @@ fn search_never_shows_a_value_replaced_mid_walk() {
     assert_eq!(seen, ["s:zebra turn 0", "s:zebra turn 1"], "v1 is gone, v4 came after the walk");
     assert_eq!(search(&engine, "tenant", q("zebra"))[0], "k=zebra v4", "a new search sees v4");
 }
+
+#[test]
+fn search_matches_plurals_of_words() {
+    let engine = open(Arc::new(SimDisk::new(62)), options());
+    for text in ["one Key", "two retries", "a policy"] {
+        say(&engine, &scope("s"), text);
+    }
+    for (words, expected) in [
+        ("keys", &["s:one Key"][..]),
+        ("retries", &["s:two retries"]),
+        ("policies", &["s:a policy"]),
+    ] {
+        assert_eq!(search(&engine, "tenant", q(words)), expected, "{words}");
+    }
+}
