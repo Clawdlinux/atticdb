@@ -155,6 +155,7 @@ pub enum WindowQuery {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SearchQuery {
     /// Words separated by whitespace. Matched as substrings, so `deploy` finds `deployment`.
+    /// A plural word also matches its singular, so `keys` finds `key`.
     pub query: String,
     /// Exclusive cursor: only records below this LSN. A previous page's `next`.
     pub before: Option<u64>,
@@ -927,6 +928,7 @@ impl Engine {
     /// word of the query. Visits at most `query.visits` records; `next` resumes below them.
     pub fn search(&self, tenant: &str, query: SearchQuery) -> Result<SearchPage> {
         let words: Vec<String> = query.query.split_whitespace().map(str::to_lowercase).collect();
+        let stems: Vec<Option<String>> = words.iter().map(|word| singular(word)).collect();
         if query.limit == 0 || query.visits == 0 || words.is_empty() {
             return Err(EngineError::rejected(ErrorKind::InvalidInput));
         }
@@ -947,7 +949,11 @@ impl Engine {
         let found = |fields: &[&[u8]]| {
             let text: Vec<String> =
                 fields.iter().map(|field| String::from_utf8_lossy(field).to_lowercase()).collect();
-            words.iter().all(|word| text.iter().any(|field| field.contains(word.as_str())))
+            let has = |word: &str| text.iter().any(|field| field.contains(word));
+            words
+                .iter()
+                .zip(&stems)
+                .all(|(word, stem)| has(word) || stem.as_deref().is_some_and(has))
         };
         let top = query.before.map_or(snapshot, |before| before.saturating_sub(1).min(snapshot));
         let (mut page, mut bytes) = (SearchPage::default(), 0usize);
@@ -1163,6 +1169,23 @@ impl Hit {
             Self::Turn { turn, .. } => turn.lsn,
             Self::Fact(fact) => fact.lsn,
         }
+    }
+}
+
+/// Harman's S-stemmer, as Lucene's `EnglishMinimalStemmer` implements it: plurals only.
+/// `keys` gives `key` and `policies` gives `policy`. None when the word is unchanged.
+fn singular(word: &str) -> Option<String> {
+    let (b, n) = (word.as_bytes(), word.len());
+    if n < 3 || b[n - 1] != b's' {
+        return None;
+    }
+    match b[n - 2] {
+        b'u' | b's' => None,
+        b'e' if n > 3 && b[n - 3] == b'i' && !matches!(b[n - 4], b'a' | b'e') => {
+            Some(format!("{}y", &word[..n - 3]))
+        }
+        b'e' if matches!(b[n - 3], b'i' | b'a' | b'o' | b'e') => None,
+        _ => Some(word[..n - 1].to_owned()),
     }
 }
 
