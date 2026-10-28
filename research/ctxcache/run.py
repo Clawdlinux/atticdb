@@ -1,0 +1,178 @@
+"""Build traces, replay every policy at every budget, and write aggregate results.
+
+    python3 -m research.ctxcache --dataset swe-agent --sample 1000
+    python3 research/ctxcache/run.py --dataset copilot
+
+README.md lists the flags and the trace format.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+import time
+from collections import Counter
+
+if __package__ in (None, ""):  # run as a script: make `research` importable
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from research.ctxcache import copilot, hf, openhands, report, swe_agent, trace  # noqa: E402
+from research.ctxcache.stats import measure, reuse_distances  # noqa: E402
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.dirname(os.path.dirname(HERE))
+DEFAULT_BUDGETS = "1k,2k,4k,8k,16k,32k,64k,128k"
+TITLES = {
+    "swe-agent": "SWE-agent trajectories (nebius)",
+    "openhands": "OpenHands trajectories (nebius, SWE-rebench)",
+    "copilot": "Our Copilot CLI sessions",
+    "trace": "Trace file",
+}
+
+
+def parse(argv=None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(prog="python3 -m research.ctxcache", description=__doc__.split("\n\n")[0])
+    p.add_argument("--dataset", required=True, choices=sorted(TITLES))
+    p.add_argument("--sample", type=int, default=1000, help="trajectories to sample (public sets)")
+    p.add_argument("--block", type=int, default=1, help="consecutive rows per stratum (public sets)")
+    p.add_argument("--seed", type=int, default=87, help="sample and bootstrap seed")
+    p.add_argument("--budgets", default=DEFAULT_BUDGETS, help="comma list of token budgets, 1k = 1,000")
+    p.add_argument("--out", default=os.path.join(HERE, "results"), help="directory for the CSV and markdown")
+    p.add_argument("--cache-dir", default=hf.CACHE, help="where downloaded rows are cached")
+    p.add_argument("--sleep", type=float, default=1.6, help="seconds between API calls")
+    p.add_argument("--max-requests", type=int, default=2500)
+    p.add_argument("--deadline", type=float, default=5400.0, help="seconds of fetching before giving up")
+    p.add_argument("--offline", action="store_true", help="use cached rows only")
+    p.add_argument("--input", help="trace JSONL for --dataset trace")
+    p.add_argument("--copilot-root", default=copilot.ROOT)
+    p.add_argument("--export-trace", help="also write the hashed trace here (outside the repo)")
+    p.add_argument("--bootstrap", type=int, default=1000, help="cluster bootstrap resamples, 0 for none")
+    p.add_argument("--drop-refs", action="store_true", help="keep re-reads only, to test the reference proxy")
+    a = p.parse_args(argv)
+    if a.dataset == "trace" and not a.input:
+        p.error("--dataset trace needs --input")
+    if a.export_trace and _inside(a.export_trace, REPO):
+        p.error("--export-trace must point outside the repo, so traces are never committed")
+    return a
+
+
+def budgets(text: str) -> list[int]:
+    out = []
+    for part in text.split(","):
+        part = part.strip().lower()
+        out.append(int(float(part[:-1]) * 1000) if part.endswith("k") else int(part))
+    return sorted(set(out))
+
+
+def _inside(path: str, root: str) -> bool:
+    path, root = os.path.realpath(path), os.path.realpath(root)
+    return os.path.commonpath([path, root]) == root
+
+
+def source(a: argparse.Namespace, skipped: Counter):
+    """Yields (trajectory id, cluster, accesses, info)."""
+    if a.dataset in ("swe-agent", "openhands"):
+        module = swe_agent if a.dataset == "swe-agent" else openhands
+        fetcher = hf.Fetcher(a.dataset, a.cache_dir, a.sleep, max_requests=a.max_requests,
+                             deadline=a.deadline, offline=a.offline)
+        counts: Counter = Counter()
+        for offset, row in hf.sampled_rows(a.dataset, a.sample, a.seed, fetcher, counts, a.block):
+            traj = f"{a.dataset}:{offset}"
+            acc, info = module.trajectory(row, traj)
+            yield traj, info.get("cluster") or traj, acc, info
+        skipped["truncated"] += counts["truncated"]
+    elif a.dataset == "copilot":
+        for traj, cluster, acc, info in copilot.traces(a.copilot_root):
+            if acc is None:
+                skipped["fork"] += 1
+                continue
+            yield traj, cluster, acc, info
+    else:
+        with open(a.input) as f:
+            for traj, acc in trace.load(f).items():
+                yield traj, traj, acc, {}
+
+
+def describe(a: argparse.Namespace, s: dict) -> dict:
+    cmd = f"python3 -m research.ctxcache --dataset {a.dataset}" + (" --drop-refs" if a.drop_refs else "")
+    if a.dataset in ("swe-agent", "openhands"):
+        cmd += f" --sample {a.sample} --seed {a.seed}" + (f" --block {a.block}" if a.block > 1 else "")
+    if a.budgets != DEFAULT_BUDGETS:
+        cmd += f" --budgets {a.budgets}"
+    if a.dataset == "trace":
+        cmd += f" --input {os.path.basename(a.input)}"
+    title = TITLES[a.dataset] + (", re-reads only" if a.drop_refs else "")
+    meta = {"title": title, "command": cmd, "source": [], "extra_rows": [], "scaffold": []}
+    if a.dataset in hf.DATASETS:
+        ds = hf.DATASETS[a.dataset]
+        meta["source"] = [
+            f"Data: [{ds.repo}]({ds.url}). {ds.cite}. Only aggregate counts appear here.",
+            f"Sample: {a.sample} rows. The {ds.rows:,} rows are cut into {max(1, a.sample // a.block)} equal "
+            f"strata, and each gives {'1 random row' if a.block == 1 else f'1 random run of {a.block} rows'}. "
+            f"Seed {a.seed}.",
+        ]
+    elif a.dataset == "copilot":
+        meta["source"] = ["Data: our own Copilot CLI session logs, main agent only. Aggregates only."]
+    else:
+        meta["source"] = [f"Data: {os.path.basename(a.input)}."]
+    held = lambda x: report.num(x)  # noqa: E731
+    meta["scaffold"] = [
+        f"- Keep the last 5 tool outputs, the shape of SWE-agent's `LastNObservations`: "
+        f"{report.pct(s['last5_token_miss'])}% of re-accessed tokens missed "
+        f"({report.pct(s['last5_miss'])}% of re-accesses), {held(s['last5_mean_held'])} tokens held on average.",
+        f"- Keep everything: no misses, {held(s['all_mean_held'])} tokens held on average.",
+    ]
+    if a.dataset == "openhands":
+        meta["extra_rows"].append(f"Rows with signs of condensed history | {s['condensed']}")
+        meta["scaffold"].append("- OpenHands keeps everything unless its condenser runs. "
+                                f"Rows with signs of condensation: {s['condensed']}.")
+    if a.dataset == "copilot":
+        meta["extra_rows"].append(f"Compactions | {s['compactions']}")
+        meta["scaffold"].append(
+            f"- Observed: {s['reread_same_window']} re-reads in the same compaction window "
+            f"({held(s['reread_same_window_tokens'])} tokens), {s['reread_after_compaction']} after a "
+            f"compaction ({held(s['reread_after_compaction_tokens'])} tokens)."
+        )
+    return meta
+
+
+def main(argv=None) -> int:
+    a = parse(argv)
+    sizes = budgets(a.budgets)
+    skipped: Counter = Counter()
+    recs, distances = [], []
+    export = open(a.export_trace, "w") if a.export_trace else None
+    start = time.time()
+    try:
+        for traj, cluster, acc, info in source(a, skipped):
+            trace.check(acc)
+            if export:
+                trace.dump(traj, acc, export)
+            if a.drop_refs:
+                acc = [x for x in acc if not x.ref]
+            rec = measure(acc, info, sizes)
+            rec["cluster"] = cluster
+            recs.append(rec)
+            distances += reuse_distances(acc)
+            if len(recs) % 100 == 0:
+                print(f"{len(recs)} trajectories, {time.time() - start:.0f} s", file=sys.stderr)
+    finally:
+        if export:
+            export.close()
+    if not recs:
+        print("no trajectories", file=sys.stderr)
+        return 1
+    summary = report.summarize(recs, distances, skipped)
+    rows = report.table(recs, sizes, a.bootstrap, a.seed)
+    name = a.dataset + ("-rereads" if a.drop_refs else "")
+    paths = report.write(a.out, name, rows, summary, describe(a, summary))
+    print(f"{a.dataset}: {summary['trajectories']} trajectories, {summary['accesses']:,} accesses, "
+          f"skipped {dict(skipped) or 0}, {time.time() - start:.0f} s")
+    for path in paths:
+        print(f"wrote {os.path.relpath(path)}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
