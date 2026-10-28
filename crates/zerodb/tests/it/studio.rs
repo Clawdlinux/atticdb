@@ -3,7 +3,7 @@ use crate::support::{
 };
 use serde_json::{json, Value};
 use std::cell::RefCell;
-use std::ffi::OsString;
+use std::ffi::OsStr;
 use std::io::Read;
 use std::net::{SocketAddr, TcpStream};
 use std::os::unix::fs::PermissionsExt;
@@ -69,8 +69,8 @@ struct Studio {
 
 impl Studio {
     /// Runs `zerodb studio` and waits for its link.
-    fn start(home: &Path, args: &[&str], path: Option<OsString>) -> Self {
-        let mut process = Process::start(&mut command(home, args, path));
+    fn start(home: &Path, args: &[&str], env: &[(&str, &OsStr)]) -> Self {
+        let mut process = Process::start(&mut command(home, args, env));
         let deadline = Instant::now() + Duration::from_secs(60);
         let link = loop {
             let out = process.stdout();
@@ -104,14 +104,14 @@ impl Studio {
     }
 }
 
-/// `zerodb studio` with `HOME` set to `home`, and `PATH` set to `path` when given.
-fn command(home: &Path, args: &[&str], path: Option<OsString>) -> Command {
+/// `zerodb studio` with `HOME` set to `home`, and `env` added.
+fn command(home: &Path, args: &[&str], env: &[(&str, &OsStr)]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_zerodb"));
     command.arg("studio").args(args).current_dir(home).env("HOME", home).stdin(Stdio::null());
     for var in ["COPILOT_HOME", "XDG_DATA_HOME", "ZERODB_TOKEN"] {
         command.env_remove(var);
     }
-    command.envs(path.map(|path| ("PATH", path)));
+    command.envs(env.iter().copied());
     command
 }
 
@@ -134,7 +134,7 @@ fn studio_forwards_reads_and_refuses_the_rest() {
     let tenants = serde_json::from_slice::<Value>(&std::fs::read(&config).unwrap()).unwrap();
     let token = tenants["tenants"][0]["token"].as_str().unwrap().to_owned();
     let store = Via::Unix(data.join(zerodb::listen::SOCKET_NAME));
-    let studio = Studio::start(&home, &["--no-open"], None);
+    let studio = Studio::start(&home, &["--no-open"], &[]);
 
     // The page needs no secret. It holds no data.
     let pages = [
@@ -230,15 +230,16 @@ fn studio_forwards_reads_and_refuses_the_rest() {
     // On the home's data directory: the same store, but no block, as the hook reads the home.
     let (config, data_flag) = (config.to_str().unwrap(), data.to_str().unwrap());
     let flags = ["--no-open", "--config", config, "--tenant", "me", "--data-dir", data_flag];
-    let by_dir = Studio::start(&home, &flags, None);
+    let by_dir = Studio::start(&home, &flags, &[]);
     let reply = by_dir.get("/api/block?repo=app", true);
     assert_eq!((reply.status, reply.json()), (404, json!({"error": "not_home"})));
     let info = json!({"version": version, "tenant": "me", "store": "data_dir", "home": null});
     assert_eq!(by_dir.get("/api/info", true).json(), info);
     assert_eq!(by_dir.get("/api/v1/sessions", true).json(), sessions);
 
-    // On a --url with a token file, in a new home. A fake opener records its arguments and
-    // fails. The studio says so and keeps serving.
+    // On a --url with a token file, in a new home. ZERODB_TOKEN holds the token too, but the
+    // file wins. A fake opener records the token it got and its arguments, then fails. The
+    // studio says so and keeps serving.
     let (other, bin) = (dir.0.join("u"), dir.0.join("bin"));
     std::fs::create_dir_all(&other).unwrap();
     std::fs::create_dir_all(&bin).unwrap();
@@ -247,21 +248,28 @@ fn studio_forwards_reads_and_refuses_the_rest() {
     let tmp = args.with_extension("tmp");
     let (tmp, args_text) = (tmp.display(), args.display());
     let script = format!(
-        "#!/bin/sh\nprintf '%s\\n' $# \"$@\" > '{tmp}' && mv '{tmp}' '{args_text}'\nexit 1\n"
+        "#!/bin/sh\nprintf '%s\\n' \"${{ZERODB_TOKEN-unset}}\" $# \"$@\" > '{tmp}' \
+         && mv '{tmp}' '{args_text}'\nexit 1\n"
     );
     std::fs::write(&opener, script).unwrap();
     chmod(&opener, 0o700);
     let path = std::env::var_os("PATH").unwrap_or_default();
-    let path = std::env::join_paths([bin.clone()].into_iter().chain(std::env::split_paths(&path)));
+    let path = [bin.clone()].into_iter().chain(std::env::split_paths(&path));
+    let path = std::env::join_paths(path).unwrap();
     let link = dir.0.join("l.sock");
     std::os::unix::fs::symlink(data.join(zerodb::listen::SOCKET_NAME), &link).unwrap();
     let url = format!("unix://{}", link.display());
     let token_file = private_file(&dir, "token", &token);
-    let by_url = Studio::start(&other, &["--url", &url, "--token-file", &token_file], path.ok());
+    let env = [("PATH", path.as_os_str()), ("ZERODB_TOKEN", OsStr::new(&token))];
+    let by_url = Studio::start(&other, &["--url", &url, "--token-file", &token_file], &env);
     wait_for("the opener", || args.exists());
     wait_for("the note", || by_url.process.stderr().contains("cannot open a browser"));
     let page = data_dir(&other).parent().unwrap().join("studio.html");
-    assert_eq!(std::fs::read_to_string(&args).unwrap(), format!("1\n{}\n", page.display()));
+    let opened = format!("unset\n1\n{}\n", page.display());
+    assert_eq!(std::fs::read_to_string(&args).unwrap(), opened, "no token, only the file");
+    // A Snap browser can fail on the hidden folder while xdg-open exits 0.
+    let hint = "zerodb studio: if the browser shows an error, open the link above.";
+    assert_eq!(by_url.process.stderr().contains(hint), cfg!(target_os = "linux"), "the hint");
     let html = std::fs::read_to_string(&page).unwrap();
     let link_text = format!("http://127.0.0.1:{}/#k={}", by_url.port, by_url.secret);
     assert!(html.contains(&format!("content=\"0;url={link_text}\"")), "{html}");
@@ -283,7 +291,7 @@ fn studio_forwards_reads_and_refuses_the_rest() {
     // With no store at start, it exits 1 and prints no link.
     let missing = format!("unix://{}", dir.0.join("missing.sock").display());
     let flags = ["--no-open", "--url", &missing, "--token-file", &token_file];
-    let mut process = Process::start(&mut command(&other, &flags, None));
+    let mut process = Process::start(&mut command(&other, &flags, &[]));
     let (status, output) = process.wait();
     assert_eq!(status.code(), Some(1), "{output}");
     let refused = process.stderr().starts_with("zerodb: cannot reach the store: ");

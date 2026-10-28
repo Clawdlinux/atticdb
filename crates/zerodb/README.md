@@ -241,6 +241,8 @@ Unless `--no-open`, it writes a redirect page with that link to `studio.html` in
 It creates that directory if missing, with no config. Then it runs `open` on macOS or `xdg-open` on Linux on that file.
 So the secret is never in a process argument, where `ps` shows it to other users. Jupyter does the same.
 If no browser opens, it prints a note and keeps serving. It serves until it is killed.
+Snap browsers, the default on Ubuntu, cannot read hidden folders such as `~/.local/share`. They show an error while `xdg-open` exits 0.
+So on Linux it always prints a hint to open the link by hand. `--no-open` skips the browser.
 
 The page reads the secret from the link's fragment, which a browser never sends to a server.
 It sends the secret back in the `X-Zerodb-Studio` header. The tenant token stays in the studio, and no response carries it.

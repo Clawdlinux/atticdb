@@ -118,6 +118,8 @@ zerodb studio --no-open   # only prints the link
 
 It takes `zerodb mcp`'s connection flags. With none, it uses the home and starts its server if needed.
 Each run listens on `127.0.0.1` on a new random port, and prints a link with a secret. Stop it with Ctrl-C.
+Snap browsers, the default on Ubuntu, cannot open the page from the hidden home folder, so they show an error.
+Then open the printed link by hand, or pass `--no-open`.
 The page needs that secret to read anything. The tenant token never leaves the studio process.
 It never writes to the store. Details: [zerodb studio](crates/zerodb/README.md#zerodb-studio).
 

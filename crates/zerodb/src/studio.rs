@@ -110,7 +110,7 @@ fn run(mut flags: HashMap<String, String>, open: bool) -> Result<Infallible, Str
     let secret = crate::random_hex(16);
     let secret = secret.map_err(|error| format!("cannot read /dev/urandom: {error}"))?;
     let url = format!("http://127.0.0.1:{port}/#k={secret}");
-    // One write, so a reader never sees half of a line.
+    // 1 write, so a reader never sees half of a line.
     let mut stdout = io::stdout();
     let lines = format!("zerodb studio: {url}\nPress Ctrl-C to stop.\n");
     let _ = stdout.write_all(lines.as_bytes()).and_then(|()| stdout.flush());
@@ -176,6 +176,8 @@ fn open_page(url: &str) -> Result<(), String> {
     let program = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
     let mut child = Command::new(program)
         .arg(&page)
+        // The browser it starts gets this environment, and a token there may be live.
+        .env_remove(crate::mcp::TOKEN_ENV)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -183,6 +185,12 @@ fn open_page(url: &str) -> Result<(), String> {
         .process_group(0)
         .spawn()
         .map_err(|error| format!("{program}: {error}"))?;
+    // Snap browsers, Ubuntu's default, cannot read hidden folders such as ~/.local/share.
+    // xdg-open still exits 0, so only the browser shows the error.
+    if cfg!(target_os = "linux") {
+        let hint = "zerodb studio: if the browser shows an error, open the link above.";
+        let _ = writeln!(io::stderr(), "{hint}");
+    }
     let reap = move || match child.wait() {
         Ok(status) if !status.success() => not_opened(&format!("{program} exited: {status}")),
         _ => {}
