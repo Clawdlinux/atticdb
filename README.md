@@ -76,7 +76,9 @@ Turns saved before this with no `--session` stay in session `default`. Read them
 That is `--agent copilot` for the `connect copilot` entry. A bare `zerodb mcp` saved them as agent `mcp`, so pass no `--agent`. Or find them with `search`.
 After upgrading zerodb, run `connect` again. It reports `updated` when the entry changed.
 An old entry with connection flags, such as `--data-dir`, keeps its own store. `connect` refuses to switch it without `--force`.
-To keep that memory, stop that store's server. Then move its data files into the home's empty `data/`. This works only if its tenant is `me`.
+To keep that memory, quit VS Code and Copilot CLI, then stop that store's server.
+Move its data files into the home's empty `data/`. This works only if its tenant is `me`.
+Then, or to switch without that memory, run `zerodb connect <name> --force`.
 
 It also adds a Copilot hook file, `~/.copilot/hooks/zerodb.json`. VS Code's Copilot chat and Copilot CLI both read it.
 At the start of each chat, the hook adds a small memory block.

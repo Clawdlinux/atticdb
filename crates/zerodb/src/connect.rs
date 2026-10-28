@@ -197,7 +197,7 @@ fn refuse_flags(name: &str, file: &Path, current: &Value, data: &Path) -> Result
     for flag in CONNECTION {
         if let Some(at) = args.iter().position(|arg| *arg == flag) {
             used.push(match (flag, args.get(at + 1)) {
-                ("--data-dir", Some(dir)) => format!("--data-dir {dir}"),
+                ("--data-dir" | "--tenant", Some(value)) => format!("{flag} {value}"),
                 _ => flag.to_owned(),
             });
         }
@@ -209,11 +209,11 @@ fn refuse_flags(name: &str, file: &Path, current: &Value, data: &Path) -> Result
     Err(format!(
         "{file}: the zerodb entry for {name} uses {used}. {file} was not changed.\n\
          Its memory stays in that store and would not follow a switch to the home.\n\
-         To keep it, stop that store's server. Then move the files in its data directory \
-         into {data}.\n\
+         To keep it, quit VS Code and Copilot CLI, then stop that store's server.\n\
+         Move the files in its data directory into {data}.\n\
          Do that only while {data} is empty, and only if the old config's tenant is \"me\".\n\
          Or keep using the old entry.\n\
-         To switch anyway: zerodb connect {name} --force"
+         Then, or to switch without it: zerodb connect {name} --force"
     ))
 }
 

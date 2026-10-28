@@ -87,7 +87,7 @@ fn connect_edits_only_the_zerodb_entry() {
         let (code, out) = run(&["connect", name]);
         assert_eq!(code, Some(1), "{case}: {out}");
         let force = format!("zerodb connect {name} --force");
-        assert!(out.contains("uses --data-dir /old, --tenant.") && out.contains(&force), "{out}");
+        assert!(out.contains("uses --data-dir /old, --tenant t.") && out.contains(&force), "{out}");
         assert_eq!(files(&parent), before, "{case}: flagged entry unchanged");
         let (code, out) = run(&["connect", name, "--force"]);
         assert_eq!(code, Some(0), "{case}: {out}");

@@ -593,7 +593,8 @@ impl Adapter {
 /// Sent in `initialize`. Clients may add it to the system prompt.
 const INSTRUCTIONS: &str = "zerodb is this user's durable memory. Memory may arrive in a \
     \"zerodb memory\" block at chat start. Use it, and call memory_search or fact_list only \
-    for more. <repo> is the name of the folder that holds .git, as in the block. Save rules \
+    for more. If no block arrived, call fact_list with prefix user/ and repo/<repo>/ first. \
+    <repo> is the name of the folder that holds .git, as in the block. Save rules \
     and decisions with fact_set under user/<topic> or repo/<repo>/<area>/<topic>. After a \
     meaningful task, save 1 short memory_append summary without a session argument. Never \
     store secrets.";

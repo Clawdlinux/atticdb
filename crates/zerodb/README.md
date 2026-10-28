@@ -161,8 +161,9 @@ Copilot's agent host and Copilot CLI start the adapter in the working folder, wh
 Run `connect` again to update an older entry.
 An old entry with `--url`, `--data-dir`, `--config`, `--token-file` or `--tenant` keeps its own store.
 `connect` refuses to replace it and exits 1. The config file is not changed. `--force` replaces it anyway.
-The message says how to keep that memory. Stop that store's server, then move its data files into the home's empty `data/`.
-This works only if the old config's tenant is `me`, as in the home. Or keep using the old entry.
+The message says how to keep that memory. Quit VS Code and Copilot CLI, then stop that store's server.
+Move its data files into the home's empty `data/`. This works only if the old config's tenant is `me`, as in the home.
+Then, or to switch without that memory, run `connect` with `--force`. Or keep using the old entry.
 The entry holds this machine's binary path. Settings Sync copies `mcp.json` to your other devices, where that path may not exist.
 Turn off MCP Servers in Settings Sync: Configure, or install zerodb at the same path on each device.
 A missing file is created at mode 0600. Missing directories are created at mode 0700. An entry that already matches writes nothing.
