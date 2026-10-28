@@ -218,4 +218,4 @@ The block depends only on the repo and memory, so the prompt prefix stays the sa
 
 ## Tests
 
-Socket paths, staging included, must fit `sun_path` (104 bytes on macOS). Tests put them under `/tmp/zerodb-test-<uid>`, so the checkout path does not matter. Tests create it with mode 0700 and fail if it is not private to you. `ZERODB_TEST_DIR` is optional. Set it to a short directory to use another root.
+Socket paths, staging included, must fit `sun_path` (104 bytes on macOS). Tests put them under `/tmp/zerodb-test-<uid>` on macOS and `/var/tmp/zerodb-test-<uid>` on Linux. The checkout path does not matter. Tests create that directory with mode 0700 and fail if it is not private to you. `ZERODB_TEST_DIR` is optional. It may be any short directory, and tests resolve it to its real path.

@@ -55,16 +55,21 @@ pub const TOKEN_A: &str = "token-a-0123456789abcdefghijklmnopqrstuv";
 pub const TOKEN_B: &str = "token-b-0123456789abcdefghijklmnopqrstuv";
 
 /// A private directory with a short path. Socket paths, staging included, must fit
-/// `sun_path` (104 bytes on macOS). By default it lives under `/tmp/zerodb-test-<uid>`, so
-/// the checkout path does not matter. `ZERODB_TEST_DIR` is optional and overrides the root.
+/// `sun_path` (104 bytes on macOS). By default it lives under `/tmp/zerodb-test-<uid>` on
+/// macOS and `/var/tmp/zerodb-test-<uid>` on Linux, whatever the checkout path.
+/// `ZERODB_TEST_DIR` is optional and may be any short directory. It is resolved to its real
+/// path.
 #[derive(Debug)]
 pub struct Dir(pub PathBuf);
 
 impl Dir {
     pub fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let root = std::env::var_os("ZERODB_TEST_DIR").map_or_else(tmp_root, PathBuf::from);
-        std::fs::create_dir_all(&root).unwrap();
+        // Its real path, since servers build absolute paths from `getcwd` and tests compare them.
+        let root = std::env::var_os("ZERODB_TEST_DIR").map_or_else(tmp_root, |root| {
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::canonicalize(root).unwrap()
+        });
         let name = format!("{:x}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
         let path = root.join(name);
         std::fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
@@ -84,14 +89,18 @@ impl Drop for Dir {
     }
 }
 
-/// `/tmp/zerodb-test-<uid>`, made with mode 0700 if missing. The path is real, since macOS
-/// links `/tmp` to `/private/tmp` and tests compare socket paths. Anyone can add names to
-/// `/tmp`, so the root must be this user's private directory and not a symlink.
+/// `/tmp/zerodb-test-<uid>` on macOS and `/var/tmp/zerodb-test-<uid>` on Linux, made with mode
+/// 0700 if missing. Linux's `/tmp` may be RAM, and each test server can pin up to 128 MiB there.
+/// macOS keeps `/tmp`: its `/var/tmp` resolves 4 bytes longer, too long for a 10-digit uid.
+/// The path is real, since macOS links `/tmp` to `/private/tmp` and tests compare socket paths.
+/// Anyone can add names there, so the root must be this user's private directory and not a
+/// symlink.
 fn tmp_root() -> PathBuf {
     let uid = rustix::process::geteuid().as_raw();
-    let root = std::fs::canonicalize("/tmp").unwrap().join(format!("zerodb-test-{uid}"));
+    let base = if cfg!(target_os = "macos") { "/tmp" } else { "/var/tmp" };
+    let root = std::fs::canonicalize(base).unwrap().join(format!("zerodb-test-{uid}"));
     // `owned_dir` makes the root if missing, but its check follows symlinks. So check the
-    // entry itself. Once it is ours, the sticky bit on /tmp stops others from replacing it.
+    // entry itself. Once it is ours, the sticky bit on the base stops others from replacing it.
     let made = zerodb::listen::owned_dir(&root, 0o077);
     let error = match std::fs::symlink_metadata(&root) {
         Ok(meta) if meta.is_dir() && meta.uid() == uid && meta.mode() & 0o077 == 0 => return root,
