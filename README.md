@@ -58,7 +58,9 @@ zerodb disconnect vscode    # removes only zerodb's entry
 
 It edits the user MCP config and keeps a backup of the old file. The entry holds no token.
 Notes go to a session named after the repo, so each repo keeps its own.
-Turns saved before this with no `--session` stay in session `default`. Read them with `--session default`, or find them with `search`.
+VS Code reports its workspace folders, and the first one is the repo.
+Copilot's agent host and Copilot CLI start zerodb in the working folder, which is the repo.
+Turns saved before this with no `--session` stay in session `default`. Read them with `--agent copilot --session default` (the agent that saved them), or find them with `search`.
 After upgrading zerodb, run `connect` again. It reports `updated` when the entry changed.
 
 It also adds a Copilot hook file, `~/.copilot/hooks/zerodb.json`. VS Code's Copilot chat and Copilot CLI both read it.

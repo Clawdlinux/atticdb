@@ -30,6 +30,13 @@ const MAX_LINE: u64 = 8 << 20;
 struct Adapter {
     agent: String,
     session: String,
+    /// Whether `--session` set the session, so client roots don't change it.
+    session_flag: bool,
+    /// Whether the client reports roots, which then name the default session.
+    roots: bool,
+    /// Requests sent to the client, and the id of the latest `roots/list` not yet answered.
+    asked: u64,
+    roots_pending: Option<String>,
     token: Token,
     retry_deadline: Duration,
     launch: Launch,
@@ -182,13 +189,19 @@ impl Adapter {
         if url.is_none() && data_dir.is_none() {
             return Err("set --url, or --data-dir or a config with data_dir".into());
         }
+        let session = flags.remove("--session");
         Ok(Self {
             agent: flags.remove("--agent").unwrap_or_else(|| "mcp".into()),
-            // The repo of the current directory, as the session-start hook reads it.
-            session: flags.remove("--session").unwrap_or_else(|| {
+            session_flag: session.is_some(),
+            // The repo of the current directory, as the session-start hook reads it, until
+            // the client's roots name one.
+            session: session.unwrap_or_else(|| {
                 let repo = std::env::current_dir().ok().and_then(|dir| crate::home::repo(&dir));
                 repo.unwrap_or_else(|| "default".into())
             }),
+            roots: false,
+            asked: 0,
+            roots_pending: None,
             token,
             retry_deadline,
             launch: Launch::new(url, data_dir, config_path),
@@ -211,12 +224,23 @@ impl Adapter {
         }
         let Some(method) = message.get("method").and_then(Value::as_str) else {
             let response = message.get("result").or(message.get("error")).is_some();
+            let answers = id.as_ref().and_then(Value::as_str);
+            if response && answers.is_some() && answers == self.roots_pending.as_deref() {
+                self.roots_pending = None;
+                if let Some(repo) = root_repo(&message["result"]) {
+                    self.session = repo;
+                }
+            }
             return (!response)
                 .then(|| rpc_error(id.unwrap_or_default(), -32600, "invalid request"));
         };
         // Notifications, `notifications/cancelled` included: a cancelled write may still
-        // commit, which is safe because it carries a key.
-        let id = id?;
+        // commit, which is safe because it carries a key. Roots are asked for once the
+        // client is ready, and again when they change.
+        let Some(id) = id else {
+            let roots = ["notifications/initialized", "notifications/roots/list_changed"];
+            return (self.roots && roots.contains(&method)).then(|| self.ask_roots());
+        };
         let params = &message["params"];
         let result = match method {
             "ping" => json!({}),
@@ -224,6 +248,7 @@ impl Adapter {
                 let asked = params["protocolVersion"].as_str().unwrap_or_default();
                 let version = VERSIONS.into_iter().find(|v| *v == asked).unwrap_or(VERSIONS[0]);
                 self.initialized = true;
+                self.roots = !self.session_flag && !params["capabilities"]["roots"].is_null();
                 json!({
                     "protocolVersion": version,
                     "capabilities": {"tools": {}},
@@ -245,6 +270,14 @@ impl Adapter {
             _ => return Some(rpc_error(id, -32601, "method not found")),
         };
         Some(json!({"jsonrpc": "2.0", "id": id, "result": result}))
+    }
+
+    /// A `roots/list` request to the client. Only the answer to the latest one counts.
+    fn ask_roots(&mut self) -> Value {
+        self.asked += 1;
+        let id = format!("zerodb-roots-{}", self.asked);
+        self.roots_pending = Some(id.clone());
+        json!({"jsonrpc": "2.0", "id": id, "method": "roots/list"})
     }
 
     fn call(&mut self, name: &str, args: &Value) -> Option<Value> {
@@ -747,6 +780,29 @@ fn tool_error(text: String) -> Value {
 
 fn rpc_error(id: Value, code: i64, message: &str) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
+}
+
+/// The repo of the first `file://` root in a `roots/list` result, by [`crate::home::repo`].
+fn root_repo(result: &Value) -> Option<String> {
+    let mut uris = result["roots"].as_array()?.iter().filter_map(|root| root["uri"].as_str());
+    let path = uris.find_map(|uri| uri.strip_prefix("file://"))?;
+    // `file://localhost/path` names the same path as `file:///path`.
+    let path = path.strip_prefix("localhost").unwrap_or(path);
+    let (mut bytes, mut decoded) = (path.bytes(), Vec::new());
+    while let Some(byte) = bytes.next() {
+        decoded.push(match byte {
+            b'%' => {
+                let hex = [bytes.next()?, bytes.next()?];
+                if !hex.iter().all(u8::is_ascii_hexdigit) {
+                    return None;
+                }
+                u8::from_str_radix(std::str::from_utf8(&hex).ok()?, 16).ok()?
+            }
+            byte => byte,
+        });
+    }
+    let path = PathBuf::from(String::from_utf8(decoded).ok()?);
+    path.is_absolute().then(|| crate::home::repo(&path)).flatten()
 }
 
 /// Percent-encodes a query value.

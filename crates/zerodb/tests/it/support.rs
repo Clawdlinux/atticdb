@@ -304,6 +304,8 @@ pub struct Mcp {
     pub process: Process,
     stdin: Option<ChildStdin>,
     read: usize,
+    /// Requests the adapter sent, such as `roots/list`.
+    asked: usize,
     pub next_id: u64,
 }
 
@@ -318,7 +320,7 @@ impl Mcp {
         }
         let mut process = Process::start(&mut command);
         let stdin = process.child.stdin.take();
-        Self { process, stdin, read: 0, next_id: 0 }
+        Self { process, stdin, read: 0, asked: 0, next_id: 0 }
     }
 
     pub fn send(&mut self, message: &Value) {
@@ -334,15 +336,28 @@ impl Mcp {
 
     /// The next line on stdout: the response to the oldest unanswered request.
     pub fn response(&mut self) -> Value {
+        let response = self.line();
+        if !response["id"].is_null() {
+            let id = (self.read - self.asked) as u64;
+            assert_eq!(response["id"], id, "responses come in order: {response}");
+        }
+        response
+    }
+
+    /// The next line on stdout, which must be a request from the adapter.
+    pub fn asked(&mut self) -> Value {
+        self.asked += 1;
+        let request = self.line();
+        assert!(request["method"].is_string(), "a request: {request}");
+        request
+    }
+
+    fn line(&mut self) -> Value {
         let deadline = Instant::now() + Duration::from_secs(60);
         loop {
             if let Some(line) = self.process.stdout().lines().nth(self.read) {
                 self.read += 1;
-                let response: Value = serde_json::from_str(line).unwrap();
-                if !response["id"].is_null() {
-                    assert_eq!(response["id"], self.read as u64, "responses come in order");
-                }
-                return response;
+                return serde_json::from_str(line).unwrap();
             }
             assert!(Instant::now() < deadline, "no response: {}", self.process.stderr());
             std::thread::sleep(Duration::from_millis(5));

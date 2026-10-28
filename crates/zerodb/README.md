@@ -106,11 +106,15 @@ Tools: `memory_append {content, role?, session?, meta?}`, `memory_recent {n?, se
 Read tools carry `readOnlyHint: true`, so VS Code runs them without asking. `initialize` returns short `instructions` on when to call each tool. Copilot CLI adds a server's instructions to the system prompt only for allowlisted servers, or with `--allow-all-mcp-server-instructions`.
 Integers beyond ±(2^53 - 1), such as `commit_time_ns`, come back as strings in tool results, because JavaScript clients can't hold them (I-JSON, RFC 7493). The shell verbs print them as numbers.
 `--agent` defaults to `mcp`. A tool may pass `session`. The tenant still comes from the token.
-`--session` defaults to the repo name of the current directory, as for the shell verbs too.
-That is the name of the first directory up with a `.git` entry, else of the current directory.
+`--session` defaults to a repo name, by the same rule as the session-start hook.
+When the client reports roots, as VS Code does, it is the repo of the first `file://` root.
+Until then, or without roots, it is the repo of the current directory. The shell verbs use that too.
+The repo is the name of the first directory up with a `.git` entry, else of that directory.
 It is `default` when that cannot be read or has no UTF-8 name.
+The adapter sends `roots/list` after `notifications/initialized`, and again on `notifications/roots/list_changed`.
+With `--session`, it asks for no roots.
 2 repos with the same folder name share a session and `repo/<name>/` facts.
-Turns saved before this with no `--session` stay in session `default`. Read them with `--session default`, or find them with `search`.
+Turns saved before this with no `--session` stay in session `default`. Read them with `--agent copilot --session default` (the agent that saved them), or find them with `search`.
 The token comes from `--token-file`, `ZERODB_TOKEN`, or the config entry for `--tenant`. A token file must be 0600 and yours.
 
 With none of `--url`, `--data-dir`, `--config`, `--token-file`, `--tenant` or `ZERODB_TOKEN`, it uses a per-user home.
@@ -141,16 +145,14 @@ It also writes the session-start hook file, described below.
 
 | Name | File | Entry |
 |---|---|---|
-| `vscode` | macOS: `~/Library/Application Support/Code/User/mcp.json`. Linux: `$XDG_CONFIG_HOME/Code/User/mcp.json` when set and absolute, else `~/.config/Code/User/mcp.json` | `servers.zerodb`: `zerodb mcp --agent vscode-copilot`, with `cwd` set to `${workspaceFolder}` |
+| `vscode` | macOS: `~/Library/Application Support/Code/User/mcp.json`. Linux: `$XDG_CONFIG_HOME/Code/User/mcp.json` when set and absolute, else `~/.config/Code/User/mcp.json` | `servers.zerodb`: `zerodb mcp --agent vscode-copilot` |
 | `copilot` | `$COPILOT_HOME/mcp-config.json` when set and absolute, else `~/.copilot/mcp-config.json` | `mcpServers.zerodb`: `zerodb mcp --agent copilot`, all tools |
 
 The entry runs the absolute path of the binary you ran. It holds no token and no config path.
-Neither entry passes `--session`, so the session is the repo of the adapter's working folder.
-That is the session the hook reads.
-Copilot's agent host and Copilot CLI start the adapter in the working folder.
-VS Code's own launcher starts it in the home folder, so the `vscode` entry sets `cwd` to `${workspaceFolder}`.
-VS Code resolves that variable. With no folder open it can't, so the `vscode` entry can't start.
-That was already so with the old `${workspaceFolderBasename}` argument. Run `connect` again to update an older entry.
+Neither entry passes `--session`, so the session is the repo the client works in. That is the session the hook reads.
+VS Code reports its workspace folders as roots, and the first one names the session.
+Copilot's agent host and Copilot CLI start the adapter in the working folder, which names it.
+Run `connect` again to update an older entry.
 The entry holds this machine's binary path. Settings Sync copies `mcp.json` to your other devices, where that path may not exist.
 Turn off MCP Servers in Settings Sync: Configure, or install zerodb at the same path on each device.
 A missing file is created. Missing directories are created at mode 0700. An entry that already matches writes nothing.

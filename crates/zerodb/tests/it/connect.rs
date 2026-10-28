@@ -16,8 +16,8 @@ fn connect_edits_only_the_zerodb_entry() {
     } else {
         (".config", ".local/share")
     };
-    let vscode = json!({"type": "stdio", "command": exe,
-        "args": ["mcp", "--agent", "vscode-copilot"], "cwd": "${workspaceFolder}"});
+    let vscode =
+        json!({"type": "stdio", "command": exe, "args": ["mcp", "--agent", "vscode-copilot"]});
     let copilot = json!({"type": "local", "command": exe,
         "args": ["mcp", "--agent", "copilot"], "tools": ["*"]});
     let vscode_file = format!("{config}/Code/User/mcp.json");

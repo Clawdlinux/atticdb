@@ -327,6 +327,26 @@ fn tool_calls_over_stdio() {
     assert_eq!(mcp.response(), json!({"jsonrpc": "2.0", "id": null, "error": refused}));
     assert_eq!(mcp.request("ping", json!({}))["result"], json!({}), "ping after a long line");
 
+    // A client with roots and no `--session`: the session is the repo of the first file root.
+    let app = dir.0.join("my 100% app");
+    std::fs::create_dir_all(app.join(".git")).unwrap();
+    let mut rooted = Mcp::start(&dir.0, &args, None);
+    let capabilities = json!({"roots": {"listChanged": true}});
+    let params = json!({"protocolVersion": "2025-11-25", "capabilities": capabilities});
+    assert!(rooted.request("initialize", params)["result"].is_object());
+    rooted.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+    let ask = rooted.asked();
+    assert_eq!((&ask["method"], &ask["id"]), (&json!("roots/list"), &json!("zerodb-roots-1")));
+    let src = app.join("src").to_str().unwrap().replace('%', "%25").replace(' ', "%20");
+    let roots = json!([{"uri": "https://example.com/"}, {"uri": format!("file://{src}")}]);
+    rooted.send(&json!({"jsonrpc": "2.0", "id": ask["id"], "result": {"roots": roots}}));
+    appended(&rooted.call("memory_append", json!({"content": "rooted"})), "rooted");
+    let window = rooted.call("memory_recent", json!({"session": "my 100% app"}));
+    assert_eq!(contents(&window), ["rooted"], "session from the root");
+    rooted.send(&json!({"jsonrpc": "2.0", "method": "notifications/roots/list_changed"}));
+    assert_eq!(rooted.asked()["id"], "zerodb-roots-2", "asked again on a change");
+    assert_eq!(rooted.close().0.code(), Some(0));
+
     let (status, _) = mcp.close();
     assert_eq!(status.code(), Some(0), "stdin closed: {}", mcp.process.stderr());
     let stdout = mcp.process.stdout();
@@ -341,6 +361,7 @@ fn tool_calls_over_stdio() {
     let hidden = !hex_run && !stdout.contains("idem") && !stdout.contains("if_lsn");
     assert!(hidden, "no retry key or condition reaches the model: {stdout}");
     assert!(!stdout.contains(TOKEN_A) && !stdout.contains("tenant"), "{stdout}");
+    assert!(!stdout.contains("roots/list"), "no roots asked of a client without them");
 
     // The same tools from a shell: one JSON line on stdout, the reason on stderr.
     let cli = |verb: &[&str], code: i32| {
