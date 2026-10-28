@@ -1,6 +1,7 @@
 //! `zerodb hook session-start`: the Copilot `sessionStart` hook. It prints a small block of
 //! the user's rules, this repo's facts and its recent notes, which the harness adds to the
-//! chat. The block's text depends only on memory, so the prompt prefix stays the same.
+//! chat. The block's text depends only on the repo name and memory, so the prompt prefix
+//! stays the same.
 
 use crate::connect::Harness;
 use crate::mcp::HomeReader;

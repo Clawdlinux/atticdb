@@ -59,6 +59,7 @@ pub struct Launch {
     url: Option<Url>,
     data_dir: Option<PathBuf>,
     config: Option<PathBuf>,
+    unix_socket: Option<PathBuf>,
     child: Option<Child>,
     next_spawn: Instant,
     backoff: Duration,
@@ -69,14 +70,21 @@ pub struct Launch {
 }
 
 impl Launch {
-    /// `data_dir` and `config` are absolute. Without `url` `data_dir` is required, and
-    /// `config` lets it start a server.
-    pub fn new(url: Option<Url>, data_dir: Option<PathBuf>, config: Option<PathBuf>) -> Self {
+    /// `data_dir`, `config` and `unix_socket` are absolute. Without `url` `data_dir` is
+    /// required, and `config` lets it start a server. `unix_socket` is the config's, which the
+    /// started server gets as a flag.
+    pub fn new(
+        url: Option<Url>,
+        data_dir: Option<PathBuf>,
+        config: Option<PathBuf>,
+        unix_socket: Option<PathBuf>,
+    ) -> Self {
         let refused = String::new();
         Self {
             url,
             data_dir,
             config,
+            unix_socket,
             child: None,
             next_spawn: Instant::now(),
             backoff: FIRST_BACKOFF,
@@ -156,15 +164,15 @@ impl Launch {
             &path,
         )?;
         crate::config::check_private(&log, &path, "server log").map_err(io::Error::other)?;
-        let child = Command::new(std::env::current_exe()?)
-            .arg("serve")
-            .arg("--config")
-            .arg(config)
-            .arg("--data-dir")
-            .arg(dir)
+        let mut command = Command::new(std::env::current_exe()?);
+        command.arg("serve").arg("--config").arg(config).arg("--data-dir").arg(dir);
+        if let Some(socket) = &self.unix_socket {
+            command.arg("--unix-socket").arg(socket);
+        }
+        let child = command
             .args(["--listen", "none", "--exit-on-poison"])
             .env_remove(crate::mcp::TOKEN_ENV)
-            // Its paths are absolute, and it must not pin the first chat's folder.
+            // Every path it gets is absolute, so it need not pin the first chat's folder.
             .current_dir("/")
             .stdin(Stdio::null())
             .stdout(log.try_clone()?)

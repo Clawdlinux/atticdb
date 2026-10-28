@@ -498,7 +498,7 @@ fn launch_race_starts_one_server() {
     let dir = Dir::new();
     let token = init_config(&dir);
     let data = dir.0.join("d");
-    let _holders = Holders(vec![data.clone(), dir.0.join("B")]);
+    let _holders = Holders(vec![data.clone(), dir.0.join("B"), dir.0.join("U")]);
     let args = ["--config", "c.json", "--tenant", "a", "--data-dir", "d"];
 
     // Two adapters race to start a server on an empty data directory.
@@ -658,17 +658,31 @@ fn launch_race_starts_one_server() {
         assert_eq!(mcp.close().0.code(), Some(0));
     }
 
-    // A config naming directory A, overridden by `--data-dir B`.
-    let config = json!({"data_dir": dir.0.join("A"), "tenants": [{"name": "a", "token": token}]});
-    private_file(&dir, "c2.json", &config.to_string());
-    let mut mcp =
-        Mcp::start(&dir.0, &["--config", "c2.json", "--tenant", "a", "--data-dir", "B"], None);
-    mcp.handshake();
-    appended(&mcp.call("memory_append", json!({"content": "b"})), "--data-dir B");
-    let socket = dir.0.join("B").join(zerodb::listen::SOCKET_NAME);
-    assert_eq!(lock_field(&dir.0.join("B"), "unix="), format!("{}", socket.display()));
+    // A config naming directory A, overridden by `--data-dir`. A relative `unix_socket` is
+    // in the adapter's folder, though the started server runs in `/`.
+    let tenants = json!([{"name": "a", "token": token}]);
+    let rows = [
+        ("--data-dir B", "B", json!({"data_dir": dir.0.join("A"), "tenants": tenants}), None),
+        (
+            "relative unix_socket",
+            "U",
+            json!({"unix_socket": "u.sock", "tenants": tenants}),
+            Some("u.sock"),
+        ),
+    ];
+    for (case, data, config, socket) in rows {
+        let name = format!("{data}.json");
+        private_file(&dir, &name, &config.to_string());
+        let args = ["--config", &name, "--tenant", "a", "--data-dir", data];
+        let mut mcp = Mcp::start(&dir.0, &args, None);
+        mcp.handshake();
+        appended(&mcp.call("memory_append", json!({"content": "b"})), case);
+        let socket =
+            socket.map_or(dir.0.join(data).join(zerodb::listen::SOCKET_NAME), |s| dir.0.join(s));
+        assert_eq!(lock_field(&dir.0.join(data), "unix="), socket.display().to_string(), "{case}");
+        assert_eq!(mcp.close().0.code(), Some(0), "{case}");
+    }
     assert!(!dir.0.join("A").exists(), "the config's directory is untouched");
-    assert_eq!(mcp.close().0.code(), Some(0));
 }
 
 /// With no connection flags, the shell verbs create and use a per-user home, ignoring a stray

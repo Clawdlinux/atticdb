@@ -223,6 +223,10 @@ impl Adapter {
         let config_path = config_path.map_err(|error| format!("--config: {error}"))?;
         let config_path = config_path.or_else(|| home.as_ref().map(|home| home.config.clone()));
         let config = config_path.as_deref().map(Config::load).transpose()?;
+        // Absolute against this folder, as a started server runs in `/`.
+        let unix_socket = config.as_ref().and_then(|config| config.unix_socket.as_deref());
+        let unix_socket = unix_socket.map(std::path::absolute).transpose();
+        let unix_socket = unix_socket.map_err(|error| format!("unix_socket: {error}"))?;
         let token_file = flags.remove("--token-file");
         let tenant =
             flags.remove("--tenant").or_else(|| home.as_ref().map(|home| home.tenant.clone()));
@@ -261,7 +265,7 @@ impl Adapter {
             roots_deadline: None,
             token,
             retry_deadline,
-            launch: Launch::new(url, data_dir, config_path),
+            launch: Launch::new(url, data_dir, config_path, unix_socket),
             initialized: false,
         })
     }

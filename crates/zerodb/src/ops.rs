@@ -75,7 +75,7 @@ pub fn load(
                 let (url, turn, run) = (url.clone(), &turn, &run);
                 scope.spawn(move || {
                     let deadline = || Instant::now() + Duration::from_secs(30);
-                    let (mut stream, host) = Launch::new(Some(url), None, None)
+                    let (mut stream, host) = Launch::new(Some(url), None, None, None)
                         .connect(deadline())
                         .map_err(|error| error.to_string())?;
                     let auth = format!("Bearer {}", token.expose());

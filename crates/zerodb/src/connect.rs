@@ -207,7 +207,7 @@ fn refuse_flags(name: &str, file: &Path, current: &Value, data: &Path) -> Result
     }
     let (used, file, data) = (used.join(", "), file.display(), data.display());
     Err(format!(
-        "{file}: the zerodb entry for {name} uses {used}. Nothing changed.\n\
+        "{file}: the zerodb entry for {name} uses {used}. {file} was not changed.\n\
          Its memory stays in that store and would not follow a switch to the home.\n\
          To keep it, stop that store's server. Then move the files in its data directory \
          into {data}.\n\
