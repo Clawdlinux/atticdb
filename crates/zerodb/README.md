@@ -7,6 +7,7 @@ The server binary. HTTP/JSON over loopback TCP and a Unix socket, with the same 
 zerodb init --config zerodb.json --tenant me     # writes a 0600 config, prints the token once
 zerodb serve --config zerodb.json --data-dir ./data
 zerodb mcp                                       # no flags: the per-user home
+zerodb connect vscode                            # adds zerodb to VS Code's MCP config
 zerodb verify --data-dir ./data                  # checks a stopped data dir on a copy
 zerodb recover --truncate-at <lsn> --data-dir ./data
 ```
@@ -126,6 +127,24 @@ How it finds a server:
 4. It repeats step 2 until a server is trusted or 2 s before the call's deadline. A started server that exits 75 lost the lock race. If no trusted server shows up, it starts another, backing off from 100 ms to 2 s. A start that can't work fails the call at once with its reason: a data directory it can't use, or a started server that exits with any code but 75 or 70 (poisoned). The last line of `serve.log` is in the error. The next call tries again.
 
 An auto-started server runs in its own process group and outlives the adapters. Stop it with `kill <pid>`. The pid is in `<data_dir>/LOCK`.
+
+## `zerodb connect` and `zerodb disconnect`
+
+`zerodb connect <vscode|copilot>` creates the home, then adds a `zerodb` entry to the harness's user MCP config.
+`zerodb disconnect <vscode|copilot>` removes that entry. Every other key and server stays.
+
+| Name | File | Entry |
+|---|---|---|
+| `vscode` | macOS: `~/Library/Application Support/Code/User/mcp.json`. Linux: `$XDG_CONFIG_HOME/Code/User/mcp.json`, else `~/.config/Code/User/mcp.json` | `servers.zerodb`: `zerodb mcp --agent vscode-copilot --session ${workspaceFolderBasename}` |
+| `copilot` | `$COPILOT_HOME/mcp-config.json`, else `~/.copilot/mcp-config.json` | `mcpServers.zerodb`: `zerodb mcp --agent copilot`, all tools |
+
+The entry runs the absolute path of the binary you ran. It holds no token and no config path.
+A missing file is created with its directories. An entry that already matches writes nothing.
+Before a change, the old file is copied to `<file>.zerodb-backup-<unix seconds>`. Backups are never restored automatically.
+The new file goes to a synced temp file, then a rename. It keeps the old file's mode.
+The rewrite sorts the file's keys and drops its formatting.
+A file that is not plain JSON, such as one with `//` comments, is left alone. The error shows the entry to add by hand.
+A symlinked file is refused, because the rename would replace the link.
 
 ## Tests
 

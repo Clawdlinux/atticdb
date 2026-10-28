@@ -1,0 +1,137 @@
+use crate::support::{chmod, files, Dir, Process};
+use serde_json::{json, Value};
+use std::os::unix::fs::MetadataExt;
+use std::process::{Command, Stdio};
+
+/// `connect` adds the entry, a rerun writes nothing, an older entry is updated, and
+/// `disconnect` removes only zerodb's entry. Rewrites keep a backup and the file mode. A file
+/// that is not a JSON object, or a symlink, stays as it was. No token reaches any output.
+#[test]
+fn connect_edits_only_the_zerodb_entry() {
+    let dir = Dir::new();
+    let exe = std::fs::canonicalize(env!("CARGO_BIN_EXE_zerodb")).unwrap();
+    let mac = cfg!(target_os = "macos");
+    let (config, data) = if mac {
+        ("Library/Application Support", "Library/Application Support")
+    } else {
+        (".config", ".local/share")
+    };
+    let session = "${workspaceFolderBasename}";
+    let vscode = json!({"type": "stdio", "command": exe,
+        "args": ["mcp", "--agent", "vscode-copilot", "--session", session]});
+    let copilot = json!({"type": "local", "command": exe,
+        "args": ["mcp", "--agent", "copilot"], "tools": ["*"]});
+    let vscode_file = format!("{config}/Code/User/mcp.json");
+    let mut rows = vec![
+        ("vscode", None, vscode_file, "servers", vscode.clone()),
+        ("copilot", None, ".copilot/mcp-config.json".into(), "mcpServers", copilot.clone()),
+        ("copilot", Some("COPILOT_HOME"), "c/mcp-config.json".into(), "mcpServers", copilot),
+    ];
+    if !mac {
+        rows.push((
+            "vscode",
+            Some("XDG_CONFIG_HOME"),
+            "c/Code/User/mcp.json".into(),
+            "servers",
+            vscode,
+        ));
+    }
+    for (row, (name, var, file, section, entry)) in rows.into_iter().enumerate() {
+        let home = dir.0.join(row.to_string());
+        let case = format!("{name} {var:?}");
+        let (file, mut printed) = (home.join(file), String::new());
+        let parent = file.parent().unwrap().to_owned();
+        let mut run = |args: &[&str]| {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_zerodb"));
+            command.args(args).current_dir(&dir.0).env("HOME", &home);
+            for var in ["COPILOT_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "ZERODB_TOKEN"] {
+                command.env_remove(var);
+            }
+            command.envs(var.map(|var| (var, home.join("c"))));
+            let (status, out) = Process::start(command.stdin(Stdio::null())).wait();
+            printed.push_str(&out);
+            (status.code(), out)
+        };
+        let read = || serde_json::from_slice::<Value>(&std::fs::read(&file).unwrap()).unwrap();
+        let mode = || std::fs::metadata(&file).unwrap().mode() & 0o777;
+        let backups =
+            || files(&parent).into_keys().filter(|n| n.contains(".zerodb-backup-")).count();
+
+        let (code, out) = run(&["connect", name]);
+        assert_eq!(code, Some(0), "{case}: {out}");
+        assert_eq!(out, format!("connected zerodb to {name}: {}\n", file.display()), "{case}");
+        assert_eq!(read(), json!({section: {"zerodb": entry}}), "{case}: created");
+        let pretty = serde_json::to_string_pretty(&read()).unwrap() + "\n";
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), pretty, "{case}: 2-space indent");
+        assert_eq!(files(&parent).len(), 1, "{case}: no backup or temp file");
+
+        let before = (files(&parent), std::fs::metadata(&file).unwrap().modified().unwrap());
+        let (code, out) = run(&["connect", name]);
+        assert_eq!(code, Some(0), "{case}: {out}");
+        assert_eq!(out, format!("zerodb is already connected to {name} ({})\n", file.display()));
+        let after = (files(&parent), std::fs::metadata(&file).unwrap().modified().unwrap());
+        assert_eq!(after, before, "{case}: nothing written");
+
+        // An older entry, another server and another top-level key, added by hand.
+        let mut edited = read();
+        edited[section]["zerodb"]["args"] = json!(["mcp"]);
+        edited[section]["other"] = json!({"command": "other"});
+        edited["editor.fontSize"] = json!(14);
+        let edited_bytes = serde_json::to_vec(&edited).unwrap();
+        std::fs::write(&file, &edited_bytes).unwrap();
+        chmod(&file, 0o600);
+        let (code, out) = run(&["connect", name]);
+        assert_eq!(code, Some(0), "{case}: {out}");
+        let prefix = format!("updated zerodb in {name}: {} (backup: ", file.display());
+        assert!(out.starts_with(&prefix) && out.ends_with(", keys are now sorted)\n"), "{out}");
+        edited[section]["zerodb"] = entry;
+        assert_eq!(read(), edited, "{case}: only the entry changed");
+        let backup = out[prefix.len()..].split(", ").next().unwrap().to_owned();
+        assert_eq!(std::fs::read(&backup).unwrap(), edited_bytes, "{case}: backup");
+        assert_eq!((backups(), mode()), (1, 0o600), "{case}: backup, mode kept");
+
+        let (code, out) = run(&["disconnect", name]);
+        assert_eq!(code, Some(0), "{case}: {out}");
+        assert!(out.starts_with(&format!("disconnected zerodb from {name}: ")), "{case}: {out}");
+        edited[section].as_object_mut().unwrap().remove("zerodb");
+        assert_eq!(read(), edited, "{case}: the other server and key stay");
+        assert_eq!((backups(), mode()), (2, 0o600), "{case}: a second backup, mode kept");
+        assert_eq!(files(&parent).len(), 3, "{case}: no temp file left");
+        let (code, out) = run(&["disconnect", name]);
+        assert_eq!((code, out), (Some(0), format!("zerodb is not connected to {name}\n")));
+
+        // Not a JSON object, or a symlink: exit 1 and change nothing.
+        std::fs::write(&file, "// my servers\n{}\n").unwrap();
+        let before = files(&parent);
+        let (code, out) = run(&["connect", name]);
+        assert_eq!(code, Some(1), "{case}: {out}");
+        assert!(out.contains(&file.display().to_string()) && out.contains("by hand"), "{out}");
+        assert_eq!(files(&parent), before, "{case}: comment file unchanged");
+        std::fs::remove_file(&file).unwrap();
+        std::fs::write(parent.join("real.json"), "{}").unwrap();
+        std::os::unix::fs::symlink("real.json", &file).unwrap();
+        let before = files(&parent);
+        let (code, out) = run(&["connect", name]);
+        assert_eq!(code, Some(1), "{case}: {out}");
+        assert!(out.contains("symlink"), "{case}: {out}");
+        assert_eq!(files(&parent), before, "{case}: symlink unchanged");
+        assert!(std::fs::symlink_metadata(&file).unwrap().is_symlink(), "{case}");
+
+        // The token stays in the home, and connect starts no server.
+        let home_dir = home.join(data).join("zerodb");
+        let config: Value =
+            serde_json::from_slice(&std::fs::read(home_dir.join("zerodb.json")).unwrap()).unwrap();
+        let token = config["tenants"][0]["token"].as_str().unwrap();
+        let leaked = files(&parent).into_values().flatten();
+        let mut seen = leaked.chain([printed.into_bytes()]);
+        let token = token.as_bytes();
+        assert!(!seen.any(|bytes| bytes.windows(token.len()).any(|w| w == token)), "{case}: leak");
+        assert_eq!(files(&home_dir.join("data")).len(), 0, "{case}: no server started");
+    }
+    let mut command = Command::new(env!("CARGO_BIN_EXE_zerodb"));
+    let (status, out) =
+        Process::start(command.args(["connect", "emacs"]).env("HOME", &dir.0).stdin(Stdio::null()))
+            .wait();
+    assert_eq!(status.code(), Some(2), "{out}");
+    assert!(out.contains("zerodb connect <vscode|copilot>"), "{out}");
+}
