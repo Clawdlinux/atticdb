@@ -170,6 +170,15 @@ fn tool_calls_over_stdio() {
     let five = ["memory_append", "memory_recent", "fact_set", "fact_get", "fact_list"];
     assert_eq!(names, [&five[..], &["memory_search"]].concat());
     assert_eq!(tools[5]["inputSchema"]["required"], json!(["query"]));
+    // VS Code runs read-only tools without a confirmation prompt.
+    let read_only: Vec<bool> = tools
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["annotations"]["readOnlyHint"] == true)
+        .collect();
+    assert_eq!(read_only, [false, true, false, true, true, true]);
+    assert_eq!(tools[2]["annotations"]["destructiveHint"], true, "fact_set replaces and deletes");
     let (set, get, list) =
         (&tools[2]["inputSchema"], &tools[3]["inputSchema"], &tools[4]["inputSchema"]);
     assert_eq!((&set["required"], &get["required"]), (&json!(["key"]), &json!(["key"])));
