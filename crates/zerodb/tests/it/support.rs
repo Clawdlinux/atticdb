@@ -55,17 +55,15 @@ pub const TOKEN_A: &str = "token-a-0123456789abcdefghijklmnopqrstuv";
 pub const TOKEN_B: &str = "token-b-0123456789abcdefghijklmnopqrstuv";
 
 /// A private directory with a short path. Socket paths, staging included, must fit
-/// `sun_path` (104 bytes on macOS), so it lives under `target/s` by default.
-/// Set `ZERODB_TEST_DIR` to a short directory when the checkout path is too deep.
+/// `sun_path` (104 bytes on macOS). By default it lives under `/tmp/zerodb-test-<uid>`, so
+/// the checkout path does not matter. `ZERODB_TEST_DIR` is optional and overrides the root.
 #[derive(Debug)]
 pub struct Dir(pub PathBuf);
 
 impl Dir {
     pub fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let root = std::env::var_os("ZERODB_TEST_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| Path::new(env!("CARGO_TARGET_TMPDIR")).parent().unwrap().join("s"));
+        let root = std::env::var_os("ZERODB_TEST_DIR").map_or_else(tmp_root, PathBuf::from);
         std::fs::create_dir_all(&root).unwrap();
         let name = format!("{:x}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
         let path = root.join(name);
@@ -84,6 +82,25 @@ impl Drop for Dir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
+}
+
+/// `/tmp/zerodb-test-<uid>`, made with mode 0700 if missing. The path is real, since macOS
+/// links `/tmp` to `/private/tmp` and tests compare socket paths. Anyone can add names to
+/// `/tmp`, so the root must be this user's private directory and not a symlink.
+fn tmp_root() -> PathBuf {
+    let uid = rustix::process::geteuid().as_raw();
+    let root = std::fs::canonicalize("/tmp").unwrap().join(format!("zerodb-test-{uid}"));
+    let checked = zerodb::listen::owned_dir(&root, 0o077).and_then(|()| {
+        // `owned_dir` follows symlinks, so check the entry itself too.
+        match std::fs::symlink_metadata(&root) {
+            Ok(meta) if meta.is_dir() => Ok(()),
+            _ => Err(format!("{} must not be a symlink", root.display())),
+        }
+    });
+    if let Err(error) = checked {
+        panic!("{error}; set ZERODB_TEST_DIR to a short directory");
+    }
+    root
 }
 
 /// An engine on a copy of `disk` with 1 MiB segments and no timed checkpoints. `tune`
