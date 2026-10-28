@@ -104,14 +104,12 @@ fn block(input: impl Read, deadline: Instant) -> Result<Option<String>, String> 
     Ok((!lines.is_empty()).then(|| cap([HEADER.to_owned()].into_iter().chain(lines))))
 }
 
-/// The name of the first directory from `cwd` up that holds a `.git` entry, else of `cwd`.
+/// The repo name for `cwd`, by [`crate::home::repo`].
 fn repo(cwd: &Path) -> Result<String, String> {
     if !cwd.is_absolute() {
         return Err(format!("cwd {cwd:?} is not absolute"));
     }
-    let root = cwd.ancestors().find(|dir| dir.join(".git").symlink_metadata().is_ok());
-    let name = root.unwrap_or(cwd).file_name().and_then(|name| name.to_str());
-    name.map(str::to_owned).ok_or_else(|| format!("cwd {cwd:?} has no directory name"))
+    crate::home::repo(cwd).ok_or_else(|| format!("cwd {cwd:?} has no directory name"))
 }
 
 fn fact(fact: &Value) -> String {

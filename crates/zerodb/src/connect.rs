@@ -72,11 +72,10 @@ impl Harness {
 
     fn entry(self, command: &str) -> Value {
         match self {
-            Self::Vscode => {
-                let session = "${workspaceFolderBasename}";
-                json!({"type": "stdio", "command": command,
-                    "args": ["mcp", "--agent", self.agent(), "--session", session]})
-            }
+            // No `--session`: the adapter's default is the repo of its current directory,
+            // the workspace folder, as the session-start hook reads it.
+            Self::Vscode => json!({"type": "stdio", "command": command,
+                "args": ["mcp", "--agent", self.agent()]}),
             Self::Copilot => json!({"type": "local", "command": command,
                 "args": ["mcp", "--agent", self.agent()], "tools": ["*"]}),
         }
@@ -242,6 +241,16 @@ fn ours(bytes: &[u8]) -> bool {
     exe.and_then(|exe| hook_text(&exe).ok()).is_some_and(|text| text.as_bytes() == bytes)
 }
 
+/// Whether `harness`'s config has a zerodb entry. A config that is not plain JSON, such as
+/// one with comments, counts when it holds `"zerodb"`.
+fn connected(harness: Harness) -> Result<bool, String> {
+    let Some((bytes, _)) = read(&harness.file()?)? else { return Ok(false) };
+    Ok(match serde_json::from_slice::<Value>(&bytes) {
+        Ok(root) => root.get(harness.section()).is_some_and(|s| s.get("zerodb").is_some()),
+        Err(_) => bytes.windows(8).any(|window| window == b"\"zerodb\""),
+    })
+}
+
 /// Deletes the hook file once no harness has a zerodb entry, if zerodb wrote it. Returns
 /// the message to print, empty when there is no hook file.
 fn remove_hook() -> Result<String, String> {
@@ -255,13 +264,9 @@ fn remove_hook() -> Result<String, String> {
     let kept = format!("kept the sessionStart hook ({shown})");
     for harness in Harness::ALL {
         let name = harness.name();
-        match harness.file().and_then(|file| load(&file)) {
-            Ok((_, root))
-                if root.get(harness.section()).is_some_and(|s| s.get("zerodb").is_some()) =>
-            {
-                return Ok(format!("{kept}: zerodb is still connected to {name}"));
-            }
-            Ok(_) => {}
+        match connected(harness) {
+            Ok(true) => return Ok(format!("{kept}: zerodb is still connected to {name}")),
+            Ok(false) => {}
             // A config that cannot be read may still have the entry.
             Err(error) => return Ok(format!("{kept}: cannot read {name}'s config: {error}")),
         }

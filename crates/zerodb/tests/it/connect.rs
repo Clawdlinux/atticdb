@@ -16,9 +16,8 @@ fn connect_edits_only_the_zerodb_entry() {
     } else {
         (".config", ".local/share")
     };
-    let session = "${workspaceFolderBasename}";
-    let vscode = json!({"type": "stdio", "command": exe,
-        "args": ["mcp", "--agent", "vscode-copilot", "--session", session]});
+    let vscode =
+        json!({"type": "stdio", "command": exe, "args": ["mcp", "--agent", "vscode-copilot"]});
     let copilot = json!({"type": "local", "command": exe,
         "args": ["mcp", "--agent", "copilot"], "tools": ["*"]});
     let vscode_file = format!("{config}/Code/User/mcp.json");
@@ -201,6 +200,10 @@ fn connect_writes_the_session_start_hook() {
         other["hooks"]["sessionStart"][0]["bash"] =
             json!(r"'/opt/it'\''s/zerodb' hook session-start");
         let other = serde_json::to_string_pretty(&other).unwrap() + "\n";
+        // A config with comments and no zerodb entry does not keep the hook.
+        let config =
+            if cfg!(target_os = "macos") { "Library/Application Support" } else { ".config" };
+        std::fs::write(home.join(config).join("Code/User/mcp.json"), "// mine\n{}\n").unwrap();
         let rows = [
             (other.as_str(), "removed the sessionStart hook", None),
             ("{}", "alone: it differs from the hook zerodb writes", Some("{}")),

@@ -184,7 +184,11 @@ impl Adapter {
         }
         Ok(Self {
             agent: flags.remove("--agent").unwrap_or_else(|| "mcp".into()),
-            session: flags.remove("--session").unwrap_or_else(|| "default".into()),
+            // The repo of the current directory, as the session-start hook reads it.
+            session: flags.remove("--session").unwrap_or_else(|| {
+                let repo = std::env::current_dir().ok().and_then(|dir| crate::home::repo(&dir));
+                repo.unwrap_or_else(|| "default".into())
+            }),
             token,
             retry_deadline,
             launch: Launch::new(url, data_dir, config_path),

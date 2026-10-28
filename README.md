@@ -57,6 +57,8 @@ zerodb disconnect vscode    # removes only zerodb's entry
 ```
 
 It edits the user MCP config and keeps a backup of the old file. The entry holds no token.
+Notes go to a session named after the repo, so each repo keeps its own.
+After upgrading zerodb, run `connect` again. It reports `updated` when the entry changed.
 
 It also adds a Copilot hook file, `~/.copilot/hooks/zerodb.json`. VS Code's Copilot chat and Copilot CLI both read it.
 At the start of each chat, the hook adds a small memory block.

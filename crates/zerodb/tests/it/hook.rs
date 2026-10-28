@@ -7,11 +7,13 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// Runs `zerodb` with `HOME` set to `home` and writes `stdin` after `delay`, keeping it open
-/// until the exit. Returns the exit code, stdout and stderr.
-fn zerodb(home: &Path, args: &[&str], stdin: &[u8], delay: u64) -> (Option<i32>, String, String) {
+type Output = (Option<i32>, String, String);
+
+/// Runs `zerodb` in `cwd` with `HOME` set to `home` and writes `stdin` after `delay`, keeping
+/// it open until the exit. Returns the exit code, stdout and stderr.
+fn zerodb(home: &Path, cwd: &Path, args: &[&str], stdin: &[u8], delay: u64) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_zerodb"));
-    command.args(args).current_dir(home).env("HOME", home).stdin(Stdio::piped());
+    command.args(args).current_dir(cwd).env("HOME", home).stdin(Stdio::piped());
     for var in ["COPILOT_HOME", "XDG_DATA_HOME", "ZERODB_TOKEN"] {
         command.env_remove(var);
     }
@@ -26,14 +28,14 @@ fn zerodb(home: &Path, args: &[&str], stdin: &[u8], delay: u64) -> (Option<i32>,
 
 /// The hook's stdout and stderr, after it exits 0 with 1 line.
 fn hook(home: &Path, stdin: &str, delay: u64) -> (String, String) {
-    let (code, out, err) = zerodb(home, &["hook", "session-start"], stdin.as_bytes(), delay);
+    let (code, out, err) = zerodb(home, home, &["hook", "session-start"], stdin.as_bytes(), delay);
     assert_eq!(code, Some(0), "{stdin:.80}: {err}");
     assert_eq!(out.lines().count(), 1, "{stdin:.80}: 1 line: {out}");
     (out, err)
 }
 
 fn seed(home: &Path, args: &[&str]) {
-    let (code, _, err) = zerodb(home, args, b"", 0);
+    let (code, _, err) = zerodb(home, home, args, b"", 0);
     assert_eq!(code, Some(0), "{args:?}: {err}");
 }
 
@@ -116,10 +118,15 @@ fn session_start_prints_the_memory_block() {
         ("mcp", "app", "not shown"),
         ("copilot", "app", "c2"),
         ("vscode-copilot", "app", "v3"),
-        ("copilot", "app", "c3"),
+        ("copilot", "", "c3"),
     ];
     for (agent, session, content) in turns {
-        seed(&home, &["append", "--agent", agent, "--session", session, "--content", content]);
+        let mut args = vec!["append", "--agent", agent, "--content", content];
+        // Without `--session`, the session is the repo of the current directory, `app`.
+        let cwd = if session.is_empty() { home.join("app/src") } else { home.clone() };
+        args.extend(["--session", session].iter().filter(|_| !session.is_empty()));
+        let (code, _, err) = zerodb(&home, &cwd, &args, b"", 0);
+        assert_eq!(code, Some(0), "{args:?}: {err}");
     }
     let out: Value = serde_json::from_str(&hook(&home, &cwd(&home.join("app/src")), 0).0).unwrap();
     let block = format!(

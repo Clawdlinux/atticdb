@@ -105,7 +105,11 @@ Newline-delimited JSON-RPC 2.0 on stdin and stdout. Logs go to stderr. It exits 
 Tools: `memory_append {content, role?, session?, meta?}`, `memory_recent {n?, session?, max_bytes?}`, the fact tools, and `memory_search {query, limit?, before?, max_bytes?}`.
 Read tools carry `readOnlyHint: true`, so VS Code runs them without asking. `initialize` returns short `instructions` on when to call each tool. Copilot CLI adds a server's instructions to the system prompt only for allowlisted servers, or with `--allow-all-mcp-server-instructions`.
 Integers beyond ±(2^53 - 1), such as `commit_time_ns`, come back as strings in tool results, because JavaScript clients can't hold them (I-JSON, RFC 7493). The shell verbs print them as numbers.
-`--agent` defaults to `mcp` and `--session` to `default`. A tool may pass `session`. The tenant still comes from the token.
+`--agent` defaults to `mcp`. A tool may pass `session`. The tenant still comes from the token.
+`--session` defaults to the repo name of the current directory, as for the shell verbs too.
+That is the name of the first directory up with a `.git` entry, else of the current directory.
+It is `default` when that cannot be read or has no UTF-8 name.
+2 repos with the same folder name share a session and `repo/<name>/` facts.
 The token comes from `--token-file`, `ZERODB_TOKEN`, or the config entry for `--tenant`. A token file must be 0600 and yours.
 
 With none of `--url`, `--data-dir`, `--config`, `--token-file`, `--tenant` or `ZERODB_TOKEN`, it uses a per-user home.
@@ -136,10 +140,13 @@ It also writes the session-start hook file, described below.
 
 | Name | File | Entry |
 |---|---|---|
-| `vscode` | macOS: `~/Library/Application Support/Code/User/mcp.json`. Linux: `$XDG_CONFIG_HOME/Code/User/mcp.json` when set and absolute, else `~/.config/Code/User/mcp.json` | `servers.zerodb`: `zerodb mcp --agent vscode-copilot --session ${workspaceFolderBasename}` |
+| `vscode` | macOS: `~/Library/Application Support/Code/User/mcp.json`. Linux: `$XDG_CONFIG_HOME/Code/User/mcp.json` when set and absolute, else `~/.config/Code/User/mcp.json` | `servers.zerodb`: `zerodb mcp --agent vscode-copilot` |
 | `copilot` | `$COPILOT_HOME/mcp-config.json` when set and absolute, else `~/.copilot/mcp-config.json` | `mcpServers.zerodb`: `zerodb mcp --agent copilot`, all tools |
 
 The entry runs the absolute path of the binary you ran. It holds no token and no config path.
+Neither entry passes `--session`. Each harness starts the adapter in the workspace or working folder.
+So its session is that repo's name.
+That is the session the hook reads. Run `connect` again to drop an older entry's `--session`.
 The entry holds this machine's binary path. Settings Sync copies `mcp.json` to your other devices, where that path may not exist.
 Turn off MCP Servers in Settings Sync: Configure, or install zerodb at the same path on each device.
 A missing file is created. Missing directories are created at mode 0700. An entry that already matches writes nothing.

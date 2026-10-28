@@ -416,7 +416,7 @@ fn tool_calls_over_stdio() {
         ("FIFO at LOCK during discovery", &["--data-dir", "fifo-lock"], "2500ms", ""),
     ];
     for (case, args, deadline, detail) in rows {
-        let args = [args, &["--retry-deadline", deadline]].concat();
+        let args = [args, &["--retry-deadline", deadline, "--session", "lost"]].concat();
         let mut mcp = Mcp::start(&dir.0, &args, Some(TOKEN_A));
         mcp.handshake();
         let result = mcp.call("memory_append", json!({"content": "lost?"}));
@@ -440,7 +440,7 @@ fn tool_calls_over_stdio() {
         assert!(started.elapsed().as_secs() < 5, "{data}: took {:?}", started.elapsed());
         assert_eq!(mcp.close().0.code(), Some(0));
     }
-    let (_, lost) = running.vias[1].a("GET", "/v1/window?agent=mcp&session=default&last=9", None);
+    let (_, lost) = running.vias[1].a("GET", "/v1/window?agent=mcp&session=lost&last=9", None);
     assert_eq!(lost["turns"], json!([]), "nothing sent under 2 s");
 }
 
