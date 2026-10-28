@@ -42,6 +42,8 @@ struct Adapter {
     /// Requests sent to the client, and the id of the latest `roots/list` not yet answered.
     asked: u64,
     roots_pending: Option<String>,
+    /// Calls wait for that answer only until 2 s after it was asked for.
+    roots_deadline: Option<Instant>,
     token: Token,
     retry_deadline: Duration,
     launch: Launch,
@@ -87,14 +89,17 @@ pub fn start(flags: HashMap<String, String>) -> u8 {
             Some(line) if line.iter().all(u8::is_ascii_whitespace) => None,
             Some(line) => {
                 if adapter.needs_roots(&line) {
-                    let deadline = Instant::now() + ROOTS_WAIT;
-                    while adapter.roots_pending.is_some() {
-                        let left = deadline.saturating_duration_since(Instant::now());
+                    // Past 8 MiB queued, stop reading ahead, so the reader is held back again.
+                    let mut held = 0;
+                    while let Some(left) = adapter.roots_wait().filter(|_| held <= MAX_LINE) {
                         match lines.recv_timeout(left) {
                             Ok(Some(next)) if adapter.answers_roots(&next) => {
                                 adapter.handle(&next);
                             }
-                            Ok(next) => queued.push_back(next),
+                            Ok(next) => {
+                                held += next.as_ref().map_or(0, Vec::len) as u64;
+                                queued.push_back(next);
+                            }
                             Err(_) => break,
                         }
                     }
@@ -237,6 +242,7 @@ impl Adapter {
             roots: false,
             asked: 0,
             roots_pending: None,
+            roots_deadline: None,
             token,
             retry_deadline,
             launch: Launch::new(url, data_dir, config_path),
@@ -310,18 +316,30 @@ impl Adapter {
     /// Whether `line` calls a tool that uses the default session while roots may still
     /// change it.
     fn needs_roots(&self, line: &[u8]) -> bool {
+        if self.roots_wait().is_none() {
+            return false;
+        }
         let message: Value = serde_json::from_slice(line).unwrap_or_default();
         let (params, tools) = (&message["params"], ["memory_append", "memory_recent"]);
-        self.roots_pending.is_some()
-            && message["method"] == "tools/call"
+        message["method"] == "tools/call"
             && tools.iter().any(|tool| params["name"] == *tool)
             && params["arguments"]["session"].is_null()
     }
 
-    /// Whether `line` is the answer to the latest `roots/list`.
+    /// The time left to wait for the latest `roots/list` answer, if any.
+    fn roots_wait(&self) -> Option<Duration> {
+        self.roots_pending.as_ref()?;
+        let left = self.roots_deadline?.saturating_duration_since(Instant::now());
+        (!left.is_zero()).then_some(left)
+    }
+
+    /// Whether `line` is a valid answer to the latest `roots/list`, as `handle` takes it.
     fn answers_roots(&self, line: &[u8]) -> bool {
         let message: Value = serde_json::from_slice(line).unwrap_or_default();
-        message.get("method").is_none()
+        let answer = message.get("result").or(message.get("error")).is_some();
+        message["jsonrpc"] == "2.0"
+            && message.get("method").is_none()
+            && answer
             && message["id"].as_str().is_some_and(|id| Some(id) == self.roots_pending.as_deref())
     }
 
@@ -330,6 +348,7 @@ impl Adapter {
         self.asked += 1;
         let id = format!("zerodb-roots-{}", self.asked);
         self.roots_pending = Some(id.clone());
+        self.roots_deadline = Some(Instant::now() + ROOTS_WAIT);
         json!({"jsonrpc": "2.0", "id": id, "method": "roots/list"})
     }
 

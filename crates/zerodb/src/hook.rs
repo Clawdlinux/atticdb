@@ -93,15 +93,13 @@ fn block(input: impl Read, deadline: Instant) -> Result<Option<String>, String> 
     };
     let (rules, this_repo) = (facts("user/".into())?, facts(format!("repo/{repo}/"))?);
     // Turns are kept per agent, and a hook can't tell which harness ran it.
-    let mut turns = Vec::new();
+    let mut windows = Vec::new();
     for agent in Harness::ALL.map(Harness::agent) {
         // The server's largest window, so the newest turn always fits.
         let args = json!({"n": TURNS, "max_bytes": crate::api::MAX_WINDOW_BYTES});
-        let recent = home.read(agent, "memory_recent", &args)?;
-        turns.extend(recent["turns"].as_array().cloned().unwrap_or_default());
+        windows.push(home.read(agent, "memory_recent", &args)?);
     }
-    turns.sort_by_key(|turn| (turn["commit_time_ns"].as_u64(), turn["lsn"].as_u64()));
-    let notes = turns[turns.len().saturating_sub(TURNS)..].iter();
+    let notes = newest(&windows).into_iter();
     let notes = notes.map(|turn| format!("- {}", line(&turn["content"], MAX_CONTENT))).collect();
     let sections = [
         ("Rules:".to_owned(), rules),
@@ -114,6 +112,22 @@ fn block(input: impl Read, deadline: Instant) -> Result<Option<String>, String> 
         lines.extend(entries);
     }
     Ok((!lines.is_empty()).then(|| cap([HEADER.to_owned()].into_iter().chain(lines))))
+}
+
+/// The newest [`TURNS`] turns across `windows`, oldest first. A truncated window left out
+/// only turns older than its oldest, which may be newer than another window's turns. So
+/// nothing older than that is kept: there may be fewer than 5, but never the wrong ones.
+fn newest(windows: &[Value]) -> Vec<&Value> {
+    let key = |turn: &Value| (turn["commit_time_ns"].as_u64(), turn["lsn"].as_u64());
+    fn turns(window: &Value) -> &[Value] {
+        window["turns"].as_array().map(Vec::as_slice).unwrap_or_default()
+    }
+    let truncated = windows.iter().filter(|window| window["truncated"] == true);
+    let floor = truncated.filter_map(|window| turns(window).iter().map(key).min()).max();
+    let mut kept: Vec<&Value> = windows.iter().flat_map(turns).collect();
+    kept.retain(|turn| floor.is_none_or(|floor| key(turn) >= floor));
+    kept.sort_by_key(|turn| key(turn));
+    kept.split_off(kept.len().saturating_sub(TURNS))
 }
 
 /// The repo name for `cwd`, by [`crate::home::repo`].
@@ -155,4 +169,34 @@ fn cap(lines: impl Iterator<Item = String>) -> String {
         block.push_str(&line);
     }
     block + "\n" + MORE
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use serde_json::{json, Value};
+
+    /// A window of turns at these commit times.
+    fn window(times: &[u64], truncated: bool) -> Value {
+        let turns: Vec<Value> =
+            times.iter().map(|t| json!({"commit_time_ns": t, "lsn": t, "content": t})).collect();
+        json!({"turns": turns, "truncated": truncated})
+    }
+
+    #[test]
+    fn newest_never_shows_turns_older_than_a_truncated_window_left_out() {
+        let rows: [(&str, bool, &[u64]); 2] = [
+            // Copilot's 3 older big notes didn't fit: VS Code's notes 1 to 3 may be older.
+            ("truncated", true, &[10, 11, 12]),
+            ("complete", false, &[2, 3, 10, 11, 12]),
+        ];
+        for (case, truncated, expected) in rows {
+            let windows = [window(&[10, 11], truncated), window(&[1, 2, 3, 12], false)];
+            let shown: Vec<u64> = super::newest(&windows)
+                .iter()
+                .map(|turn| turn["content"].as_u64().unwrap())
+                .collect();
+            assert_eq!(shown, expected, "{case}");
+        }
+    }
 }

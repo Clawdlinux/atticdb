@@ -354,6 +354,23 @@ fn tool_calls_over_stdio() {
     assert_eq!(rooted.asked()["id"], "zerodb-roots-2", "asked again on a change");
     assert_eq!(rooted.close().0.code(), Some(0));
 
+    // A client that never answers roots: only the first default-session call waits 2 s.
+    let mut silent = Mcp::start(&dir.0, &args, None);
+    let params = json!({"protocolVersion": "2025-11-25", "capabilities": {"roots": {}}});
+    assert!(silent.request("initialize", params)["result"].is_object());
+    silent.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+    assert_eq!(silent.asked()["method"], "roots/list");
+    for (content, waits) in [("slow", 1_900..2_500), ("fast", 0..500)] {
+        let started = std::time::Instant::now();
+        appended(&silent.call("memory_append", json!({"content": content})), content);
+        let elapsed = started.elapsed().as_millis() as u64;
+        assert!(waits.contains(&elapsed), "{content}: {elapsed} ms");
+    }
+    let session = zerodb::home::repo(&dir.0).unwrap();
+    let window = silent.call("memory_recent", json!({"session": session}));
+    assert_eq!(contents(&window), ["slow", "fast"], "both in the working folder's repo");
+    assert_eq!(silent.close().0.code(), Some(0));
+
     let (status, _) = mcp.close();
     assert_eq!(status.code(), Some(0), "stdin closed: {}", mcp.process.stderr());
     let stdout = mcp.process.stdout();
