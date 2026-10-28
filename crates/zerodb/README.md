@@ -273,6 +273,9 @@ Also `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cache-C
 A 5xx answer logs 1 stderr line with the method, path, status and time. Never a query string, a header value or the secret.
 Exit code 1 when it cannot start, 2 for a bad flag.
 
+The page has 7 screens: Overview, Log, Sessions, Facts, Search, Chat start and Health, each at a hash route.
+`studio/seed.sh <empty dir>` seeds a throwaway home with realistic memory and hostile values. Set `ZERODB_BIN` for a build not on `PATH`, then run `HOME=<dir> zerodb studio`.
+
 ## Tests
 
 Socket paths, staging included, must fit `sun_path` (104 bytes on macOS). Tests put them under `/tmp/zerodb-test-<uid>` on macOS and `/var/tmp/zerodb-test-<uid>` on Linux. The checkout path does not matter. Tests create that directory with mode 0700 and fail if it is not private to you. `ZERODB_TEST_DIR` is optional. It may be any short directory, and tests resolve it to its real path.
