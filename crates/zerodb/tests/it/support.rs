@@ -357,6 +357,8 @@ impl Mcp {
     pub fn handshake(&mut self) {
         let reply = self.request("initialize", init("2025-11-25"));
         assert_eq!(reply["result"]["protocolVersion"], "2025-11-25");
+        let instructions = reply["result"]["instructions"].as_str().unwrap_or_default();
+        assert!(instructions.contains("memory_search"), "server instructions: {reply}");
         self.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
     }
 

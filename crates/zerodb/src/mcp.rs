@@ -185,6 +185,7 @@ impl Adapter {
                     "protocolVersion": version,
                     "capabilities": {"tools": {}},
                     "serverInfo": {"name": "zerodb", "version": env!("CARGO_PKG_VERSION")},
+                    "instructions": INSTRUCTIONS,
                 })
             }
             "tools/list" if self.initialized => tools(),
@@ -421,7 +422,38 @@ impl Adapter {
     }
 }
 
+/// Sent in `initialize`. Clients may add it to the system prompt.
+const INSTRUCTIONS: &str = "zerodb is this user's durable memory, shared across sessions and \
+    agents. At the start of a task, call fact_list with prefix user/ and with repo/<repo>/, \
+    then memory_recent. Use memory_search with a few words when you don't know the key or \
+    session. Save rules and decisions with fact_set under path-like keys; setting a key again \
+    corrects it. After a meaningful task, save 1 short memory_append summary. Never store \
+    secrets.";
+
+/// Title and whether the tool only reads. VS Code runs read-only tools without asking.
+const ANNOTATIONS: [(&str, &str, bool); 6] = [
+    ("memory_append", "Save a turn", false),
+    ("memory_recent", "Read recent turns", true),
+    ("fact_set", "Save or delete a fact", false),
+    ("fact_get", "Read a fact", true),
+    ("fact_list", "List facts", true),
+    ("memory_search", "Search memory", true),
+];
+
 fn tools() -> Value {
+    let mut list = tool_schemas();
+    for tool in list["tools"].as_array_mut().into_iter().flatten() {
+        if let Some((_, title, read_only)) = ANNOTATIONS.iter().find(|(n, ..)| tool["name"] == *n) {
+            // Writes only add or replace, never touch anything outside zerodb.
+            let destructive = tool["name"] == "fact_set";
+            tool["annotations"] = json!({"title": title, "readOnlyHint": read_only,
+                "destructiveHint": destructive, "openWorldHint": false});
+        }
+    }
+    list
+}
+
+fn tool_schemas() -> Value {
     json!({"tools": [
         {
             "name": "memory_append",
