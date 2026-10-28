@@ -1176,6 +1176,10 @@ impl Engine {
     /// Lists a tenant's sessions that have a published turn, in byte order of agent, then
     /// session, with totals over all of them.
     ///
+    /// `turns` counts published turns. The writer publishes after the sync, so a counted turn
+    /// is durable. `window`, `records` and `search` can read it a few microseconds after it is
+    /// counted.
+    ///
     /// It makes 1 pass over the session index under the state lock. A max-heap keeps the
     /// `limit` smallest keys above the cursor. That is O(sessions) time and O(limit) memory.
     /// The index holds every tenant's sessions, so the pass covers them all. Writers wait for
