@@ -196,11 +196,19 @@ fn connect_writes_the_session_start_hook() {
         assert!(out.ends_with(&format!("\nremoved the sessionStart hook: {shown}\n")), "{out}");
         assert_eq!(files(&hooks).len(), 0, "{var:?}: removed, no backup");
 
-        // A hook file zerodb did not write stays.
-        std::fs::write(&file, "{}").unwrap();
-        let out = run(&["disconnect", "copilot"]);
-        assert!(out.contains(&format!("left {shown} alone")), "{var:?}: {out}");
-        assert_eq!(std::fs::read(&file).unwrap(), b"{}", "{var:?}");
+        // The hook for another binary goes. A hook file with other content stays.
+        let mut other = wanted.clone();
+        other["hooks"]["sessionStart"][0]["bash"] =
+            json!(r"'/opt/it'\''s/zerodb' hook session-start");
+        let other = serde_json::to_string_pretty(&other).unwrap() + "\n";
+        for (content, removed) in [(other.as_str(), true), ("{}", false)] {
+            std::fs::write(&file, content).unwrap();
+            let out = run(&["disconnect", "copilot"]);
+            let (verb, found) = if removed { ("removed", None) } else { ("left", Some(content)) };
+            assert!(out.contains(&format!("{verb} ")), "{var:?} {content}: {out}");
+            let left = std::fs::read_to_string(&file).ok();
+            assert_eq!(left.as_deref(), found, "{var:?}: {out}");
+        }
     }
     // The command runs in `sh` as the harness runs it.
     let mut sh = Command::new("sh");

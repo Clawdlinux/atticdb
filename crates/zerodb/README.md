@@ -160,6 +160,7 @@ VS Code's Copilot chat and Copilot CLI both read it:
 The binary path is single-quoted for the shell, with each `'` written as `'\''`.
 The rules above apply: no write when it matches, a backup, a synced temp file and a rename.
 `disconnect` deletes it once neither config has a zerodb entry, then syncs the directory. No backup is kept.
+It deletes the hook zerodb writes for any absolute binary path, so a moved binary's hook goes too.
 A hook file with other content is left alone, and `disconnect` says so.
 
 ## `zerodb hook session-start`
@@ -167,7 +168,8 @@ A hook file with other content is left alone, and `disconnect` says so.
 The Copilot `sessionStart` hook. It reads at most 1 MiB of JSON on stdin and uses only `cwd`.
 Parsing stops after the first JSON value, so stdin left open does not block it.
 The repo is the name of the first directory from `cwd` up that has a `.git` entry, else of `cwd`.
-It reads the home like `zerodb mcp` with no flags, with a 3 s retry deadline. It starts the server if needed.
+It reads the home like `zerodb mcp` with no flags, and starts the server if needed.
+All its reads share 1 deadline, 3 s after they start. A read with under 2 s left fails at once.
 It lists facts under `user/` and under `repo/<repo>/`, 50 each, in key order.
 It reads the last 5 turns of session `<repo>` for agents `vscode-copilot` and `copilot`, then keeps the newest 5.
 It prints 1 line, `{"additionalContext": "<block>"}`. With nothing to show, or on any error, it prints `{}`.

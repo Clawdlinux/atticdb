@@ -62,7 +62,7 @@ It also adds a Copilot hook file, `~/.copilot/hooks/zerodb.json`. VS Code's Copi
 At the start of each chat, the hook adds a small memory block.
 It lists your `user/` rules, this repo's facts and the 5 newest notes of this repo's session.
 The repo is the folder holding `.git`, at or above the chat's working directory.
-The block is at most 6,000 characters, and each entry at most 300.
+The block is at most 6,000 characters. Each content is cut to 300 characters.
 It is a snapshot. The model can call `memory_search` or `fact_list` for more.
 To turn it off, delete the hook file, or disconnect both harnesses.
 

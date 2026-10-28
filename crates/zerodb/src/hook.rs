@@ -11,8 +11,9 @@ use std::time::Duration;
 
 /// Most stdin bytes read.
 const MAX_INPUT: u64 = 1 << 20;
-/// Leaves 1 s to connect or start the server, the rest of the hook's 5 s for the reads.
-const RETRY_DEADLINE: Duration = Duration::from_secs(3);
+/// Time for all reads together, under the hook's 5 s timeout. A read needs 2 s left to
+/// start, so the first one has 1 s to connect or start the server.
+const BUDGET: Duration = Duration::from_secs(3);
 const FACTS: u64 = 50;
 const TURNS: usize = 5;
 const MAX_CONTENT: usize = 300;
@@ -44,7 +45,7 @@ fn block(input: impl Read) -> Result<Option<String>, String> {
     let input = input.map_err(|error| format!("stdin is not JSON of at most 1 MiB: {error}"))?;
     let cwd = input["cwd"].as_str().ok_or("stdin has no cwd string")?;
     let repo = repo(Path::new(cwd))?;
-    let mut home = HomeReader::new(&repo, RETRY_DEADLINE)?;
+    let mut home = HomeReader::new(&repo, BUDGET)?;
     let mut facts = |prefix: String| {
         let list = home.read("hook", "fact_list", &json!({"prefix": prefix, "limit": FACTS}))?;
         let list = list["facts"].as_array().cloned().unwrap_or_default();

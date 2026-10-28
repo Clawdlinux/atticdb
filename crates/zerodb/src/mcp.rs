@@ -109,21 +109,27 @@ pub fn command(tool: &str, mut flags: HashMap<String, String>) -> u8 {
 }
 
 /// Reads from the per-user home for code in this crate, such as the session-start hook.
-pub(crate) struct HomeReader(Adapter);
+pub(crate) struct HomeReader {
+    adapter: Adapter,
+    deadline: Instant,
+}
 
 impl HomeReader {
-    /// Resolves the home as `zerodb mcp` with no connection flags does. Each read retries
-    /// for up to `retry_deadline`.
-    pub(crate) fn new(session: &str, retry_deadline: Duration) -> Result<Self, String> {
-        let mut adapter = Adapter::new(HashMap::from([("--session".into(), session.into())]))?;
-        adapter.retry_deadline = retry_deadline;
-        Ok(Self(adapter))
+    /// Resolves the home as `zerodb mcp` with no connection flags does. All reads together,
+    /// connects and server starts included, end by `budget` from now.
+    pub(crate) fn new(session: &str, budget: Duration) -> Result<Self, String> {
+        let deadline = Instant::now() + budget;
+        let adapter = Adapter::new(HashMap::from([("--session".into(), session.into())]))?;
+        Ok(Self { adapter, deadline })
     }
 
     /// Runs the read tool `tool` as `agent`. Returns its `structuredContent`, or its error.
+    /// With under 2 s left it sends nothing and fails at once.
     pub(crate) fn read(&mut self, agent: &str, tool: &str, args: &Value) -> Result<Value, String> {
-        self.0.agent = agent.to_owned();
-        let result = self.0.call(tool, args).ok_or_else(|| format!("unknown tool {tool}"))?;
+        self.adapter.agent = agent.to_owned();
+        // `retry` and every exchange in it end at now + `retry_deadline`.
+        self.adapter.retry_deadline = self.deadline.saturating_duration_since(Instant::now());
+        let result = self.adapter.call(tool, args).ok_or_else(|| format!("unknown tool {tool}"))?;
         match result["content"][0]["text"].as_str() {
             Some(text) if result["isError"] == true => Err(text.to_owned()),
             _ => Ok(result["structuredContent"].clone()),

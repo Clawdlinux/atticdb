@@ -230,6 +230,18 @@ fn set_hook(exe: &str) -> Result<String, String> {
     })
 }
 
+/// Whether `bytes` are exactly the hook zerodb writes for some absolute binary path, so a
+/// hook from a moved or other zerodb binary counts too.
+fn ours(bytes: &[u8]) -> bool {
+    let hook: Value = serde_json::from_slice(bytes).unwrap_or_default();
+    let bash = hook["hooks"]["sessionStart"][0]["bash"].as_str().unwrap_or_default();
+    let quoted = bash.strip_suffix(" hook session-start").and_then(|q| q.strip_prefix('\''));
+    let exe = quoted.and_then(|q| q.strip_suffix('\'')).map(|q| q.replace(r"'\''", "'"));
+    let exe = exe.filter(|exe| Path::new(exe).is_absolute());
+    // Writing the hook again for that path must give the same bytes.
+    exe.and_then(|exe| hook_text(&exe).ok()).is_some_and(|text| text.as_bytes() == bytes)
+}
+
 /// Deletes the hook file once no harness has a zerodb entry, if zerodb wrote it. Returns
 /// the message to print, empty when there is no hook file.
 fn remove_hook() -> Result<String, String> {
@@ -254,8 +266,8 @@ fn remove_hook() -> Result<String, String> {
             Err(error) => return Ok(format!("{kept}: cannot read {name}'s config: {error}")),
         }
     }
-    if binary().and_then(|exe| hook_text(&exe)).map(String::into_bytes) != Ok(bytes) {
-        let why = "it is not the hook this zerodb writes. Delete it by hand to stop the block";
+    if !ours(&bytes) {
+        let why = "it differs from the hook zerodb writes. Delete it by hand to stop the block";
         return Ok(format!("left {shown} alone: {why}"));
     }
     std::fs::remove_file(&path).map_err(|error| format!("{shown}: cannot delete: {error}"))?;

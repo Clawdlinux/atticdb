@@ -1,6 +1,8 @@
 use crate::support::{chmod, Dir, Holders, Process};
 use serde_json::{json, Value};
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -41,6 +43,45 @@ fn data_dir(home: &Path) -> std::path::PathBuf {
     let data =
         if cfg!(target_os = "macos") { "Library/Application Support" } else { ".local/share" };
     home.join(data).join("zerodb/data")
+}
+
+/// A trusted fake server in `home`'s data directory. `/healthz` answers at once, any other
+/// request after 1.5 s with no facts and no turns.
+fn slow_server(home: &Path) {
+    let data = data_dir(home);
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&data).unwrap();
+    let socket = data.join("zerodb.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let lock =
+        format!("pid={} instance=X unix={} tcp=none\n", std::process::id(), socket.display());
+    std::fs::write(data.join("LOCK"), lock).unwrap();
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().map_while(Result::ok) {
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                loop {
+                    let mut head = String::new();
+                    while !head.ends_with("\r\n\r\n") {
+                        if reader.read_line(&mut head).unwrap_or(0) == 0 {
+                            return;
+                        }
+                    }
+                    let body = if head.starts_with("GET /healthz ") {
+                        r#"{"instance": "X"}"#
+                    } else {
+                        std::thread::sleep(Duration::from_millis(1_500));
+                        r#"{"facts": [], "next": null, "turns": [], "truncated": false}"#
+                    };
+                    let length = body.len();
+                    let reply =
+                        format!("HTTP/1.1 200 OK\r\nContent-Length: {length}\r\n\r\n{body}");
+                    if stream.write_all(reply.as_bytes()).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
 }
 
 /// The block lists rules, then this repo's facts, both in key order, then the newest 5
@@ -103,12 +144,13 @@ fn session_start_prints_the_memory_block() {
     assert!(last.starts_with("- repo/big/") && last.ends_with(&format!(": {content}")), "{last}");
 }
 
-/// Each row prints `{}` and exits 0 in under 5 s.
+/// Each row prints `{}` and exits 0 in under 5 s. A slow server gets 3 s for all 4 reads.
 #[test]
 fn session_start_prints_nothing_on_errors() {
     let dir = Dir::new();
-    let (empty, refused) = (dir.0.join("e"), dir.0.join("r"));
-    let _holders = Holders(vec![data_dir(&empty)]);
+    let (empty, refused, slow) = (dir.0.join("e"), dir.0.join("r"), dir.0.join("s"));
+    let _holders = Holders(vec![data_dir(&empty), data_dir(&slow)]);
+    slow_server(&slow);
     std::fs::create_dir_all(data_dir(&refused)).unwrap();
     chmod(data_dir(&refused).parent().unwrap(), 0o700);
     chmod(&data_dir(&refused), 0o755);
@@ -119,6 +161,7 @@ fn session_start_prints_nothing_on_errors() {
         ("over 1 MiB", &empty, too_long),
         ("no memory", &empty, cwd(&empty.join("repo"))),
         ("data directory mode 0755", &refused, cwd(&refused.join("repo"))),
+        ("1.5 s per read", &slow, cwd(&slow.join("repo"))),
     ];
     for (case, home, stdin) in rows {
         std::fs::create_dir_all(home).unwrap();
