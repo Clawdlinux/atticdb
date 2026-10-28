@@ -10,8 +10,8 @@ import time
 
 TOKEN = "token-a-0123456789abcdefghijklmnopqrstuv"
 BIN = os.path.abspath(os.environ["ZERODB_BIN"])
-# Socket paths must fit sun_path (104 bytes on macOS), so the default is short, as in
-# the Rust tests. Set ZERODB_TEST_DIR to a short directory when the checkout is deep.
+# Socket paths must fit sun_path (104 bytes on macOS), so the default is short.
+# Set ZERODB_TEST_DIR to a short directory when the checkout is deep.
 ROOT = os.environ.get("ZERODB_TEST_DIR") or os.path.join(
     os.path.dirname(__file__), "..", "..", "..", "target", "s"
 )

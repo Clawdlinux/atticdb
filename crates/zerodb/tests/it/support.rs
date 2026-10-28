@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::os::fd::OwnedFd;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
@@ -90,17 +90,23 @@ impl Drop for Dir {
 fn tmp_root() -> PathBuf {
     let uid = rustix::process::geteuid().as_raw();
     let root = std::fs::canonicalize("/tmp").unwrap().join(format!("zerodb-test-{uid}"));
-    let checked = zerodb::listen::owned_dir(&root, 0o077).and_then(|()| {
-        // `owned_dir` follows symlinks, so check the entry itself too.
-        match std::fs::symlink_metadata(&root) {
-            Ok(meta) if meta.is_dir() => Ok(()),
-            _ => Err(format!("{} must not be a symlink", root.display())),
-        }
-    });
-    if let Err(error) = checked {
-        panic!("{error}; set ZERODB_TEST_DIR to a short directory");
-    }
-    root
+    // `owned_dir` makes the root if missing, but its check follows symlinks. So check the
+    // entry itself. Once it is ours, the sticky bit on /tmp stops others from replacing it.
+    let made = zerodb::listen::owned_dir(&root, 0o077);
+    let error = match std::fs::symlink_metadata(&root) {
+        Ok(meta) if meta.is_dir() && meta.uid() == uid && meta.mode() & 0o077 == 0 => return root,
+        Ok(meta) if meta.is_symlink() => format!("{} is a symlink", root.display()),
+        Ok(meta) => format!(
+            "{} must be a directory owned by uid {uid}, mode 0700 or stricter, found mode {:04o} \
+             owned by uid {}",
+            root.display(),
+            meta.mode() & 0o7777,
+            meta.uid()
+        ),
+        // If `owned_dir` failed, its error says why the root is missing.
+        Err(error) => made.err().unwrap_or_else(|| format!("{}: {error}", root.display())),
+    };
+    panic!("{error}; set ZERODB_TEST_DIR to a short directory")
 }
 
 /// An engine on a copy of `disk` with 1 MiB segments and no timed checkpoints. `tune`
