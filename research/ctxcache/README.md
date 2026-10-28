@@ -155,9 +155,11 @@ A `cat -n` in the shell and an editor view of the same lines are 1 object.
 
 ### Shell commands: `bash.py`
 
-The command is split with `shlex` on `&&`, `||`, `;`, `|`, `&` and newlines. Heredoc bodies are dropped.
-Leading `VAR=value` words and wrappers such as `timeout 10` are skipped. A `cd` sets the directory.
-- **Pure read**: 1 reader on exactly 1 file, maybe piped into filters, with no redirection. Readers are `cat`, `head`, `tail`, `nl`, `wc`, `less`, `more`, `sed` without `-i`, `grep` without `-r`, `rg` and `awk`. The output is a read of that file.
+A small scanner splits the command on unquoted `&&`, `||`, `;`, `|`, `&` and newlines.
+Quotes and escapes are resolved inside words, so a quoted `|` is a word, not a pipe.
+A backslash-newline joins 2 lines. An unquoted word that starts with `#` is a comment up to the newline.
+Heredoc bodies are dropped. Leading `VAR=value` words and wrappers such as `timeout 10` are skipped. A `cd` sets the directory.
+- **Pure read**: 1 reader on exactly 1 file, maybe piped into filters, with no redirection. Readers are `cat`, `head`, `tail`, `nl`, `wc`, `less`, `more`, `sed` without `-i`, `grep` without `-r`, `rg` and `awk`. The output is a read of that file. `rg` searches directories, so it reads a file only when the operand is a known file or has an extension. An operand ending in `/` is never a file.
 - **Writes**: `rm`, `mv`, `touch`, `truncate`, `tee`, the last operand of `cp`, and `sed -i`, which is a reference first. Also `git checkout` or `git restore` of a known file, and `>` or `>>` into a file.
 - **References**: every other operand that resolves to a known file.
 - **URLs**: `curl` or `wget` of exactly 1 URL, with no output file, is a URL read. Another command that names a known URL references it.
@@ -214,4 +216,5 @@ We changed nothing in the data. The results are aggregate counts derived from it
 - `test_policies.py`: hand-checked results per policy, with reuse distances, peak live and dead tokens.
 - `test_adapters.py`: 1 table per adapter, on rows shaped like the real ones.
 - `test_fetch.py`: API outcomes against a fake HTTP layer, and the pinned samples.
+- `test_shell.py`: 1 table of shell commands and the reads, writes and uses they imply.
 - `test_cli.py`: the CLI on the fixture trace.

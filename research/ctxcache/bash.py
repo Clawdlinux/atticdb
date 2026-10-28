@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import posixpath
 import re
-import shlex
 from dataclasses import dataclass, field
 
 READERS = {"cat", "head", "tail", "nl", "wc", "less", "more", "sed", "grep", "egrep", "fgrep", "rg", "awk"}
@@ -18,6 +17,9 @@ WRAPPERS = {"timeout", "time", "sudo", "env", "nohup", "nice", "stdbuf", "comman
 REDIRECTS = {">", ">>", ">|", "&>", "&>>", ">&", "<", "<<", "<<<", "<&", "<>"}
 WRITE_REDIRECTS = {">", ">>", ">|", "&>", "&>>", ">&"}
 OPERATORS = "();<>|&\n"
+# Longest first, so "&&" wins over "&" and "2>&1" reads as 2, >&, 1.
+OPS = sorted(["&&", "||", ";;", "|&", "&>>", "&>", ">>", ">&", ">|", "<<<", "<<", "<&", "<>", ">", "<", "|", "&",
+              ";", "(", ")", "\n"], key=len, reverse=True)
 # Options that take the next word as their value, per program.
 VALUED = {
     "grep": {"-e", "-f", "-m", "-A", "-B", "-C", "-d", "-D", "--regexp", "--file", "--max-count"},
@@ -82,9 +84,9 @@ def effects(command: str, cwd: str | None, known: set[str]) -> Effects:
         stages.append(Stage(sep, prog, args, redirects, eff.cwd))
         _classify(stages[-1], eff, known)
 
-    pure = _pure_read(stages)
+    pure = _pure_read(stages, known)
     if pure is not None and not any(kind == "write" for kind, _ in eff.events):
-        eff.read = resolve(pure, stages[0].cwd, known)
+        eff.read = pure
         eff.events = []
     elif len(stages) == 1 and stages[0].prog in ("curl", "wget") and len(eff.urls) == 1 and not eff.events:
         if not any(a in ("-o", "-O") or a.startswith("--output") for a in stages[0].args):
@@ -93,24 +95,74 @@ def effects(command: str, cwd: str | None, known: set[str]) -> Effects:
     return eff
 
 
+class Op(str):
+    """An unquoted operator. A quoted ">" or "|" stays a plain word."""
+
+
 def split(command: str) -> list[tuple[str, list[str]]] | None:
-    """Simple commands as (operator before it, words). None if the quotes do not parse."""
-    lex = shlex.shlex(strip_heredocs(command), posix=True, punctuation_chars=OPERATORS)
-    lex.whitespace, lex.whitespace_split = " \t\r", True
-    try:
-        tokens = list(lex)
-    except ValueError:
+    """Simple commands as (operator before it, words). None if a quote is not closed."""
+    toks = tokens(command)
+    if toks is None:
         return None
     out, words, sep = [], [], ""
-    for tok in tokens:
-        if tok and all(c in OPERATORS for c in tok) and tok not in REDIRECTS:
+    for kind, text in toks:
+        if kind == "op" and text not in REDIRECTS:
             if words:
                 out.append((sep, words))
-            words, sep = [], tok.strip("\n") or "\n"
+            words, sep = [], text
         else:
-            words.append(tok)
+            words.append(Op(text) if kind == "op" else text)
     if words:
         out.append((sep, words))
+    return out
+
+
+def tokens(command: str) -> list[tuple[str, str]] | None:
+    """("op", text) and ("word", text) pairs. Quotes and escapes are resolved inside
+    words, so an operator in quotes is part of its word. A backslash-newline joins
+    lines. A word that starts with # is a comment up to the newline, which stays.
+    None if a quote is not closed."""
+    s = strip_heredocs(command.replace("\\\n", ""))
+    out: list[tuple[str, str]] = []
+    i, n = 0, len(s)
+    while i < n:
+        c = s[i]
+        if c in " \t\r":
+            i += 1
+        elif c in OPERATORS:
+            op = next(o for o in OPS if s.startswith(o, i))
+            out.append(("op", op))
+            i += len(op)
+        elif c == "#":
+            j = s.find("\n", i)
+            i = n if j < 0 else j
+        else:
+            word: list[str] = []
+            while i < n and s[i] not in " \t\r" and s[i] not in OPERATORS:
+                c = s[i]
+                if c == "'":
+                    j = s.find("'", i + 1)
+                    if j < 0:
+                        return None
+                    word.append(s[i + 1 : j])
+                    i = j + 1
+                elif c == '"':
+                    i += 1
+                    while i < n and s[i] != '"':
+                        if s[i] == "\\" and i + 1 < n and s[i + 1] in '"\\$`':
+                            i += 1
+                        word.append(s[i])
+                        i += 1
+                    if i >= n:
+                        return None
+                    i += 1
+                elif c == "\\" and i + 1 < n:
+                    word.append(s[i + 1])
+                    i += 2
+                else:
+                    word.append(c)
+                    i += 1
+            out.append(("word", "".join(word)))
     return out
 
 
@@ -170,7 +222,7 @@ def _redirects(words: list[str]) -> tuple[list[str], list[tuple[str, str]]]:
     args, redirects, i = [], [], 0
     while i < len(words):
         w = words[i]
-        if w not in REDIRECTS:
+        if not isinstance(w, Op):
             args.append(w)
             i += 1
             continue
@@ -226,18 +278,23 @@ def _classify(stage: Stage, eff: Effects, known: set[str]) -> None:
     eff.urls += [a for a in stage.args if URL.match(a)]
 
 
-def _pure_read(stages: list[Stage]) -> str | None:
-    """The file a command shows when it is 1 reader on 1 file, maybe piped into filters."""
+def _pure_read(stages: list[Stage], known: set[str]) -> str | None:
+    """The file a command shows when it is 1 reader on 1 file, maybe piped into filters.
+    rg searches directories, so it reads a file only when the operand is a known file
+    or has an extension. A trailing slash is never a file."""
     if not stages or any(s.redirects for s in stages) or any(s.sep != "|" for s in stages[1:]):
         return None
     first = stages[0]
     if first.prog not in READERS:
         return None
     files, flags = _files(first.prog, first.args)
-    if len(files) != 1 or _in_place(first.prog, flags):
+    if len(files) != 1 or _in_place(first.prog, flags) or files[0].endswith("/"):
         return None
     if first.prog in GREPS and ("--recursive" in flags or any("r" in f or "R" in f for f in flags if f[1] != "-")):
         return None
+    path = resolve(files[0], first.cwd, known)
+    if first.prog == "rg" and path not in known and not EXTENSION.search(posixpath.basename(path)):
+        return None
     if any(s.prog not in FILTERS or _files(s.prog, s.args)[0] for s in stages[1:]):
         return None
-    return files[0]
+    return path
