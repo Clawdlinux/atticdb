@@ -671,8 +671,9 @@ fn launch_race_starts_one_server() {
     assert_eq!(mcp.close().0.code(), Some(0));
 }
 
-/// With no connection flags, the shell verbs create and use a per-user home. 4 parallel
-/// first runs all succeed and leave no temp config. One left by a killed run is ignored.
+/// With no connection flags, the shell verbs create and use a per-user home, ignoring a stray
+/// `ZERODB_TOKEN` with a note. 4 parallel first runs all succeed and leave no temp config.
+/// One left by a killed run is ignored.
 #[test]
 fn no_flags_use_the_home() {
     let dir = Dir::new();
@@ -700,13 +701,15 @@ fn no_flags_use_the_home() {
         let start = |verb: &[&str]| {
             let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_zerodb"));
             command.args(verb).current_dir(&dir.0).env("HOME", &home_env);
-            command.env_remove("ZERODB_TOKEN").env_remove("XDG_DATA_HOME");
+            command.env("ZERODB_TOKEN", "x").env_remove("XDG_DATA_HOME");
             command.envs(xdg.iter().map(|xdg| ("XDG_DATA_HOME", xdg)));
             Process::start(command.stdin(std::process::Stdio::null()))
         };
+        let note = "zerodb: ignoring ZERODB_TOKEN: no --url, --data-dir or --config given, so \
+            the home's token is used\n";
         let run = |mut process: Process| {
             let (status, out) = process.wait();
-            assert!(status.success(), "{case}: {out}");
+            assert!(status.success() && process.stderr().starts_with(note), "{case}: {out}");
             serde_json::from_str::<Value>(&process.stdout()).unwrap()
         };
         let written: Vec<String> = (0..4).map(|n| format!("{case} {n}")).collect();

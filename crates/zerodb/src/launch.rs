@@ -69,7 +69,8 @@ pub struct Launch {
 }
 
 impl Launch {
-    /// `data_dir` is absolute. Without `url` it is required, and `config` lets it start a server.
+    /// `data_dir` and `config` are absolute. Without `url` `data_dir` is required, and
+    /// `config` lets it start a server.
     pub fn new(url: Option<Url>, data_dir: Option<PathBuf>, config: Option<PathBuf>) -> Self {
         let refused = String::new();
         Self {
@@ -163,6 +164,8 @@ impl Launch {
             .arg(dir)
             .args(["--listen", "none", "--exit-on-poison"])
             .env_remove(crate::mcp::TOKEN_ENV)
+            // Its paths are absolute, and it must not pin the first chat's folder.
+            .current_dir("/")
             .stdin(Stdio::null())
             .stdout(log.try_clone()?)
             .stderr(log)

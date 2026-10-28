@@ -3,6 +3,7 @@
 //! entry and the hook run the binary on the home, so they hold no token or path but the
 //! binary's.
 
+use crate::home::user_home;
 use serde_json::{json, Map, Value};
 use std::fs::{File, OpenOptions, Permissions};
 use std::io::Write;
@@ -51,11 +52,11 @@ impl Harness {
     fn file(self) -> Result<PathBuf, String> {
         Ok(match self {
             Self::Vscode if cfg!(target_os = "macos") => {
-                home()?.join("Library/Application Support/Code/User/mcp.json")
+                user_home()?.join("Library/Application Support/Code/User/mcp.json")
             }
             Self::Vscode => match absolute_env("XDG_CONFIG_HOME") {
                 Some(config) => config,
-                None => home()?.join(".config"),
+                None => user_home()?.join(".config"),
             }
             .join("Code/User/mcp.json"),
             Self::Copilot => copilot_home()?.join("mcp-config.json"),
@@ -87,13 +88,9 @@ fn absolute_env(name: &str) -> Option<PathBuf> {
     std::env::var_os(name).map(PathBuf::from).filter(|path| path.is_absolute())
 }
 
-fn home() -> Result<PathBuf, String> {
-    absolute_env("HOME").ok_or_else(|| "HOME must be set to an absolute path".into())
-}
-
 /// `$COPILOT_HOME` when set and absolute, else `~/.copilot`.
 fn copilot_home() -> Result<PathBuf, String> {
-    absolute_env("COPILOT_HOME").map_or_else(|| Ok(home()?.join(".copilot")), Ok)
+    absolute_env("COPILOT_HOME").map_or_else(|| Ok(user_home()?.join(".copilot")), Ok)
 }
 
 /// The absolute path of the running binary, which must be UTF-8 to fit in JSON.
@@ -104,10 +101,12 @@ fn binary() -> Result<String, String> {
 }
 
 /// Adds zerodb's entry to `harness`'s config and writes the hook, after creating the home.
-/// Returns the exit code.
-pub fn connect(harness: Harness) -> u8 {
-    finish(crate::home::ensure().and_then(|_| binary()).and_then(|exe| {
-        println!("{}", edit(harness, Some(harness.entry(&exe)))?);
+/// An entry with connection flags is replaced only with `force`. Returns the exit code.
+pub fn connect(harness: Harness, force: bool) -> u8 {
+    finish(crate::home::ensure().and_then(|home| {
+        let exe = binary()?;
+        let guard = (!force).then_some(home.data_dir.as_path());
+        println!("{}", edit(harness, Some(harness.entry(&exe)), guard)?);
         set_hook(&exe)
     }))
 }
@@ -115,7 +114,7 @@ pub fn connect(harness: Harness) -> u8 {
 /// Removes zerodb's entry from `harness`'s config, and the hook once no harness has one.
 /// Returns the exit code.
 pub fn disconnect(harness: Harness) -> u8 {
-    finish(edit(harness, None).and_then(|message| {
+    finish(edit(harness, None, None).and_then(|message| {
         println!("{message}");
         remove_hook()
     }))
@@ -136,8 +135,9 @@ fn finish(result: Result<String, String>) -> u8 {
     }
 }
 
-/// Sets zerodb's entry to `wanted`, or removes it for `None`. Returns the message to print.
-fn edit(harness: Harness, wanted: Option<Value>) -> Result<String, String> {
+/// Sets zerodb's entry to `wanted`, or removes it for `None`. With `guard`, the home's data
+/// directory, an entry with connection flags is refused. Returns the message to print.
+fn edit(harness: Harness, wanted: Option<Value>, guard: Option<&Path>) -> Result<String, String> {
     let (name, path) = (harness.name(), harness.file()?);
     let section = harness.section();
     let shown = path.display();
@@ -158,6 +158,9 @@ fn edit(harness: Harness, wanted: Option<Value>) -> Result<String, String> {
         }
         (None, None) => return Ok(format!("zerodb is not connected to {name}")),
         (Some(entry), current) => {
+            if let (Some(current), Some(data)) = (current, guard) {
+                refuse_flags(name, &path, current, data)?;
+            }
             servers.insert("zerodb".into(), entry.clone());
             if current.is_some() {
                 "updated zerodb in"
@@ -180,6 +183,38 @@ fn edit(harness: Harness, wanted: Option<Value>) -> Result<String, String> {
         }
         None => format!("{verb} {name}: {shown}"),
     })
+}
+
+/// Flags that point an entry at a store other than the home.
+const CONNECTION: [&str; 5] = ["--url", "--data-dir", "--config", "--token-file", "--tenant"];
+
+/// Fails when `current`, the entry in `file`, passes connection flags, because its memory
+/// would not follow a switch to the home, whose data directory is `data`.
+fn refuse_flags(name: &str, file: &Path, current: &Value, data: &Path) -> Result<(), String> {
+    let args = current["args"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let args: Vec<&str> = args.iter().filter_map(Value::as_str).collect();
+    let mut used = Vec::new();
+    for flag in CONNECTION {
+        if let Some(at) = args.iter().position(|arg| *arg == flag) {
+            used.push(match (flag, args.get(at + 1)) {
+                ("--data-dir", Some(dir)) => format!("--data-dir {dir}"),
+                _ => flag.to_owned(),
+            });
+        }
+    }
+    if used.is_empty() {
+        return Ok(());
+    }
+    let (used, file, data) = (used.join(", "), file.display(), data.display());
+    Err(format!(
+        "{file}: the zerodb entry for {name} uses {used}. Nothing changed.\n\
+         Its memory stays in that store and would not follow a switch to the home.\n\
+         To keep it, stop that store's server. Then move the files in its data directory \
+         into {data}.\n\
+         Do that only while {data} is empty, and only if the old config's tenant is \"me\".\n\
+         Or keep using the old entry.\n\
+         To switch anyway: zerodb connect {name} --force"
+    ))
 }
 
 /// A file's bytes and mode.
@@ -374,10 +409,11 @@ fn save(path: &Path, bytes: &[u8], mode: u32) -> Result<PathBuf, String> {
     Err(format!("{}: too many backups in 1 second", Path::new(&base).display()))
 }
 
-/// Creates `path`, which must not exist, with `bytes` and `mode`, and syncs it.
+/// Creates `path`, which must not exist, with `bytes` and `mode`, and syncs it. A new file
+/// without `mode` is owner-only.
 fn create(path: &Path, bytes: &[u8], mode: Option<u32>) -> std::io::Result<()> {
     let mut file: File =
-        OpenOptions::new().write(true).create_new(true).mode(mode.unwrap_or(0o666)).open(path)?;
+        OpenOptions::new().write(true).create_new(true).mode(mode.unwrap_or(0o600)).open(path)?;
     if let Some(mode) = mode {
         file.set_permissions(Permissions::from_mode(mode))?;
     }
