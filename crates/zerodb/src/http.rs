@@ -63,6 +63,11 @@ pub struct Limits {
     /// After closing our half, time spent discarding input so the peer reads our
     /// response before a TCP reset can drop it.
     pub linger: Duration,
+    /// Most requests on 1 connection. The response to the last one says `Connection: close`.
+    pub max_requests: u64,
+    /// Extra headers on the errors the connection answers itself, such as 400 for a bad head.
+    /// Empty for the store server.
+    pub headers: &'static [(&'static str, &'static str)],
 }
 
 impl Default for Limits {
@@ -76,6 +81,8 @@ impl Default for Limits {
             idle_timeout: Duration::from_secs(30),
             write_timeout: Duration::from_secs(30),
             linger: Duration::from_secs(1),
+            max_requests: u64::MAX,
+            headers: &[],
         }
     }
 }
@@ -153,6 +160,8 @@ pub struct Response {
     pub body: Vec<u8>,
     /// `Content-Type`.
     pub content_type: &'static str,
+    /// Extra headers, written after `Connection`. Empty for the store server.
+    pub headers: &'static [(&'static str, &'static str)],
     /// A share of a [`Budget`] that lasts until the response is dropped, after its write.
     pub(crate) _held: Option<Held>,
 }
@@ -165,7 +174,7 @@ impl Response {
 
     /// A response with a text body of `content_type`.
     pub fn text(status: u16, content_type: &'static str, body: String) -> Self {
-        Self { status, body: body.into_bytes(), content_type, _held: None }
+        Self { status, body: body.into_bytes(), content_type, headers: &[], _held: None }
     }
 
     /// `{"outcome": "not_committed", "error": <error>, "message"?: <message>}`. Nothing
@@ -237,6 +246,7 @@ impl<S: Stream> ServerConn<S> {
             Ok(head) => head,
             Err(rejection) => {
                 if let Some(response) = rejection {
+                    let response = self.own(response);
                     let _ = self.write_response(&response, true);
                 }
                 self.close();
@@ -248,7 +258,8 @@ impl<S: Stream> ServerConn<S> {
             Err(response) => return self.reject(&response),
         };
         if head.content_length > self.limits.body_bytes {
-            return self.reject(&Response::error(413, "too_large", None));
+            let response = self.own(Response::error(413, "too_large", None));
+            return self.reject(&response);
         }
         if head.expect_continue && head.content_length > 0 && head.minor_version == 1 {
             let deadline = Instant::now() + self.limits.write_timeout;
@@ -262,12 +273,17 @@ impl<S: Stream> ServerConn<S> {
             return None;
         };
         self.served += 1;
-        self.keep_alive = head.keep_alive;
+        self.keep_alive = head.keep_alive && self.served < self.limits.max_requests;
         Some((Request { head, body }, checked))
     }
 
-    /// Writes the response to the last request. Closes the connection after it when
-    /// the request asked to, the response says so, or the write fails.
+    /// An error the connection answers itself, with the extra headers in its limits.
+    fn own(&self, response: Response) -> Response {
+        Response { headers: self.limits.headers, ..response }
+    }
+
+    /// Writes the response to the last request. Closes the connection after it when the
+    /// request asked to, it was the last of `max_requests`, or the write fails.
     pub fn respond(&mut self, response: &Response) -> io::Result<()> {
         if !self.open {
             return Err(io::Error::new(ErrorKind::NotConnected, "connection closed"));
@@ -475,9 +491,13 @@ pub fn write_response<S: Stream + ?Sized>(
 ) -> io::Result<()> {
     let (status, length, kind) = (response.status, response.body.len(), response.content_type);
     let connection = if close { "close" } else { "keep-alive" };
-    let head = format!(
-        "HTTP/1.1 {status} \r\nContent-Type: {kind}\r\nContent-Length: {length}\r\nConnection: {connection}\r\n\r\n"
+    let mut head = format!(
+        "HTTP/1.1 {status} \r\nContent-Type: {kind}\r\nContent-Length: {length}\r\nConnection: {connection}\r\n"
     );
+    for (name, value) in response.headers {
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
+    head.push_str("\r\n");
     write_until(stream, head.as_bytes(), deadline)?;
     write_until(stream, &response.body, deadline)
 }

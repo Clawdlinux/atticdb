@@ -10,6 +10,8 @@ pub const TENANT: &str = "me";
 /// A home ready for use.
 #[derive(Clone, Debug)]
 pub struct Home {
+    /// The home directory, mode 0700.
+    pub dir: PathBuf,
     /// `zerodb.json`, mode 0600.
     pub config: PathBuf,
     /// `data/`, mode 0700.
@@ -62,7 +64,7 @@ pub fn ensure() -> Result<Home, String> {
     crate::listen::owned_dir(&data_dir, 0o077)?;
     // Every call syncs, covering a concurrent creator that has not synced yet.
     sync_dirs(&dir, &data_dir)?;
-    Ok(Home { config, data_dir, tenant: TENANT.into() })
+    Ok(Home { dir, config, data_dir, tenant: TENANT.into() })
 }
 
 /// Syncs `data/`, the home and its ancestors, deepest first, so their entries survive a

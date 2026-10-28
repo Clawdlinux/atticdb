@@ -504,3 +504,50 @@ pub fn private_file(dir: &Dir, name: &str, content: &str) -> String {
     file.write_all(content.as_bytes()).unwrap();
     path.to_str().unwrap().to_owned()
 }
+
+/// The exit code, stdout and stderr of a finished `zerodb`.
+pub type Output = (Option<i32>, String, String);
+
+/// Runs `zerodb` in `cwd` with `HOME` set to `home` and writes `stdin` after `delay`, keeping
+/// it open until the exit. A stray `ZERODB_TOKEN` is set, which the home's users ignore.
+pub fn zerodb(home: &Path, cwd: &Path, args: &[&str], stdin: &[u8], delay: u64) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_zerodb"));
+    command.args(args).current_dir(cwd).env("HOME", home).stdin(Stdio::piped());
+    for var in ["COPILOT_HOME", "XDG_DATA_HOME"] {
+        command.env_remove(var);
+    }
+    command.env("ZERODB_TOKEN", "x");
+    let mut process = Process::start(&mut command);
+    let mut input = process.child.stdin.take().unwrap();
+    std::thread::sleep(Duration::from_millis(delay));
+    // The hook reads at most 1 MiB, so a longer write fails once it exits.
+    let _ = input.write_all(stdin);
+    let (status, _) = process.wait();
+    (status.code(), process.stdout(), process.stderr())
+}
+
+/// The hook's stdout and stderr, after it exits 0 with 1 line.
+pub fn hook(home: &Path, stdin: &str, delay: u64) -> (String, String) {
+    let (code, out, err) = zerodb(home, home, &["hook", "session-start"], stdin.as_bytes(), delay);
+    assert_eq!(code, Some(0), "{stdin:.80}: {err}");
+    assert_eq!(out.lines().count(), 1, "{stdin:.80}: 1 line: {out}");
+    (out, err)
+}
+
+/// Runs a verb on the home, which must succeed.
+pub fn seed(home: &Path, args: &[&str]) {
+    let (code, _, err) = zerodb(home, home, args, b"", 0);
+    assert_eq!(code, Some(0), "{args:?}: {err}");
+}
+
+/// The hook's stdin for a chat in `path`.
+pub fn cwd(path: &Path) -> String {
+    json!({"cwd": path}).to_string()
+}
+
+/// The home's data directory when `HOME` is `home`.
+pub fn data_dir(home: &Path) -> PathBuf {
+    let data =
+        if cfg!(target_os = "macos") { "Library/Application Support" } else { ".local/share" };
+    home.join(data).join("zerodb/data")
+}
