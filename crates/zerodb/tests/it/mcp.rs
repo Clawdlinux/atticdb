@@ -623,40 +623,53 @@ fn launch_race_starts_one_server() {
     assert_eq!(mcp.close().0.code(), Some(0));
 }
 
-/// With no connection flags, the shell verbs create and use a per-user home.
+/// With no connection flags, the shell verbs create and use a per-user home. 4 parallel
+/// first runs all succeed. A temp config left by a killed run is ignored.
 #[test]
 fn no_flags_use_the_home() {
     let dir = Dir::new();
     let mut rows = vec![];
     if cfg!(target_os = "linux") {
-        rows.push(("XDG_DATA_HOME", Some(dir.0.join("x")), dir.0.join("x/zerodb")));
+        rows.push(("XDG_DATA_HOME", dir.0.clone(), Some(dir.0.join("x")), dir.0.join("x/zerodb")));
     }
     let home =
         if cfg!(target_os = "macos") { "Library/Application Support" } else { ".local/share" };
-    rows.push(("HOME", None, dir.0.join(home).join("zerodb")));
-    let _holders = Holders(rows.iter().map(|(_, _, home)| home.join("data")).collect());
-    for (case, xdg, home) in rows {
+    rows.push(("HOME", dir.0.clone(), None, dir.0.join(home).join("zerodb")));
+    rows.push(("stray temp", dir.0.join("t"), None, dir.0.join("t").join(home).join("zerodb")));
+    let _holders = Holders(rows.iter().map(|(.., home)| home.join("data")).collect());
+    for (case, home_env, xdg, home) in rows {
         let staging = home.join("data/.zs.01234567/s");
         assert!(
             staging.as_os_str().len() < zerodb::listen::SUN_PATH_BYTES,
             "{case}: {} is too deep, set ZERODB_TEST_DIR to a short directory",
             staging.display()
         );
-        let run = |verb: &[&str]| {
+        if case == "stray temp" {
+            std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&home).unwrap();
+            std::fs::write(home.join(".zerodb.json.0123456789abcdef"), "").unwrap();
+        }
+        let start = |verb: &[&str]| {
             let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_zerodb"));
-            command.args(verb).current_dir(&dir.0).env("HOME", &dir.0);
+            command.args(verb).current_dir(&dir.0).env("HOME", &home_env);
             command.env_remove("ZERODB_TOKEN").env_remove("XDG_DATA_HOME");
             command.envs(xdg.iter().map(|xdg| ("XDG_DATA_HOME", xdg)));
-            let mut process = Process::start(command.stdin(std::process::Stdio::null()));
+            Process::start(command.stdin(std::process::Stdio::null()))
+        };
+        let run = |mut process: Process| {
             let (status, out) = process.wait();
-            assert!(status.success(), "{case} {verb:?}: {out}");
+            assert!(status.success(), "{case}: {out}");
             serde_json::from_str::<Value>(&process.stdout()).unwrap()
         };
-        run(&["append", "--content", case]);
+        let written: Vec<String> = (0..4).map(|n| format!("{case} {n}")).collect();
+        let started: Vec<_> = written.iter().map(|n| start(&["append", "--content", n])).collect();
+        started.into_iter().for_each(|process| _ = run(process));
         let config = std::fs::read(home.join("zerodb.json")).unwrap();
-        let turns = run(&["recent"])["turns"].clone();
-        assert_eq!(turns.as_array().map(Vec::len), Some(1), "{case}: {turns}");
-        assert_eq!(turns[0]["content"], case, "{case}: its own home");
+        let recent = run(start(&["recent", "--n", "10"]));
+        let turns = recent["turns"].as_array().unwrap();
+        let mut found: Vec<_> =
+            turns.iter().map(|turn| turn["content"].as_str().unwrap()).collect();
+        found.sort_unstable();
+        assert_eq!(found, written, "{case}: all 4 in its own home");
         assert_eq!(std::fs::read(home.join("zerodb.json")).unwrap(), config, "{case}: kept");
         for (path, mode) in [("", 0o700), ("data", 0o700), ("zerodb.json", 0o600)] {
             let found = std::fs::metadata(home.join(path)).unwrap().mode() & 0o777;
