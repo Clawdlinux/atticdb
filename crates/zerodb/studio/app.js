@@ -520,7 +520,7 @@ async function logScreen(main, p) {
     h('section', { class: 'card wide', 'aria-label': 'Records' }, h('div', { class: 'card-body' }, listHead(), list), foot));
   const pages = pager({
     list, foot, noun: kind === 'turn' ? 'turn' : kind === 'fact' ? 'fact revision' : 'record',
-    get: async (before) => { const pg = await api('v1/records', { before, limit: PAGE, kind }); return { items: pg.records, next: pg.next }; },
+    get: async (before) => { const pg = await api('v1/records', { before, limit: PAGE, kind, max_bytes: EIGHT_MIB }); return { items: pg.records, next: pg.next }; },
     row: (r) => recordRow(r),
     emptyLines: [kind === 'fact' ? ['No fact revisions yet.'] : kind === 'turn' ? ['No turns yet.'] : nothingSaved()],
   });
@@ -566,7 +566,7 @@ async function searchScreen(main, p) {
   main.append(h('section', { class: 'card wide', 'aria-label': 'Hits' }, h('div', { class: 'card-body' }, listHead(), list), foot));
   pager({
     list, foot, noun: 'hit',
-    get: async (before) => { const pg = await api('v1/search', { q, before, limit: PAGE }); return { items: pg.hits, next: pg.next }; },
+    get: async (before) => { const pg = await api('v1/search', { q, before, limit: PAGE, max_bytes: EIGHT_MIB }); return { items: pg.hits, next: pg.next }; },
     row: (r) => recordRow(r, words),
     emptyLines: [['No note or fact holds every word of ', h('b', null, q), '. Try fewer words.']],
     onFirst: (shown, more) => {
@@ -810,7 +810,7 @@ async function chatStartScreen(main, p) {
   let records = [];
   try {
     [facts, sessions] = await Promise.all([allFacts('repo/'), allSessions()]);
-    if (!p.get('repo')) records = (await api('v1/records', { limit: 50 })).records;
+    if (!p.get('repo')) records = (await api('v1/records', { limit: 50, max_bytes: EIGHT_MIB })).records;
   } catch (err) { tabs.remove(); failed(view.body, err); say(finding, errorShort(err)); return; }
   const names = new Set();
   for (const f of facts) { const r = repoOf({ kind: 'fact', key: f.key }); if (r) names.add(r); }

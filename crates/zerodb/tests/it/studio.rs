@@ -194,6 +194,15 @@ fn studio_forwards_reads_and_refuses_the_rest() {
         assert!(tag.contains(" src="), "index.html has an inline script: {tag}");
     }
     assert!(!lower.contains("<style") && !lower.contains("style="), "index.html styles inline");
+    // An inline handler is `on`, letters and `=`, after a space, a slash or a quote.
+    for (at, _) in lower.match_indices("on") {
+        let after = lower[..at].ends_with(|c: char| c.is_ascii_whitespace() || "/\"'".contains(c));
+        let rest = &lower[at + 2..];
+        let name = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_lowercase()).len();
+        let handler = after && name > 0 && rest[name..].trim_start().starts_with('=');
+        assert!(!handler, "index.html has an inline event handler: {}", &html[at..at + 2 + name]);
+    }
+    assert!(!lower.contains("javascript:"), "index.html has a javascript: URL");
 
     // Each read gets the store's own status and body, a 400 included.
     let reads = [
