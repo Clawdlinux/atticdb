@@ -139,9 +139,9 @@ An auto-started server runs in its own process group and outlives the adapters. 
 | `copilot` | `$COPILOT_HOME/mcp-config.json` when set and absolute, else `~/.copilot/mcp-config.json` | `mcpServers.zerodb`: `zerodb mcp --agent copilot`, all tools |
 
 The entry runs the absolute path of the binary you ran. It holds no token and no config path.
-That path is this machine's. VS Code Settings Sync may carry it to devices where it doesn't exist.
-Run `zerodb connect vscode` on each device.
-A missing file is created with its directories, at mode 0700. An entry that already matches writes nothing.
+The entry holds this machine's binary path. Settings Sync copies `mcp.json` to your other devices, where that path may not exist.
+Turn off MCP Servers in Settings Sync: Configure, or install zerodb at the same path on each device.
+A missing file is created. Missing directories are created at mode 0700. An entry that already matches writes nothing.
 Before a change, the old file is copied to `<file>.zerodb-backup-<unix seconds>`, with its mode.
 If that name is taken in the same second, a `-<n>` suffix is added. Backups are never restored automatically.
 The new file goes to a synced temp file, then a rename. It keeps the old file's mode.
