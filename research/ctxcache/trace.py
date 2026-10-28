@@ -60,28 +60,29 @@ class TraceBuilder:
             self.size[obj] = size
         self.accesses.append(Access(obj, self.size[obj], kind, first, ref))
 
-    def read_file(self, path: str, body: str, size: int, lines=None, text: str | None = None) -> str:
+    def read_file(self, path: str, body: str, lines=None, text: str | None = None) -> str:
         """A tool output that shows `path` at its current version. `body` is the shown
-        text without tool chrome, so the same lines shown twice are the same object."""
+        text without tool chrome, so the same lines shown twice are the same object.
+        The key and the size both come from `body`."""
         v = self.version.setdefault(path, 0)
         obj = self.key("file", path, v, body)
-        self._access(obj, "file", size, ref=False)
+        self._access(obj, "file", tokens(body), ref=False)
         views = [w for w in self.views.get((path, v), []) if w.obj != obj]
         views.append(View(obj, lines, body if text is None else text))
         self.views[(path, v)] = views
         return obj
 
-    def read_url(self, url: str, request: str, body: str, size: int) -> str:
+    def read_url(self, url: str, request: str, body: str) -> str:
         obj = self.key("url", url, request, body)
-        self._access(obj, "url", size, ref=False)
+        self._access(obj, "url", tokens(body), ref=False)
         self.urls[url] = obj
         return obj
 
-    def output(self, tool: str, request: str, body: str, size: int) -> str:
+    def output(self, tool: str, request: str, body: str) -> str:
         """Any other tool output. The same request and text with no write in between
         is the same object, so an unchanged rerun counts as a re-read."""
         obj = self.key("output", tool, request, body, self.world)
-        self._access(obj, "output", size, ref=False)
+        self._access(obj, "output", tokens(body), ref=False)
         return obj
 
     def use(self, path: str, line: int | None = None, text: str | None = None) -> bool:

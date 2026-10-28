@@ -85,7 +85,7 @@ def trajectory(row: dict, traj: str, salt: str = "ctxcache-v1") -> tuple[list[Ac
         b.stats["output_tokens"] += tokens(obs)
         foot = FOOTER.search(obs)
         body = obs[: foot.start()] if foot else obs
-        _step(b, cmd, body, tokens(obs), open_file, cwd)
+        _step(b, cmd, body, open_file, cwd)
         if foot:
             open_file = None if foot.group("open") in ("n/a", "") else foot.group("open")
             cwd = foot.group("cwd") or None
@@ -93,17 +93,17 @@ def trajectory(row: dict, traj: str, salt: str = "ctxcache-v1") -> tuple[list[Ac
     return b.accesses, {**info, **b.stats}
 
 
-def _step(b: TraceBuilder, cmd: str, body: str, size: int, open_file: str | None, cwd: str | None) -> None:
+def _step(b: TraceBuilder, cmd: str, body: str, open_file: str | None, cwd: str | None) -> None:
     name = cmd.split(None, 1)[0] if cmd else ""
     if name in WINDOW_COMMANDS:
         win = window(body)
         if win is None:
-            b.output(name, cmd, body, size)
+            b.output(name, cmd, body)
             return
         path, shown, lines, plain = win
         if name == "create" and not body.lstrip().startswith("Error:"):
             b.write(path)
-        b.read_file(path, shown, size, lines, plain)
+        b.read_file(path, shown, lines, plain)
     elif name == "edit":
         m = EDIT.match(cmd)
         if open_file:
@@ -111,30 +111,30 @@ def _step(b: TraceBuilder, cmd: str, body: str, size: int, open_file: str | None
         win = window(body)
         if "File updated." in body and win is not None:
             b.write(win[0])
-            b.read_file(win[0], win[1], size, win[2], win[3])
+            b.read_file(win[0], win[1], win[2], win[3])
         else:
-            b.output("edit", cmd, body, size)
+            b.output("edit", cmd, body)
     elif name == "search_file":
         m = SEARCH_FILE.search(body)
         if m:
-            b.read_file(m.group("path"), body, size)
+            b.read_file(m.group("path"), body)
         else:
-            b.output(name, cmd, body, size)
+            b.output(name, cmd, body)
     elif name in OUTPUT_COMMANDS or not cmd:
-        b.output(name or "invalid", cmd, body, size)
+        b.output(name or "invalid", cmd, body)
     else:
-        _shell(b, cmd, body, size, cwd)
+        _shell(b, cmd, body, cwd)
 
 
-def _shell(b: TraceBuilder, cmd: str, body: str, size: int, cwd: str | None) -> None:
+def _shell(b: TraceBuilder, cmd: str, body: str, cwd: str | None) -> None:
     eff = bash.effects(cmd, cwd, b.known())
     for kind, path in eff.events:
         b.use(path) if kind == "use" else b.write(path)
     for url in eff.urls:
         b.use_url(url)
     if eff.read and not any(e in body.split("\n", 1)[0] for e in SHELL_ERRORS):
-        b.read_file(eff.read, body, size)
+        b.read_file(eff.read, body)
     elif eff.url:
-        b.read_url(eff.url, cmd, body, size)
+        b.read_url(eff.url, cmd, body)
     else:
-        b.output("bash", f"{cwd}\0{cmd}", body, size)
+        b.output("bash", f"{cwd}\0{cmd}", body)

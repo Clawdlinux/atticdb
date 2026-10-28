@@ -55,7 +55,7 @@ The context window is a cache of `B` tokens. These rules define objects and acce
 
 **Versions.** A write makes a new version. Writes are edits, creates, deletes, moves, `sed -i` and shell redirects into a file. Every object of the old version is dead after it. A write is not an access. An edit is a reference to the version it edits, then a write. When the edit's output shows the new lines, that output is the first access to the new version.
 
-**Sizes.** Tokens are characters / 4, at least 1, of the whole tool output. An object's size is fixed at its first access. A missed reference costs that size.
+**Sizes.** Tokens are characters / 4, at least 1. An object's size comes from the same canonical body that its key hashes. Tool chrome is not counted, such as SWE-agent's footer, OpenHands' `cat -n` header or a shell exit-code line. A missed reference costs that size.
 
 **Outside the model.** Only the main agent counts. The system prompt, tool definitions, the task text and the agent's own messages are outside the budget. Results report message tokens next to tool output tokens.
 

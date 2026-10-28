@@ -82,18 +82,18 @@ def trajectory(row: dict, traj: str, salt: str = "ctxcache-v1") -> tuple[list[Ac
             elif fn.get("name") == "execute_bash" and isinstance(args, dict):
                 cwd = _shell(b, args, content, cwd)
             else:
-                b.output(fn.get("name") or "", raw, content, tokens(content))
+                b.output(fn.get("name") or "", raw, content)
     info = {"cluster": row.get("instance_id"), "condensed": int(condensed(row))}
     return b.accesses, {**info, **b.stats}
 
 
 def _editor(b: TraceBuilder, args: dict, content: str) -> None:
-    cmd, size = args.get("command"), tokens(content)
+    cmd = args.get("command")
     path = posixpath.normpath(args.get("path") or "")
     request = json.dumps(args, sort_keys=True)
     if cmd == "view" and content.startswith(CAT_N):
         body, lines, plain = numbered(content)
-        b.read_file(path, body, size, lines, plain)
+        b.read_file(path, body, lines, plain)
         return
     if cmd == "create" and content.startswith("File created successfully"):
         b.write(path)
@@ -104,23 +104,23 @@ def _editor(b: TraceBuilder, args: dict, content: str) -> None:
         if "has been edited" in content.split("\n", 1)[0]:
             b.write(path)
             body, lines, plain = numbered(content)
-            b.read_file(path, body, size, lines, plain)
+            b.read_file(path, body, lines, plain)
             return
     elif cmd == "undo_edit" and "undone successfully" in content.split("\n", 1)[0]:
         b.write(path)
         body, lines, plain = numbered(content)
-        b.read_file(path, body, size, lines, plain)
+        b.read_file(path, body, lines, plain)
         return
-    b.output(f"editor:{cmd}", request, content, size)
+    b.output(f"editor:{cmd}", request, content)
 
 
 def _shell(b: TraceBuilder, args: dict, content: str, cwd: str | None) -> str | None:
-    command, size = str(args.get("command") or ""), tokens(content)
+    command = str(args.get("command") or "")
     body = "\n".join(line for line in content.split("\n") if not FOOTER.match(line)).strip("\n")
     after = CWD.findall(content)
     exit_code = EXIT.search(content)
     if str(args.get("is_input")).lower() == "true":
-        b.output("bash-input", command, body, size)
+        b.output("bash-input", command, body)
         return after[-1] if after else cwd
     eff = bash.effects(command, cwd, b.known())
     for kind, path in eff.events:
@@ -130,9 +130,9 @@ def _shell(b: TraceBuilder, args: dict, content: str, cwd: str | None) -> str | 
     ok = exit_code is None or exit_code.group(1) == "0" or (exit_code.group(1) == "1" and "grep" in command)
     if eff.read and ok:
         nbody, lines, plain = numbered(body)
-        b.read_file(eff.read, nbody if lines else body, size, lines, plain if lines else body)
+        b.read_file(eff.read, nbody if lines else body, lines, plain if lines else body)
     elif eff.url and ok:
-        b.read_url(eff.url, command, body, size)
+        b.read_url(eff.url, command, body)
     else:
-        b.output("bash", f"{cwd}\0{command}", body, size)
+        b.output("bash", f"{cwd}\0{command}", body)
     return after[-1] if after else eff.cwd

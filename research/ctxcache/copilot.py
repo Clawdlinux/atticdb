@@ -75,7 +75,6 @@ def _observed(acc: list[Access], window: list[int], stats) -> None:
 
 
 def _call(b: TraceBuilder, name: str, args, content: str, ok: bool) -> None:
-    size = tokens(content)
     if isinstance(args, str):
         args = {"input": args}
     if not isinstance(args, dict):
@@ -85,7 +84,7 @@ def _call(b: TraceBuilder, name: str, args, content: str, ok: bool) -> None:
     if name == "view" and path and ok and content and not content.startswith(NOT_CONTENT):
         rng = args.get("view_range")
         lines = (int(rng[0]), int(rng[1])) if isinstance(rng, list) and len(rng) == 2 and all(isinstance(v, int) for v in rng) else None
-        b.read_file(path, content, size, lines if lines and lines[1] > 0 else None, content)
+        b.read_file(path, content, lines if lines and lines[1] > 0 else None, content)
         return
     if name == "edit" and path:
         b.use(path, text=args["old_str"] if isinstance(args.get("old_str"), str) else None)
@@ -107,16 +106,16 @@ def _call(b: TraceBuilder, name: str, args, content: str, ok: bool) -> None:
         for url in eff.urls:
             b.use_url(url)
         if eff.read and ok:
-            b.read_file(eff.read, content, size)
+            b.read_file(eff.read, content)
             return
         if eff.url and ok:
-            b.read_url(eff.url, args["command"], content, size)
+            b.read_url(eff.url, args["command"], content)
             return
     elif isinstance(args.get("url"), str) and ok:
         rest = json.dumps({k: v for k, v in args.items() if k != "url"}, sort_keys=True, default=str)
-        b.read_url(args["url"], f"{name}\0{rest}", content, size)
+        b.read_url(args["url"], f"{name}\0{rest}", content)
         return
-    b.output(name, request, content, size)
+    b.output(name, request, content)
 
 
 def traces(root: str = ROOT, salt: str | None = None):

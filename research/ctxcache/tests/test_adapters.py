@@ -67,7 +67,8 @@ def test_swe_agent_trace(name, row, expected, info):
     check(acc)
     assert shape(acc) == expected, name
     assert {k: got.get(k) for k in info} == info, name
-    assert acc[0].tokens == tokens(row["trajectory"][3]["text"]), "a miss costs the whole observation"
+    window = row["trajectory"][3]["text"].split("\n\n(Open file:")[0]
+    assert acc[0].tokens == tokens(window) < tokens(row["trajectory"][3]["text"]), "size and key share 1 body"
 
 
 CAT_N_V1 = "\n".join(f"{i:6}\t{t}" for i, t in enumerate(["line ONE", "line two", "line three"], 1))
