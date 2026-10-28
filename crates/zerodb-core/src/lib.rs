@@ -19,7 +19,8 @@ pub mod turn;
 
 pub use engine::{
     Appended, Engine, FactHistory, FactPage, FactQuery, FactWritten, Health, Hit, Metrics, NewFact,
-    Revision, Scope, SearchPage, SearchQuery, StoredFact, Turn, Window, WindowQuery,
+    Record, RecordKind, RecordPage, RecordQuery, Revision, Scope, SearchPage, SearchQuery,
+    SessionInfo, SessionPage, SessionQuery, StoredFact, Turn, Window, WindowQuery,
 };
 #[cfg(feature = "sim")]
 pub use engine::{SimAppend, SimFact};

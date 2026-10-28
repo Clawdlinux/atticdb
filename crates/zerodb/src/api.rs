@@ -1,7 +1,8 @@
-//! HTTP routes: `POST /v1/append`, `GET /v1/window`, `GET /healthz`, and the fact routes
-//! `POST /v1/facts/put`, `POST /v1/facts/delete`, `GET /v1/facts/get`,
-//! `GET /v1/facts/history`, `GET /v1/facts/list`, and `GET /v1/search`. Fact keys travel in bodies and query
-//! strings, never in paths. `GET /v1/stats` answers on the Unix socket only.
+//! HTTP routes. Writes: `POST /v1/append`, `POST /v1/facts/put` and `POST /v1/facts/delete`.
+//! Reads: `GET /v1/window`, `GET /v1/facts/get`, `GET /v1/facts/history`, `GET /v1/facts/list`,
+//! `GET /v1/search`, `GET /v1/sessions` and `GET /v1/records`. `GET /healthz` needs no token.
+//! `GET /v1/stats` and `GET /metrics` answer on the Unix socket only, with no token. Fact keys
+//! travel in bodies and query strings, never in paths.
 
 use crate::auth::{self, Auth};
 use crate::http::{Budget, Head, Response};
@@ -11,7 +12,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use zerodb_core::{
     Appended, Engine, EngineError, ErrorKind, FactQuery, FactWritten, Health, Hit, NewFact,
-    NewTurn, Revision, Role, Scope, SearchQuery, StoredFact, Turn, WindowQuery,
+    NewTurn, Record, RecordKind, RecordQuery, Revision, Role, Scope, SearchQuery, SessionQuery,
+    StoredFact, Turn, WindowQuery,
 };
 use zerodb_tape::{Error, Outcome};
 
@@ -60,9 +62,13 @@ pub enum Route {
     FactList,
     /// `GET /v1/search`.
     Search,
+    /// `GET /v1/sessions`.
+    Sessions,
+    /// `GET /v1/records`.
+    Records,
 }
 
-const ROUTES: [(&str, &str, Route); 9] = [
+const ROUTES: [(&str, &str, Route); 11] = [
     ("GET", "/healthz", Route::Health),
     ("POST", "/v1/append", Route::Append),
     ("GET", "/v1/window", Route::Window),
@@ -72,6 +78,8 @@ const ROUTES: [(&str, &str, Route); 9] = [
     ("GET", "/v1/facts/history", Route::FactHistory),
     ("GET", "/v1/facts/list", Route::FactList),
     ("GET", "/v1/search", Route::Search),
+    ("GET", "/v1/sessions", Route::Sessions),
+    ("GET", "/v1/records", Route::Records),
 ];
 
 /// Checks a head before its body is read: `Host` on TCP, then the token. Returns the
@@ -618,6 +626,81 @@ fn hit_json(hit: Hit) -> Value {
         Hit::Fact(fact) => {
             let mut out = fact_json(fact);
             out["kind"] = json!("fact");
+            out
+        }
+    }
+}
+
+/// `GET /v1/sessions?limit=&after_agent=&after_session=`. Sessions with a published turn, in
+/// byte order of agent, then session. Pass `next` as `after_agent` and `after_session`.
+pub fn sessions(engine: &Engine, tenant: &str, target: &str) -> Response {
+    let query = (|| {
+        let mut params = params(target)?;
+        let limit = number(params.remove("limit"), "limit")?;
+        let limit = limit.map_or(100, |n| cap(n, MAX_WINDOW_TURNS)).max(1);
+        let after = match (params.remove("after_agent"), params.remove("after_session")) {
+            (Some(agent), Some(session)) => Some((agent, session)),
+            (None, None) => None,
+            _ => return Err("pass after_agent and after_session together".to_owned()),
+        };
+        if !params.is_empty() {
+            return Err("unknown query parameter".to_owned());
+        }
+        Ok(SessionQuery { after, limit })
+    })();
+    match query {
+        Ok(query) => send(engine.sessions(tenant, query), |page| {
+            let sessions: Vec<_> = page
+                .sessions
+                .into_iter()
+                .map(|s| json!({"agent": s.agent, "session": s.session, "turns": s.turns}))
+                .collect();
+            let next =
+                page.next.map(|(agent, session)| json!({"agent": agent, "session": session}));
+            let total = json!({"sessions": page.total_sessions, "turns": page.total_turns});
+            json!({"sessions": sessions, "next": next, "total": total})
+        }),
+        Err(message) => Response::json(400, &json!({"error": "invalid_input", "message": message})),
+    }
+}
+
+/// `GET /v1/records?before=&limit=&kind=&max_bytes=`. The tenant's turns and fact revisions,
+/// newest first, each as written. Pass `next` as `before` for the next page.
+pub fn records(engine: &Engine, tenant: &str, target: &str) -> Response {
+    let query = (|| {
+        let mut params = params(target)?;
+        let before = number(params.remove("before"), "before")?;
+        let limit = number(params.remove("limit"), "limit")?;
+        let limit = limit.map_or(50, |n| cap(n, MAX_WINDOW_TURNS)).max(1);
+        let kind = match params.remove("kind").as_deref() {
+            None => None,
+            Some("turn") => Some(RecordKind::Turn),
+            Some("fact") => Some(RecordKind::Fact),
+            Some(_) => return Err("kind must be turn or fact".to_owned()),
+        };
+        let max_bytes = number(params.remove("max_bytes"), "max_bytes")?;
+        let max_bytes = max_bytes.map_or(DEFAULT_WINDOW_BYTES, |n| cap(n, MAX_WINDOW_BYTES));
+        if !params.is_empty() {
+            return Err("unknown query parameter".to_owned());
+        }
+        Ok(RecordQuery { before, limit, kind, max_bytes, visits: SEARCH_VISITS })
+    })();
+    match query {
+        Ok(query) => send(engine.records(tenant, query), |page| {
+            let records: Vec<_> = page.records.into_iter().map(record_json).collect();
+            json!({"records": records, "next": page.next})
+        }),
+        Err(message) => Response::json(400, &json!({"error": "invalid_input", "message": message})),
+    }
+}
+
+/// A turn as `search` shows it. A fact revision as `history` shows it, plus `kind` and `key`.
+fn record_json(record: Record) -> Value {
+    match record {
+        Record::Turn { agent, session, turn } => hit_json(Hit::Turn { agent, session, turn }),
+        Record::Fact { key, revision } => {
+            let mut out = revision_json(revision);
+            (out["kind"], out["key"]) = (json!("fact"), json!(key));
             out
         }
     }
