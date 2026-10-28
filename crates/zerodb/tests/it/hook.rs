@@ -188,8 +188,9 @@ fn session_start_prints_nothing_on_errors() {
         ("no memory", &empty, cwd(&empty.join("repo")), 0, 0..5_000, ""),
         ("data directory mode 0755", &refused, cwd(&refused.join("repo")), 0, 0..5_000, ""),
         ("1.5 s per read", &slow, cwd(&slow.join("repo")), 0, 1_400..5_000, late),
-        // The budget counts from the start, so the first read is already late.
-        ("stdin after 1.2 s", &slow, cwd(&slow.join("repo")), 1_200, 1_200..2_000, late),
+        // The budget counts from the start, so the first read is already late. That holds
+        // for any process start under 1 s. A read sent to the server would end past 3.5 s.
+        ("stdin after 2 s", &slow, cwd(&slow.join("repo")), 2_000, 2_000..2_900, late),
         ("partial JSON, stdin open", &empty, r#"{"cwd": "/tm"#.to_owned(), 0, 3_900..5_000, stop),
     ];
     for (case, home, stdin, delay, range, says) in rows {
