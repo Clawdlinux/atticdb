@@ -79,6 +79,28 @@ function svg(tag, attrs, ...kids) {
 const code = (t) => h('code', null, t);
 const fig = (t, cls) => h('span', { class: cls ? 'fig ' + cls : 'fig' }, t);
 const byId = (id) => document.getElementById(id);
+// A turn can hold 4 MiB with no space, and the browser takes over 30 s to wrap 2 MiB of that. A row shows 2 lines,
+// so it gets the first 1,000 characters. A full view of text past 10,000 characters gets a break point every 32
+// characters of a run longer than 64. Shorter text renders as written.
+const preview = (t) => (t.length > 1000 ? t.slice(0, 1000) : t);
+function breakable(t) {
+  if (t.length <= 10000) return t;
+  const out = [];
+  let from = 0;
+  for (const m of t.matchAll(/\S{65,}/g)) {
+    if (m.index > from) out.push(t.slice(from, m.index));
+    const run = m[0];
+    for (let i = 0; i < run.length;) {
+      let j = Math.min(i + 32, run.length);
+      if (j < run.length && /[\uDC00-\uDFFF]/.test(run[j])) j++; // keep a surrogate pair whole
+      out.push(h('wbr'), run.slice(i, j));
+      i = j;
+    }
+    from = m.index + run.length;
+  }
+  if (from < t.length) out.push(t.slice(from));
+  return out;
+}
 
 // Hash routes: #/<screen>?<params>. The screen name comes from a fixed table; store values ride in params.
 function href(screen, params) {
@@ -261,7 +283,7 @@ function recordRow(rec, words) {
   const mark = (t) => (words ? highlight(t, words) : t);
   const text = isFact && rec.deleted === true
     ? h('p', { class: 'rec-text is-deleted' }, 'Value deleted.')
-    : h('p', { class: 'rec-text' }, mark(rec.content));
+    : h('p', { class: 'rec-text' }, mark(preview(rec.content)));
   const where = isFact
     ? ['Fact ', h('a', { href: href('fact', { key: rec.key }) }, code(mark(rec.key)))]
     : ['Turn ', fig(String(rec.seq)), ' in ', h('a', { href: href('session', { agent: rec.agent, session: rec.session, seq: rec.seq }) }, rec.session),
@@ -434,7 +456,7 @@ async function overview(main) {
   busy(list, 8);
   blockSkeleton(chat.body);
   let records;
-  try { records = (await api('v1/records', { limit: 8 })).records; } catch (err) {
+  try { records = (await api('v1/records', { limit: 8, max_bytes: EIGHT_MIB })).records; } catch (err) {
     failed(list, err); failed(chat.body, err); say(finding, errorShort(err));
     return;
   }
@@ -611,8 +633,8 @@ function turnItem(t, want) {
   return h('li', { class: 'turn', 'aria-current': t.seq === want ? 'true' : null },
     h('p', { class: 'turn-head' }, 'Turn ', fig(String(t.seq)), t.role === 'assistant' ? h('span', null, 'assistant') : h('span', { class: 'pill' }, t.role)),
     h('p', { class: 'rec-when' }, timeCell(t.commit_time_ns), h('span', { class: 'lsn' }, 'LSN ' + t.lsn)),
-    h('p', { class: 'turn-body' }, t.content),
-    t.meta === null || t.meta === undefined ? null : h('p', { class: 'turn-meta' }, 'meta ' + JSON.stringify(t.meta)));
+    h('p', { class: 'turn-body' }, breakable(t.content)),
+    t.meta === null || t.meta === undefined ? null : h('p', { class: 'turn-meta' }, breakable('meta ' + JSON.stringify(t.meta))));
 }
 async function sessionScreen(main, p) {
   const agent = p.get('agent') || '';
@@ -676,7 +698,7 @@ async function sessionScreen(main, p) {
 function factRow(f, group) {
   return h('li', { class: 'fact-row linked' },
     h('a', { class: 'key row-link', href: href('fact', { key: f.key }) }, f.key.slice(group.length) || f.key),
-    h('p', { class: 'rec-text' }, f.content),
+    h('p', { class: 'rec-text' }, preview(f.content)),
     h('span', { class: 'rec-agent' }, f.agent),
     h('p', { class: 'rec-meta' }, 'by ', h('span', { class: 'who' }, f.agent)),
     h('span', { class: 'rec-when' }, timeCell(f.commit_time_ns), h('span', { class: 'lsn' }, 'LSN ' + f.lsn)));
@@ -740,9 +762,9 @@ async function factScreen(main, p) {
   const shown = `${count(list.length, 'revision')}${hist.truncated ? ' shown' : ''}`;
   const line = (label, ...v) => h('span', null, label, ' ', h('b', null, v));
   if (got.fact) {
-    put(done(now.body), h('p', { class: 'lead' }, got.fact.content),
+    put(done(now.body), h('p', { class: 'lead' }, breakable(got.fact.content)),
       h('p', { class: 'facts-line' }, line('Key', code(key)), line('Set by', got.fact.agent), line('At', timeCell(got.fact.commit_time_ns)), line('LSN', fig(String(got.fact.lsn)))),
-      got.fact.meta === null || got.fact.meta === undefined ? null : h('p', { class: 'meta-json' }, 'meta ' + JSON.stringify(got.fact.meta)));
+      got.fact.meta === null || got.fact.meta === undefined ? null : h('p', { class: 'meta-json' }, breakable('meta ' + JSON.stringify(got.fact.meta))));
     say(finding, `${shown}. Last set by `, h('span', { class: 'who' }, last.agent), ` ${whenWords(last.commit_time_ns)}.`);
   } else {
     empty(now.body, ['No current value. ', h('b', null, last.agent), ` deleted this key ${whenWords(last.commit_time_ns)}, at LSN ${last.lsn}.`]);
@@ -752,7 +774,7 @@ async function factScreen(main, p) {
     h('span', { class: 'rec-lsn' }, String(r.lsn)),
     r.deleted
       ? h('p', { class: 'rec-text is-deleted' }, h('span', { class: 'pill' }, 'Deleted'), 'The key held no value after this.')
-      : h('p', { class: 'rec-text' }, got.fact && r.lsn === got.fact.lsn ? h('span', { class: 'pill' }, 'Current') : null, r.content),
+      : h('p', { class: 'rec-text' }, got.fact && r.lsn === got.fact.lsn ? h('span', { class: 'pill' }, 'Current') : null, breakable(r.content)),
     h('span', { class: 'rec-agent' }, r.agent),
     h('p', { class: 'rec-meta' }, 'by ', h('span', { class: 'who' }, r.agent)),
     h('span', { class: 'rec-when' }, timeCell(r.commit_time_ns), h('span', { class: 'lsn' }, 'LSN ' + r.lsn))))),
