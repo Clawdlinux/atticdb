@@ -41,6 +41,7 @@ SWE_CASES = [
         ["A*:file", "B*:file", "Br:file", "C*:file", "D*:file", "Dr:file", "E*:output", "Dr:file", "E:output",
          "F*:output", "F:output", "Dr:file", "G*:output", "H*:file", "I*:output", "Dr:file", "J*:output",
          "K*:url", "D:file", "Dr:file"],
+        ["line_span", "run", "run", "line_span", "run", "line_span"],
         {"writes": 3, "actions_without_output": 1, "cluster": "owner__repo-1"},
     ),
     (
@@ -53,19 +54,24 @@ SWE_CASES = [
             ("cat b.py", swe_obs("x = 1\nraise KeyError('not found')", "/repo/a.py")),
             ("cat b.py", swe_obs("x = 1\nraise KeyError('not found')", "/repo/a.py")),
             ("cat c.py", swe_obs("cat: c.py: No such file or directory", "/repo/a.py")),
+            ("edit 2:9\nx = 2\nend_of_edit", swe_obs(FAILED_EDIT, "/repo/a.py")),
         ),
         # A file that says "not found" is still read. A failed cat is an output.
-        ["A*:file", "B*:file", "Br:file", "C*:file", "A:file", "D*:file", "D:file", "E*:output"],
+        # The last edit runs past the 3 lines its window shows, so it is not an exact span.
+        ["A*:file", "B*:file", "Br:file", "C*:file", "A:file", "D*:file", "D:file", "E*:output", "Ar:file",
+         "F*:output"],
+        ["line_span", "line"],
         {"writes": 1},
     ),
 ]
 
 
-@pytest.mark.parametrize("name, row, expected, info", SWE_CASES, ids=[c[0] for c in SWE_CASES])
-def test_swe_agent_trace(name, row, expected, info):
+@pytest.mark.parametrize("name, row, expected, subs, info", SWE_CASES, ids=[c[0] for c in SWE_CASES])
+def test_swe_agent_trace(name, row, expected, subs, info):
     acc, got = swe_agent.trajectory(row, "swe-agent:0")
     check(acc)
     assert shape(acc) == expected, name
+    assert [a.sub for a in acc if a.ref] == subs, name
     assert {k: got.get(k) for k in info} == info, name
     window = row["trajectory"][3]["text"].split("\n\n(Open file:")[0]
     assert acc[0].tokens == tokens(window) < tokens(row["trajectory"][3]["text"]), "size and key share 1 body"
@@ -88,6 +94,9 @@ OH_CASES = [
             ("execute_bash", {"command": "cd /repo && python reproduce.py"}, oh_bash("Traceback: boom", code=1)),
             ("execute_bash", {"command": "cd /repo && cat -n src/app.py"}, oh_bash(CAT_N_V1)),
             ("str_replace_editor", {"command": "view", "path": APP}, oh_cat(APP, ["line ONE", "line two", "line three"])),
+            ("str_replace_editor", {"command": "insert", "path": APP, "insert_line": 2, "new_str": "line 2.5"},
+             oh_cat(APP, ["line two", "line 2.5"], first=2, edited=True)),
+            ("execute_bash", {"command": "cd /repo && git diff src/app.py"}, oh_bash("+line 2.5")),
             ("execute_bash", {"command": "grep -rn 'two' /repo/src"}, oh_bash("/repo/src/app.py:2:line two")),
             ("think", {"thought": "The fix works."}, "Your thought has been logged."),
             ("finish", {"message": "done"}, None),
@@ -95,15 +104,18 @@ OH_CASES = [
         # The edit uses A, the view that holds all of old_str. B is newer and has its first line.
         # The run of the created file uses nothing: its content was never shown.
         # F: `cat -n` and the editor show the same lines.
-        ["A*:file", "B*:file", "Ar:file", "C*:file", "D*:output", "E*:output", "F*:file", "F:file", "G*:output",
-         "H*:output"],
-        {"condensed": 0, "refs_without_view": 1, "writes": 2, "actions_without_output": 1},
+        # The insert uses F, which shows line 2. git diff then names version 2.
+        ["A*:file", "B*:file", "Ar:file", "C*:file", "D*:output", "E*:output", "F*:file", "F:file", "Fr:file",
+         "G*:file", "Gr:file", "H*:output", "I*:output", "J*:output"],
+        ["edit_span", "line_span", "git"],
+        {"condensed": 0, "refs_without_view": 1, "writes": 3, "actions_without_output": 1},
     ),
     (
         "a second user message flags condensed history",
         oh_row(("str_replace_editor", {"command": "view", "path": APP}, oh_cat(APP, ["x"])),
                extra_user="Summary of the earlier steps."),
         ["A*:file"],
+        [],
         {"condensed": 1},
     ),
     (
@@ -111,6 +123,7 @@ OH_CASES = [
         oh_row(("str_replace_editor", {"command": "view", "path": APP}, oh_cat(APP, ["x"])),
                extra_user="Please continue working on the task on whatever approach you think is suitable."),
         ["A*:file"],
+        [],
         {"condensed": 0},
     ),
     (
@@ -118,16 +131,18 @@ OH_CASES = [
         oh_row(("str_replace_editor", {"command": "view", "path": APP}, oh_cat(APP, ["x"])),
                exit_status="RuntimeError: Agent reached maximum iteration. Current iteration: 100, max iteration: 100"),
         ["A*:file"],
+        [],
         {"condensed": 1},
     ),
 ]
 
 
-@pytest.mark.parametrize("name, row, expected, info", OH_CASES, ids=[c[0] for c in OH_CASES])
-def test_openhands_trace(name, row, expected, info):
+@pytest.mark.parametrize("name, row, expected, subs, info", OH_CASES, ids=[c[0] for c in OH_CASES])
+def test_openhands_trace(name, row, expected, subs, info):
     acc, got = openhands.trajectory(row, "openhands:0")
     check(acc)
     assert shape(acc) == expected, name
+    assert [a.sub for a in acc if a.ref] == subs, name
     assert {k: got.get(k, 0) for k in info} == info, name
 
 
@@ -147,13 +162,14 @@ COPILOT_CASES = [
         + copilot_call("c7", "bash", {"command": "cat /r/a.py"}, "print(3)\n"),
         # The sub-agent's view is not an access, but its edit makes version 2, so D is new.
         ["A*:file", "Ar:file", "B*:output", "C*:file", "D*:file", "E*:url", "E:url", "D:file"],
+        ["edit_span"],
         {"compactions": 1, "reread_same_window": 1, "reread_after_compaction": 1},
     ),
 ]
 
 
-@pytest.mark.parametrize("name, events, expected, info", COPILOT_CASES, ids=[c[0] for c in COPILOT_CASES])
-def test_copilot_trace(tmp_path, name, events, expected, info):
+@pytest.mark.parametrize("name, events, expected, subs, info", COPILOT_CASES, ids=[c[0] for c in COPILOT_CASES])
+def test_copilot_trace(tmp_path, name, events, expected, subs, info):
     copilot_session(str(tmp_path), "main-session", events)
     copilot_session(str(tmp_path), "forked-session", events[:4])  # shares c1 and c2
     out = list(copilot.traces(str(tmp_path), salt="fixed"))
@@ -161,6 +177,7 @@ def test_copilot_trace(tmp_path, name, events, expected, info):
     traj, _, acc, got = out[0]
     check(acc)
     assert shape(acc) == expected, name
+    assert [a.sub for a in acc if a.ref] == subs, name
     assert {k: got.get(k, 0) for k in info} == info, name
     # Keys and ids are hashes: no path, URL or session name leaves a run.
     for text in [traj, *(a.obj for a in acc)]:

@@ -19,6 +19,12 @@ def tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
+# Why a reference counts as a use. *_span means the referenced view holds the exact text
+# or lines the edit names. See README.md.
+REF_KINDS = ("edit_span", "edit", "line_span", "line", "run", "git", "path")
+EDITS = ("edit_span", "edit", "line_span", "line")
+
+
 @dataclass(frozen=True)
 class Access:
     obj: str  # hashed key
@@ -26,6 +32,7 @@ class Access:
     kind: str  # "file", "url" or "output"
     first: bool  # the first access to the object: a compulsory miss
     ref: bool  # a later action named the object. False for a tool output.
+    sub: str = ""  # "first", "reread", or 1 of REF_KINDS for a reference
 
 
 @dataclass
@@ -54,11 +61,12 @@ class TraceBuilder:
             h.update(b"\0" + str(p).encode("utf-8", "surrogatepass"))
         return h.hexdigest()[:16]
 
-    def _access(self, obj: str, kind: str, size: int, ref: bool) -> None:
+    def _access(self, obj: str, kind: str, size: int, ref: bool, sub: str = "") -> None:
         first = obj not in self.size
         if first:
             self.size[obj] = size
-        self.accesses.append(Access(obj, self.size[obj], kind, first, ref))
+        sub = "first" if first else (sub if ref else "reread")
+        self.accesses.append(Access(obj, self.size[obj], kind, first, ref, sub))
 
     def read_file(self, path: str, body: str, lines=None, text: str | None = None) -> str:
         """A tool output that shows `path` at its current version. `body` is the shown
@@ -85,22 +93,30 @@ class TraceBuilder:
         self._access(obj, "output", tokens(body), ref=False)
         return obj
 
-    def use(self, path: str, line: int | None = None, text: str | None = None) -> bool:
+    def use(self, path: str, how: str = "path", line: int | None = None, end: int | None = None,
+            text: str | None = None) -> bool:
         """An action names `path` without reading it. That references a view of the current
         version: the newest that shows `line`, or else the newest that contains all of `text`,
         or else its longest line. Otherwise the newest view. With no view of the current
-        version there is nothing to reference."""
+        version there is nothing to reference. `how` is "edit", "line", "run", "git" or
+        "path". An edit or line reference whose view holds its exact span becomes *_span."""
         views = self.views.get((path, self.version.get(path, 0)))
         if not views:
             self.stats["refs_without_view"] += 1
             return False
-        self._access(_pick(views, line, text).obj, "file", 0, ref=True)
+        pick = _pick(views, line, text)
+        sub = how
+        if how == "edit" and text and text in pick.text:
+            sub = "edit_span"
+        elif how == "line" and line is not None and pick.lines:
+            sub = "line_span" if pick.lines[0] <= line and (end or line) <= pick.lines[1] else "line"
+        self._access(pick.obj, "file", 0, ref=True, sub=sub)
         return True
 
     def use_url(self, url: str) -> bool:
         obj = self.urls.get(url)
         if obj is not None:
-            self._access(obj, "url", 0, ref=True)
+            self._access(obj, "url", 0, ref=True, sub="path")
         return obj is not None
 
     def write(self, path: str) -> None:
@@ -140,11 +156,15 @@ def check(accesses: list[Access]) -> None:
             raise ValueError(f"access {t}: object size changed")
         if a.tokens < 1:
             raise ValueError(f"access {t}: tokens must be at least 1")
+        want = ("first",) if a.first else (REF_KINDS if a.ref else ("reread",))
+        if a.sub and a.sub not in want:
+            raise ValueError(f"access {t}: subtype {a.sub!r} does not fit the access")
 
 
 def dump(traj: str, accesses: list[Access], out) -> None:
     for t, a in enumerate(accesses):
-        line = {"traj": traj, "t": t, "obj": a.obj, "tokens": a.tokens, "kind": a.kind, "first": a.first, "ref": a.ref}
+        line = {"traj": traj, "t": t, "obj": a.obj, "tokens": a.tokens, "kind": a.kind, "first": a.first, "ref": a.ref,
+                "sub": a.sub}
         out.write(json.dumps(line) + "\n")
 
 
@@ -155,7 +175,7 @@ def load(lines) -> dict[str, list[Access]]:
         if not line.strip():
             continue
         o = json.loads(line)
-        a = Access(o["obj"], int(o["tokens"]), o["kind"], bool(o["first"]), bool(o.get("ref", False)))
+        a = Access(o["obj"], int(o["tokens"]), o["kind"], bool(o["first"]), bool(o.get("ref", False)), o.get("sub", ""))
         rows.setdefault(str(o["traj"]), []).append((int(o["t"]), a))
     out = {}
     for traj, items in rows.items():

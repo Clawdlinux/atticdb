@@ -87,7 +87,7 @@ def _call(b: TraceBuilder, name: str, args, content: str, ok: bool) -> None:
         b.read_file(path, content, lines if lines and lines[1] > 0 else None, content)
         return
     if name == "edit" and path:
-        b.use(path, text=args["old_str"] if isinstance(args.get("old_str"), str) else None)
+        b.use(path, "edit", text=args["old_str"] if isinstance(args.get("old_str"), str) else None)
         if ok:
             b.write(path)
     elif name == "create" and path and ok:
@@ -96,13 +96,13 @@ def _call(b: TraceBuilder, name: str, args, content: str, ok: bool) -> None:
         for m in PATCH.finditer(str(args.get("input") or args.get("str") or "")):
             p = bash.resolve(m.group(2) or m.group(3), None, b.known())
             if m.group(1) == "Update":
-                b.use(p)
+                b.use(p, "edit")
             if ok:
                 b.write(p)
     elif name == "bash" and isinstance(args.get("command"), str):
         eff = bash.effects(args["command"], None, b.known())
         for kind, p in eff.events:
-            b.use(p) if kind == "use" else b.write(p)
+            b.use(p, eff.why.get(p, "path")) if kind == "use" else b.write(p)
         for url in eff.urls:
             b.use_url(url)
         if eff.read and ok:

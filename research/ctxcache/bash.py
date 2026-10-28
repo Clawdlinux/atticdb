@@ -13,6 +13,9 @@ from dataclasses import dataclass, field
 READERS = {"cat", "head", "tail", "nl", "wc", "less", "more", "sed", "grep", "egrep", "fgrep", "rg", "awk"}
 FILTERS = {"head", "tail", "grep", "egrep", "fgrep", "rg", "sed", "awk", "cut", "sort", "uniq", "wc", "nl", "tr", "cat"}
 GREPS = {"grep", "egrep", "fgrep"}
+# Programs whose file operands are scripts or tests to run.
+RUNNERS = {"python", "python2", "python3", "pytest", "py.test", "nosetests", "coverage", "ipython", "bash", "sh",
+           "zsh", "node", "ruby", "perl", "php", "Rscript", "julia", "tox"}
 WRAPPERS = {"timeout", "time", "sudo", "env", "nohup", "nice", "stdbuf", "command", "exec"}
 REDIRECTS = {">", ">>", ">|", "&>", "&>>", ">&", "<", "<<", "<<<", "<&", "<>"}
 WRITE_REDIRECTS = {">", ">>", ">|", "&>", "&>>", ">&"}
@@ -54,6 +57,7 @@ class Effects:
     url: str | None = None  # the 1 URL a pure fetch shows
     urls: list[str] = field(default_factory=list)  # other URLs named
     cwd: str | None = None  # the working directory after the command
+    why: dict[str, str] = field(default_factory=dict)  # used path -> "run", "git", "edit" or "path"
 
 
 @dataclass
@@ -63,6 +67,7 @@ class Stage:
     args: list[str]
     redirects: list[tuple[str, str]]
     cwd: str | None
+    word: str = ""  # the program as written, such as ./run.sh
 
 
 def effects(command: str, cwd: str | None, known: set[str]) -> Effects:
@@ -81,7 +86,7 @@ def effects(command: str, cwd: str | None, known: set[str]) -> Effects:
             eff.cwd = _cd(eff.cwd, args)
             if not stages:
                 continue  # leading cd commands do not stop a pure read
-        stages.append(Stage(sep, prog, args, redirects, eff.cwd))
+        stages.append(Stage(sep, prog, args, redirects, eff.cwd, words[0]))
         _classify(stages[-1], eff, known)
 
     pure = _pure_read(stages, known)
@@ -262,17 +267,23 @@ def _classify(stage: Stage, eff: Effects, known: set[str]) -> None:
     files, flags = _files(stage.prog, stage.args)
     paths = [resolve(f, stage.cwd, known) for f in files]
     uses, writes = paths, []
+    why = "run" if stage.prog in RUNNERS else ("git" if stage.prog in ("git", "diff") else "path")
+    if pathlike(stage.word) and resolve(stage.word, stage.cwd, known) in known:
+        uses, why = [resolve(stage.word, stage.cwd, known), *paths], "run"  # ./run.sh runs the file
     if stage.prog in ("rm", "unlink", "mv", "touch", "truncate", "tee"):
         uses, writes = [], paths
     elif stage.prog in ("cp", "install", "ln"):
         uses, writes = paths[:-1], paths[-1:]
     elif _in_place(stage.prog, flags):
-        writes = paths
+        writes, why = paths, "edit"
     elif stage.prog == "git" and stage.args[:1] in (["checkout"], ["restore"]):
         uses, writes = [], [p for p in paths if p in known]
     for op, target in stage.redirects:
         if pathlike(target) and not target.startswith("/dev/"):
             (writes if op in WRITE_REDIRECTS else uses).append(resolve(target, stage.cwd, known))
+    for p in uses:
+        if p in known:
+            eff.why.setdefault(p, why)
     eff.events += [("use", p) for p in uses if p in known]
     eff.events += [("write", p) for p in writes]
     eff.urls += [a for a in stage.args if URL.match(a)]

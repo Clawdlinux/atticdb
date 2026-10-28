@@ -100,7 +100,11 @@ def _editor(b: TraceBuilder, args: dict, content: str) -> None:
     elif cmd in ("str_replace", "insert"):
         line = args.get("insert_line") if cmd == "insert" else None
         old = args.get("old_str") if isinstance(args.get("old_str"), str) else None
-        b.use(path, line=int(line) if str(line or "").isdigit() else None, text=old)
+        if cmd == "insert":
+            n = int(line) if str(line or "").isdigit() else None
+            b.use(path, "line", line=n, end=n)
+        else:
+            b.use(path, "edit", text=old)
         if "has been edited" in content.split("\n", 1)[0]:
             b.write(path)
             body, lines, plain = numbered(content)
@@ -124,7 +128,7 @@ def _shell(b: TraceBuilder, args: dict, content: str, cwd: str | None) -> str | 
         return after[-1] if after else cwd
     eff = bash.effects(command, cwd, b.known())
     for kind, path in eff.events:
-        b.use(path) if kind == "use" else b.write(path)
+        b.use(path, eff.why.get(path, "path")) if kind == "use" else b.write(path)
     for url in eff.urls:
         b.use_url(url)
     ok = exit_code is None or exit_code.group(1) == "0" or (exit_code.group(1) == "1" and "grep" in command)

@@ -18,7 +18,7 @@ HEADER = re.compile(r"^\[File: (?P<path>.+) \(\d+ lines total\)\]$", re.M)
 WINDOW_LINE = re.compile(r"^(\d+):(.*)$")
 MORE = re.compile(r"^\(\d+ more lines (?:above|below)\)$")
 SEARCH_FILE = re.compile(r'^(?:Found \d+ matches|No matches found) for ".*" in (?P<path>/[^\n]*?):?$', re.M)
-EDIT = re.compile(r"^edit\s+(\d+)\s*:\s*\d+")
+EDIT = re.compile(r"^edit\s+(\d+)\s*:\s*(\d+)")
 WINDOW_COMMANDS = ("open", "goto", "scroll_down", "scroll_up", "create")
 OUTPUT_COMMANDS = ("search_dir", "find_file", "submit")
 # A shell read failed when its first line says so, as in "cat: x: No such file or directory".
@@ -78,7 +78,7 @@ def trajectory(row: dict, traj: str, salt: str = "ctxcache-v1") -> tuple[list[Ac
             # The run ended before an observation. The action still used its target.
             m = EDIT.match(cmd)
             if m and open_file:
-                b.use(open_file, line=int(m.group(1)))
+                b.use(open_file, "line", line=int(m.group(1)), end=int(m.group(2)))
             b.stats["actions_without_output"] += 1
             continue
         obs = nxt.get("text") or ""
@@ -107,7 +107,7 @@ def _step(b: TraceBuilder, cmd: str, body: str, open_file: str | None, cwd: str 
     elif name == "edit":
         m = EDIT.match(cmd)
         if open_file:
-            b.use(open_file, line=int(m.group(1)) if m else None)
+            b.use(open_file, "line", line=int(m.group(1)) if m else None, end=int(m.group(2)) if m else None)
         win = window(body)
         if "File updated." in body and win is not None:
             b.write(win[0])
@@ -129,7 +129,7 @@ def _step(b: TraceBuilder, cmd: str, body: str, open_file: str | None, cwd: str 
 def _shell(b: TraceBuilder, cmd: str, body: str, cwd: str | None) -> None:
     eff = bash.effects(cmd, cwd, b.known())
     for kind, path in eff.events:
-        b.use(path) if kind == "use" else b.write(path)
+        b.use(path, eff.why.get(path, "path")) if kind == "use" else b.write(path)
     for url in eff.urls:
         b.use_url(url)
     if eff.read and not any(e in body.split("\n", 1)[0] for e in SHELL_ERRORS):

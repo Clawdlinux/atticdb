@@ -53,6 +53,18 @@ The context window is a cache of `B` tokens. These rules define objects and acce
 - Every tool output is 1 access to its object. The first access to an object is a compulsory miss. A later one is a re-read: a hit if the object is still held, else a miss that costs its tokens.
 - A reference is a later action that names a path at its current version, or a URL, without reading it. Examples are an edit of the file, a run of the script, and `git diff` on it. It is 1 access to the newest view of that version. An action that names a line (`edit 150:152`, `insert_line`) uses the newest view that shows the line. An edit with old text (`old_str`) uses the newest view that holds all of it. Failing that, it uses the newest view with its longest line. str_replace needs that text verbatim in the file. With no view of the current version there is nothing to reference, so there is no access. We count those cases.
 
+**Proxy accesses.** Re-reads and references together are the proxy accesses. Every miss ratio is over them. Each reference has 1 subtype:
+
+| Subtype | Action |
+|---|---|
+| `edit_span` | an edit by old text, and the referenced view holds all of that text |
+| `edit` | any other edit: old text not found in full, `sed -i`, a patch |
+| `line_span` | an edit or insert by line, and the referenced view shows all its lines |
+| `line` | any other edit or insert by line |
+| `run` | a command that runs the file: `python`, `pytest`, `bash` and other runners, or `./x.sh` |
+| `git` | `git` or `diff` naming the file |
+| `path` | any other mention of a known path or URL |
+
 **Versions.** A write makes a new version. Writes are edits, creates, deletes, moves, `sed -i` and shell redirects into a file. Every object of the old version is dead after it. A write is not an access. An edit is a reference to the version it edits, then a write. When the edit's output shows the new lines, that output is the first access to the new version.
 
 **Sizes.** Tokens are characters / 4, at least 1. An object's size comes from the same canonical body that its key hashes. Tool chrome is not counted, such as SWE-agent's footer, OpenHands' `cat -n` header or a shell exit-code line. A missed reference costs that size.
@@ -64,8 +76,8 @@ The context window is a cache of `B` tokens. These rules define objects and acce
 1 JSONL line per access. These 2 lines open sampled row 6681: `create reproduce.py` shows a 1-line window, then `edit 1:1` references it.
 
 ```json
-{"traj": "swe-agent:6681", "t": 0, "obj": "6ee1cca095f41078", "tokens": 34, "kind": "file", "first": true, "ref": false}
-{"traj": "swe-agent:6681", "t": 1, "obj": "6ee1cca095f41078", "tokens": 34, "kind": "file", "first": false, "ref": true}
+{"traj": "swe-agent:6681", "t": 0, "obj": "6ee1cca095f41078", "tokens": 13, "kind": "file", "first": true, "ref": false, "sub": "first"}
+{"traj": "swe-agent:6681", "t": 1, "obj": "6ee1cca095f41078", "tokens": 13, "kind": "file", "first": false, "ref": true, "sub": "line_span"}
 ```
 
 | Field | Meaning |
@@ -77,8 +89,9 @@ The context window is a cache of `B` tokens. These rules define objects and acce
 | `kind` | `file`, `url` or `output` |
 | `first` | the first access to the object: a compulsory miss |
 | `ref` | true for a reference by a later action, false for a tool output |
+| `sub` | `first`, `reread`, or the reference subtype below |
 
-`ref` is the 1 field beyond the format in issue #87. Tool-result clearing needs it, because a reference does not refresh a cleared output.
+`ref` and `sub` go beyond the format in issue #87. Tool-result clearing needs `ref`, because a reference does not refresh a cleared output. `sub` lets a run drop 1 kind of reference to test the proxy.
 `trace.load` rejects a trace whose `first` flags do not match each object's history, or whose sizes change.
 `--export-trace` writes this format and `--dataset trace` reads it. [fixtures/tiny-trace.jsonl](fixtures/tiny-trace.jsonl) is a synthetic example.
 
