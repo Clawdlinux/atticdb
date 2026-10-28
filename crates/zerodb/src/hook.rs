@@ -32,7 +32,8 @@ const MORE: &str = "(more in zerodb)";
 /// Returns exit code 0.
 pub fn session_start() -> u8 {
     let start = Instant::now();
-    std::thread::spawn(move || {
+    // Without the thread, the 3 s budget still bounds the reads, but not stdin.
+    let _ = std::thread::Builder::new().spawn(move || {
         std::thread::sleep(HARD_STOP.saturating_sub(start.elapsed()));
         if print_once(&json!({})) {
             let _ = writeln!(std::io::stderr(), "zerodb: hook session-start: stopped at 4 s");
@@ -67,7 +68,8 @@ fn print_once(output: &Value) -> bool {
 /// The block for the `cwd` in `input`, or `None` when memory has nothing for it. Reads end
 /// by `deadline`.
 fn block(input: impl Read, deadline: Instant) -> Result<Option<String>, String> {
-    // Parsing stops at the end of the first value, so an open stdin cannot hang the hook.
+    // Parsing stops at the end of the first object, so stdin left open after it cannot hang
+    // the hook. A bare number or `true` waits for more, until the 4 s stop.
     let first = serde_json::Deserializer::from_reader(input).into_iter::<Value>().next();
     let input = first.ok_or("stdin is empty")?;
     let input = input.map_err(|error| format!("stdin is not JSON of at most 1 MiB: {error}"))?;

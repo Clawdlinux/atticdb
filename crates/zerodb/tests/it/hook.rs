@@ -7,9 +7,9 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// Runs `zerodb` with `HOME` set to `home` and writes `stdin`, keeping it open until the
-/// exit. Returns the exit code, stdout and stderr.
-fn zerodb(home: &Path, args: &[&str], stdin: &[u8]) -> (Option<i32>, String, String) {
+/// Runs `zerodb` with `HOME` set to `home` and writes `stdin` after `delay`, keeping it open
+/// until the exit. Returns the exit code, stdout and stderr.
+fn zerodb(home: &Path, args: &[&str], stdin: &[u8], delay: u64) -> (Option<i32>, String, String) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_zerodb"));
     command.args(args).current_dir(home).env("HOME", home).stdin(Stdio::piped());
     for var in ["COPILOT_HOME", "XDG_DATA_HOME", "ZERODB_TOKEN"] {
@@ -17,21 +17,23 @@ fn zerodb(home: &Path, args: &[&str], stdin: &[u8]) -> (Option<i32>, String, Str
     }
     let mut process = Process::start(&mut command);
     let mut input = process.child.stdin.take().unwrap();
+    std::thread::sleep(Duration::from_millis(delay));
     // The hook reads at most 1 MiB, so a longer write fails once it exits.
     let _ = input.write_all(stdin);
     let (status, _) = process.wait();
     (status.code(), process.stdout(), process.stderr())
 }
 
-fn hook(home: &Path, stdin: &str) -> String {
-    let (code, out, err) = zerodb(home, &["hook", "session-start"], stdin.as_bytes());
+/// The hook's stdout and stderr, after it exits 0 with 1 line.
+fn hook(home: &Path, stdin: &str, delay: u64) -> (String, String) {
+    let (code, out, err) = zerodb(home, &["hook", "session-start"], stdin.as_bytes(), delay);
     assert_eq!(code, Some(0), "{stdin:.80}: {err}");
     assert_eq!(out.lines().count(), 1, "{stdin:.80}: 1 line: {out}");
-    out
+    (out, err)
 }
 
 fn seed(home: &Path, args: &[&str]) {
-    let (code, _, err) = zerodb(home, args, b"");
+    let (code, _, err) = zerodb(home, args, b"", 0);
     assert_eq!(code, Some(0), "{args:?}: {err}");
 }
 
@@ -119,7 +121,7 @@ fn session_start_prints_the_memory_block() {
     for (agent, session, content) in turns {
         seed(&home, &["append", "--agent", agent, "--session", session, "--content", content]);
     }
-    let out: Value = serde_json::from_str(&hook(&home, &cwd(&home.join("app/src")))).unwrap();
+    let out: Value = serde_json::from_str(&hook(&home, &cwd(&home.join("app/src")), 0).0).unwrap();
     let block = format!(
         "zerodb memory (snapshot at chat start; call memory_search or fact_list for more)\n\
          Rules:\n- user/style: short sentences\n- user/tabs: line 1 line 2\n\
@@ -134,7 +136,7 @@ fn session_start_prints_the_memory_block() {
     for n in 0..100 {
         seed(&home, &["fact", "set", "--key", &format!("repo/big/{n:03}"), "--content", &content]);
     }
-    let out: Value = serde_json::from_str(&hook(&home, &cwd(&home.join("big")))).unwrap();
+    let out: Value = serde_json::from_str(&hook(&home, &cwd(&home.join("big")), 0).0).unwrap();
     let block = out["additionalContext"].as_str().unwrap();
     let length = block.chars().count();
     assert!((6_000 - 320..=6_000).contains(&length), "{length} characters");
@@ -144,8 +146,9 @@ fn session_start_prints_the_memory_block() {
     assert!(last.starts_with("- repo/big/") && last.ends_with(&format!(": {content}")), "{last}");
 }
 
-/// Each row prints `{}` and exits 0 in under 5 s, and not before its minimum time. A slow
-/// server gets 3 s for all 4 reads. Stdin open after part of a value hits the 4 s stop.
+/// Each row prints `{}` and exits 0 within its time range, saying why on stderr. A slow
+/// server gets 3 s from the start for all 4 reads. Stdin open after part of a value hits
+/// the 4 s stop.
 #[test]
 fn session_start_prints_nothing_on_errors() {
     let dir = Dir::new();
@@ -156,21 +159,25 @@ fn session_start_prints_nothing_on_errors() {
     chmod(data_dir(&refused).parent().unwrap(), 0o700);
     chmod(&data_dir(&refused), 0o755);
     let too_long = format!(r#"{{"cwd": "{}"}}"#, "a".repeat(2 << 20));
+    let (late, stop) = ("less than 2 s left before the deadline", "stopped at 4 s");
     let rows = [
-        ("not JSON", &empty, "nope".to_owned(), 0),
-        ("no cwd", &empty, r#"{"dir": "/tmp"}"#.to_owned(), 0),
-        ("over 1 MiB", &empty, too_long, 0),
-        ("no memory", &empty, cwd(&empty.join("repo")), 0),
-        ("data directory mode 0755", &refused, cwd(&refused.join("repo")), 0),
-        ("1.5 s per read", &slow, cwd(&slow.join("repo")), 1_400),
-        ("partial JSON, stdin open", &empty, r#"{"cwd": "/tm"#.to_owned(), 3_900),
+        ("not JSON", &empty, "nope".to_owned(), 0, 0..5_000, ""),
+        ("no cwd", &empty, r#"{"dir": "/tmp"}"#.to_owned(), 0, 0..5_000, ""),
+        ("over 1 MiB", &empty, too_long, 0, 0..5_000, ""),
+        ("no memory", &empty, cwd(&empty.join("repo")), 0, 0..5_000, ""),
+        ("data directory mode 0755", &refused, cwd(&refused.join("repo")), 0, 0..5_000, ""),
+        ("1.5 s per read", &slow, cwd(&slow.join("repo")), 0, 1_400..5_000, late),
+        // The budget counts from the start, so the first read is already late.
+        ("stdin after 1.2 s", &slow, cwd(&slow.join("repo")), 1_200, 1_200..2_000, late),
+        ("partial JSON, stdin open", &empty, r#"{"cwd": "/tm"#.to_owned(), 0, 3_900..5_000, stop),
     ];
-    for (case, home, stdin, min_ms) in rows {
+    for (case, home, stdin, delay, range, says) in rows {
         std::fs::create_dir_all(home).unwrap();
         let started = Instant::now();
-        assert_eq!(hook(home, &stdin), "{}\n", "{case}");
+        let (out, err) = hook(home, &stdin, delay);
         let elapsed = started.elapsed();
-        let range = Duration::from_millis(min_ms)..Duration::from_secs(5);
-        assert!(range.contains(&elapsed), "{case}: {elapsed:?}");
+        assert_eq!(out, "{}\n", "{case}");
+        assert!(range.contains(&(elapsed.as_millis() as u64)), "{case}: {elapsed:?}");
+        assert!(err.contains(says) && err.contains(stop) == (says == stop), "{case}: {err}");
     }
 }
