@@ -97,8 +97,13 @@ impl Drop for Dir {
 /// symlink.
 fn tmp_root() -> PathBuf {
     let uid = rustix::process::geteuid().as_raw();
-    let base = if cfg!(target_os = "macos") { "/tmp" } else { "/var/tmp" };
-    let root = std::fs::canonicalize(base).unwrap().join(format!("zerodb-test-{uid}"));
+    // Minimal containers may have no `/var/tmp`, so fall back to `/tmp` there.
+    let wanted = if cfg!(target_os = "macos") { "/tmp" } else { "/var/tmp" };
+    let base = std::fs::canonicalize(wanted).or_else(|_| std::fs::canonicalize("/tmp"));
+    let base = base.unwrap_or_else(|error| {
+        panic!("cannot resolve {wanted} or /tmp: {error}; set ZERODB_TEST_DIR to a short directory")
+    });
+    let root = base.join(format!("zerodb-test-{uid}"));
     // `owned_dir` makes the root if missing, but its check follows symlinks. So check the
     // entry itself. Once it is ours, the sticky bit on the base stops others from replacing it.
     let made = zerodb::listen::owned_dir(&root, 0o077);
