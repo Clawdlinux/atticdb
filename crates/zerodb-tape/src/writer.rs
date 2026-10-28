@@ -341,13 +341,22 @@ impl ReadState {
     }
 
     fn read(&self, lsn: u64) -> Result<Option<Frame>> {
-        self.read_with(&mut None, lsn)
+        self.read_with(&mut None, lsn, |_| true)
     }
 
     /// Reads through `open`, the last segment handle this caller used, and keeps the one it
     /// read from there. Durable bytes never change while the tape is open, and a handle stays
     /// valid across rename, so a held handle reads what a fresh open would.
-    fn read_with(&self, open: &mut Option<(u64, Handle)>, lsn: u64) -> Result<Option<Frame>> {
+    ///
+    /// `keep` sees the header before the CRC check. A frame it rejects costs 1 header read and
+    /// returns `None`, if its header names `lsn` and is not a footer. Every other frame is read
+    /// and decoded in full, also one whose header does not parse, so decode reports why.
+    fn read_with(
+        &self,
+        open: &mut Option<(u64, Handle)>,
+        lsn: u64,
+        keep: impl FnOnce(&Header) -> bool,
+    ) -> Result<Option<Frame>> {
         if lsn > self.durable_lsn.load(Ordering::Acquire) {
             return Ok(None);
         }
@@ -367,6 +376,20 @@ impl ReadState {
         if !(HEADER_LEN..=MAX_FRAME_SIZE).contains(&len) {
             return Err(crate::dir::corruption(lsn, segment, offset, "invalid read length"));
         }
+        let at_lsn = |found: &Header| match found.lsn == lsn && found.kind != Kind::Footer {
+            true => Ok(()),
+            false => Err(crate::dir::corruption(
+                lsn,
+                segment,
+                offset,
+                "LSN index points to another record",
+            )),
+        };
+        if let Ok(unverified) = frame::parse_header(&header) {
+            if !keep(&unverified) {
+                return at_lsn(&unverified).map(|()| None);
+            }
+        }
         let mut bytes = vec![0; len];
         bytes[..HEADER_LEN].copy_from_slice(&header);
         read_exact(
@@ -377,14 +400,7 @@ impl ReadState {
         )?;
         let (frame, _) = frame::decode(&bytes, segment, offset)
             .map_err(|e| crate::dir::corruption(lsn, segment, offset, e))?;
-        if frame.header.lsn != lsn || frame.header.kind == Kind::Footer {
-            return Err(crate::dir::corruption(
-                lsn,
-                segment,
-                offset,
-                "LSN index points to another record",
-            ));
-        }
+        at_lsn(&frame.header)?;
         Ok(Some(frame))
     }
 }
@@ -404,7 +420,21 @@ impl std::fmt::Debug for Reader<'_> {
 impl Reader<'_> {
     /// Reads a complete durable record, or returns `None` for an unpublished LSN.
     pub fn read(&mut self, lsn: u64) -> Result<Option<Frame>> {
-        self.reads.read_with(&mut self.open, lsn)
+        self.reads.read_with(&mut self.open, lsn, |_| true)
+    }
+
+    /// Reads a record like [`Reader::read`], but only when `keep` accepts its header. Else it
+    /// returns `None` after reading the 40-byte header.
+    ///
+    /// A skipped record's payload is not read, so it is not checksummed. Its header must still
+    /// name `lsn` and not be a footer. `keep` sees the header before the CRC check. A record
+    /// it keeps is read and checked in full. `zerodb verify` checks every frame.
+    pub fn read_if(
+        &mut self,
+        lsn: u64,
+        keep: impl FnOnce(&Header) -> bool,
+    ) -> Result<Option<Frame>> {
+        self.reads.read_with(&mut self.open, lsn, keep)
     }
 }
 

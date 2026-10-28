@@ -4,7 +4,8 @@ use std::sync::{Arc, Barrier};
 use std::time::Duration;
 use zerodb_tape::sim::WriterCore;
 use zerodb_tape::{
-    Committed, Durability, Error, HookIo, Io, Kind, Outcome, Result, SimDisk, Tape, TapeOptions,
+    Committed, Durability, Error, Frame, HookIo, Io, Kind, Op, Outcome, Result, SimDisk, Tape,
+    TapeOptions,
 };
 
 fn turn(content: &[u8]) -> Vec<zerodb_tape::RecordInput> {
@@ -173,19 +174,39 @@ fn rewritten_batches_are_revalidated_without_exposing_reserved_state() {
 }
 
 #[test]
-fn scan_reports_corruption_and_stops_after_the_bad_frame() {
-    let disk = Arc::new(SimDisk::new(7));
-    let (tape, _) = Tape::open(disk.clone(), clock(), "db", opts(160)).unwrap();
+fn corrupt_frames_fail_scans_and_reads_unless_a_header_filter_skips_them() {
+    let io = Arc::new(HookIo::sim(7));
+    let (tape, _) = Tape::open(io.clone(), clock(), "db", opts(160)).unwrap();
     for _ in 0..3 {
         tape.append(turn(&[0; 8]), Durability::Durable).unwrap();
     }
-    let file = disk.open(&seg(2)).unwrap();
-    disk.flip_bit(file, 0).unwrap();
-    disk.close(file).unwrap();
+    // Each record fills its own segment. Flip LSN 2's CRC, and LSN 3's first payload byte
+    // after its 40-byte header.
+    for (id, offset) in [(2, 0), (3, 40)] {
+        let file = io.inner.open(&seg(id)).unwrap();
+        io.inner.flip_bit(file, offset).unwrap();
+        io.inner.close(file).unwrap();
+    }
     let mut scan = tape.scan(0);
     assert_eq!(scan.next().unwrap().unwrap().lsn, 1);
     assert!(matches!(scan.next().unwrap(), Err(Error::CorruptionDetected { lsn: 2, .. })));
     assert!(scan.next().is_none());
+
+    // A filter that skips LSN 3 reads only its header, so the bad payload goes unchecked.
+    let corrupt =
+        |read: Result<Option<Frame>>| matches!(read, Err(Error::CorruptionDetected { lsn: 3, .. }));
+    let read = io.tally(|op| match op {
+        Op::Read(_, _, len) => *len as u64,
+        _ => 0,
+    });
+    let mut reader = tape.reader();
+    assert!(corrupt(reader.read(3)), "a full read checks the payload");
+    let before = read.load(Ordering::SeqCst);
+    assert_eq!(reader.read_if(3, |header| header.tenant_id != 7).unwrap(), None);
+    assert_eq!(read.load(Ordering::SeqCst) - before, 40, "a skip reads the header only");
+    assert!(corrupt(reader.read_if(3, |header| header.tenant_id == 7)), "a kept frame is checked");
+    let kept = reader.read_if(1, |header| header.kind == Kind::Turn).unwrap().unwrap();
+    assert_eq!((kept.header.lsn, kept.payload), (1, vec![0; 8]));
 }
 
 #[test]

@@ -193,6 +193,20 @@ pub fn encode(frame: &Frame, segment: u64, offset: u64) -> crate::Result<Vec<u8>
     Ok(bytes)
 }
 
+/// Parses the header fields without the CRC, which covers the payload too. Only [`decode`]
+/// proves a frame intact.
+pub fn parse_header(bytes: &[u8; HEADER_LEN]) -> Result<Header, DecodeError> {
+    Ok(Header {
+        kind: Kind::try_from(bytes[8])?,
+        version: bytes[9],
+        flags: u16::from_le_bytes(field(bytes, 10)?),
+        txn: u64::from_le_bytes(field(bytes, 12)?),
+        lsn: u64::from_le_bytes(field(bytes, 20)?),
+        commit_time_ns: u64::from_le_bytes(field(bytes, 28)?),
+        tenant_id: u32::from_le_bytes(field(bytes, 36)?),
+    })
+}
+
 /// Decodes one frame at its manifest location.
 pub fn decode(bytes: &[u8], segment: u64, offset: u64) -> Result<(Frame, usize), DecodeError> {
     if bytes.is_empty() {
@@ -203,9 +217,9 @@ pub fn decode(bytes: &[u8], segment: u64, offset: u64) -> Result<(Frame, usize),
     if total == 0 {
         return Err(if crc == 0 { DecodeError::EndOfData } else { DecodeError::BadLength });
     }
-    if bytes.len() < HEADER_LEN {
+    let Some(head) = bytes.first_chunk::<HEADER_LEN>() else {
         return Err(DecodeError::Truncated);
-    }
+    };
     if !(HEADER_LEN..=MAX_FRAME_SIZE).contains(&total) || total > bytes.len() {
         return Err(DecodeError::BadLength);
     }
@@ -215,15 +229,7 @@ pub fn decode(bytes: &[u8], segment: u64, offset: u64) -> Result<(Frame, usize),
     if checksum(segment, offset, &bytes[4..total]) != crc {
         return Err(DecodeError::BadCrc);
     }
-    let header = Header {
-        kind: Kind::try_from(bytes[8])?,
-        version: bytes[9],
-        flags: u16::from_le_bytes(field(bytes, 10)?),
-        txn: u64::from_le_bytes(field(bytes, 12)?),
-        lsn: u64::from_le_bytes(field(bytes, 20)?),
-        commit_time_ns: u64::from_le_bytes(field(bytes, 28)?),
-        tenant_id: u32::from_le_bytes(field(bytes, 36)?),
-    };
+    let header = parse_header(head)?;
     let payload = &bytes[HEADER_LEN..total];
     validate(&header, payload)?;
     Ok((Frame { header, payload: payload.to_vec() }, total))

@@ -14,7 +14,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use zerodb_tape::{
-    Clock, Committed, Digest, Durability, Frame, Io, Kind, RecordInput, StdIo, SystemClock, Tape,
+    Clock, Committed, Digest, Durability, Frame, Header, Io, Kind, RecordInput, StdIo, SystemClock,
+    Tape,
 };
 
 /// A session's isolation boundary.
@@ -1041,7 +1042,8 @@ impl Engine {
             max_bytes: query.max_bytes,
             visits: query.visits,
         };
-        let (hits, next) = self.newest_first(tenant, walk, |frame| {
+        let wanted = |header: &Header| matches!(header.kind, Kind::Turn | Kind::Fact);
+        let (hits, next) = self.newest_first(tenant, walk, wanted, |frame| {
             let hit = match frame.header.kind {
                 Kind::Turn => {
                     let (agent, session, turn) = turn_frame(frame)?;
@@ -1084,13 +1086,18 @@ impl Engine {
             max_bytes: query.max_bytes,
             visits: query.visits,
         };
-        let (records, next) = self.newest_first(tenant, walk, |frame| {
-            let record = match (frame.header.kind, query.kind) {
-                (Kind::Turn, None | Some(RecordKind::Turn)) => {
+        let wanted = |header: &Header| match query.kind {
+            None => matches!(header.kind, Kind::Turn | Kind::Fact),
+            Some(RecordKind::Turn) => header.kind == Kind::Turn,
+            Some(RecordKind::Fact) => header.kind == Kind::Fact,
+        };
+        let (records, next) = self.newest_first(tenant, walk, wanted, |frame| {
+            let record = match frame.header.kind {
+                Kind::Turn => {
                     let (agent, session, turn) = turn_frame(frame)?;
                     Record::Turn { agent, session, turn }
                 }
-                (Kind::Fact, None | Some(RecordKind::Fact)) => {
+                Kind::Fact => {
                     let corrupt = |_| EngineError::rejected(ErrorKind::CorruptIndex);
                     let fact = crate::fact::decode(&frame.payload).map_err(corrupt)?;
                     let Fact { key, content, meta, agent, tombstone, .. } = fact;
@@ -1117,8 +1124,11 @@ impl Engine {
     }
 
     /// The newest-first walk `search` and `records` share, so the two cannot drift. It reads
-    /// the tenant's records below `before` at the snapshot other readers use. `pick` keeps a
-    /// record as an item with its size, or skips it.
+    /// the tenant's records below `before` at the snapshot other readers use.
+    ///
+    /// `wanted` filters frames by header. A frame of another tenant, or one `wanted` rejects,
+    /// costs a 40-byte header read and gets no CRC check. `pick` keeps a wanted record as an
+    /// item with its size, or skips it.
     ///
     /// Every LSN the walk visits counts toward `visits`, other tenants' records and skipped
     /// kinds included. The first item is kept even when it alone passes `max_bytes`. `next`
@@ -1132,6 +1142,7 @@ impl Engine {
         &self,
         tenant: &str,
         walk: Walk,
+        wanted: impl Fn(&Header) -> bool,
         mut pick: impl FnMut(&Frame) -> Result<Option<(T, usize)>>,
     ) -> Result<(Vec<T>, Option<u64>)> {
         if walk.limit == 0 || walk.visits == 0 {
@@ -1145,10 +1156,9 @@ impl Engine {
         let top = walk.before.map_or(snapshot, |before| before.saturating_sub(1).min(snapshot));
         let (mut items, mut bytes, mut reader) = (Vec::new(), 0usize, self.tape.reader());
         for lsn in (1..=top).rev().take(walk.visits) {
-            let Some(frame) = reader.read(lsn)? else { continue };
-            if frame.header.tenant_id != id {
-                continue;
-            }
+            // A kept frame passes its CRC check, so its header is the one this filter saw.
+            let mine = |header: &Header| header.tenant_id == id && wanted(header);
+            let Some(frame) = reader.read_if(lsn, mine)? else { continue };
             let Some((item, size)) = pick(&frame)? else { continue };
             bytes = bytes.saturating_add(size);
             if bytes > walk.max_bytes && !items.is_empty() {
