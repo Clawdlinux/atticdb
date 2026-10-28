@@ -58,6 +58,14 @@ zerodb disconnect vscode    # removes only zerodb's entry
 
 It edits the user MCP config and keeps a backup of the old file. The entry holds no token.
 
+It also adds a Copilot hook file, `~/.copilot/hooks/zerodb.json`. VS Code's Copilot chat and Copilot CLI both read it.
+At the start of each chat, the hook adds a small memory block.
+It lists your `user/` rules, this repo's facts and the 5 newest notes of this repo's session.
+The repo is the folder holding `.git`, at or above the chat's working directory.
+The block is at most 6,000 characters, and each entry at most 300.
+It is a snapshot. The model can call `memory_search` or `fact_list` for more.
+To turn it off, delete the hook file, or disconnect both harnesses.
+
 ## Shell verbs
 
 The same 6 tools run from a shell, with `zerodb mcp`'s connection flags. Each prints 1 JSON line. `fact set --delete` deletes.

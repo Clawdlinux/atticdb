@@ -131,6 +131,7 @@ An auto-started server runs in its own process group and outlives the adapters. 
 ## `zerodb connect` and `zerodb disconnect`
 
 `zerodb connect <vscode|copilot>` creates the home, then adds a `zerodb` entry to the harness's user MCP config.
+It also writes the session-start hook file, described below.
 `zerodb disconnect <vscode|copilot>` removes that entry. Every other key and server stays.
 
 | Name | File | Entry |
@@ -148,6 +149,44 @@ The new file goes to a synced temp file, then a rename. It keeps the old file's 
 The rewrite sorts the file's keys and drops its formatting.
 A file that is not plain JSON, such as one with `//` comments, is left alone. The error shows the entry to add by hand.
 A symlinked file is refused, because the rename would replace the link.
+
+`connect` also writes the hook file `hooks/zerodb.json` in `$COPILOT_HOME` when set and absolute, else in `~/.copilot`.
+VS Code's Copilot chat and Copilot CLI both read it:
+
+```json
+{"version": 1, "hooks": {"sessionStart": [{"type": "command", "bash": "'<binary>' hook session-start", "timeoutSec": 5}]}}
+```
+
+The binary path is single-quoted for the shell, with each `'` written as `'\''`.
+The rules above apply: no write when it matches, a backup, a synced temp file and a rename.
+`disconnect` deletes it once neither config has a zerodb entry, then syncs the directory. No backup is kept.
+A hook file with other content is left alone, and `disconnect` says so.
+
+## `zerodb hook session-start`
+
+The Copilot `sessionStart` hook. It reads at most 1 MiB of JSON on stdin and uses only `cwd`.
+Parsing stops after the first JSON value, so stdin left open does not block it.
+The repo is the name of the first directory from `cwd` up that has a `.git` entry, else of `cwd`.
+It reads the home like `zerodb mcp` with no flags, with a 3 s retry deadline. It starts the server if needed.
+It lists facts under `user/` and under `repo/<repo>/`, 50 each, in key order.
+It reads the last 5 turns of session `<repo>` for agents `vscode-copilot` and `copilot`, then keeps the newest 5.
+It prints 1 line, `{"additionalContext": "<block>"}`. With nothing to show, or on any error, it prints `{}`.
+It always exits 0. Errors go to stderr.
+
+```text
+zerodb memory (snapshot at chat start; call memory_search or fact_list for more)
+Rules:
+- <key>: <content>
+This repo (<repo>):
+- <key>: <content>
+Recent notes (<repo>):
+- <content>
+```
+
+Turns are listed oldest first. A section with no entries is left out.
+Each content is cut to 300 characters, and its newlines become spaces.
+Past 6,000 characters the block stops at a whole line and ends with `(more in zerodb)`.
+The block depends only on memory, so the prompt prefix stays the same until memory changes.
 
 ## Tests
 

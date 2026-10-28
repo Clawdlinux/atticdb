@@ -108,6 +108,29 @@ pub fn command(tool: &str, mut flags: HashMap<String, String>) -> u8 {
     }
 }
 
+/// Reads from the per-user home for code in this crate, such as the session-start hook.
+pub(crate) struct HomeReader(Adapter);
+
+impl HomeReader {
+    /// Resolves the home as `zerodb mcp` with no connection flags does. Each read retries
+    /// for up to `retry_deadline`.
+    pub(crate) fn new(session: &str, retry_deadline: Duration) -> Result<Self, String> {
+        let mut adapter = Adapter::new(HashMap::from([("--session".into(), session.into())]))?;
+        adapter.retry_deadline = retry_deadline;
+        Ok(Self(adapter))
+    }
+
+    /// Runs the read tool `tool` as `agent`. Returns its `structuredContent`, or its error.
+    pub(crate) fn read(&mut self, agent: &str, tool: &str, args: &Value) -> Result<Value, String> {
+        self.0.agent = agent.to_owned();
+        let result = self.0.call(tool, args).ok_or_else(|| format!("unknown tool {tool}"))?;
+        match result["content"][0]["text"].as_str() {
+            Some(text) if result["isError"] == true => Err(text.to_owned()),
+            _ => Ok(result["structuredContent"].clone()),
+        }
+    }
+}
+
 impl Adapter {
     fn new(mut flags: HashMap<String, String>) -> Result<Self, String> {
         let url = flags.remove("--url").as_deref().map(Url::parse).transpose()?;

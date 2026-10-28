@@ -56,21 +56,25 @@ fn connect_edits_only_the_zerodb_entry() {
         let mode = || std::fs::metadata(&file).unwrap().mode() & 0o777;
         let backups =
             || files(&parent).into_keys().filter(|n| n.contains(".zerodb-backup-")).count();
+        // Copilot's hook directory sits next to its config.
+        let listed = || files(&parent).into_keys().filter(|name| name != "hooks").count();
 
         let (code, out) = run(&["connect", name]);
         assert_eq!(code, Some(0), "{case}: {out}");
-        assert_eq!(out, format!("connected zerodb to {name}: {}\n", file.display()), "{case}");
+        let first = format!("connected zerodb to {name}: {}", file.display());
+        assert_eq!(out.lines().next(), Some(first.as_str()), "{case}");
         assert_eq!(read(), json!({section: {"zerodb": entry}}), "{case}: created");
         let pretty = serde_json::to_string_pretty(&read()).unwrap() + "\n";
         assert_eq!(std::fs::read_to_string(&file).unwrap(), pretty, "{case}: 2-space indent");
-        assert_eq!(files(&parent).len(), 1, "{case}: no backup or temp file");
+        assert_eq!(listed(), 1, "{case}: no backup or temp file");
         let parent_mode = std::fs::metadata(&parent).unwrap().mode() & 0o777;
         assert_eq!(parent_mode, 0o700, "{case}: new directories are private");
 
         let before = (files(&parent), std::fs::metadata(&file).unwrap().modified().unwrap());
         let (code, out) = run(&["connect", name]);
         assert_eq!(code, Some(0), "{case}: {out}");
-        assert_eq!(out, format!("zerodb is already connected to {name} ({})\n", file.display()));
+        let first = format!("zerodb is already connected to {name} ({})", file.display());
+        assert_eq!(out.lines().next(), Some(first.as_str()), "{case}");
         let after = (files(&parent), std::fs::metadata(&file).unwrap().modified().unwrap());
         assert_eq!(after, before, "{case}: nothing written");
 
@@ -85,10 +89,11 @@ fn connect_edits_only_the_zerodb_entry() {
         let (code, out) = run(&["connect", name]);
         assert_eq!(code, Some(0), "{case}: {out}");
         let prefix = format!("updated zerodb in {name}: {} (backup: ", file.display());
-        assert!(out.starts_with(&prefix) && out.ends_with(", keys are now sorted)\n"), "{out}");
+        let first = out.lines().next().unwrap();
+        assert!(first.starts_with(&prefix) && first.ends_with(", keys are now sorted)"), "{out}");
         edited[section]["zerodb"] = entry;
         assert_eq!(read(), edited, "{case}: only the entry changed");
-        let backup = out[prefix.len()..].split(", ").next().unwrap().to_owned();
+        let backup = first[prefix.len()..].split(", ").next().unwrap().to_owned();
         assert_eq!(std::fs::read(&backup).unwrap(), edited_bytes, "{case}: backup");
         let backup_mode = std::fs::metadata(&backup).unwrap().mode() & 0o777;
         assert_eq!(backup_mode, 0o600, "{case}: the backup keeps the mode");
@@ -100,7 +105,7 @@ fn connect_edits_only_the_zerodb_entry() {
         edited[section].as_object_mut().unwrap().remove("zerodb");
         assert_eq!(read(), edited, "{case}: the other server and key stay");
         assert_eq!((backups(), mode()), (2, 0o600), "{case}: a second backup, mode kept");
-        assert_eq!(files(&parent).len(), 3, "{case}: no temp file left");
+        assert_eq!(listed(), 3, "{case}: no temp file left");
         let before = files(&parent);
         let (code, out) = run(&["disconnect", name]);
         assert_eq!((code, out), (Some(0), format!("zerodb is not connected to {name}\n")));
@@ -140,4 +145,66 @@ fn connect_edits_only_the_zerodb_entry() {
             .wait();
     assert_eq!(status.code(), Some(2), "{out}");
     assert!(out.contains("zerodb connect <vscode|copilot>"), "{out}");
+}
+
+/// `connect` writes 1 hook file for both harnesses, and `disconnect` removes it once neither
+/// is connected. A hook file zerodb did not write stays. The quoted path runs in `sh`.
+#[test]
+fn connect_writes_the_session_start_hook() {
+    let dir = Dir::new();
+    // A binary path with a quote, which the hook command must escape.
+    let bin = dir.0.join("it's");
+    std::fs::create_dir(&bin).unwrap();
+    let exe = bin.join("zerodb");
+    std::fs::copy(env!("CARGO_BIN_EXE_zerodb"), &exe).unwrap();
+    let exe = std::fs::canonicalize(exe).unwrap();
+    let bash = format!("'{}' hook session-start", exe.to_str().unwrap().replace('\'', r"'\''"));
+    let wanted = json!({"version": 1, "hooks": {"sessionStart": [
+        {"type": "command", "bash": bash, "timeoutSec": 5}]}});
+    for (row, var) in [None, Some("COPILOT_HOME")].into_iter().enumerate() {
+        let home = dir.0.join(row.to_string());
+        let hooks = var.map_or(home.join(".copilot"), |_| home.join("c")).join("hooks");
+        let file = hooks.join("zerodb.json");
+        let run = |args: &[&str]| {
+            let mut command = Command::new(&exe);
+            command.args(args).current_dir(&dir.0).env("HOME", &home);
+            for var in ["COPILOT_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "ZERODB_TOKEN"] {
+                command.env_remove(var);
+            }
+            command.envs(var.map(|var| (var, home.join("c"))));
+            let (status, out) = Process::start(command.stdin(Stdio::null())).wait();
+            assert_eq!(status.code(), Some(0), "{var:?} {args:?}: {out}");
+            out
+        };
+        let shown = file.display();
+        let out = run(&["connect", "vscode"]);
+        assert!(out.ends_with(&format!("\nadded the sessionStart hook: {shown}\n")), "{out}");
+        let pretty = serde_json::to_string_pretty(&wanted).unwrap() + "\n";
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), pretty, "{var:?}");
+        assert_eq!(std::fs::metadata(&hooks).unwrap().mode() & 0o777, 0o700, "{var:?}");
+        let before = (files(&hooks), std::fs::metadata(&file).unwrap().modified().unwrap());
+        let out = run(&["connect", "copilot"]);
+        assert!(out.ends_with(&format!("\nthe sessionStart hook is already in place ({shown})\n")));
+        let after = (files(&hooks), std::fs::metadata(&file).unwrap().modified().unwrap());
+        assert_eq!(after, before, "{var:?}: nothing written");
+
+        let out = run(&["disconnect", "vscode"]);
+        let kept = format!("\nkept the sessionStart hook ({shown}): zerodb is still connected");
+        assert!(out.contains(&kept), "{var:?}: {out}");
+        assert_eq!(files(&hooks), before.0, "{var:?}: kept");
+        let out = run(&["disconnect", "copilot"]);
+        assert!(out.ends_with(&format!("\nremoved the sessionStart hook: {shown}\n")), "{out}");
+        assert_eq!(files(&hooks).len(), 0, "{var:?}: removed, no backup");
+
+        // A hook file zerodb did not write stays.
+        std::fs::write(&file, "{}").unwrap();
+        let out = run(&["disconnect", "copilot"]);
+        assert!(out.contains(&format!("left {shown} alone")), "{var:?}: {out}");
+        assert_eq!(std::fs::read(&file).unwrap(), b"{}", "{var:?}");
+    }
+    // The command runs in `sh` as the harness runs it.
+    let mut sh = Command::new("sh");
+    sh.args(["-c", &bash]).env("HOME", dir.0.join("0")).stdin(Stdio::null());
+    let (status, out) = Process::start(&mut sh).wait();
+    assert_eq!((status.code(), out.lines().next()), (Some(0), Some("{}")), "{out}");
 }
