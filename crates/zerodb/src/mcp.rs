@@ -123,8 +123,9 @@ impl Adapter {
         };
         let retry_deadline = duration("--retry-deadline", 30)?;
         // With no connection flags and no token in the environment, use the per-user home.
-        let connection = ["--url", "--data-dir", "--config", "--token-file", "--tenant"];
-        let given = connection.iter().any(|flag| flags.contains_key(*flag));
+        // `--url` was removed above, so it counts through `url`.
+        let connection = ["--data-dir", "--config", "--token-file", "--tenant"];
+        let given = url.is_some() || connection.iter().any(|flag| flags.contains_key(*flag));
         let home = (!given && std::env::var_os(TOKEN_ENV).is_none())
             .then(crate::home::ensure)
             .transpose()?;

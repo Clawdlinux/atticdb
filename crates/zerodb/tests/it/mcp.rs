@@ -682,6 +682,17 @@ fn no_flags_use_the_home() {
             assert_eq!(found, mode, "{case}: {path:?} mode");
         }
     }
+    // Any connection flag keeps the old rule: no token is an error and no home is made.
+    for flags in [["--url", "unix:///nowhere.sock"], ["--data-dir", "d"]] {
+        let home_env = dir.0.join("u");
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_zerodb"));
+        command.arg("recent").args(flags).current_dir(&dir.0).env("HOME", &home_env);
+        command.env_remove("ZERODB_TOKEN").env_remove("XDG_DATA_HOME");
+        let (status, out) = Process::start(command.stdin(std::process::Stdio::null())).wait();
+        assert_eq!(status.code(), Some(1), "{flags:?}: {out}");
+        assert!(out.contains("set ZERODB_TOKEN"), "{flags:?}: {out}");
+        assert!(!home_env.exists(), "{flags:?}: no home");
+    }
 }
 
 /// A write whose first answer is `unknown` is never reported as `not_committed`.
