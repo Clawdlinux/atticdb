@@ -177,12 +177,13 @@ fn rewritten_batches_are_revalidated_without_exposing_reserved_state() {
 fn corrupt_frames_fail_scans_and_reads_unless_a_header_filter_skips_them() {
     let io = Arc::new(HookIo::sim(7));
     let (tape, _) = Tape::open(io.clone(), clock(), "db", opts(160)).unwrap();
-    for _ in 0..3 {
+    for _ in 0..5 {
         tape.append(turn(&[0; 8]), Durability::Durable).unwrap();
     }
-    // Each record fills its own segment. Flip LSN 2's CRC, and LSN 3's first payload byte
-    // after its 40-byte header.
-    for (id, offset) in [(2, 0), (3, 40)] {
+    // Each record fills its own segment. Flip bit 0 of LSN 2's CRC, of LSN 3's first payload
+    // byte after its 40-byte header, of LSN 4's kind (Turn becomes 0, which does not parse) and
+    // of LSN 5's LSN field (5 becomes 4).
+    for (id, offset) in [(2, 0), (3, 40), (4, 8), (5, 20)] {
         let file = io.inner.open(&seg(id)).unwrap();
         io.inner.flip_bit(file, offset).unwrap();
         io.inner.close(file).unwrap();
@@ -207,6 +208,14 @@ fn corrupt_frames_fail_scans_and_reads_unless_a_header_filter_skips_them() {
     assert!(corrupt(reader.read_if(3, |header| header.tenant_id == 7)), "a kept frame is checked");
     let kept = reader.read_if(1, |header| header.kind == Kind::Turn).unwrap().unwrap();
     assert_eq!((kept.header.lsn, kept.payload), (1, vec![0; 8]));
+    // A header that does not parse, or names another LSN, is never skipped. It is read in full
+    // and fails exactly like `read`.
+    for lsn in [4, 5] {
+        let skipped = reader.read_if(lsn, |_| false).unwrap_err();
+        let at_lsn = matches!(skipped, Error::CorruptionDetected { lsn: at, .. } if at == lsn);
+        assert!(at_lsn, "lsn={lsn}: {skipped}");
+        assert_eq!(skipped.to_string(), tape.read(lsn).unwrap_err().to_string(), "lsn={lsn}");
+    }
 }
 
 #[test]

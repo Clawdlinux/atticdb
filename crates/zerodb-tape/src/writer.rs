@@ -350,7 +350,7 @@ impl ReadState {
     ///
     /// `keep` sees the header before the CRC check. A frame it rejects costs 1 header read and
     /// returns `None`, if its header names `lsn` and is not a footer. Every other frame is read
-    /// and decoded in full, also one whose header does not parse, so decode reports why.
+    /// and decoded in full, also one whose header does not parse, so errors match `read`.
     fn read_with(
         &self,
         open: &mut Option<(u64, Handle)>,
@@ -386,8 +386,8 @@ impl ReadState {
             )),
         };
         if let Ok(unverified) = frame::parse_header(&header) {
-            if !keep(&unverified) {
-                return at_lsn(&unverified).map(|()| None);
+            if !keep(&unverified) && at_lsn(&unverified).is_ok() {
+                return Ok(None);
             }
         }
         let mut bytes = vec![0; len];
@@ -426,9 +426,13 @@ impl Reader<'_> {
     /// Reads a record like [`Reader::read`], but only when `keep` accepts its header. Else it
     /// returns `None` after reading the 40-byte header.
     ///
-    /// A skipped record's payload is not read, so it is not checksummed. Its header must still
-    /// name `lsn` and not be a footer. `keep` sees the header before the CRC check. A record
-    /// it keeps is read and checked in full. `zerodb verify` checks every frame.
+    /// A skipped record's payload is not read, so it is not checksummed. `keep` sees the header
+    /// before the CRC check, and no separate CRC covers the header. So a flipped bit in a
+    /// header's tenant or kind can make a wanted record look like one to skip, with no error.
+    /// Full reads still catch it: [`Reader::read`], which the engine's `window` and fact reads
+    /// use, and `zerodb verify`. A header that does not parse, names another LSN or is a footer
+    /// is read in full, so its error matches [`Reader::read`]. A record `keep` accepts is read
+    /// and checked in full.
     pub fn read_if(
         &mut self,
         lsn: u64,

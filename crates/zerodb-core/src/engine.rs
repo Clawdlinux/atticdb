@@ -1127,8 +1127,10 @@ impl Engine {
     /// the tenant's records below `before` at the snapshot other readers use.
     ///
     /// `wanted` filters frames by header. A frame of another tenant, or one `wanted` rejects,
-    /// costs a 40-byte header read and gets no CRC check. `pick` keeps a wanted record as an
-    /// item with its size, or skips it.
+    /// costs a 40-byte header read and gets no CRC check. So a flipped bit in a wanted frame's
+    /// tenant or kind can drop it from `records` and `search` with no error. `window`, the fact
+    /// reads and `zerodb verify` read in full and still catch it. `pick` keeps a wanted record
+    /// as an item with its size, or skips it.
     ///
     /// Every LSN the walk visits counts toward `visits`, other tenants' records and skipped
     /// kinds included. The first item is kept even when it alone passes `max_bytes`. `next`
