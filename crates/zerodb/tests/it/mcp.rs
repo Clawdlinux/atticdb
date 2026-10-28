@@ -1,6 +1,6 @@
 use crate::support::{
     self, chmod, init, init_config, kill_holder, private_file, text, wait_for, Dir, Holders, Mcp,
-    TOKEN_A,
+    Process, TOKEN_A,
 };
 use serde_json::{json, Value};
 use std::io::{Read, Write};
@@ -621,6 +621,48 @@ fn launch_race_starts_one_server() {
     assert_eq!(lock_field(&dir.0.join("B"), "unix="), format!("{}", socket.display()));
     assert!(!dir.0.join("A").exists(), "the config's directory is untouched");
     assert_eq!(mcp.close().0.code(), Some(0));
+}
+
+/// With no connection flags, the shell verbs create and use a per-user home.
+#[test]
+fn no_flags_use_the_home() {
+    let dir = Dir::new();
+    let mut rows = vec![];
+    if cfg!(target_os = "linux") {
+        rows.push(("XDG_DATA_HOME", Some(dir.0.join("x")), dir.0.join("x/zerodb")));
+    }
+    let home =
+        if cfg!(target_os = "macos") { "Library/Application Support" } else { ".local/share" };
+    rows.push(("HOME", None, dir.0.join(home).join("zerodb")));
+    let _holders = Holders(rows.iter().map(|(_, _, home)| home.join("data")).collect());
+    for (case, xdg, home) in rows {
+        let staging = home.join("data/.zs.01234567/s");
+        assert!(
+            staging.as_os_str().len() < zerodb::listen::SUN_PATH_BYTES,
+            "{case}: {} is too deep, set ZERODB_TEST_DIR to a short directory",
+            staging.display()
+        );
+        let run = |verb: &[&str]| {
+            let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_zerodb"));
+            command.args(verb).current_dir(&dir.0).env("HOME", &dir.0);
+            command.env_remove("ZERODB_TOKEN").env_remove("XDG_DATA_HOME");
+            command.envs(xdg.iter().map(|xdg| ("XDG_DATA_HOME", xdg)));
+            let mut process = Process::start(command.stdin(std::process::Stdio::null()));
+            let (status, out) = process.wait();
+            assert!(status.success(), "{case} {verb:?}: {out}");
+            serde_json::from_str::<Value>(&process.stdout()).unwrap()
+        };
+        run(&["append", "--content", case]);
+        let config = std::fs::read(home.join("zerodb.json")).unwrap();
+        let turns = run(&["recent"])["turns"].clone();
+        assert_eq!(turns.as_array().map(Vec::len), Some(1), "{case}: {turns}");
+        assert_eq!(turns[0]["content"], case, "{case}: its own home");
+        assert_eq!(std::fs::read(home.join("zerodb.json")).unwrap(), config, "{case}: kept");
+        for (path, mode) in [("", 0o700), ("data", 0o700), ("zerodb.json", 0o600)] {
+            let found = std::fs::metadata(home.join(path)).unwrap().mode() & 0o777;
+            assert_eq!(found, mode, "{case}: {path:?} mode");
+        }
+    }
 }
 
 /// A write whose first answer is `unknown` is never reported as `not_committed`.

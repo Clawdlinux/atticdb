@@ -122,10 +122,19 @@ impl Adapter {
             .ok_or(format!("{name} must be <n>s or <n>ms")),
         };
         let retry_deadline = duration("--retry-deadline", 30)?;
+        // With no connection flags and no token in the environment, use the per-user home.
+        let connection = ["--url", "--data-dir", "--config", "--token-file", "--tenant"];
+        let given = connection.iter().any(|flag| flags.contains_key(*flag));
+        let home = (!given && std::env::var_os(TOKEN_ENV).is_none())
+            .then(crate::home::ensure)
+            .transpose()?;
         let config_path = flags.remove("--config").map(PathBuf::from);
+        let config_path = config_path.or_else(|| home.as_ref().map(|home| home.config.clone()));
         let config = config_path.as_deref().map(Config::load).transpose()?;
         let token_file = flags.remove("--token-file");
-        let token = match (token_file, std::env::var(TOKEN_ENV), flags.remove("--tenant")) {
+        let tenant =
+            flags.remove("--tenant").or_else(|| home.as_ref().map(|home| home.tenant.clone()));
+        let token = match (token_file, std::env::var(TOKEN_ENV), tenant) {
             (Some(path), _, _) => read_token_file(path.as_ref())?,
             (None, Ok(text), _) => {
                 Token::new(text).map_err(|error| format!("{TOKEN_ENV}: {error}"))?
@@ -138,6 +147,7 @@ impl Adapter {
             _ => return Err(format!("set {TOKEN_ENV}, --token-file, or --config with --tenant")),
         };
         let data_dir = flags.remove("--data-dir").map(PathBuf::from);
+        let data_dir = data_dir.or(home.map(|home| home.data_dir));
         let data_dir = data_dir.or_else(|| config.and_then(|config| config.data_dir));
         let data_dir = data_dir.map(std::path::absolute).transpose().map_err(|e| e.to_string())?;
         if url.is_none() && data_dir.is_none() {

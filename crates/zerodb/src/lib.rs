@@ -8,6 +8,7 @@ pub mod auth;
 pub mod config;
 #[cfg(feature = "fault-inject")]
 pub mod fault;
+pub mod home;
 pub mod http;
 pub mod launch;
 pub mod listen;
