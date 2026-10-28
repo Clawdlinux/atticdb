@@ -5,7 +5,7 @@
 use serde_json::{json, Map, Value};
 use std::fs::{File, OpenOptions, Permissions};
 use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use zerodb_tape::{Io, StdIo};
 
@@ -188,7 +188,11 @@ fn write(
     let shown = path.display();
     let parent = path.parent().ok_or_else(|| format!("{shown}: has no parent directory"))?;
     let existing = parent.ancestors().find(|dir| dir.exists()).unwrap_or(Path::new("/"));
-    std::fs::create_dir_all(parent)
+    // New directories are private, as Copilot and XDG make them. Existing ones keep their mode.
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(parent)
         .map_err(|error| format!("{}: cannot create: {error}", parent.display()))?;
     let io = StdIo::new();
     let sync = |dir: &Path| {

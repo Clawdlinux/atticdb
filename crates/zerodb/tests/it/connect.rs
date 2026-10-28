@@ -64,6 +64,8 @@ fn connect_edits_only_the_zerodb_entry() {
         let pretty = serde_json::to_string_pretty(&read()).unwrap() + "\n";
         assert_eq!(std::fs::read_to_string(&file).unwrap(), pretty, "{case}: 2-space indent");
         assert_eq!(files(&parent).len(), 1, "{case}: no backup or temp file");
+        let parent_mode = std::fs::metadata(&parent).unwrap().mode() & 0o777;
+        assert_eq!(parent_mode, 0o700, "{case}: new directories are private");
 
         let before = (files(&parent), std::fs::metadata(&file).unwrap().modified().unwrap());
         let (code, out) = run(&["connect", name]);
@@ -88,6 +90,8 @@ fn connect_edits_only_the_zerodb_entry() {
         assert_eq!(read(), edited, "{case}: only the entry changed");
         let backup = out[prefix.len()..].split(", ").next().unwrap().to_owned();
         assert_eq!(std::fs::read(&backup).unwrap(), edited_bytes, "{case}: backup");
+        let backup_mode = std::fs::metadata(&backup).unwrap().mode() & 0o777;
+        assert_eq!(backup_mode, 0o600, "{case}: the backup keeps the mode");
         assert_eq!((backups(), mode()), (1, 0o600), "{case}: backup, mode kept");
 
         let (code, out) = run(&["disconnect", name]);
@@ -97,8 +101,10 @@ fn connect_edits_only_the_zerodb_entry() {
         assert_eq!(read(), edited, "{case}: the other server and key stay");
         assert_eq!((backups(), mode()), (2, 0o600), "{case}: a second backup, mode kept");
         assert_eq!(files(&parent).len(), 3, "{case}: no temp file left");
+        let before = files(&parent);
         let (code, out) = run(&["disconnect", name]);
         assert_eq!((code, out), (Some(0), format!("zerodb is not connected to {name}\n")));
+        assert_eq!(files(&parent), before, "{case}: nothing written");
 
         // Not a JSON object, or a symlink: exit 1 and change nothing.
         std::fs::write(&file, "// my servers\n{}\n").unwrap();
