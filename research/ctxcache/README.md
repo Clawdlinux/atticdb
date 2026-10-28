@@ -108,13 +108,14 @@ Each policy returns misses and missed tokens over non-first accesses. First acce
 |---|---|---|
 | LRU | online | Evict the least recently accessed object. |
 | FIFO | online | Evict the oldest insertion. A hit changes nothing. This keeps the newest tokens, which threshold compaction approximates. |
-| Clearing | online | Hold the objects of the newest N tool outputs. References do not refresh. This is the shape of tool-result clearing in Anthropic's context editing. N is the largest value whose held tokens, averaged over the gaps between accesses, fit in `B`. N is picked per trajectory, which favors clearing, and it can exceed `B` at peaks. |
+| Clearing (oracle N) | oracle-tuned, average-budget | Hold the objects of the newest N tool outputs. References do not refresh. This is the shape of tool-result clearing in Anthropic's context editing. N is the largest value whose held tokens, averaged over the gaps between accesses, fit in `B`. N looks at the whole trajectory, and the budget holds only on average. So it is not causal, and it favors clearing. |
+| Clearing (cap) | online, causal | Hold the objects of the newest tool outputs that fit in `B`. After each tool output, drop the oldest until they fit. References do not refresh. It never exceeds `B` and uses no future information. With no references it is exactly LRU. |
 | GDSF | online | Greedy-Dual-Size-Frequency (Cherkasova 1998) with cost 1. Priority is L + frequency / size. Evict the lowest and raise L to it. |
 | Belady-Size | offline, upper bound | On a miss, admit the object only if it fits after evicting held objects used later than it. Those go furthest next use first, larger first. It is feasible, so the optimum is at most this. |
 | PFOO-L | offline, lower bound | Berger, Beckmann, Harchol-Balter, SIGMETRICS 2018, arXiv 1711.03709. The capacity must hold only on average over the n - 1 gaps between accesses. A hit needs its reuse interval held, at a cost of size x length. For misses, keep the cheapest intervals. For missed tokens, solve a fractional knapsack, shortest intervals first. Intervals of objects larger than `B` never count. Every feasible schedule fits this relaxation, so the optimum is at least this. |
 | OPT | exact, tiny traces | `policies.opt` searches every hold and evict choice, for at most 16 accesses. It finds the fewest misses and the fewest missed tokens separately. |
 
-`test_bounds.py` replays 500 random traces of at most 12 accesses, with seed 87. It asserts PFOO-L <= OPT <= Belady-Size for misses and for missed tokens. It also asserts that OPT is at most LRU, FIFO and GDSF, and that PFOO-L is at most Clearing.
+`test_bounds.py` replays 500 random traces of at most 12 accesses, with seed 87. It asserts PFOO-L <= OPT <= Belady-Size for misses and for missed tokens. It also asserts that OPT is at most every causal policy, and that PFOO-L is at most Clearing (oracle N).
 An earlier draft took PFOO-L's missed tokens from the count-optimal intervals. That is not a bound: on random tiny traces it exceeded the true optimum in 5 of 5,000.
 
 ## Measures

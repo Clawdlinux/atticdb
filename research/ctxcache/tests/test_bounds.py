@@ -21,10 +21,10 @@ def test_bounds_bracket_the_exact_optimum_on_random_tiny_traces():
         for k, metric in enumerate(("misses", "missed tokens")):
             assert low[k] <= opt[k] <= up[k], f"{metric}: PFOO-L {low}, OPT {opt}, Belady-Size {up}; {where}"
             # Every policy that holds the budget at every step is feasible, so OPT is below it.
-            for name in ("lru", "fifo", "gdsf"):
+            for name in P.CAUSAL:
                 assert opt[k] <= P.POLICIES[name](acc, budget)[k], f"{name} beat OPT on {metric}; {where}"
-            # Clearing holds the budget only on average, and that is all PFOO-L assumes.
-            assert low[k] <= P.clearing(acc, budget)[k], f"clearing beat PFOO-L on {metric}; {where}"
+            # Oracle clearing holds the budget only on average, and that is all PFOO-L assumes.
+            assert low[k] <= P.clear_oracle(acc, budget)[k], f"clear_oracle beat PFOO-L on {metric}; {where}"
         lower_gap += low != opt
         upper_gap += up != opt
         # LRU hits exactly when the reuse distance plus the size fits, if every object fits.

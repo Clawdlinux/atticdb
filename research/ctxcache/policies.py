@@ -126,10 +126,33 @@ def clearing_keep(acc: Sequence[Access], budget: int) -> int:
     return lo
 
 
-def clearing(acc: Sequence[Access], budget: int) -> tuple[int, int]:
-    """Tool-result clearing: keep only the newest N tool outputs, with N from
-    `clearing_keep`. It fits the budget on average, not at every step."""
+def clear_oracle(acc: Sequence[Access], budget: int) -> tuple[int, int]:
+    """Oracle-tuned, average-budget clearing: keep only the newest N tool outputs, with
+    N from `clearing_keep`. N looks at the whole trajectory, and the budget holds only
+    on average, so this is not a causal policy. It favors clearing."""
     return keep_last(acc, clearing_keep(acc, budget), budget)[:2]
+
+
+def clear_cap(acc: Sequence[Access], budget: int) -> tuple[int, int]:
+    """Causal hard-cap clearing: after each tool output, drop the oldest tool outputs
+    until the held objects fit the budget. References do not refresh. It never exceeds
+    the budget and uses no future information. With no references it equals LRU."""
+    window: deque[Access] = deque()
+    count: Counter = Counter()
+    used = misses = missed = 0
+    for a in acc:
+        if count[a.obj] == 0 and not a.first:
+            misses, missed = misses + 1, missed + a.tokens
+        if a.ref or a.tokens > budget:
+            continue
+        window.append(a)
+        used += a.tokens if count[a.obj] == 0 else 0
+        count[a.obj] += 1
+        while used > budget:
+            old = window.popleft()
+            count[old.obj] -= 1
+            used -= old.tokens if count[old.obj] == 0 else 0
+    return misses, missed
 
 
 def next_use(acc: Sequence[Access]) -> list[float]:
@@ -232,9 +255,11 @@ def opt(acc: Sequence[Access], budget: int) -> tuple[int, int]:
 POLICIES = {
     "lru": lru,
     "fifo": fifo,
-    "clearing": clearing,
+    "clear_oracle": clear_oracle,
+    "clear_cap": clear_cap,
     "gdsf": gdsf,
     "belady_size": belady_size,
     "pfoo_l": pfoo_l,
 }
-ONLINE = ("lru", "fifo", "clearing", "gdsf")
+ONLINE = ("lru", "fifo", "clear_oracle", "clear_cap", "gdsf")
+CAUSAL = ("lru", "fifo", "clear_cap", "gdsf")  # feasible at every step, no future information

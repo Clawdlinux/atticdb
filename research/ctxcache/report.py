@@ -11,11 +11,12 @@ from typing import Sequence
 from .policies import ONLINE
 from .stats import bootstrap, percentile, pooled, ratio
 
-ORDER = ("lru", "fifo", "clearing", "gdsf", "pfoo_l", "belady_size")
+ORDER = ("lru", "fifo", "clear_oracle", "clear_cap", "gdsf", "pfoo_l", "belady_size")
 LABEL = {
     "lru": "LRU",
     "fifo": "FIFO",
-    "clearing": "Clearing",
+    "clear_oracle": "Clearing (oracle N)",
+    "clear_cap": "Clearing (cap)",
     "gdsf": "GDSF",
     "pfoo_l": "PFOO-L (lower)",
     "belady_size": "Belady-Size (upper)",
@@ -134,7 +135,7 @@ def table(recs: Sequence[dict], budgets: Sequence[int], resamples: int, seed: in
                 "x_opt_max_lo": ci.get(f"lo:{p}:{b}", nan2)[0],
                 "x_opt_max_hi": ci.get(f"lo:{p}:{b}", nan2)[1],
                 "clearing_n_p50": percentile(sorted(r["counts"][f"clearing_n@{b}"] for r in recs), 0.5)
-                if p == "clearing" else math.nan,
+                if p == "clear_oracle" else math.nan,
             })
     return rows
 
@@ -224,9 +225,11 @@ def markdown(dataset: str, rows: list[dict], s: dict, meta: dict) -> str:
         upper, lower = at[(b, "belady_size")]["missed_tokens"], at[(b, "pfoo_l")]["missed_tokens"]
         cells = [_gap(at[(b, p)]["missed_tokens"], upper, lower) for p in ONLINE]
         out.append(f"| {kb(b)} | " + " | ".join(cells) + " |")
-    clear = [f"{kb(b)}: {num(at[(b, 'clearing')]['clearing_n_p50'])}" for b in budgets]
-    out += ["", f"Clearing keeps the newest N tool outputs. Median N per budget: {', '.join(clear)}.",
-            "N stops at the trajectory's count of tool outputs once everything fits."]
+    clear = [f"{kb(b)}: {num(at[(b, 'clear_oracle')]['clearing_n_p50'])}" for b in budgets]
+    out += ["", "Clearing (oracle N) keeps the newest N tool outputs. N is tuned on the whole trajectory, "
+            "and only the average fits the budget.", f"Median N per budget: {', '.join(clear)}. "
+            "N stops at the trajectory's count of tool outputs once everything fits.",
+            "Clearing (cap) keeps the newest tool outputs that fit the budget at every step. It is causal."]
     out += ["", "## Scaffold baselines", ""] + meta.get("scaffold", [])
     return "\n".join(out) + "\n"
 

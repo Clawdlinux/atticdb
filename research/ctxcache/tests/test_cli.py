@@ -4,6 +4,7 @@ import os
 import pytest
 
 from research.ctxcache import hf, run, trace
+from research.ctxcache.policies import ONLINE, POLICIES
 
 from .helpers import cache_row, copilot_call, copilot_session, swe_obs, swe_row, swe_window
 
@@ -18,13 +19,13 @@ def test_cli_on_the_fixture_trace(tmp_path):
 
     rows = list(csv.DictReader(open(out / "trace.csv")))
     assert [(r["budget"], r["policy"]) for r in rows][:2] == [("200", "lru"), ("200", "fifo")]
-    assert len(rows) == 2 * 6
+    assert len(rows) == 2 * len(POLICIES)
     by = {(int(r["budget"]), r["policy"]): r for r in rows}
     for budget in (200, 4000):
-        missed = {p: int(by[(budget, p)]["missed_tokens"]) for p in ("lru", "fifo", "clearing", "gdsf")}
+        missed = {p: int(by[(budget, p)]["missed_tokens"]) for p in ONLINE}
         low, up = int(by[(budget, "pfoo_l")]["missed_tokens"]), int(by[(budget, "belady_size")]["missed_tokens"])
         assert low <= up and all(low <= m for m in missed.values()), budget
-    assert all(int(by[(4000, p)]["misses"]) == 0 for p in ("lru", "fifo", "clearing", "gdsf")), "all fits in 4K"
+    assert all(int(by[(4000, p)]["misses"]) == 0 for p in ONLINE), "all fits in 4K"
 
     measures = {r["measure"]: r["value"] for r in csv.DictReader(open(out / "trace-trace.csv"))}
     assert measures["trajectories"] == "2" and measures["accesses"] == "20"
@@ -36,7 +37,7 @@ def test_cli_on_the_fixture_trace(tmp_path):
     # Dropping references leaves the 7 re-reads: 1 in the first trajectory, 6 in the cycle.
     assert run.main(argv[:-2] + ["--drop-refs"]) == 0
     rereads = list(csv.DictReader(open(out / "trace-rereads.csv")))
-    assert {r["reaccesses"] for r in rereads} == {"7"} and len(rereads) == 12
+    assert {r["reaccesses"] for r in rereads} == {"7"} and len(rereads) == 2 * len(POLICIES)
 
     original = trace.load(open(FIXTURE))
     assert trace.load(open(exported)) == original, "an exported trace reads back the same"
