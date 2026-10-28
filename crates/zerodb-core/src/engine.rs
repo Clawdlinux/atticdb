@@ -1169,8 +1169,10 @@ impl Engine {
     /// It makes 1 pass over the session index under the state lock. A max-heap keeps the
     /// `limit` smallest keys above the cursor. That is O(sessions) time and O(limit) memory.
     /// The index holds every tenant's sessions, so the pass covers them all. Writers wait for
-    /// this pass. Over 100,000 sessions it holds the lock about 1 ms at limit 100 and 2 ms at
-    /// limit 1,000, in release mode on an Apple M4.
+    /// this pass. A first page over 100,000 sessions holds the lock about 1 to 4 ms at limit
+    /// 100 to 1,000. A page after a cursor costs about 1.5x that. At the default cap of
+    /// 1,000,000 sessions, a first page holds it about 25 to 30 ms. All figures are from
+    /// release mode on an Apple M4.
     pub fn sessions(&self, tenant: &str, query: SessionQuery) -> Result<SessionPage> {
         if query.limit == 0 {
             return Err(EngineError::rejected(ErrorKind::InvalidInput));
