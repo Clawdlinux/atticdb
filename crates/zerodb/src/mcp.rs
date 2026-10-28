@@ -89,8 +89,10 @@ pub fn start(flags: HashMap<String, String>) -> u8 {
             Some(line) if line.iter().all(u8::is_ascii_whitespace) => None,
             Some(line) => {
                 if adapter.needs_roots(&line) {
-                    // Past 8 MiB queued, stop reading ahead, so the reader is held back again.
-                    let mut held = 0;
+                    // Past 8 MiB in the whole queue, stop reading ahead, so the reader is held
+                    // back again. Earlier waits' lines count too.
+                    let mut held: u64 =
+                        queued.iter().flatten().map(|l: &Vec<u8>| l.len() as u64).sum();
                     while let Some(left) = adapter.roots_wait().filter(|_| held <= MAX_LINE) {
                         match lines.recv_timeout(left) {
                             Ok(Some(next)) if adapter.answers_roots(&next) => {

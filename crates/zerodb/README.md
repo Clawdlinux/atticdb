@@ -189,6 +189,7 @@ It reads the home like `zerodb mcp` with no flags, and starts the server if need
 Its reads share a 3 s budget from the hook's start. A read with under 2 s left fails at once.
 It lists facts under `user/` and under `repo/<repo>/`, 50 each, in key order.
 It reads the last 5 turns of session `<repo>` for agents `vscode-copilot` and `copilot`, then keeps the newest 5.
+A window cut short by its 8 MiB cap hides older turns, so then it may show fewer than 5.
 It prints 1 line, `{"additionalContext": "<block>"}`. With nothing to show, or on any error, it prints `{}`.
 At 4 s it prints `{}` and exits, whatever is blocking, stdin included. It always exits 0. Errors go to stderr.
 The stop cannot help if the harness stops reading the hook's output mid-line. That needs a stalled harness.
