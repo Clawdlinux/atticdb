@@ -212,6 +212,71 @@ fn writes_reads_and_retries_over_both_listeners() {
     // tests share the counter, so this is a lower bound.
     assert!(repeats() - before >= 4, "repeats counted: {before} then {}", repeats());
 
+    // Sessions and records answer alike on both listeners. Tenant B wrote nothing.
+    let (lo, total) = (Some("127.0.0.1"), json!({"sessions": 2, "turns": 8}));
+    for via in &running.vias {
+        let name = via.name();
+        let get = |target: &str| via.a("GET", target, None);
+        let first = json!({"agent": "a", "session": "s-tcp"});
+        let (status, page) = get("/v1/sessions?limit=1");
+        assert_eq!(status, 200, "{name}: {page}");
+        let listed = json!([{"agent": "a", "session": "s-tcp", "turns": 4}]);
+        assert_eq!(page, json!({"sessions": listed, "next": first, "total": total}), "{name}");
+        let page = get("/v1/sessions?after_agent=a&after_session=s-tcp").1;
+        let listed = json!([{"agent": "a", "session": "s-unix", "turns": 4}]);
+        assert_eq!(page, json!({"sessions": listed, "next": null, "total": total}), "{name}");
+
+        // The 3 newest records are the unix list facts. The delete comes right under them.
+        let (status, page) = get("/v1/records?limit=3");
+        assert_eq!(status, 200, "{name}: {page}");
+        let newest = page["records"].as_array().unwrap();
+        let shown: Vec<_> =
+            newest.iter().map(|r| (&r["kind"], r["key"].as_str().unwrap())).collect();
+        let fact = json!("fact");
+        let expected = [(&fact, "unix/list/3"), (&fact, "unix/list/2"), (&fact, "unix/list/1")];
+        assert_eq!(shown, expected, "{name}: newest first");
+        assert_eq!(page["next"], newest[2]["lsn"], "{name}: a full page ends at its last record");
+        // A fact record is its `history` revision plus kind and key. A turn record is its
+        // `window` turn plus kind, agent and session.
+        let key = "unix/dir/a b+\u{e9}";
+        let below = format!("/v1/records?kind=fact&limit=1&before={}", page["next"]);
+        let (_, deleted) = get(&below);
+        let target = format!("/v1/facts/history?key={}", query_value(key));
+        let mut revision = get(&target).1["revisions"][0].clone();
+        (revision["kind"], revision["key"]) = (json!("fact"), json!(key));
+        assert_eq!(deleted["records"], json!([revision]), "{name}: the delete");
+        assert_eq!(deleted["next"], revision["lsn"], "{name}");
+        let shown = (&revision["deleted"], &revision["content"]);
+        assert_eq!(shown, (&json!(true), &json!("")), "{name}");
+        let (_, turns) = get("/v1/records?kind=turn&limit=1");
+        let mut turn = get("/v1/window?agent=a&session=s-unix&last=1").1["turns"][0].clone();
+        (turn["kind"], turn["agent"], turn["session"]) =
+            (json!("turn"), json!("a"), json!("s-unix"));
+        assert_eq!(turns["records"], json!([turn]), "{name}: the newest turn");
+
+        let a = Some(TOKEN_A);
+        for (case, token, target, status) in [
+            ("sessions without a token", None, "/v1/sessions", 401),
+            ("records without a token", None, "/v1/records", 401),
+            ("after_agent alone", a, "/v1/sessions?after_agent=a", 400),
+            ("unknown parameter on sessions", a, "/v1/sessions?agent=a", 400),
+            ("unknown parameter on records", a, "/v1/records?session=s", 400),
+            ("kind is turn or fact", a, "/v1/records?kind=forget", 400),
+        ] {
+            let error = if status == 401 { "unauthorized" } else { "invalid_input" };
+            let (got, body) = via.call(lo, token, "GET", target, None);
+            assert_eq!((got, &body["error"]), (status, &json!(error)), "{name} {case}: {body}");
+        }
+        let zero = json!({"sessions": 0, "turns": 0});
+        for (target, nothing) in [
+            ("/v1/sessions", json!({"sessions": [], "next": null, "total": zero})),
+            ("/v1/records", json!({"records": [], "next": null})),
+        ] {
+            let got = via.call(lo, Some(TOKEN_B), "GET", target, None);
+            assert_eq!(got, (200, nothing), "{name}: tenant B sees none of A's: {target}");
+        }
+    }
+
     // Only direct Rust API writes can store content that is not UTF-8.
     let raw = Scope { tenant: "a".into(), agent: "a".into(), session: "raw".into() };
     let turn = NewTurn { role: Role::Tool, content: vec![b'o', 0xff, b'k'], meta: vec![] };

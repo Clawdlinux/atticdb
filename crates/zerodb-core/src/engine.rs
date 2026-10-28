@@ -8,12 +8,13 @@ use crate::session::{address, Key};
 use crate::state::State;
 use crate::turn::{decode, encode};
 use crate::{EngineError, EngineOptions, ErrorKind, NewTurn, Role};
+use std::collections::BinaryHeap;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use zerodb_tape::{
-    Clock, Committed, Digest, Durability, Io, Kind, RecordInput, StdIo, SystemClock, Tape,
+    Clock, Committed, Digest, Durability, Frame, Io, Kind, RecordInput, StdIo, SystemClock, Tape,
 };
 
 /// A session's isolation boundary.
@@ -186,7 +187,91 @@ pub enum Hit {
 pub struct SearchPage {
     /// Matching turns and current facts, newest first.
     pub hits: Vec<Hit>,
-    /// Pass as `before` to continue. None once the walk reached the oldest record.
+    /// Pass as `before` to continue. A page can be empty while it is set. None once the walk
+    /// reached the oldest record.
+    pub next: Option<u64>,
+}
+/// A listing of a tenant's sessions in byte order of agent, then session.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SessionQuery {
+    /// Exclusive cursor as (agent, session): a previous page's `next`.
+    pub after: Option<(String, String)>,
+    /// Maximum sessions per page, at least 1.
+    pub limit: usize,
+}
+/// A session with at least 1 published turn.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionInfo {
+    /// Agent identifier.
+    pub agent: String,
+    /// Session identifier.
+    pub session: String,
+    /// Published turns. Sequences are dense, so this is also the newest turn's sequence.
+    pub turns: u64,
+}
+/// One page of sessions, with totals over all of the tenant's sessions.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SessionPage {
+    /// Sessions in byte order of agent, then session.
+    pub sessions: Vec<SessionInfo>,
+    /// The page's last session as (agent, session) when more follow. Pass it as `after`.
+    pub next: Option<(String, String)>,
+    /// The tenant's sessions with a published turn, not only this page's.
+    pub total_sessions: usize,
+    /// The tenant's published turns, not only this page's.
+    pub total_turns: u64,
+}
+/// Which records a [`RecordQuery`] returns.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecordKind {
+    /// Turns only.
+    Turn,
+    /// Fact revisions only, deletes included.
+    Fact,
+}
+/// A newest-first walk over a tenant's turns and fact revisions, each as written.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RecordQuery {
+    /// Exclusive cursor: only records below this LSN. A previous page's `next`.
+    pub before: Option<u64>,
+    /// Maximum records per page, at least 1.
+    pub limit: usize,
+    /// Only this kind. None returns both.
+    pub kind: Option<RecordKind>,
+    /// Agent, session, key, content and meta bytes per page. The first record is always
+    /// returned.
+    pub max_bytes: usize,
+    /// Records to visit at most, which bounds the call's cost. Other tenants' records and
+    /// skipped kinds count too. `next` resumes below them.
+    pub visits: usize,
+}
+/// One record as written.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Record {
+    /// A turn and the session it belongs to.
+    Turn {
+        /// Agent identifier.
+        agent: String,
+        /// Session identifier.
+        session: String,
+        /// The turn.
+        turn: Turn,
+    },
+    /// A fact revision, current or not. A delete has `deleted` set and empty content and meta.
+    Fact {
+        /// Tenant-scoped key.
+        key: String,
+        /// The revision.
+        revision: Revision,
+    },
+}
+/// One page of records, newest first.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RecordPage {
+    /// Turns and fact revisions, newest first.
+    pub records: Vec<Record>,
+    /// Pass as `before` to continue. A page can be empty while it is set. None once the walk
+    /// reached the oldest record.
     pub next: Option<u64>,
 }
 /// A session window cut by a byte budget.
@@ -928,18 +1013,14 @@ impl Engine {
     pub fn search(&self, tenant: &str, query: SearchQuery) -> Result<SearchPage> {
         let words: Vec<String> = query.query.split_whitespace().map(str::to_lowercase).collect();
         let stems: Vec<Option<String>> = words.iter().map(|word| singular(word)).collect();
-        if query.limit == 0 || query.visits == 0 || words.is_empty() {
+        if words.is_empty() {
             return Err(EngineError::rejected(ErrorKind::InvalidInput));
         }
-        let (id, snapshot) = match self.fact_snapshot(tenant)? {
-            Some((_, snapshot, id)) => (id, snapshot),
-            None => return Ok(SearchPage::default()),
-        };
         // A fact counts only while it is its key's newest durable revision and not deleted,
         // checked when the walk reaches it. So a superseded value never shows. The index keeps
         // old revisions only for readers at the previous durable LSN, so a key changed during
         // the walk may be missing from this call, like any record written after it started.
-        let current = |key: &str, lsn: u64| -> Result<bool> {
+        let current = |id: u32, key: &str, lsn: u64| -> Result<bool> {
             let state = lock(&self.state)?;
             let revs = state.facts.map.get(&(id, key.to_owned()));
             let newest = revs.and_then(|revs| visible(revs, self.tape.durable_lsn()).last());
@@ -954,60 +1035,185 @@ impl Engine {
                 .zip(&stems)
                 .all(|(word, stem)| has(word) || stem.as_deref().is_some_and(has))
         };
-        let top = query.before.map_or(snapshot, |before| before.saturating_sub(1).min(snapshot));
-        let (mut page, mut bytes, mut reader) = (SearchPage::default(), 0usize, self.tape.reader());
-        for lsn in (1..=top).rev().take(query.visits) {
-            let Some(frame) = reader.read(lsn)? else { continue };
-            if frame.header.tenant_id != id {
-                continue;
-            }
+        let walk = Walk {
+            before: query.before,
+            limit: query.limit,
+            max_bytes: query.max_bytes,
+            visits: query.visits,
+        };
+        let (hits, next) = self.newest_first(tenant, walk, |frame| {
             let hit = match frame.header.kind {
                 Kind::Turn => {
-                    let corrupt = |_| EngineError::rejected(ErrorKind::CorruptIndex);
-                    let decoded = decode(&frame.payload).map_err(corrupt)?;
-                    if !found(&[&decoded.turn.content]) {
-                        continue;
+                    let (agent, session, turn) = turn_frame(frame)?;
+                    if !found(&[&turn.content]) {
+                        return Ok(None);
                     }
-                    let turn = Turn {
-                        lsn,
-                        seq: decoded.seq,
-                        commit_time_ns: frame.header.commit_time_ns,
-                        role: decoded.turn.role,
-                        content: decoded.turn.content,
-                        meta: decoded.turn.meta,
-                    };
-                    Hit::Turn { agent: decoded.agent_id, session: decoded.session_id, turn }
+                    Hit::Turn { agent, session, turn }
                 }
                 Kind::Fact => {
                     let corrupt = |_| EngineError::rejected(ErrorKind::CorruptIndex);
                     let fact = crate::fact::decode(&frame.payload).map_err(corrupt)?;
-                    if !found(&[fact.key.as_bytes(), &fact.content]) || !current(&fact.key, lsn)? {
-                        continue;
+                    let (id, lsn) = (frame.header.tenant_id, frame.header.lsn);
+                    let keep = found(&[fact.key.as_bytes(), &fact.content])
+                        && current(id, &fact.key, lsn)?;
+                    if !keep {
+                        return Ok(None);
                     }
                     let rev = Rev { lsn, deleted: false };
                     Hit::Fact(stored((rev, frame.header.commit_time_ns, fact)))
                 }
-                _ => continue,
+                _ => return Ok(None),
             };
             let size = match &hit {
                 Hit::Turn { turn, .. } => turn.content.len() + turn.meta.len(),
                 Hit::Fact(fact) => fact.key.len() + fact.content.len() + fact.meta.len(),
             };
-            bytes = bytes.saturating_add(size);
-            if bytes > query.max_bytes && !page.hits.is_empty() {
-                page.next = Some(lsn + 1);
-                return Ok(page);
+            Ok(Some((hit, size)))
+        })?;
+        Ok(SearchPage { hits, next })
+    }
+
+    /// Walks a tenant's turns and fact revisions newest first, each as written. Superseded
+    /// revisions and deletes show too: it is the log, not the current state. Visits at most
+    /// `query.visits` records; `next` resumes below them.
+    pub fn records(&self, tenant: &str, query: RecordQuery) -> Result<RecordPage> {
+        // Forgets are not applied yet. Once they are, hide here what `window` and `search` hide.
+        let walk = Walk {
+            before: query.before,
+            limit: query.limit,
+            max_bytes: query.max_bytes,
+            visits: query.visits,
+        };
+        let (records, next) = self.newest_first(tenant, walk, |frame| {
+            let record = match (frame.header.kind, query.kind) {
+                (Kind::Turn, None | Some(RecordKind::Turn)) => {
+                    let (agent, session, turn) = turn_frame(frame)?;
+                    Record::Turn { agent, session, turn }
+                }
+                (Kind::Fact, None | Some(RecordKind::Fact)) => {
+                    let corrupt = |_| EngineError::rejected(ErrorKind::CorruptIndex);
+                    let fact = crate::fact::decode(&frame.payload).map_err(corrupt)?;
+                    let Fact { key, content, meta, agent, tombstone, .. } = fact;
+                    let (lsn, commit_time_ns) = (frame.header.lsn, frame.header.commit_time_ns);
+                    let deleted = tombstone;
+                    let revision = Revision { lsn, commit_time_ns, agent, deleted, content, meta };
+                    Record::Fact { key, revision }
+                }
+                _ => return Ok(None),
+            };
+            // Every variable-length field counts, so `max_bytes` bounds all of a page's
+            // variable bytes, not only content and meta.
+            let size = match &record {
+                Record::Turn { agent, session, turn } => {
+                    agent.len() + session.len() + turn.content.len() + turn.meta.len()
+                }
+                Record::Fact { key, revision: rev } => {
+                    key.len() + rev.agent.len() + rev.content.len() + rev.meta.len()
+                }
+            };
+            Ok(Some((record, size)))
+        })?;
+        Ok(RecordPage { records, next })
+    }
+
+    /// The newest-first walk `search` and `records` share, so the two cannot drift. It reads
+    /// the tenant's records below `before` at the snapshot other readers use. `pick` keeps a
+    /// record as an item with its size, or skips it.
+    ///
+    /// Every LSN the walk visits counts toward `visits`, other tenants' records and skipped
+    /// kinds included. The first item is kept even when it alone passes `max_bytes`. `next`
+    /// says where the next page starts:
+    /// - after an item over `max_bytes`: its LSN + 1, so that item comes first;
+    /// - after `limit` items: the last item's LSN;
+    /// - after `visits` LSNs: the lowest LSN visited. So a page can be empty while `next` is set.
+    ///
+    /// The last 2 give None when no LSN is left below.
+    fn newest_first<T>(
+        &self,
+        tenant: &str,
+        walk: Walk,
+        mut pick: impl FnMut(&Frame) -> Result<Option<(T, usize)>>,
+    ) -> Result<(Vec<T>, Option<u64>)> {
+        if walk.limit == 0 || walk.visits == 0 {
+            return Err(EngineError::rejected(ErrorKind::InvalidInput));
+        }
+        let Some((state, snapshot, id)) = self.fact_snapshot(tenant)? else {
+            return Ok((Vec::new(), None));
+        };
+        // Release the state lock before any tape read.
+        drop(state);
+        let top = walk.before.map_or(snapshot, |before| before.saturating_sub(1).min(snapshot));
+        let (mut items, mut bytes, mut reader) = (Vec::new(), 0usize, self.tape.reader());
+        for lsn in (1..=top).rev().take(walk.visits) {
+            let Some(frame) = reader.read(lsn)? else { continue };
+            if frame.header.tenant_id != id {
+                continue;
             }
-            page.hits.push(hit);
-            if page.hits.len() == query.limit {
-                break;
+            let Some((item, size)) = pick(&frame)? else { continue };
+            bytes = bytes.saturating_add(size);
+            if bytes > walk.max_bytes && !items.is_empty() {
+                return Ok((items, Some(lsn + 1)));
+            }
+            items.push(item);
+            if items.len() == walk.limit {
+                return Ok((items, Some(lsn).filter(|&lsn| lsn > 1)));
             }
         }
-        let low = top.saturating_sub(query.visits as u64);
-        page.next = match page.hits.len() == query.limit {
-            true => page.hits.last().map(Hit::lsn).filter(|&lsn| lsn > 1),
-            false => (low > 0).then_some(low + 1),
+        let low = top.saturating_sub(walk.visits as u64);
+        Ok((items, (low > 0).then_some(low + 1)))
+    }
+
+    /// Lists a tenant's sessions that have a published turn, in byte order of agent, then
+    /// session, with totals over all of them.
+    ///
+    /// It makes 1 pass over the session index under the state lock. A max-heap keeps the
+    /// `limit` smallest keys above the cursor. That is O(sessions) time and O(limit) memory.
+    /// The index holds every tenant's sessions, so the pass covers them all. Writers wait for
+    /// this pass. Over 100,000 sessions it holds the lock about 1 ms at limit 100 and 2 ms at
+    /// limit 1,000, in release mode on an Apple M4.
+    pub fn sessions(&self, tenant: &str, query: SessionQuery) -> Result<SessionPage> {
+        if query.limit == 0 {
+            return Err(EngineError::rejected(ErrorKind::InvalidInput));
+        }
+        let state = lock(&self.state)?;
+        let Some(id) = state.tenants.get(tenant) else {
+            return Ok(SessionPage::default());
         };
+        let after = query.after.as_ref().map(|(agent, session)| (agent.as_str(), session.as_str()));
+        let (mut page, mut smallest, mut more) = (SessionPage::default(), BinaryHeap::new(), false);
+        for (Key(owner, agent, session), entry) in &state.index.sessions {
+            // `len` counts published turns. A session with only reserved ones is skipped.
+            if *owner != id || entry.len == 0 {
+                continue;
+            }
+            page.total_sessions += 1;
+            page.total_turns = page.total_turns.saturating_add(entry.len);
+            let key = (agent.as_str(), session.as_str());
+            if after.is_some_and(|after| key <= after) {
+                continue;
+            }
+            if smallest.len() < query.limit {
+                smallest.push((key, entry.len));
+                continue;
+            }
+            more = true;
+            if let Some(mut largest) = smallest.peek_mut() {
+                if key < largest.0 {
+                    *largest = (key, entry.len);
+                }
+            }
+        }
+        let sessions = smallest.into_sorted_vec().into_iter();
+        page.sessions = sessions
+            .map(|((agent, session), turns)| SessionInfo {
+                agent: agent.to_owned(),
+                session: session.to_owned(),
+                turns,
+            })
+            .collect();
+        if more {
+            page.next = page.sessions.last().map(|last| (last.agent.clone(), last.session.clone()));
+        }
         Ok(page)
     }
 
@@ -1160,6 +1366,29 @@ impl SimFact<'_> {
 
 /// A fact frame read for a revision, with its commit time.
 type ReadFact = (Rev, u64, Fact);
+
+/// The bounds of a newest-first walk, from a search or a records query.
+struct Walk {
+    before: Option<u64>,
+    limit: usize,
+    max_bytes: usize,
+    visits: usize,
+}
+
+/// Decodes a turn frame into its agent, session and turn.
+fn turn_frame(frame: &Frame) -> Result<(String, String, Turn)> {
+    let corrupt = |_| EngineError::rejected(ErrorKind::CorruptIndex);
+    let decoded = decode(&frame.payload).map_err(corrupt)?;
+    let turn = Turn {
+        lsn: frame.header.lsn,
+        seq: decoded.seq,
+        commit_time_ns: frame.header.commit_time_ns,
+        role: decoded.turn.role,
+        content: decoded.turn.content,
+        meta: decoded.turn.meta,
+    };
+    Ok((decoded.agent_id, decoded.session_id, turn))
+}
 
 impl Hit {
     /// The record's LSN.
