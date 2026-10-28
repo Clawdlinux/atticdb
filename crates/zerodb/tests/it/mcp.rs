@@ -624,10 +624,11 @@ fn launch_race_starts_one_server() {
 }
 
 /// With no connection flags, the shell verbs create and use a per-user home. 4 parallel
-/// first runs all succeed. A temp config left by a killed run is ignored.
+/// first runs all succeed and leave no temp config. One left by a killed run is ignored.
 #[test]
 fn no_flags_use_the_home() {
     let dir = Dir::new();
+    let (stray, stray_row) = (".zerodb.json.0123456789abcdef", "stray temp left alone");
     let mut rows = vec![];
     if cfg!(target_os = "linux") {
         rows.push(("XDG_DATA_HOME", dir.0.clone(), Some(dir.0.join("x")), dir.0.join("x/zerodb")));
@@ -635,7 +636,7 @@ fn no_flags_use_the_home() {
     let home =
         if cfg!(target_os = "macos") { "Library/Application Support" } else { ".local/share" };
     rows.push(("HOME", dir.0.clone(), None, dir.0.join(home).join("zerodb")));
-    rows.push(("stray temp", dir.0.join("t"), None, dir.0.join("t").join(home).join("zerodb")));
+    rows.push((stray_row, dir.0.join("t"), None, dir.0.join("t").join(home).join("zerodb")));
     let _holders = Holders(rows.iter().map(|(.., home)| home.join("data")).collect());
     for (case, home_env, xdg, home) in rows {
         let staging = home.join("data/.zs.01234567/s");
@@ -644,9 +645,9 @@ fn no_flags_use_the_home() {
             "{case}: {} is too deep, set ZERODB_TEST_DIR to a short directory",
             staging.display()
         );
-        if case == "stray temp" {
+        if case == stray_row {
             std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&home).unwrap();
-            std::fs::write(home.join(".zerodb.json.0123456789abcdef"), "").unwrap();
+            std::fs::write(home.join(stray), "").unwrap();
         }
         let start = |verb: &[&str]| {
             let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_zerodb"));
@@ -671,6 +672,11 @@ fn no_flags_use_the_home() {
         found.sort_unstable();
         assert_eq!(found, written, "{case}: all 4 in its own home");
         assert_eq!(std::fs::read(home.join("zerodb.json")).unwrap(), config, "{case}: kept");
+        let mut names: Vec<_> =
+            std::fs::read_dir(&home).unwrap().map(|entry| entry.unwrap().file_name()).collect();
+        names.sort_unstable();
+        let expected = [stray, "data", "zerodb.json"];
+        assert_eq!(names, expected[usize::from(case != stray_row)..], "{case}: no temp left");
         for (path, mode) in [("", 0o700), ("data", 0o700), ("zerodb.json", 0o600)] {
             let found = std::fs::metadata(home.join(path)).unwrap().mode() & 0o777;
             assert_eq!(found, mode, "{case}: {path:?} mode");
