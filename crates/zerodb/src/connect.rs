@@ -232,9 +232,15 @@ fn save(path: &Path, bytes: &[u8], mode: u32) -> Result<PathBuf, String> {
     let seconds = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs());
-    let base = format!("{}.zerodb-backup-{seconds}", path.display());
+    // Built from the path's bytes, so a non-UTF-8 directory name stays intact.
+    let mut base = path.as_os_str().to_owned();
+    base.push(format!(".zerodb-backup-{seconds}"));
     for n in 0..100 {
-        let backup = PathBuf::from(if n == 0 { base.clone() } else { format!("{base}-{n}") });
+        let mut backup = base.clone();
+        if n > 0 {
+            backup.push(format!("-{n}"));
+        }
+        let backup = PathBuf::from(backup);
         match create(&backup, bytes, Some(mode)) {
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => {
@@ -244,7 +250,7 @@ fn save(path: &Path, bytes: &[u8], mode: u32) -> Result<PathBuf, String> {
             Ok(()) => return Ok(backup),
         }
     }
-    Err(format!("{base}: too many backups in 1 second"))
+    Err(format!("{}: too many backups in 1 second", Path::new(&base).display()))
 }
 
 /// Creates `path`, which must not exist, with `bytes` and `mode`, and syncs it.
