@@ -164,10 +164,12 @@ pub(crate) struct HomeReader {
 }
 
 impl HomeReader {
-    /// Resolves the home as `zerodb mcp` with no connection flags does. All reads together,
-    /// connects and server starts included, end by `deadline`.
+    /// Resolves the home as `zerodb mcp` with no connection flags does, quietly ignoring
+    /// `ZERODB_TOKEN`. All reads together, connects and server starts included, end by
+    /// `deadline`.
     pub(crate) fn new(session: &str, deadline: Instant) -> Result<Self, String> {
-        let adapter = Adapter::new(HashMap::from([("--session".into(), session.into())]))?;
+        let flags = HashMap::from([("--session".into(), session.into())]);
+        let adapter = Adapter::open(flags, false)?;
         Ok(Self { adapter, deadline })
     }
 
@@ -186,7 +188,12 @@ impl HomeReader {
 }
 
 impl Adapter {
-    fn new(mut flags: HashMap<String, String>) -> Result<Self, String> {
+    fn new(flags: HashMap<String, String>) -> Result<Self, String> {
+        Self::open(flags, true)
+    }
+
+    /// With `note`, says on stderr when the home is used and `ZERODB_TOKEN` is ignored.
+    fn open(mut flags: HashMap<String, String>, note: bool) -> Result<Self, String> {
         let url = flags.remove("--url").as_deref().map(Url::parse).transpose()?;
         let mut duration = |name: &str, default: u64| match flags.remove(name) {
             None => Ok(Duration::from_secs(default)),
@@ -199,25 +206,36 @@ impl Adapter {
             .ok_or(format!("{name} must be <n>s or <n>ms")),
         };
         let retry_deadline = duration("--retry-deadline", 30)?;
-        // With no connection flags and no token in the environment, use the per-user home.
-        // `--url` was removed above, so it counts through `url`.
+        // With no connection flags, use the per-user home and its token, never the
+        // environment's. `--url` was removed above, so it counts through `url`.
         let connection = ["--data-dir", "--config", "--token-file", "--tenant"];
         let given = url.is_some() || connection.iter().any(|flag| flags.contains_key(*flag));
-        let home = (!given && std::env::var_os(TOKEN_ENV).is_none())
-            .then(crate::home::ensure)
-            .transpose()?;
-        let config_path = flags.remove("--config").map(PathBuf::from);
+        let home = (!given).then(crate::home::ensure).transpose()?;
+        if home.is_some() && std::env::var_os(TOKEN_ENV).is_some() && note {
+            eprintln!(
+                "zerodb: ignoring {TOKEN_ENV}: no --url, --data-dir or --config given, so the \
+                 home's token is used"
+            );
+        }
+        let env_token = std::env::var(TOKEN_ENV).ok().filter(|_| home.is_none());
+        // Absolute, as a started server runs in `/`.
+        let config_path = flags.remove("--config").map(std::path::absolute).transpose();
+        let config_path = config_path.map_err(|error| format!("--config: {error}"))?;
         let config_path = config_path.or_else(|| home.as_ref().map(|home| home.config.clone()));
         let config = config_path.as_deref().map(Config::load).transpose()?;
+        // Absolute against this folder, as a started server runs in `/`.
+        let unix_socket = config.as_ref().and_then(|config| config.unix_socket.as_deref());
+        let unix_socket = unix_socket.map(std::path::absolute).transpose();
+        let unix_socket = unix_socket.map_err(|error| format!("unix_socket: {error}"))?;
         let token_file = flags.remove("--token-file");
         let tenant =
             flags.remove("--tenant").or_else(|| home.as_ref().map(|home| home.tenant.clone()));
-        let token = match (token_file, std::env::var(TOKEN_ENV), tenant) {
+        let token = match (token_file, env_token, tenant) {
             (Some(path), _, _) => read_token_file(path.as_ref())?,
-            (None, Ok(text), _) => {
+            (None, Some(text), _) => {
                 Token::new(text).map_err(|error| format!("{TOKEN_ENV}: {error}"))?
             }
-            (None, Err(_), Some(name)) => config
+            (None, None, Some(name)) => config
                 .as_ref()
                 .and_then(|config| config.tenant(&name))
                 .map(|tenant| tenant.token.clone())
@@ -247,7 +265,7 @@ impl Adapter {
             roots_deadline: None,
             token,
             retry_deadline,
-            launch: Launch::new(url, data_dir, config_path),
+            launch: Launch::new(url, data_dir, config_path, unix_socket),
             initialized: false,
         })
     }
@@ -573,12 +591,13 @@ impl Adapter {
 }
 
 /// Sent in `initialize`. Clients may add it to the system prompt.
-const INSTRUCTIONS: &str = "zerodb is this user's durable memory, shared across sessions and \
-    agents. At the start of a task, call fact_list with prefix user/ and with repo/<repo>/, \
-    then memory_recent. Use memory_search with a few words when you don't know the key or \
-    session. Save rules and decisions with fact_set under path-like keys; setting a key again \
-    corrects it. After a meaningful task, save 1 short memory_append summary. Never store \
-    secrets.";
+const INSTRUCTIONS: &str = "zerodb is this user's durable memory. Memory may arrive in a \
+    \"zerodb memory\" block at chat start. Use it, and call memory_search or fact_list only \
+    for more. If no block arrived, call fact_list with prefix user/ and repo/<repo>/ first. \
+    <repo> is the name of the folder that holds .git, as in the block. Save rules \
+    and decisions with fact_set under user/<topic> or repo/<repo>/<area>/<topic>. After a \
+    meaningful task, save 1 short memory_append summary without a session argument. Never \
+    store secrets.";
 
 /// Title and whether the tool only reads. VS Code runs read-only tools without asking.
 const ANNOTATIONS: [(&str, &str, bool); 6] = [

@@ -103,7 +103,7 @@ Branch on `outcome`, never on the status alone. One call is one `idem_key`, reus
 
 Newline-delimited JSON-RPC 2.0 on stdin and stdout. Logs go to stderr. It exits 0 when stdin closes.
 Tools: `memory_append {content, role?, session?, meta?}`, `memory_recent {n?, session?, max_bytes?}`, the fact tools, and `memory_search {query, limit?, before?, max_bytes?}`.
-Read tools carry `readOnlyHint: true`, so VS Code runs them without asking. `initialize` returns short `instructions` on when to call each tool. Copilot CLI adds a server's instructions to the system prompt only for allowlisted servers, or with `--allow-all-mcp-server-instructions`.
+Read tools carry `readOnlyHint: true`, so VS Code runs them without asking. `initialize` returns short `instructions`: use the memory block, and where to save rules and notes. Copilot CLI adds a server's instructions to the system prompt only for allowlisted servers, or with `--allow-all-mcp-server-instructions`.
 Integers beyond ±(2^53 - 1), such as `commit_time_ns`, come back as strings in tool results, because JavaScript clients can't hold them (I-JSON, RFC 7493). The shell verbs print them as numbers.
 `--agent` defaults to `mcp`. A tool may pass `session`. The tenant still comes from the token.
 `--session` defaults to a repo name, by the same rule as the session-start hook.
@@ -118,10 +118,11 @@ Calls that use the default session wait for the roots answer until 2 s after `ro
 Messages behind a waiting call wait too. An answer that comes later still sets the session.
 2 repos with the same folder name share a session and `repo/<name>/` facts.
 Turns saved before this with no `--session` stay in session `default`. Read them with `--session default` and the agent that saved them.
-That is `--agent copilot` for the `connect copilot` entry, and no `--agent` for a bare `zerodb mcp`. Or find them with `search`.
+That is `--agent copilot` for the `connect copilot` entry. A bare `zerodb mcp` saved them as agent `mcp`, so pass no `--agent`. Or find them with `search`.
 The token comes from `--token-file`, `ZERODB_TOKEN`, or the config entry for `--tenant`. A token file must be 0600 and yours.
 
-With none of `--url`, `--data-dir`, `--config`, `--token-file`, `--tenant` or `ZERODB_TOKEN`, it uses a per-user home.
+With none of `--url`, `--data-dir`, `--config`, `--token-file` or `--tenant`, it uses a per-user home and its token.
+It then ignores `ZERODB_TOKEN`, and says so once on stderr. The token is never sent.
 On macOS the home is `~/Library/Application Support/zerodb`. On Linux it is `$XDG_DATA_HOME/zerodb`, else `~/.local/share/zerodb`.
 The first use creates it with mode 0700, `zerodb.json` with tenant `me` at 0600, and `data/` at 0700.
 The home and `data/` must be yours, with no group or other bits. The shell verbs use the same home.
@@ -136,14 +137,14 @@ How it finds a server:
 
 1. `--url unix:///path` or `--url http://127.0.0.1:<port>`. An operator chose it, so there is no instance check. `http` takes only `127.0.0.1`, `localhost` or `[::1]`, because the token travels in cleartext.
 2. Else it reads `<data_dir>/LOCK` and uses the Unix socket named there. Never the TCP address. The socket must be yours, its parent owned by you and not writable by group or others. Every directory above it must be owned by root or you and not writable by group or others unless sticky, as OpenSSH's StrictModes checks. Then `GET /healthz` must return the instance id in `LOCK`. Only then does the token go out, on that same connection.
-3. Else, with `--config` or the home, it starts `zerodb serve --config <path> --data-dir <dir> --listen none --exit-on-poison`. Output goes to `<data_dir>/serve.log`. The token is never on its command line.
+3. Else, with `--config` or the home, it starts `zerodb serve --config <path> --data-dir <dir> --listen none --exit-on-poison`. Output goes to `<data_dir>/serve.log`. The token is never on its command line. It runs in `/`, so it holds no repo folder. A relative `unix_socket` in the config is made absolute against the adapter's folder, then passed as `--unix-socket`.
 4. It repeats step 2 until a server is trusted or 2 s before the call's deadline. A started server that exits 75 lost the lock race. If no trusted server shows up, it starts another, backing off from 100 ms to 2 s. A start that can't work fails the call at once with its reason: a data directory it can't use, or a started server that exits with any code but 75 or 70 (poisoned). The last line of `serve.log` is in the error. The next call tries again.
 
 An auto-started server runs in its own process group and outlives the adapters. Stop it with `kill <pid>`. The pid is in `<data_dir>/LOCK`.
 
 ## `zerodb connect` and `zerodb disconnect`
 
-`zerodb connect <vscode|copilot>` creates the home, then adds a `zerodb` entry to the harness's user MCP config.
+`zerodb connect <vscode|copilot> [--force]` creates the home, then adds a `zerodb` entry to the harness's user MCP config.
 It also writes the session-start hook file, described below.
 `zerodb disconnect <vscode|copilot>` removes that entry. Every other key and server stays.
 
@@ -153,13 +154,19 @@ It also writes the session-start hook file, described below.
 | `copilot` | `$COPILOT_HOME/mcp-config.json` when set and absolute, else `~/.copilot/mcp-config.json` | `mcpServers.zerodb`: `zerodb mcp --agent copilot`, all tools |
 
 The entry runs the absolute path of the binary you ran. It holds no token and no config path.
+Install it with `cargo install --path crates/zerodb --locked` first. An entry that points into `target/` breaks on `cargo clean`.
 Neither entry passes `--session`, so the session is the repo the client works in. That is the session the hook reads.
 VS Code reports its workspace folders as roots, and the first one names the session.
 Copilot's agent host and Copilot CLI start the adapter in the working folder, which names it.
 Run `connect` again to update an older entry.
+An old entry with `--url`, `--data-dir`, `--config`, `--token-file` or `--tenant` keeps its own store.
+`connect` refuses to replace it and exits 1. The config file is not changed. `--force` replaces it anyway.
+The message says how to keep that memory. Quit VS Code and Copilot CLI, then stop that store's server.
+Move its data files into the home's empty `data/`. This works only if the old config's tenant is `me`, as in the home.
+Then, or to switch without that memory, run `connect` with `--force`. Or keep using the old entry.
 The entry holds this machine's binary path. Settings Sync copies `mcp.json` to your other devices, where that path may not exist.
 Turn off MCP Servers in Settings Sync: Configure, or install zerodb at the same path on each device.
-A missing file is created. Missing directories are created at mode 0700. An entry that already matches writes nothing.
+A missing file is created at mode 0600. Missing directories are created at mode 0700. An entry that already matches writes nothing.
 Before a change, the old file is copied to `<file>.zerodb-backup-<unix seconds>`, with its mode.
 If that name is taken in the same second, a `-<n>` suffix is added. Backups are never restored automatically.
 The new file goes to a synced temp file, then a rename. It keeps the old file's mode.
@@ -185,7 +192,7 @@ A hook file with other content is left alone, and `disconnect` says so.
 The Copilot `sessionStart` hook. It reads at most 1 MiB of JSON on stdin and uses only `cwd`.
 Parsing stops after the first JSON object, so stdin left open after that object does not block it.
 The repo is the name of the first directory from `cwd` up that has a `.git` entry, else of `cwd`.
-It reads the home like `zerodb mcp` with no flags, and starts the server if needed.
+It reads the home like `zerodb mcp` with no flags, and starts the server if needed. It ignores `ZERODB_TOKEN`.
 Its reads share a 3 s budget from the hook's start. A read with under 2 s left fails at once.
 It lists facts under `user/` and under `repo/<repo>/`, 50 each, in key order.
 It reads the last 5 turns of session `<repo>` for agents `vscode-copilot` and `copilot`, then keeps the newest 5.
@@ -195,7 +202,7 @@ At 4 s it prints `{}` and exits, whatever is blocking, stdin included. It always
 The stop cannot help if the harness stops reading the hook's output mid-line. That needs a stalled harness.
 
 ```text
-zerodb memory (snapshot at chat start; call memory_search or fact_list for more)
+zerodb memory for repo <repo> (facts under repo/<repo>/; snapshot at chat start; call memory_search or fact_list for more)
 Rules:
 - <key>: <content>
 This repo (<repo>):
@@ -207,7 +214,7 @@ Recent notes (<repo>):
 Turns are listed oldest first. A section with no entries is left out.
 Each content is cut to 300 characters, and its newlines become spaces.
 Past 6,000 characters the block stops at a whole line and ends with `(more in zerodb)`.
-The block depends only on memory, so the prompt prefix stays the same until memory changes.
+The block depends only on the repo and memory, so the prompt prefix stays the same until memory changes.
 
 ## Tests
 

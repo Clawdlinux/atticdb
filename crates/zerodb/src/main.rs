@@ -20,7 +20,7 @@ const USAGE: &str = "usage:
   zerodb verify --data-dir <dir> [--scratch <dir>]
   zerodb dump --data-dir <dir> [--scratch <dir>] [--from <lsn>] [--limit <n>]
   zerodb mcp <connect>
-  zerodb connect <vscode|copilot>
+  zerodb connect <vscode|copilot> [--force]
   zerodb disconnect <vscode|copilot>
   zerodb hook session-start
   zerodb append <connect> --content <text> [--role user|assistant|tool]
@@ -33,6 +33,8 @@ const USAGE: &str = "usage:
              [--tenant <name>] [--token-file <path>] [--agent <name>] [--session <name>]
              [--retry-deadline <n>s|<n>ms]
   The token comes from --token-file, ZERODB_TOKEN, or the config entry for --tenant.
+  With no --url, --data-dir, --config, --tenant or --token-file, the home is used and
+  ZERODB_TOKEN is ignored.
   append, recent, search and fact print one JSON line. They exit 1 when nothing was written,
   3 when a write may or may not be saved.";
 
@@ -78,11 +80,15 @@ fn main() -> ExitCode {
                 flags(rest, &["--data-dir", "--scratch", "--from", "--limit"], &[]).and_then(dump)
             }
             "mcp" => flags(rest, &CONNECT, &[]).map(zerodb::mcp::start),
-            "connect" | "disconnect" => match rest {
-                [name] => Harness::parse(name).map(|harness| match command.as_str() {
-                    "connect" => zerodb::connect::connect(harness),
-                    _ => zerodb::connect::disconnect(harness),
-                }),
+            "connect" => match rest {
+                [name, force @ ..] if force.is_empty() || force == ["--force"] => {
+                    let force = !force.is_empty();
+                    Harness::parse(name).map(|harness| zerodb::connect::connect(harness, force))
+                }
+                _ => None,
+            },
+            "disconnect" => match rest {
+                [name] => Harness::parse(name).map(zerodb::connect::disconnect),
                 _ => None,
             },
             "hook" => match rest {

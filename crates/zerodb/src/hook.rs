@@ -1,6 +1,7 @@
 //! `zerodb hook session-start`: the Copilot `sessionStart` hook. It prints a small block of
 //! the user's rules, this repo's facts and its recent notes, which the harness adds to the
-//! chat. The block's text depends only on memory, so the prompt prefix stays the same.
+//! chat. The block's text depends only on the repo name and memory, so the prompt prefix
+//! stays the same.
 
 use crate::connect::Harness;
 use crate::mcp::HomeReader;
@@ -23,8 +24,6 @@ const FACTS: usize = 50;
 const TURNS: usize = 5;
 const MAX_CONTENT: usize = 300;
 const MAX_BLOCK: usize = 6_000;
-const HEADER: &str =
-    "zerodb memory (snapshot at chat start; call memory_search or fact_list for more)";
 const MORE: &str = "(more in zerodb)";
 
 /// Reads the hook's JSON on stdin and prints `{"additionalContext": "<block>"}`, or `{}`
@@ -111,7 +110,11 @@ fn block(input: impl Read, deadline: Instant) -> Result<Option<String>, String> 
         lines.push(title);
         lines.extend(entries);
     }
-    Ok((!lines.is_empty()).then(|| cap([HEADER.to_owned()].into_iter().chain(lines))))
+    let header = format!(
+        "zerodb memory for repo {repo} (facts under repo/{repo}/; snapshot at chat start; call \
+         memory_search or fact_list for more)"
+    );
+    Ok((!lines.is_empty()).then(|| cap([header].into_iter().chain(lines))))
 }
 
 /// The newest [`TURNS`] turns across `windows`, oldest first. A truncated window left out

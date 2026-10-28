@@ -29,11 +29,16 @@ pub fn repo(dir: &Path) -> Option<String> {
     root.unwrap_or(&dir).file_name().and_then(|name| name.to_str()).map(str::to_owned)
 }
 
+/// `$HOME`, which must be absolute.
+pub fn user_home() -> Result<PathBuf, String> {
+    let home = std::env::var_os("HOME").map(PathBuf::from).filter(|home| home.is_absolute());
+    home.ok_or_else(|| "HOME must be set to an absolute path".into())
+}
+
 /// The home directory. On macOS `$HOME/Library/Application Support/zerodb`. On Linux
 /// `$XDG_DATA_HOME/zerodb` when that is set and absolute, else `$HOME/.local/share/zerodb`.
 pub fn dir() -> Result<PathBuf, String> {
-    let home = std::env::var_os("HOME").map(PathBuf::from).filter(|home| home.is_absolute());
-    let home = home.ok_or("HOME must be set to an absolute path")?;
+    let home = user_home()?;
     if cfg!(target_os = "macos") {
         return Ok(home.join("Library/Application Support/zerodb"));
     }
@@ -63,7 +68,7 @@ pub fn ensure() -> Result<Home, String> {
 /// Syncs `data/`, the home and its ancestors, deepest first, so their entries survive a
 /// power loss before the first ack.
 fn sync_dirs(dir: &Path, data_dir: &Path) -> Result<(), String> {
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    let home = user_home()?;
     // Stop at $HOME, or at XDG_DATA_HOME's parent when the home is outside $HOME.
     let top = if dir.starts_with(&home) {
         home.as_path()

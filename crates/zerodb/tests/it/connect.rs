@@ -3,9 +3,10 @@ use serde_json::{json, Value};
 use std::os::unix::fs::MetadataExt;
 use std::process::{Command, Stdio};
 
-/// `connect` adds the entry, a rerun writes nothing, an older entry is updated, and
-/// `disconnect` removes only zerodb's entry. Rewrites keep a backup and the file mode. A file
-/// that is not a JSON object, or a symlink, stays as it was. No token reaches any output.
+/// `connect` adds an owner-only file, a rerun writes nothing, and an older entry is updated.
+/// An entry with connection flags is replaced only with `--force`. `disconnect` removes only
+/// zerodb's entry. Rewrites keep a backup and the file mode. A file that is not a JSON
+/// object, or a symlink, stays as it was. No token reaches any output.
 #[test]
 fn connect_edits_only_the_zerodb_entry() {
     let dir = Dir::new();
@@ -66,6 +67,7 @@ fn connect_edits_only_the_zerodb_entry() {
         let pretty = serde_json::to_string_pretty(&read()).unwrap() + "\n";
         assert_eq!(std::fs::read_to_string(&file).unwrap(), pretty, "{case}: 2-space indent");
         assert_eq!(listed(), 1, "{case}: no backup or temp file");
+        assert_eq!(mode(), 0o600, "{case}: a new file is owner-only");
         let parent_mode = std::fs::metadata(&parent).unwrap().mode() & 0o777;
         assert_eq!(parent_mode, 0o700, "{case}: new directories are private");
 
@@ -76,6 +78,24 @@ fn connect_edits_only_the_zerodb_entry() {
         assert_eq!(out.lines().next(), Some(first.as_str()), "{case}");
         let after = (files(&parent), std::fs::metadata(&file).unwrap().modified().unwrap());
         assert_eq!(after, before, "{case}: nothing written");
+
+        // An entry with any connection flag keeps its store: refused unless `--force`.
+        let force = format!("zerodb connect {name} --force");
+        for flag in ["--url", "--data-dir", "--config", "--token-file", "--tenant"] {
+            let mut flagged = read();
+            flagged[section]["zerodb"]["args"] = json!(["mcp", flag, "/old"]);
+            std::fs::write(&file, serde_json::to_vec(&flagged).unwrap()).unwrap();
+            let before = files(&parent);
+            let (code, out) = run(&["connect", name]);
+            assert_eq!(code, Some(1), "{case} {flag}: {out}");
+            let used = format!("uses {flag} /old.");
+            assert!(out.contains(&used) && out.contains(&force), "{case} {flag}: {out}");
+            assert_eq!(files(&parent), before, "{case} {flag}: entry unchanged");
+        }
+        let (code, out) = run(&["connect", name, "--force"]);
+        assert_eq!(code, Some(0), "{case}: {out}");
+        assert!(out.starts_with(&format!("updated zerodb in {name}: ")), "{case}: {out}");
+        assert_eq!((read()[section]["zerodb"].clone(), backups()), (entry.clone(), 1), "{case}");
 
         // An older entry, another server and another top-level key, added by hand.
         let mut edited = read();
@@ -96,15 +116,15 @@ fn connect_edits_only_the_zerodb_entry() {
         assert_eq!(std::fs::read(&backup).unwrap(), edited_bytes, "{case}: backup");
         let backup_mode = std::fs::metadata(&backup).unwrap().mode() & 0o777;
         assert_eq!(backup_mode, 0o600, "{case}: the backup keeps the mode");
-        assert_eq!((backups(), mode()), (1, 0o600), "{case}: backup, mode kept");
+        assert_eq!((backups(), mode()), (2, 0o600), "{case}: backup, mode kept");
 
         let (code, out) = run(&["disconnect", name]);
         assert_eq!(code, Some(0), "{case}: {out}");
         assert!(out.starts_with(&format!("disconnected zerodb from {name}: ")), "{case}: {out}");
         edited[section].as_object_mut().unwrap().remove("zerodb");
         assert_eq!(read(), edited, "{case}: the other server and key stay");
-        assert_eq!((backups(), mode()), (2, 0o600), "{case}: a second backup, mode kept");
-        assert_eq!(listed(), 3, "{case}: no temp file left");
+        assert_eq!((backups(), mode()), (3, 0o600), "{case}: another backup, mode kept");
+        assert_eq!(listed(), 4, "{case}: no temp file left");
         let before = files(&parent);
         let (code, out) = run(&["disconnect", name]);
         assert_eq!((code, out), (Some(0), format!("zerodb is not connected to {name}\n")));
@@ -181,6 +201,7 @@ fn connect_writes_the_session_start_hook() {
         let pretty = serde_json::to_string_pretty(&wanted).unwrap() + "\n";
         assert_eq!(std::fs::read_to_string(&file).unwrap(), pretty, "{var:?}");
         assert_eq!(std::fs::metadata(&hooks).unwrap().mode() & 0o777, 0o700, "{var:?}");
+        assert_eq!(std::fs::metadata(&file).unwrap().mode() & 0o777, 0o600, "{var:?}");
         let before = (files(&hooks), std::fs::metadata(&file).unwrap().modified().unwrap());
         let out = run(&["connect", "copilot"]);
         assert!(out.ends_with(&format!("\nthe sessionStart hook is already in place ({shown})\n")));

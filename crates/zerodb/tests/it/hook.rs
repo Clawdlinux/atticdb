@@ -10,13 +10,15 @@ use std::time::{Duration, Instant};
 type Output = (Option<i32>, String, String);
 
 /// Runs `zerodb` in `cwd` with `HOME` set to `home` and writes `stdin` after `delay`, keeping
-/// it open until the exit. Returns the exit code, stdout and stderr.
+/// it open until the exit. A stray `ZERODB_TOKEN` is set, which the home's users ignore.
+/// Returns the exit code, stdout and stderr.
 fn zerodb(home: &Path, cwd: &Path, args: &[&str], stdin: &[u8], delay: u64) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_zerodb"));
     command.args(args).current_dir(cwd).env("HOME", home).stdin(Stdio::piped());
-    for var in ["COPILOT_HOME", "XDG_DATA_HOME", "ZERODB_TOKEN"] {
+    for var in ["COPILOT_HOME", "XDG_DATA_HOME"] {
         command.env_remove(var);
     }
+    command.env("ZERODB_TOKEN", "x");
     let mut process = Process::start(&mut command);
     let mut input = process.child.stdin.take().unwrap();
     std::thread::sleep(Duration::from_millis(delay));
@@ -137,7 +139,8 @@ fn session_start_prints_the_memory_block() {
     std::os::unix::fs::symlink(home.join("app/src"), home.join("link")).unwrap();
     let out: Value = serde_json::from_str(&hook(&home, &cwd(&home.join("link")), 0).0).unwrap();
     let block = format!(
-        "zerodb memory (snapshot at chat start; call memory_search or fact_list for more)\n\
+        "zerodb memory for repo app (facts under repo/app/; snapshot at chat start; call \
+         memory_search or fact_list for more)\n\
          Rules:\n- user/big-1: {}\n- user/big-2: {}\n\
          - user/style: short sentences\n- user/tabs: line 1 line 2\n\
          This repo (app):\n- repo/app/build: cargo build\n- repo/app/long: {}\n\
