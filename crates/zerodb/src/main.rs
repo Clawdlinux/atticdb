@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use zerodb::config::{Config, Listen};
+use zerodb::connect::Harness;
 use zerodb::launch::Url;
 
 const USAGE: &str = "usage:
@@ -19,6 +20,8 @@ const USAGE: &str = "usage:
   zerodb verify --data-dir <dir> [--scratch <dir>]
   zerodb dump --data-dir <dir> [--scratch <dir>] [--from <lsn>] [--limit <n>]
   zerodb mcp <connect>
+  zerodb connect <vscode|copilot>
+  zerodb disconnect <vscode|copilot>
   zerodb append <connect> --content <text> [--role user|assistant|tool]
   zerodb recent <connect> [--n <n>] [--max-bytes <n>]
   zerodb search <connect> --query <words> [--limit <n>] [--before <lsn>] [--max-bytes <n>]
@@ -74,6 +77,13 @@ fn main() -> ExitCode {
                 flags(rest, &["--data-dir", "--scratch", "--from", "--limit"], &[]).and_then(dump)
             }
             "mcp" => flags(rest, &CONNECT, &[]).map(zerodb::mcp::start),
+            "connect" | "disconnect" => match rest {
+                [name] => Harness::parse(name).map(|harness| match command.as_str() {
+                    "connect" => zerodb::connect::connect(harness),
+                    _ => zerodb::connect::disconnect(harness),
+                }),
+                _ => None,
+            },
             "append" => tool(rest, "memory_append", &["--content", "--role"], &[]),
             "recent" => tool(rest, "memory_recent", &["--n", "--max-bytes"], &[]),
             "search" => {

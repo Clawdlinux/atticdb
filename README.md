@@ -47,6 +47,17 @@ With no connection flags, `zerodb mcp` and the shell verbs use a per-user home, 
 On macOS it is `~/Library/Application Support/zerodb`. On Linux it is `$XDG_DATA_HOME/zerodb`, else `~/.local/share/zerodb`.
 It holds `zerodb.json` with tenant `me`, and `data/`. Any connection flag, or `ZERODB_TOKEN`, skips the home. Use absolute paths in flags.
 
+## Connect
+
+Add zerodb to VS Code's Copilot chat or to Copilot CLI with 1 command:
+
+```sh
+zerodb connect vscode       # or: zerodb connect copilot
+zerodb disconnect vscode    # removes only zerodb's entry
+```
+
+It edits the user MCP config and keeps a backup of the old file. The entry holds no token.
+
 ## Shell verbs
 
 The same 6 tools run from a shell, with `zerodb mcp`'s connection flags. Each prints 1 JSON line. `fact set --delete` deletes.
