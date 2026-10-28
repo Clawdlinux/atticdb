@@ -31,17 +31,42 @@ TITLES = {
 }
 
 
+def positive(text: str) -> int:
+    try:
+        n = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not an integer: {text!r}") from None
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"must be at least 1: {text!r}")
+    return n
+
+
+def budget_list(text: str) -> list[int]:
+    """A comma list such as 1k,2k,4096. 1k is 1,000 tokens."""
+    out = set()
+    for part in text.split(","):
+        part = part.strip().lower()
+        try:
+            n = int(float(part[:-1]) * 1000) if part.endswith("k") else int(part)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"not a budget: {part!r}") from None
+        if n < 1:
+            raise argparse.ArgumentTypeError(f"a budget must be at least 1 token: {part!r}")
+        out.add(n)
+    return sorted(out)
+
+
 def parse(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="python3 -m research.ctxcache", description=__doc__.split("\n\n")[0])
     p.add_argument("--dataset", required=True, choices=sorted(TITLES))
-    p.add_argument("--sample", type=int, default=1000, help="trajectories to sample (public sets)")
-    p.add_argument("--block", type=int, default=1, help="consecutive rows per stratum (public sets)")
+    p.add_argument("--sample", type=positive, default=1000, help="rows to sample (public sets)")
+    p.add_argument("--block", type=positive, default=1, help="consecutive rows per stratum (public sets)")
     p.add_argument("--seed", type=int, default=87, help="sample and bootstrap seed")
-    p.add_argument("--budgets", default=DEFAULT_BUDGETS, help="comma list of token budgets, 1k = 1,000")
+    p.add_argument("--budgets", type=budget_list, default=DEFAULT_BUDGETS, help="comma list, 1k = 1,000 tokens")
     p.add_argument("--out", default=os.path.join(HERE, "results"), help="directory for the CSV and markdown")
-    p.add_argument("--cache-dir", default=hf.CACHE, help="where downloaded rows are cached")
+    p.add_argument("--cache-dir", default=hf.CACHE, help="where downloaded rows are cached (outside the repo)")
     p.add_argument("--sleep", type=float, default=1.6, help="seconds between API calls")
-    p.add_argument("--max-requests", type=int, default=2500)
+    p.add_argument("--max-requests", type=positive, default=2500)
     p.add_argument("--deadline", type=float, default=5400.0, help="seconds of fetching before giving up")
     p.add_argument("--offline", action="store_true", help="use cached rows only")
     p.add_argument("--input", help="trace JSONL for --dataset trace")
@@ -52,17 +77,19 @@ def parse(argv=None) -> argparse.Namespace:
     a = p.parse_args(argv)
     if a.dataset == "trace" and not a.input:
         p.error("--dataset trace needs --input")
+    if a.block > a.sample:
+        p.error("--block must not exceed --sample")
+    if a.bootstrap < 0:
+        p.error("--bootstrap must be 0 or more")
     if a.export_trace and _inside(a.export_trace, REPO):
         p.error("--export-trace must point outside the repo, so traces are never committed")
+    if _inside(a.cache_dir, REPO):
+        p.error("--cache-dir must point outside the repo, so downloaded rows are never committed")
     return a
 
 
-def budgets(text: str) -> list[int]:
-    out = []
-    for part in text.split(","):
-        part = part.strip().lower()
-        out.append(int(float(part[:-1]) * 1000) if part.endswith("k") else int(part))
-    return sorted(set(out))
+def budget_text(budgets: list[int]) -> str:
+    return ",".join(f"{b // 1000}k" if b % 1000 == 0 else str(b) for b in budgets)
 
 
 def _inside(path: str, root: str) -> bool:
@@ -98,17 +125,18 @@ def describe(a: argparse.Namespace, s: dict) -> dict:
     cmd = f"python3 -m research.ctxcache --dataset {a.dataset}" + (" --drop-refs" if a.drop_refs else "")
     if a.dataset in ("swe-agent", "openhands"):
         cmd += f" --sample {a.sample} --seed {a.seed}" + (f" --block {a.block}" if a.block > 1 else "")
-    if a.budgets != DEFAULT_BUDGETS:
-        cmd += f" --budgets {a.budgets}"
+    if a.budgets != budget_list(DEFAULT_BUDGETS):
+        cmd += f" --budgets {budget_text(a.budgets)}"
     if a.dataset == "trace":
         cmd += f" --input {os.path.basename(a.input)}"
     title = TITLES[a.dataset] + (", re-reads only" if a.drop_refs else "")
     meta = {"title": title, "command": cmd, "source": [], "extra_rows": [], "scaffold": []}
     if a.dataset in hf.DATASETS:
         ds = hf.DATASETS[a.dataset]
+        drawn = len(hf.sample_offsets(ds.rows, a.sample, a.seed, a.block))
         meta["source"] = [
             f"Data: [{ds.repo}]({ds.url}). {ds.cite}. Only aggregate counts appear here.",
-            f"Sample: {a.sample} rows. The {ds.rows:,} rows are cut into {max(1, a.sample // a.block)} equal "
+            f"Sample: {drawn:,} rows. The {ds.rows:,} rows are cut into {max(1, a.sample // a.block)} equal "
             f"strata, and each gives {'1 random row' if a.block == 1 else f'1 random run of {a.block} rows'}. "
             f"Seed {a.seed}.",
         ]
@@ -139,7 +167,15 @@ def describe(a: argparse.Namespace, s: dict) -> dict:
 
 def main(argv=None) -> int:
     a = parse(argv)
-    sizes = budgets(a.budgets)
+    try:
+        return run(a)
+    except (hf.FetchError, OSError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
+
+def run(a: argparse.Namespace) -> int:
+    sizes = a.budgets
     skipped: Counter = Counter()
     recs, distances = [], []
     export = open(a.export_trace, "w") if a.export_trace else None

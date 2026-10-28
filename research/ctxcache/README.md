@@ -29,7 +29,7 @@ python3 -m pytest research/ctxcache/tests
 | `--seed` | 87 | the sample and bootstrap seed |
 | `--budgets` | `1k,2k,4k,8k,16k,32k,64k,128k` | token budgets. 1k is 1,000 tokens |
 | `--out` | `research/ctxcache/results` | where the CSV and markdown go |
-| `--cache-dir` | `~/.cache/zerodb-ctxcache` | downloaded rows, outside the repo |
+| `--cache-dir` | `~/.cache/zerodb-ctxcache` | downloaded rows. A path inside the repo is refused |
 | `--sleep` | 1.6 | seconds between API calls |
 | `--max-requests`, `--deadline` | 2500, 5400 | caps on API calls and on seconds spent fetching |
 | `--offline` | off | use cached rows only |
@@ -38,7 +38,7 @@ python3 -m pytest research/ctxcache/tests
 | `--drop-refs` | off | keep re-reads only, to test the reference proxy. Output names end in `-rereads` |
 | `--input`, `--copilot-root` | | a trace file, or another Copilot log directory |
 
-A run writes 3 files to `--out`: `<dataset>.csv` has 1 row per budget and policy, `<dataset>-trace.csv` has the trace measures, and `<dataset>.md` shows both.
+Bad flags and fetch or file errors exit with code 2. A run writes 3 files to `--out`: `<dataset>.csv` has 1 row per budget and policy, `<dataset>-trace.csv` has the trace measures, and `<dataset>.md` shows both.
 
 ## The model
 
@@ -176,12 +176,14 @@ Main-agent tool calls are the `toolRequests` of `assistant.message` events with 
 - Sub-agent calls are not accesses, but their `fileEdits` still make new versions.
 - A `session.compaction_complete` event with `success` is a compaction. Re-reads are split into those in the same compaction window as the previous access and those after a compaction.
 - A session that shares at least half its tool calls with a longer session is a fork, and is skipped. 3 of our session logs share 18,005 tool calls. Without this rule they count 1 session 3 times.
+- Sessions sort by tool call count, then by directory name. So the order, the kept fork and the intervals never depend on the salt.
 - Session ids and object keys are salted with a random value per run, so a hashed path cannot be guessed.
 
 ## Sampling
 
 The datasets-server `rows` endpoint returns at most 100 rows per call. We call it sequentially, 1.6 s apart.
-A 429 raises that gap by 25%, once per episode. Retries back off 1, 2, 4, 8, 16 and 32 s, or follow `Retry-After`. After 6 retries the run stops.
+A 429 raises that gap by 25%, once per episode. Retries back off 1, 2, 4, 8, 16 and 32 s, or follow `Retry-After`, up to 60 s.
+Resets, timeouts, cut bodies and bad JSON are retried too. The log names the pause actually taken. After 6 retries the run stops.
 The request count and the time spent fetching are capped. A row whose `trajectory` cell comes back truncated is skipped and counted.
 
 The sample cuts the rows into equal strata and takes 1 random run of rows per stratum, with seed 87.

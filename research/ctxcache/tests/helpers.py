@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import random
@@ -119,3 +120,10 @@ def copilot_session(root: str, name: str, events: list[dict]) -> None:
     with open(os.path.join(root, name, "events.jsonl"), "w") as f:
         for e in events:
             f.write(json.dumps(e) + "\n")
+
+
+def cache_row(cache_dir: str, dataset: str, offset: int, row: dict) -> None:
+    """A row as the fetcher caches it, so the CLI can run offline."""
+    os.makedirs(os.path.join(cache_dir, dataset), exist_ok=True)
+    with gzip.open(os.path.join(cache_dir, dataset, f"{offset}.json.gz"), "wt") as f:
+        json.dump({"offset": offset, "truncated": False, "row": row}, f)

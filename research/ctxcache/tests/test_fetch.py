@@ -1,6 +1,8 @@
+import http.client
 import io
 import json
 import os
+import re
 import urllib.error
 
 import pytest
@@ -23,28 +25,35 @@ class FakeHTTP:
     def __call__(self, request, timeout):
         self.calls += 1
         r = self.replies.pop(0)
-        if isinstance(r, int):
-            raise urllib.error.HTTPError(request.full_url, r, "error", {}, None)
-        return io.BytesIO(json.dumps(r).encode())
+        if isinstance(r, BaseException):
+            raise r
+        if isinstance(r, (int, tuple)):
+            code, headers = r if isinstance(r, tuple) else (r, {})
+            raise urllib.error.HTTPError(request.full_url, code, "error", headers, None)
+        return io.BytesIO(r if isinstance(r, bytes) else json.dumps(r).encode())
 
 
-# name, replies, outcome, requests made, fetcher options, gap after
+# name, replies, outcome, requests made, fetcher options, gap after, pauses logged
 CASES = [
-    ("a row is cached with only the kept columns", [reply(7)], "ok", 1, {}, 1.6),
-    ("a run of 3 rows comes in 1 request", [reply(7, length=3)], "ok", 1, {"length": 3}, 1.6),
-    ("a truncated trajectory cell is skipped and cached as such", [reply(7, True)], "truncated", 1, {}, 1.6),
-    ("429 twice, then the row: the gap grows once", [429, 429, reply(7)], "ok", 3, {}, 2.0),
-    ("a client error fails at once", [404], hf.FetchError, 1, {}, 1.6),
-    ("5xx until the retries run out", [503] * 7, hf.FetchError, 7, {}, 1.6),
-    ("the request budget bounds the retries", [503, 503, reply(7)], hf.FetchError, 2, {"max_requests": 2}, 1.6),
-    ("offline with no cached row", [], hf.FetchError, 0, {"offline": True}, 1.6),
+    ("a row is cached with only the kept columns", [reply(7)], "ok", 1, {}, 1.6, []),
+    ("a run of 3 rows comes in 1 request", [reply(7, length=3)], "ok", 1, {"length": 3}, 1.6, []),
+    ("a truncated trajectory cell is skipped and cached as such", [reply(7, True)], "truncated", 1, {}, 1.6, []),
+    ("429 twice, then the row: the gap grows once", [429, 429, reply(7)], "ok", 3, {}, 2.0, [1, 2]),
+    ("a reset, a cut body and a short read are retried",
+     [ConnectionResetError(), b'{"rows": [', http.client.IncompleteRead(b""), reply(7)], "ok", 4, {}, 1.6, [1, 2, 4]),
+    ("a Retry-After past the cap logs the 60 s it sleeps", [(429, {"Retry-After": "300"}), reply(7)], "ok", 2, {},
+     2.0, [60]),
+    ("a client error fails at once", [404], hf.FetchError, 1, {}, 1.6, []),
+    ("5xx until the retries run out", [503] * 7, hf.FetchError, 7, {}, 1.6, [1, 2, 4, 8, 16, 32]),
+    ("the request budget bounds the retries", [503, 503, reply(7)], hf.FetchError, 2, {"max_requests": 2}, 1.6, [1, 2]),
+    ("offline with no cached row", [], hf.FetchError, 0, {"offline": True}, 1.6, []),
 ]
 
 
-@pytest.mark.parametrize("name, replies, outcome, requests, options, gap", CASES, ids=[c[0] for c in CASES])
-def test_fetch_outcomes(tmp_path, name, replies, outcome, requests, options, gap):
-    http, pauses, length = FakeHTTP(replies), [], options.pop("length", 1)
-    f = hf.Fetcher("swe-agent", str(tmp_path), urlopen=http, pause=pauses.append, log=io.StringIO(), **options)
+@pytest.mark.parametrize("name, replies, outcome, requests, options, gap, logged", CASES, ids=[c[0] for c in CASES])
+def test_fetch_outcomes(tmp_path, name, replies, outcome, requests, options, gap, logged):
+    http, pauses, log, length = FakeHTTP(replies), [], io.StringIO(), options.pop("length", 1)
+    f = hf.Fetcher("swe-agent", str(tmp_path), urlopen=http, pause=pauses.append, log=log, **options)
     if outcome is hf.FetchError:
         with pytest.raises(hf.FetchError):
             f.row(7, length)
@@ -58,7 +67,8 @@ def test_fetch_outcomes(tmp_path, name, replies, outcome, requests, options, gap
         assert f.row(7 + length - 1) == (row, status), "every row of the run is cached"
     assert http.calls == requests, name
     assert f.sleep == gap, name
-    assert all(p <= 60 for p in pauses), name
+    said = [float(x) for x in re.findall(r"retry \d+ in (\d+) s", log.getvalue())]
+    assert said == logged and all(p in pauses for p in said), f"{name}: the log names the real pause"
 
 
 @pytest.mark.parametrize("name, block, head", [("swe-agent", 1, [18, 104, 229]), ("openhands", 10, [149, 150, 151])])

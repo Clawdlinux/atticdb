@@ -8,6 +8,7 @@ The request count and the wall time are both capped. Rows are cached under
 from __future__ import annotations
 
 import gzip
+import http.client
 import json
 import os
 import random
@@ -157,12 +158,14 @@ class Fetcher:
                     # Slow down for good, once per episode, to stay under the limit.
                     self.sleep = min(max(self.sleep, 0.5) * 1.25, 10.0)
                     reason += f", gap now {self.sleep:.1f} s"
-            except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+            except (OSError, ValueError, http.client.HTTPException) as e:
+                # Resets, timeouts, cut bodies and bad JSON are all worth a retry.
                 wait, reason = backoff, type(e).__name__
             if attempt == self.retries:
                 raise FetchError(f"{reason} after {self.retries} retries: {url}")
+            wait = min(wait, 60.0)
             print(f"retry {attempt + 1} in {wait:.0f} s: {reason}", file=self.log)
-            self.pause(min(wait, 60.0))
+            self.pause(wait)
             backoff = min(backoff * 2, 60.0)
         raise AssertionError("unreachable")
 

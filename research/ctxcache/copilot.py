@@ -120,8 +120,8 @@ def _call(b: TraceBuilder, name: str, args, content: str, ok: bool) -> None:
 
 
 def traces(root: str = ROOT, salt: str | None = None):
-    """Yields (trajectory id, cluster, accesses, info) per session, longest first.
-    A skipped fork yields accesses None and info {"fork": 1}."""
+    """Yields (trajectory id, cluster, accesses, info) per session: most tool calls
+    first, then by directory name. A skipped fork yields accesses None and info {"fork": 1}."""
     salt = salt or os.urandom(16).hex()
     found = []
     for d in sorted(os.listdir(root)):
@@ -129,10 +129,12 @@ def traces(root: str = ROOT, salt: str | None = None):
         if os.path.isfile(p):
             traj = hashlib.sha256(f"{salt}\0{d}".encode()).hexdigest()[:12]
             acc, info, ids = session(p, traj, salt)
-            found.append((len(ids), traj, acc, info, ids))
+            found.append((len(ids), d, traj, acc, info, ids))
+    # Sort by the directory name, not the salted id, so the order and the kept fork
+    # are the same on every run.
     found.sort(key=lambda s: (-s[0], s[1]))
     kept: set[str] = set()
-    for n, traj, acc, info, ids in found:
+    for n, _, traj, acc, info, ids in found:
         if ids and len(ids & kept) * 2 >= len(ids):
             yield traj, traj, None, {"fork": 1}
             continue
