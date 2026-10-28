@@ -79,16 +79,19 @@ fn connect_edits_only_the_zerodb_entry() {
         let after = (files(&parent), std::fs::metadata(&file).unwrap().modified().unwrap());
         assert_eq!(after, before, "{case}: nothing written");
 
-        // An entry with connection flags keeps its store: refused unless `--force`.
-        let mut flagged = read();
-        flagged[section]["zerodb"]["args"] = json!(["mcp", "--data-dir", "/old", "--tenant", "t"]);
-        std::fs::write(&file, serde_json::to_vec(&flagged).unwrap()).unwrap();
-        let before = files(&parent);
-        let (code, out) = run(&["connect", name]);
-        assert_eq!(code, Some(1), "{case}: {out}");
+        // An entry with any connection flag keeps its store: refused unless `--force`.
         let force = format!("zerodb connect {name} --force");
-        assert!(out.contains("uses --data-dir /old, --tenant t.") && out.contains(&force), "{out}");
-        assert_eq!(files(&parent), before, "{case}: flagged entry unchanged");
+        for flag in ["--url", "--data-dir", "--config", "--token-file", "--tenant"] {
+            let mut flagged = read();
+            flagged[section]["zerodb"]["args"] = json!(["mcp", flag, "/old"]);
+            std::fs::write(&file, serde_json::to_vec(&flagged).unwrap()).unwrap();
+            let before = files(&parent);
+            let (code, out) = run(&["connect", name]);
+            assert_eq!(code, Some(1), "{case} {flag}: {out}");
+            let used = format!("uses {flag} /old.");
+            assert!(out.contains(&used) && out.contains(&force), "{case} {flag}: {out}");
+            assert_eq!(files(&parent), before, "{case} {flag}: entry unchanged");
+        }
         let (code, out) = run(&["connect", name, "--force"]);
         assert_eq!(code, Some(0), "{case}: {out}");
         assert!(out.starts_with(&format!("updated zerodb in {name}: ")), "{case}: {out}");

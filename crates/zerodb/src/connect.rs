@@ -196,10 +196,8 @@ fn refuse_flags(name: &str, file: &Path, current: &Value, data: &Path) -> Result
     let mut used = Vec::new();
     for flag in CONNECTION {
         if let Some(at) = args.iter().position(|arg| *arg == flag) {
-            used.push(match (flag, args.get(at + 1)) {
-                ("--data-dir" | "--tenant", Some(value)) => format!("{flag} {value}"),
-                _ => flag.to_owned(),
-            });
+            // `--token-file`'s value is a path, not the token.
+            used.push(args.get(at + 1).map_or(flag.to_owned(), |value| format!("{flag} {value}")));
         }
     }
     if used.is_empty() {
