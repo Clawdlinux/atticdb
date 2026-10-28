@@ -110,6 +110,7 @@ Integers beyond ±(2^53 - 1), such as `commit_time_ns`, come back as strings in 
 That is the name of the first directory up with a `.git` entry, else of the current directory.
 It is `default` when that cannot be read or has no UTF-8 name.
 2 repos with the same folder name share a session and `repo/<name>/` facts.
+Turns saved before this with no `--session` stay in session `default`. Read them with `--session default`, or find them with `search`.
 The token comes from `--token-file`, `ZERODB_TOKEN`, or the config entry for `--tenant`. A token file must be 0600 and yours.
 
 With none of `--url`, `--data-dir`, `--config`, `--token-file`, `--tenant` or `ZERODB_TOKEN`, it uses a per-user home.
@@ -140,13 +141,16 @@ It also writes the session-start hook file, described below.
 
 | Name | File | Entry |
 |---|---|---|
-| `vscode` | macOS: `~/Library/Application Support/Code/User/mcp.json`. Linux: `$XDG_CONFIG_HOME/Code/User/mcp.json` when set and absolute, else `~/.config/Code/User/mcp.json` | `servers.zerodb`: `zerodb mcp --agent vscode-copilot` |
+| `vscode` | macOS: `~/Library/Application Support/Code/User/mcp.json`. Linux: `$XDG_CONFIG_HOME/Code/User/mcp.json` when set and absolute, else `~/.config/Code/User/mcp.json` | `servers.zerodb`: `zerodb mcp --agent vscode-copilot`, with `cwd` set to `${workspaceFolder}` |
 | `copilot` | `$COPILOT_HOME/mcp-config.json` when set and absolute, else `~/.copilot/mcp-config.json` | `mcpServers.zerodb`: `zerodb mcp --agent copilot`, all tools |
 
 The entry runs the absolute path of the binary you ran. It holds no token and no config path.
-Neither entry passes `--session`. Each harness starts the adapter in the workspace or working folder.
-So its session is that repo's name.
-That is the session the hook reads. Run `connect` again to drop an older entry's `--session`.
+Neither entry passes `--session`, so the session is the repo of the adapter's working folder.
+That is the session the hook reads.
+Copilot's agent host and Copilot CLI start the adapter in the working folder.
+VS Code's own launcher starts it in the home folder, so the `vscode` entry sets `cwd` to `${workspaceFolder}`.
+VS Code resolves that variable. With no folder open it can't, so the `vscode` entry can't start.
+That was already so with the old `${workspaceFolderBasename}` argument. Run `connect` again to update an older entry.
 The entry holds this machine's binary path. Settings Sync copies `mcp.json` to your other devices, where that path may not exist.
 Turn off MCP Servers in Settings Sync: Configure, or install zerodb at the same path on each device.
 A missing file is created. Missing directories are created at mode 0700. An entry that already matches writes nothing.

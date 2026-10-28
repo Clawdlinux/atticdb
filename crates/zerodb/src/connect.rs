@@ -72,10 +72,11 @@ impl Harness {
 
     fn entry(self, command: &str) -> Value {
         match self {
-            // No `--session`: the adapter's default is the repo of its current directory,
-            // the workspace folder, as the session-start hook reads it.
+            // No `--session`: the adapter's default is the repo of its current directory, as
+            // the session-start hook reads it. VS Code's own launcher starts user servers in
+            // the home folder unless `cwd` is set. VS Code resolves the variable.
             Self::Vscode => json!({"type": "stdio", "command": command,
-                "args": ["mcp", "--agent", self.agent()]}),
+                "args": ["mcp", "--agent", self.agent()], "cwd": "${workspaceFolder}"}),
             Self::Copilot => json!({"type": "local", "command": command,
                 "args": ["mcp", "--agent", self.agent()], "tools": ["*"]}),
         }
