@@ -36,12 +36,16 @@ That appends over TCP and reads over the Unix socket. A repeated `idem_key` retu
 
 ## MCP
 
-`zerodb mcp` gives the model `memory_append`, `memory_recent`, `fact_set`, `fact_get`, `fact_list` and `memory_search`. Search finds turns and current facts by words, across every session, newest first. Use absolute paths. It starts the server if none is running.
+`zerodb mcp` gives the model `memory_append`, `memory_recent`, `fact_set`, `fact_get`, `fact_list` and `memory_search`. Search finds turns and current facts by words, across every session, newest first. It starts the server if none is running.
 The model can read and write any session in the tenant. Don't give it to a model you don't trust with the whole tenant.
 
 ```json
-{"mcpServers": {"zerodb": {"command": "/path/to/zerodb", "args": ["mcp", "--config", "/path/to/zerodb.json", "--tenant", "me", "--data-dir", "/path/to/data"]}}}
+{"mcpServers": {"zerodb": {"command": "zerodb", "args": ["mcp"]}}}
 ```
+
+With no connection flags, `zerodb mcp` and the shell verbs use a per-user home, created on first use.
+On macOS it is `~/Library/Application Support/zerodb`. On Linux it is `$XDG_DATA_HOME/zerodb`, else `~/.local/share/zerodb`.
+It holds `zerodb.json` with tenant `me`, and `data/`. Any connection flag, or `ZERODB_TOKEN`, skips the home. Use absolute paths in flags.
 
 ## Shell verbs
 

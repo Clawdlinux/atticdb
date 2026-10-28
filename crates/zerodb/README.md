@@ -6,7 +6,7 @@ The server binary. HTTP/JSON over loopback TCP and a Unix socket, with the same 
 ```sh
 zerodb init --config zerodb.json --tenant me     # writes a 0600 config, prints the token once
 zerodb serve --config zerodb.json --data-dir ./data
-zerodb mcp --config zerodb.json --tenant me --data-dir ./data
+zerodb mcp                                       # no flags: the per-user home
 zerodb verify --data-dir ./data                  # checks a stopped data dir on a copy
 zerodb recover --truncate-at <lsn> --data-dir ./data
 ```
@@ -107,11 +107,22 @@ Integers beyond ±(2^53 - 1), such as `commit_time_ns`, come back as strings in 
 `--agent` defaults to `mcp` and `--session` to `default`. A tool may pass `session`. The tenant still comes from the token.
 The token comes from `--token-file`, `ZERODB_TOKEN`, or the config entry for `--tenant`. A token file must be 0600 and yours.
 
+With none of `--url`, `--data-dir`, `--config`, `--token-file`, `--tenant` or `ZERODB_TOKEN`, it uses a per-user home.
+On macOS the home is `~/Library/Application Support/zerodb`. On Linux it is `$XDG_DATA_HOME/zerodb`, else `~/.local/share/zerodb`.
+The first use creates it with mode 0700, `zerodb.json` with tenant `me` at 0600, and `data/` at 0700.
+The home and `data/` must be yours, with no group or other bits. The shell verbs use the same home.
+Each use syncs the directory entries of `data/`, the home and its parents up to `$HOME`.
+A client needs only this:
+
+```json
+{"mcpServers": {"zerodb": {"command": "zerodb", "args": ["mcp"]}}}
+```
+
 How it finds a server:
 
 1. `--url unix:///path` or `--url http://127.0.0.1:<port>`. An operator chose it, so there is no instance check. `http` takes only `127.0.0.1`, `localhost` or `[::1]`, because the token travels in cleartext.
 2. Else it reads `<data_dir>/LOCK` and uses the Unix socket named there. Never the TCP address. The socket must be yours, its parent owned by you and not writable by group or others. Every directory above it must be owned by root or you and not writable by group or others unless sticky, as OpenSSH's StrictModes checks. Then `GET /healthz` must return the instance id in `LOCK`. Only then does the token go out, on that same connection.
-3. Else, with `--config`, it starts `zerodb serve --config <path> --data-dir <dir> --listen none --exit-on-poison`. Output goes to `<data_dir>/serve.log`. The token is never on its command line.
+3. Else, with `--config` or the home, it starts `zerodb serve --config <path> --data-dir <dir> --listen none --exit-on-poison`. Output goes to `<data_dir>/serve.log`. The token is never on its command line.
 4. It repeats step 2 until a server is trusted or 2 s before the call's deadline. A started server that exits 75 lost the lock race. If no trusted server shows up, it starts another, backing off from 100 ms to 2 s. A start that can't work fails the call at once with its reason: a data directory it can't use, or a started server that exits with any code but 75 or 70 (poisoned). The last line of `serve.log` is in the error. The next call tries again.
 
 An auto-started server runs in its own process group and outlives the adapters. Stop it with `kill <pid>`. The pid is in `<data_dir>/LOCK`.

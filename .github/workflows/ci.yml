@@ -20,6 +20,9 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
+      # The home test's socket paths overflow sun_path under the macOS checkout, so use a short root.
+      # Use the real path: macOS links /tmp to /private/tmp, and tests compare socket paths.
+      - run: echo "ZERODB_TEST_DIR=$(cd /tmp && pwd -P)/zt" >> "$GITHUB_ENV"
       # Installs the toolchain and components from rust-toolchain.toml.
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
