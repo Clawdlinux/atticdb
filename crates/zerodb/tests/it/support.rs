@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::os::fd::OwnedFd;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
@@ -55,18 +55,21 @@ pub const TOKEN_A: &str = "token-a-0123456789abcdefghijklmnopqrstuv";
 pub const TOKEN_B: &str = "token-b-0123456789abcdefghijklmnopqrstuv";
 
 /// A private directory with a short path. Socket paths, staging included, must fit
-/// `sun_path` (104 bytes on macOS), so it lives under `target/s` by default.
-/// Set `ZERODB_TEST_DIR` to a short directory when the checkout path is too deep.
+/// `sun_path` (104 bytes on macOS). By default it lives under `/tmp/zerodb-test-<uid>` on
+/// macOS and `/var/tmp/zerodb-test-<uid>` on Linux, whatever the checkout path.
+/// `ZERODB_TEST_DIR` is optional and may be any short directory. It is resolved to its real
+/// path.
 #[derive(Debug)]
 pub struct Dir(pub PathBuf);
 
 impl Dir {
     pub fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let root = std::env::var_os("ZERODB_TEST_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| Path::new(env!("CARGO_TARGET_TMPDIR")).parent().unwrap().join("s"));
-        std::fs::create_dir_all(&root).unwrap();
+        // Its real path, since servers build absolute paths from `getcwd` and tests compare them.
+        let root = std::env::var_os("ZERODB_TEST_DIR").map_or_else(tmp_root, |root| {
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::canonicalize(root).unwrap()
+        });
         let name = format!("{:x}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
         let path = root.join(name);
         std::fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
@@ -84,6 +87,40 @@ impl Drop for Dir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
+}
+
+/// `/tmp/zerodb-test-<uid>` on macOS and `/var/tmp/zerodb-test-<uid>` on Linux, made with mode
+/// 0700 if missing. Linux's `/tmp` may be RAM, and each test server can pin up to 128 MiB there.
+/// macOS keeps `/tmp`: its `/var/tmp` resolves 4 bytes longer, too long for a 10-digit uid.
+/// The path is real, since macOS links `/tmp` to `/private/tmp` and tests compare socket paths.
+/// Anyone can add names there, so the root must be this user's private directory and not a
+/// symlink.
+fn tmp_root() -> PathBuf {
+    let uid = rustix::process::geteuid().as_raw();
+    // Minimal containers may have no `/var/tmp`, so fall back to `/tmp` there.
+    let wanted = if cfg!(target_os = "macos") { "/tmp" } else { "/var/tmp" };
+    let base = std::fs::canonicalize(wanted).or_else(|_| std::fs::canonicalize("/tmp"));
+    let base = base.unwrap_or_else(|error| {
+        panic!("cannot resolve {wanted} or /tmp: {error}; set ZERODB_TEST_DIR to a short directory")
+    });
+    let root = base.join(format!("zerodb-test-{uid}"));
+    // `owned_dir` makes the root if missing, but its check follows symlinks. So check the
+    // entry itself. Once it is ours, the sticky bit on the base stops others from replacing it.
+    let made = zerodb::listen::owned_dir(&root, 0o077);
+    let error = match std::fs::symlink_metadata(&root) {
+        Ok(meta) if meta.is_dir() && meta.uid() == uid && meta.mode() & 0o077 == 0 => return root,
+        Ok(meta) if meta.is_symlink() => format!("{} is a symlink", root.display()),
+        Ok(meta) => format!(
+            "{} must be a directory owned by uid {uid}, mode 0700 or stricter, found mode {:04o} \
+             owned by uid {}",
+            root.display(),
+            meta.mode() & 0o7777,
+            meta.uid()
+        ),
+        // If `owned_dir` failed, its error says why the root is missing.
+        Err(error) => made.err().unwrap_or_else(|| format!("{}: {error}", root.display())),
+    };
+    panic!("{error}; set ZERODB_TEST_DIR to a short directory")
 }
 
 /// An engine on a copy of `disk` with 1 MiB segments and no timed checkpoints. `tune`
