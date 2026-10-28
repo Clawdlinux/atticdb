@@ -2,6 +2,7 @@
 //! flags: an owner-only directory with `zerodb.json` and `data/`, created on first use.
 
 use std::path::{Path, PathBuf};
+use zerodb_tape::{Io, StdIo};
 
 /// The tenant the home's config names.
 pub const TENANT: &str = "me";
@@ -43,7 +44,29 @@ pub fn ensure() -> Result<Home, String> {
     }
     let data_dir = dir.join("data");
     crate::listen::owned_dir(&data_dir, 0o077)?;
+    // Every call syncs, covering a concurrent creator that has not synced yet.
+    sync_dirs(&dir, &data_dir)?;
     Ok(Home { config, data_dir, tenant: TENANT.into() })
+}
+
+/// Syncs `data/`, the home and its ancestors, deepest first, so their entries survive a
+/// power loss before the first ack.
+fn sync_dirs(dir: &Path, data_dir: &Path) -> Result<(), String> {
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    // Stop at $HOME, or at XDG_DATA_HOME's parent when the home is outside $HOME.
+    let top = if dir.starts_with(&home) {
+        home.as_path()
+    } else {
+        dir.ancestors().nth(2).unwrap_or(Path::new("/"))
+    };
+    let io = StdIo::new();
+    for path in data_dir.ancestors() {
+        io.sync_dir(path).map_err(|error| format!("{}: cannot sync: {error}", path.display()))?;
+        if path == top {
+            break;
+        }
+    }
+    Ok(())
 }
 
 /// Writes a complete config to a temp file, then hard-links it to `config`, so `config`
