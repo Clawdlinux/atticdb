@@ -18,6 +18,17 @@ pub struct Home {
     pub tenant: String,
 }
 
+/// The repo name for `dir`, an absolute path: the name of the first directory from `dir` up
+/// that has a `.git` entry, else of `dir`. `None` when that has no UTF-8 name. It is the
+/// default session and what the session-start hook reads, so notes land where it looks.
+/// Symlinks are resolved first, as the adapter's `current_dir` is. A path that cannot be
+/// resolved, such as a deleted folder, is walked as given.
+pub fn repo(dir: &Path) -> Option<String> {
+    let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_owned());
+    let root = dir.ancestors().find(|dir| dir.join(".git").symlink_metadata().is_ok());
+    root.unwrap_or(&dir).file_name().and_then(|name| name.to_str()).map(str::to_owned)
+}
+
 /// The home directory. On macOS `$HOME/Library/Application Support/zerodb`. On Linux
 /// `$XDG_DATA_HOME/zerodb` when that is set and absolute, else `$HOME/.local/share/zerodb`.
 pub fn dir() -> Result<PathBuf, String> {

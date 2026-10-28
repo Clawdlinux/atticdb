@@ -22,6 +22,7 @@ const USAGE: &str = "usage:
   zerodb mcp <connect>
   zerodb connect <vscode|copilot>
   zerodb disconnect <vscode|copilot>
+  zerodb hook session-start
   zerodb append <connect> --content <text> [--role user|assistant|tool]
   zerodb recent <connect> [--n <n>] [--max-bytes <n>]
   zerodb search <connect> --query <words> [--limit <n>] [--before <lsn>] [--max-bytes <n>]
@@ -82,6 +83,10 @@ fn main() -> ExitCode {
                     "connect" => zerodb::connect::connect(harness),
                     _ => zerodb::connect::disconnect(harness),
                 }),
+                _ => None,
+            },
+            "hook" => match rest {
+                [event] if event == "session-start" => Some(zerodb::hook::session_start()),
                 _ => None,
             },
             "append" => tool(rest, "memory_append", &["--content", "--role"], &[]),

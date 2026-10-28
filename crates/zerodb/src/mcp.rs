@@ -10,7 +10,7 @@ use crate::config::{read_token_file, Config, Token};
 use crate::launch::{Launch, Url};
 use crate::outcome::{self, Attempt, Merge, Outcome};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufRead, Read, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -26,10 +26,24 @@ const MAX_BACKOFF: Duration = Duration::from_secs(2);
 const MIN_ATTEMPT: Duration = Duration::from_secs(2);
 /// Longest stdin line. A request body cannot be larger anyway.
 const MAX_LINE: u64 = 8 << 20;
+/// Longest wait for the client's roots before a call that uses the default session.
+const ROOTS_WAIT: Duration = Duration::from_secs(2);
+
+/// A stdin line, or `None` for one longer than [`MAX_LINE`].
+type Line = Option<Vec<u8>>;
 
 struct Adapter {
     agent: String,
     session: String,
+    /// Whether `--session` set the session, so client roots don't change it.
+    session_flag: bool,
+    /// Whether the client reports roots, which then name the default session.
+    roots: bool,
+    /// Requests sent to the client, and the id of the latest `roots/list` not yet answered.
+    asked: u64,
+    roots_pending: Option<String>,
+    /// Calls wait for that answer only until 2 s after it was asked for.
+    roots_deadline: Option<Instant>,
     token: Token,
     retry_deadline: Duration,
     launch: Launch,
@@ -45,20 +59,55 @@ pub fn start(flags: HashMap<String, String>) -> u8 {
             return 1;
         }
     };
-    let (mut stdin, mut stdout, mut line) = (io::stdin().lock(), io::stdout(), Vec::new());
-    loop {
-        line.clear();
-        match (&mut stdin).take(MAX_LINE + 1).read_until(b'\n', &mut line) {
-            Ok(0) | Err(_) => return 0,
-            Ok(_) => {}
+    // A thread reads stdin, so a call can wait for the roots answer with a timeout.
+    let (send, lines) = std::sync::mpsc::sync_channel::<Line>(1);
+    std::thread::spawn(move || {
+        let mut stdin = io::stdin().lock();
+        loop {
+            let mut line = Vec::new();
+            match (&mut stdin).take(MAX_LINE + 1).read_until(b'\n', &mut line) {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {}
+            }
+            let line = if line.len() as u64 > MAX_LINE && !line.ends_with(b"\n") {
+                let _ = stdin.skip_until(b'\n');
+                None
+            } else {
+                Some(line)
+            };
+            if send.send(line).is_err() {
+                return;
+            }
         }
-        let reply = if line.len() as u64 > MAX_LINE && !line.ends_with(b"\n") {
-            let _ = stdin.skip_until(b'\n');
-            Some(rpc_error(Value::Null, -32600, "message longer than 8 MiB"))
-        } else if line.iter().all(u8::is_ascii_whitespace) {
-            None
-        } else {
-            adapter.handle(&line)
+    });
+    // Lines read while a call waited for roots, handled after it in order.
+    let (mut queued, mut stdout) = (VecDeque::new(), io::stdout());
+    loop {
+        let Some(line) = queued.pop_front().or_else(|| lines.recv().ok()) else { return 0 };
+        let reply = match line {
+            None => Some(rpc_error(Value::Null, -32600, "message longer than 8 MiB")),
+            Some(line) if line.iter().all(u8::is_ascii_whitespace) => None,
+            Some(line) => {
+                if adapter.needs_roots(&line) {
+                    // Past 8 MiB in the whole queue, stop reading ahead, so the reader is held
+                    // back again. Earlier waits' lines count too.
+                    let mut held: u64 =
+                        queued.iter().flatten().map(|l: &Vec<u8>| l.len() as u64).sum();
+                    while let Some(left) = adapter.roots_wait().filter(|_| held <= MAX_LINE) {
+                        match lines.recv_timeout(left) {
+                            Ok(Some(next)) if adapter.answers_roots(&next) => {
+                                adapter.handle(&next);
+                            }
+                            Ok(next) => {
+                                held += next.as_ref().map_or(0, Vec::len) as u64;
+                                queued.push_back(next);
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                }
+                adapter.handle(&line)
+            }
         };
         if let Some(reply) = reply {
             let _ = writeln!(stdout, "{reply}").and_then(|()| stdout.flush());
@@ -108,6 +157,34 @@ pub fn command(tool: &str, mut flags: HashMap<String, String>) -> u8 {
     }
 }
 
+/// Reads from the per-user home for code in this crate, such as the session-start hook.
+pub(crate) struct HomeReader {
+    adapter: Adapter,
+    deadline: Instant,
+}
+
+impl HomeReader {
+    /// Resolves the home as `zerodb mcp` with no connection flags does. All reads together,
+    /// connects and server starts included, end by `deadline`.
+    pub(crate) fn new(session: &str, deadline: Instant) -> Result<Self, String> {
+        let adapter = Adapter::new(HashMap::from([("--session".into(), session.into())]))?;
+        Ok(Self { adapter, deadline })
+    }
+
+    /// Runs the read tool `tool` as `agent`. Returns its `structuredContent`, or its error.
+    /// With under 2 s left it sends nothing and fails at once.
+    pub(crate) fn read(&mut self, agent: &str, tool: &str, args: &Value) -> Result<Value, String> {
+        self.adapter.agent = agent.to_owned();
+        // `retry` and every exchange in it end at now + `retry_deadline`.
+        self.adapter.retry_deadline = self.deadline.saturating_duration_since(Instant::now());
+        let result = self.adapter.call(tool, args).ok_or_else(|| format!("unknown tool {tool}"))?;
+        match result["content"][0]["text"].as_str() {
+            Some(text) if result["isError"] == true => Err(text.to_owned()),
+            _ => Ok(result["structuredContent"].clone()),
+        }
+    }
+}
+
 impl Adapter {
     fn new(mut flags: HashMap<String, String>) -> Result<Self, String> {
         let url = flags.remove("--url").as_deref().map(Url::parse).transpose()?;
@@ -154,9 +231,20 @@ impl Adapter {
         if url.is_none() && data_dir.is_none() {
             return Err("set --url, or --data-dir or a config with data_dir".into());
         }
+        let session = flags.remove("--session");
         Ok(Self {
             agent: flags.remove("--agent").unwrap_or_else(|| "mcp".into()),
-            session: flags.remove("--session").unwrap_or_else(|| "default".into()),
+            session_flag: session.is_some(),
+            // The repo of the current directory, as the session-start hook reads it, until
+            // the client's roots name one.
+            session: session.unwrap_or_else(|| {
+                let repo = std::env::current_dir().ok().and_then(|dir| crate::home::repo(&dir));
+                repo.unwrap_or_else(|| "default".into())
+            }),
+            roots: false,
+            asked: 0,
+            roots_pending: None,
+            roots_deadline: None,
             token,
             retry_deadline,
             launch: Launch::new(url, data_dir, config_path),
@@ -179,12 +267,23 @@ impl Adapter {
         }
         let Some(method) = message.get("method").and_then(Value::as_str) else {
             let response = message.get("result").or(message.get("error")).is_some();
+            let answers = id.as_ref().and_then(Value::as_str);
+            if response && answers.is_some() && answers == self.roots_pending.as_deref() {
+                self.roots_pending = None;
+                if let Some(repo) = root_repo(&message["result"]) {
+                    self.session = repo;
+                }
+            }
             return (!response)
                 .then(|| rpc_error(id.unwrap_or_default(), -32600, "invalid request"));
         };
         // Notifications, `notifications/cancelled` included: a cancelled write may still
-        // commit, which is safe because it carries a key.
-        let id = id?;
+        // commit, which is safe because it carries a key. Roots are asked for once the
+        // client is ready, and again when they change.
+        let Some(id) = id else {
+            let roots = ["notifications/initialized", "notifications/roots/list_changed"];
+            return (self.roots && roots.contains(&method)).then(|| self.ask_roots());
+        };
         let params = &message["params"];
         let result = match method {
             "ping" => json!({}),
@@ -192,6 +291,7 @@ impl Adapter {
                 let asked = params["protocolVersion"].as_str().unwrap_or_default();
                 let version = VERSIONS.into_iter().find(|v| *v == asked).unwrap_or(VERSIONS[0]);
                 self.initialized = true;
+                self.roots = !self.session_flag && !params["capabilities"]["roots"].is_null();
                 json!({
                     "protocolVersion": version,
                     "capabilities": {"tools": {}},
@@ -213,6 +313,45 @@ impl Adapter {
             _ => return Some(rpc_error(id, -32601, "method not found")),
         };
         Some(json!({"jsonrpc": "2.0", "id": id, "result": result}))
+    }
+
+    /// Whether `line` calls a tool that uses the default session while roots may still
+    /// change it.
+    fn needs_roots(&self, line: &[u8]) -> bool {
+        if self.roots_wait().is_none() {
+            return false;
+        }
+        let message: Value = serde_json::from_slice(line).unwrap_or_default();
+        let (params, tools) = (&message["params"], ["memory_append", "memory_recent"]);
+        message["method"] == "tools/call"
+            && tools.iter().any(|tool| params["name"] == *tool)
+            && params["arguments"]["session"].is_null()
+    }
+
+    /// The time left to wait for the latest `roots/list` answer, if any.
+    fn roots_wait(&self) -> Option<Duration> {
+        self.roots_pending.as_ref()?;
+        let left = self.roots_deadline?.saturating_duration_since(Instant::now());
+        (!left.is_zero()).then_some(left)
+    }
+
+    /// Whether `line` is a valid answer to the latest `roots/list`, as `handle` takes it.
+    fn answers_roots(&self, line: &[u8]) -> bool {
+        let message: Value = serde_json::from_slice(line).unwrap_or_default();
+        let answer = message.get("result").or(message.get("error")).is_some();
+        message["jsonrpc"] == "2.0"
+            && message.get("method").is_none()
+            && answer
+            && message["id"].as_str().is_some_and(|id| Some(id) == self.roots_pending.as_deref())
+    }
+
+    /// A `roots/list` request to the client. Only the answer to the latest one counts.
+    fn ask_roots(&mut self) -> Value {
+        self.asked += 1;
+        let id = format!("zerodb-roots-{}", self.asked);
+        self.roots_pending = Some(id.clone());
+        self.roots_deadline = Some(Instant::now() + ROOTS_WAIT);
+        json!({"jsonrpc": "2.0", "id": id, "method": "roots/list"})
     }
 
     fn call(&mut self, name: &str, args: &Value) -> Option<Value> {
@@ -715,6 +854,33 @@ fn tool_error(text: String) -> Value {
 
 fn rpc_error(id: Value, code: i64, message: &str) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
+}
+
+/// The repo of the first `file://` root in a `roots/list` result, by [`crate::home::repo`].
+fn root_repo(result: &Value) -> Option<String> {
+    let mut uris = result["roots"].as_array()?.iter().filter_map(|root| root["uri"].as_str());
+    let path = uris.find_map(|uri| uri.strip_prefix("file://"))?;
+    // `file://localhost/path` names the same path as `file:///path`.
+    let path = path.strip_prefix("localhost").unwrap_or(path);
+    let (mut bytes, mut decoded) = (path.bytes(), Vec::new());
+    while let Some(byte) = bytes.next() {
+        decoded.push(match byte {
+            b'%' => {
+                let hex = [bytes.next()?, bytes.next()?];
+                if !hex.iter().all(u8::is_ascii_hexdigit) {
+                    return None;
+                }
+                u8::from_str_radix(std::str::from_utf8(&hex).ok()?, 16).ok()?
+            }
+            byte => byte,
+        });
+    }
+    // PATH_MAX. A longer path is no real folder, and walking its ancestors costs a stat each.
+    if decoded.len() > 4096 {
+        return None;
+    }
+    let path = PathBuf::from(String::from_utf8(decoded).ok()?);
+    path.is_absolute().then(|| crate::home::repo(&path)).flatten()
 }
 
 /// Percent-encodes a query value.

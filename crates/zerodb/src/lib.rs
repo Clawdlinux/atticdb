@@ -10,6 +10,7 @@ pub mod connect;
 #[cfg(feature = "fault-inject")]
 pub mod fault;
 pub mod home;
+pub mod hook;
 pub mod http;
 pub mod launch;
 pub mod listen;

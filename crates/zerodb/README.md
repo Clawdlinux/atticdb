@@ -105,7 +105,20 @@ Newline-delimited JSON-RPC 2.0 on stdin and stdout. Logs go to stderr. It exits 
 Tools: `memory_append {content, role?, session?, meta?}`, `memory_recent {n?, session?, max_bytes?}`, the fact tools, and `memory_search {query, limit?, before?, max_bytes?}`.
 Read tools carry `readOnlyHint: true`, so VS Code runs them without asking. `initialize` returns short `instructions` on when to call each tool. Copilot CLI adds a server's instructions to the system prompt only for allowlisted servers, or with `--allow-all-mcp-server-instructions`.
 Integers beyond ±(2^53 - 1), such as `commit_time_ns`, come back as strings in tool results, because JavaScript clients can't hold them (I-JSON, RFC 7493). The shell verbs print them as numbers.
-`--agent` defaults to `mcp` and `--session` to `default`. A tool may pass `session`. The tenant still comes from the token.
+`--agent` defaults to `mcp`. A tool may pass `session`. The tenant still comes from the token.
+`--session` defaults to a repo name, by the same rule as the session-start hook.
+When the client reports roots, as VS Code does, it is the repo of the first `file://` root.
+A root that can't be read leaves the session as it was.
+Until then, or without roots, it is the repo of the current directory. The shell verbs use that too.
+The repo is the name of the first directory up with a `.git` entry, else of that directory.
+For the current directory, it is `default` when that cannot be read or has no UTF-8 name.
+The adapter sends `roots/list` after `notifications/initialized`, and again on `notifications/roots/list_changed`.
+With `--session`, it asks for no roots.
+Calls that use the default session wait for the roots answer until 2 s after `roots/list`. So only the first one waits.
+Messages behind a waiting call wait too. An answer that comes later still sets the session.
+2 repos with the same folder name share a session and `repo/<name>/` facts.
+Turns saved before this with no `--session` stay in session `default`. Read them with `--session default` and the agent that saved them.
+That is `--agent copilot` for the `connect copilot` entry, and no `--agent` for a bare `zerodb mcp`. Or find them with `search`.
 The token comes from `--token-file`, `ZERODB_TOKEN`, or the config entry for `--tenant`. A token file must be 0600 and yours.
 
 With none of `--url`, `--data-dir`, `--config`, `--token-file`, `--tenant` or `ZERODB_TOKEN`, it uses a per-user home.
@@ -131,14 +144,19 @@ An auto-started server runs in its own process group and outlives the adapters. 
 ## `zerodb connect` and `zerodb disconnect`
 
 `zerodb connect <vscode|copilot>` creates the home, then adds a `zerodb` entry to the harness's user MCP config.
+It also writes the session-start hook file, described below.
 `zerodb disconnect <vscode|copilot>` removes that entry. Every other key and server stays.
 
 | Name | File | Entry |
 |---|---|---|
-| `vscode` | macOS: `~/Library/Application Support/Code/User/mcp.json`. Linux: `$XDG_CONFIG_HOME/Code/User/mcp.json` when set and absolute, else `~/.config/Code/User/mcp.json` | `servers.zerodb`: `zerodb mcp --agent vscode-copilot --session ${workspaceFolderBasename}` |
+| `vscode` | macOS: `~/Library/Application Support/Code/User/mcp.json`. Linux: `$XDG_CONFIG_HOME/Code/User/mcp.json` when set and absolute, else `~/.config/Code/User/mcp.json` | `servers.zerodb`: `zerodb mcp --agent vscode-copilot` |
 | `copilot` | `$COPILOT_HOME/mcp-config.json` when set and absolute, else `~/.copilot/mcp-config.json` | `mcpServers.zerodb`: `zerodb mcp --agent copilot`, all tools |
 
 The entry runs the absolute path of the binary you ran. It holds no token and no config path.
+Neither entry passes `--session`, so the session is the repo the client works in. That is the session the hook reads.
+VS Code reports its workspace folders as roots, and the first one names the session.
+Copilot's agent host and Copilot CLI start the adapter in the working folder, which names it.
+Run `connect` again to update an older entry.
 The entry holds this machine's binary path. Settings Sync copies `mcp.json` to your other devices, where that path may not exist.
 Turn off MCP Servers in Settings Sync: Configure, or install zerodb at the same path on each device.
 A missing file is created. Missing directories are created at mode 0700. An entry that already matches writes nothing.
@@ -148,6 +166,48 @@ The new file goes to a synced temp file, then a rename. It keeps the old file's 
 The rewrite sorts the file's keys and drops its formatting.
 A file that is not plain JSON, such as one with `//` comments, is left alone. The error shows the entry to add by hand.
 A symlinked file is refused, because the rename would replace the link.
+
+`connect` also writes the hook file `hooks/zerodb.json` in `$COPILOT_HOME` when set and absolute, else in `~/.copilot`.
+VS Code's Copilot chat and Copilot CLI both read it:
+
+```json
+{"version": 1, "hooks": {"sessionStart": [{"type": "command", "bash": "'<binary>' hook session-start", "timeoutSec": 5}]}}
+```
+
+The binary path is single-quoted for the shell, with each `'` written as `'\''`.
+The rules above apply: no write when it matches, a backup, a synced temp file and a rename.
+`disconnect` deletes it once neither config has a zerodb entry, then syncs the directory. No backup is kept.
+It deletes the hook zerodb writes for any absolute binary path, so a moved binary's hook goes too.
+A hook file with other content is left alone, and `disconnect` says so.
+
+## `zerodb hook session-start`
+
+The Copilot `sessionStart` hook. It reads at most 1 MiB of JSON on stdin and uses only `cwd`.
+Parsing stops after the first JSON object, so stdin left open after that object does not block it.
+The repo is the name of the first directory from `cwd` up that has a `.git` entry, else of `cwd`.
+It reads the home like `zerodb mcp` with no flags, and starts the server if needed.
+Its reads share a 3 s budget from the hook's start. A read with under 2 s left fails at once.
+It lists facts under `user/` and under `repo/<repo>/`, 50 each, in key order.
+It reads the last 5 turns of session `<repo>` for agents `vscode-copilot` and `copilot`, then keeps the newest 5.
+A window cut short by its 8 MiB cap hides older turns, so then it may show fewer than 5.
+It prints 1 line, `{"additionalContext": "<block>"}`. With nothing to show, or on any error, it prints `{}`.
+At 4 s it prints `{}` and exits, whatever is blocking, stdin included. It always exits 0. Errors go to stderr.
+The stop cannot help if the harness stops reading the hook's output mid-line. That needs a stalled harness.
+
+```text
+zerodb memory (snapshot at chat start; call memory_search or fact_list for more)
+Rules:
+- <key>: <content>
+This repo (<repo>):
+- <key>: <content>
+Recent notes (<repo>):
+- <content>
+```
+
+Turns are listed oldest first. A section with no entries is left out.
+Each content is cut to 300 characters, and its newlines become spaces.
+Past 6,000 characters the block stops at a whole line and ends with `(more in zerodb)`.
+The block depends only on memory, so the prompt prefix stays the same until memory changes.
 
 ## Tests
 

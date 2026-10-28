@@ -138,7 +138,10 @@ fn tool_calls_over_stdio() {
         assert_eq!(reply["error"]["code"], -32601, "{method} before initialize");
     }
     for (asked, answered) in [("2024-11-05", "2024-11-05"), ("2099-01-01", "2025-11-25")] {
-        let reply = mcp.request("initialize", init(asked));
+        // The client reports roots, but `--session` is set, so none are asked for.
+        let mut params = init(asked);
+        params["capabilities"] = json!({"roots": {}});
+        let reply = mcp.request("initialize", params);
         assert_eq!(reply["result"]["protocolVersion"], answered, "asked for {asked}");
         assert_eq!(reply["result"]["capabilities"], json!({"tools": {}}), "asked for {asked}");
     }
@@ -327,6 +330,47 @@ fn tool_calls_over_stdio() {
     assert_eq!(mcp.response(), json!({"jsonrpc": "2.0", "id": null, "error": refused}));
     assert_eq!(mcp.request("ping", json!({}))["result"], json!({}), "ping after a long line");
 
+    // A client with roots and no `--session`: the session is the repo of the first file root.
+    let app = dir.0.join("my 100% app");
+    std::fs::create_dir_all(app.join(".git")).unwrap();
+    let mut rooted = Mcp::start(&dir.0, &args, None);
+    let capabilities = json!({"roots": {"listChanged": true}});
+    let params = json!({"protocolVersion": "2025-11-25", "capabilities": capabilities});
+    assert!(rooted.request("initialize", params)["result"].is_object());
+    rooted.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+    let ask = rooted.asked();
+    assert_eq!((&ask["method"], &ask["id"]), (&json!("roots/list"), &json!("zerodb-roots-1")));
+    let src = app.join("src").to_str().unwrap().replace('%', "%25").replace(' ', "%20");
+    let roots = json!([{"uri": "https://example.com/"}, {"uri": format!("file://{src}")}]);
+    // A call without `session` sent before the answer waits for it. A ping behind it waits too.
+    rooted.post_call("memory_append", json!({"content": "rooted"}));
+    rooted.post("ping", json!({}));
+    rooted.send(&json!({"jsonrpc": "2.0", "id": ask["id"], "result": {"roots": roots}}));
+    appended(&rooted.response()["result"], "rooted");
+    assert_eq!(rooted.response()["result"], json!({}), "the ping is answered after the call");
+    let window = rooted.call("memory_recent", json!({"session": "my 100% app"}));
+    assert_eq!(contents(&window), ["rooted"], "session from the root");
+    rooted.send(&json!({"jsonrpc": "2.0", "method": "notifications/roots/list_changed"}));
+    assert_eq!(rooted.asked()["id"], "zerodb-roots-2", "asked again on a change");
+    assert_eq!(rooted.close().0.code(), Some(0));
+
+    // A client that never answers roots: only the first default-session call waits 2 s.
+    let mut silent = Mcp::start(&dir.0, &args, None);
+    let params = json!({"protocolVersion": "2025-11-25", "capabilities": {"roots": {}}});
+    assert!(silent.request("initialize", params)["result"].is_object());
+    silent.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+    assert_eq!(silent.asked()["method"], "roots/list");
+    for (content, waits) in [("slow", 1_900..2_500), ("fast", 0..500)] {
+        let started = std::time::Instant::now();
+        appended(&silent.call("memory_append", json!({"content": content})), content);
+        let elapsed = started.elapsed().as_millis() as u64;
+        assert!(waits.contains(&elapsed), "{content}: {elapsed} ms");
+    }
+    let session = zerodb::home::repo(&dir.0).unwrap();
+    let window = silent.call("memory_recent", json!({"session": session}));
+    assert_eq!(contents(&window), ["slow", "fast"], "both in the working folder's repo");
+    assert_eq!(silent.close().0.code(), Some(0));
+
     let (status, _) = mcp.close();
     assert_eq!(status.code(), Some(0), "stdin closed: {}", mcp.process.stderr());
     let stdout = mcp.process.stdout();
@@ -341,6 +385,10 @@ fn tool_calls_over_stdio() {
     let hidden = !hex_run && !stdout.contains("idem") && !stdout.contains("if_lsn");
     assert!(hidden, "no retry key or condition reaches the model: {stdout}");
     assert!(!stdout.contains(TOKEN_A) && !stdout.contains("tenant"), "{stdout}");
+    assert!(
+        !stdout.contains("roots/list"),
+        "--session: no roots asked, though the client has them"
+    );
 
     // The same tools from a shell: one JSON line on stdout, the reason on stderr.
     let cli = |verb: &[&str], code: i32| {
@@ -416,7 +464,7 @@ fn tool_calls_over_stdio() {
         ("FIFO at LOCK during discovery", &["--data-dir", "fifo-lock"], "2500ms", ""),
     ];
     for (case, args, deadline, detail) in rows {
-        let args = [args, &["--retry-deadline", deadline]].concat();
+        let args = [args, &["--retry-deadline", deadline, "--session", "lost"]].concat();
         let mut mcp = Mcp::start(&dir.0, &args, Some(TOKEN_A));
         mcp.handshake();
         let result = mcp.call("memory_append", json!({"content": "lost?"}));
@@ -440,7 +488,7 @@ fn tool_calls_over_stdio() {
         assert!(started.elapsed().as_secs() < 5, "{data}: took {:?}", started.elapsed());
         assert_eq!(mcp.close().0.code(), Some(0));
     }
-    let (_, lost) = running.vias[1].a("GET", "/v1/window?agent=mcp&session=default&last=9", None);
+    let (_, lost) = running.vias[1].a("GET", "/v1/window?agent=mcp&session=lost&last=9", None);
     assert_eq!(lost["turns"], json!([]), "nothing sent under 2 s");
 }
 
