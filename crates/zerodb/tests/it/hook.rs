@@ -100,7 +100,11 @@ fn session_start_prints_the_memory_block() {
     std::fs::write(home.join("big/.git"), "gitdir: elsewhere\n").unwrap();
     let _holders = Holders(vec![data_dir(&home)]);
     let long = "é".repeat(301);
+    // 2 rules over half of `fact_list`'s 64 KiB page, and a newest note over 64 KiB.
+    let (rule_1, rule_2, note) = ("1".repeat(40 << 10), "2".repeat(40 << 10), "n".repeat(70 << 10));
     let facts = [
+        ("user/big-2", rule_2.as_str()),
+        ("user/big-1", &rule_1),
         ("user/tabs", "line 1\nline 2"),
         ("repo/app/long", &long),
         ("user/style", "short sentences"),
@@ -119,6 +123,7 @@ fn session_start_prints_the_memory_block() {
         ("copilot", "app", "c2"),
         ("vscode-copilot", "app", "v3"),
         ("copilot", "", "c3"),
+        ("copilot", "app", &note),
     ];
     for (agent, session, content) in turns {
         let mut args = vec!["append", "--agent", agent, "--content", content];
@@ -131,10 +136,14 @@ fn session_start_prints_the_memory_block() {
     let out: Value = serde_json::from_str(&hook(&home, &cwd(&home.join("app/src")), 0).0).unwrap();
     let block = format!(
         "zerodb memory (snapshot at chat start; call memory_search or fact_list for more)\n\
-         Rules:\n- user/style: short sentences\n- user/tabs: line 1 line 2\n\
+         Rules:\n- user/big-1: {}\n- user/big-2: {}\n\
+         - user/style: short sentences\n- user/tabs: line 1 line 2\n\
          This repo (app):\n- repo/app/build: cargo build\n- repo/app/long: {}\n\
-         Recent notes (app):\n- c1\n- v2\n- c2\n- v3\n- c3",
-        "é".repeat(300)
+         Recent notes (app):\n- v2\n- c2\n- v3\n- c3\n- {}",
+        &rule_1[..300],
+        &rule_2[..300],
+        "é".repeat(300),
+        &note[..300]
     );
     assert_eq!(out, json!({"additionalContext": block}));
 

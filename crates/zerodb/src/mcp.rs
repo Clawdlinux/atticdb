@@ -10,7 +10,7 @@ use crate::config::{read_token_file, Config, Token};
 use crate::launch::{Launch, Url};
 use crate::outcome::{self, Attempt, Merge, Outcome};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufRead, Read, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -26,6 +26,11 @@ const MAX_BACKOFF: Duration = Duration::from_secs(2);
 const MIN_ATTEMPT: Duration = Duration::from_secs(2);
 /// Longest stdin line. A request body cannot be larger anyway.
 const MAX_LINE: u64 = 8 << 20;
+/// Longest wait for the client's roots before a call that uses the default session.
+const ROOTS_WAIT: Duration = Duration::from_secs(2);
+
+/// A stdin line, or `None` for one longer than [`MAX_LINE`].
+type Line = Option<Vec<u8>>;
 
 struct Adapter {
     agent: String,
@@ -52,20 +57,50 @@ pub fn start(flags: HashMap<String, String>) -> u8 {
             return 1;
         }
     };
-    let (mut stdin, mut stdout, mut line) = (io::stdin().lock(), io::stdout(), Vec::new());
-    loop {
-        line.clear();
-        match (&mut stdin).take(MAX_LINE + 1).read_until(b'\n', &mut line) {
-            Ok(0) | Err(_) => return 0,
-            Ok(_) => {}
+    // A thread reads stdin, so a call can wait for the roots answer with a timeout.
+    let (send, lines) = std::sync::mpsc::sync_channel::<Line>(1);
+    std::thread::spawn(move || {
+        let mut stdin = io::stdin().lock();
+        loop {
+            let mut line = Vec::new();
+            match (&mut stdin).take(MAX_LINE + 1).read_until(b'\n', &mut line) {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {}
+            }
+            let line = if line.len() as u64 > MAX_LINE && !line.ends_with(b"\n") {
+                let _ = stdin.skip_until(b'\n');
+                None
+            } else {
+                Some(line)
+            };
+            if send.send(line).is_err() {
+                return;
+            }
         }
-        let reply = if line.len() as u64 > MAX_LINE && !line.ends_with(b"\n") {
-            let _ = stdin.skip_until(b'\n');
-            Some(rpc_error(Value::Null, -32600, "message longer than 8 MiB"))
-        } else if line.iter().all(u8::is_ascii_whitespace) {
-            None
-        } else {
-            adapter.handle(&line)
+    });
+    // Lines read while a call waited for roots, handled after it in order.
+    let (mut queued, mut stdout) = (VecDeque::new(), io::stdout());
+    loop {
+        let Some(line) = queued.pop_front().or_else(|| lines.recv().ok()) else { return 0 };
+        let reply = match line {
+            None => Some(rpc_error(Value::Null, -32600, "message longer than 8 MiB")),
+            Some(line) if line.iter().all(u8::is_ascii_whitespace) => None,
+            Some(line) => {
+                if adapter.needs_roots(&line) {
+                    let deadline = Instant::now() + ROOTS_WAIT;
+                    while adapter.roots_pending.is_some() {
+                        let left = deadline.saturating_duration_since(Instant::now());
+                        match lines.recv_timeout(left) {
+                            Ok(Some(next)) if adapter.answers_roots(&next) => {
+                                adapter.handle(&next);
+                            }
+                            Ok(next) => queued.push_back(next),
+                            Err(_) => break,
+                        }
+                    }
+                }
+                adapter.handle(&line)
+            }
         };
         if let Some(reply) = reply {
             let _ = writeln!(stdout, "{reply}").and_then(|()| stdout.flush());
@@ -270,6 +305,24 @@ impl Adapter {
             _ => return Some(rpc_error(id, -32601, "method not found")),
         };
         Some(json!({"jsonrpc": "2.0", "id": id, "result": result}))
+    }
+
+    /// Whether `line` calls a tool that uses the default session while roots may still
+    /// change it.
+    fn needs_roots(&self, line: &[u8]) -> bool {
+        let message: Value = serde_json::from_slice(line).unwrap_or_default();
+        let (params, tools) = (&message["params"], ["memory_append", "memory_recent"]);
+        self.roots_pending.is_some()
+            && message["method"] == "tools/call"
+            && tools.iter().any(|tool| params["name"] == *tool)
+            && params["arguments"]["session"].is_null()
+    }
+
+    /// Whether `line` is the answer to the latest `roots/list`.
+    fn answers_roots(&self, line: &[u8]) -> bool {
+        let message: Value = serde_json::from_slice(line).unwrap_or_default();
+        message.get("method").is_none()
+            && message["id"].as_str().is_some_and(|id| Some(id) == self.roots_pending.as_deref())
     }
 
     /// A `roots/list` request to the client. Only the answer to the latest one counts.

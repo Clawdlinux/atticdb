@@ -114,6 +114,7 @@ The repo is the name of the first directory up with a `.git` entry, else of that
 For the current directory, it is `default` when that cannot be read or has no UTF-8 name.
 The adapter sends `roots/list` after `notifications/initialized`, and again on `notifications/roots/list_changed`.
 With `--session`, it asks for no roots.
+A call that uses the default session waits up to 2 s for the roots answer. Messages behind it wait too.
 2 repos with the same folder name share a session and `repo/<name>/` facts.
 Turns saved before this with no `--session` stay in session `default`. Read them with `--session default` and the agent that saved them.
 That is `--agent copilot` for the `connect copilot` entry, and no `--agent` for a bare `zerodb mcp`. Or find them with `search`.

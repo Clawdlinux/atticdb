@@ -19,7 +19,7 @@ const BUDGET: Duration = Duration::from_secs(3);
 const HARD_STOP: Duration = Duration::from_secs(4);
 /// Set once a line is printed, so exactly one ever is.
 static PRINTED: Mutex<bool> = Mutex::new(false);
-const FACTS: u64 = 50;
+const FACTS: usize = 50;
 const TURNS: usize = 5;
 const MAX_CONTENT: usize = 300;
 const MAX_BLOCK: usize = 6_000;
@@ -76,16 +76,28 @@ fn block(input: impl Read, deadline: Instant) -> Result<Option<String>, String> 
     let cwd = input["cwd"].as_str().ok_or("stdin has no cwd string")?;
     let repo = repo(Path::new(cwd))?;
     let mut home = HomeReader::new(&repo, deadline)?;
+    // A page may stop short of 50 at its byte or scan budget, so follow `next`. Every read
+    // shares the deadline, which ends the paging too.
     let mut facts = |prefix: String| {
-        let list = home.read("hook", "fact_list", &json!({"prefix": prefix, "limit": FACTS}))?;
-        let list = list["facts"].as_array().cloned().unwrap_or_default();
+        let (mut list, mut args) = (Vec::new(), json!({"prefix": prefix}));
+        while list.len() < FACTS {
+            args["limit"] = json!(FACTS - list.len());
+            let page = home.read("hook", "fact_list", &args)?;
+            list.extend(page["facts"].as_array().cloned().unwrap_or_default());
+            match &page["next"] {
+                Value::String(next) => args["after"] = json!(next),
+                _ => break,
+            }
+        }
         Ok::<Vec<_>, String>(list.iter().map(fact).collect())
     };
     let (rules, this_repo) = (facts("user/".into())?, facts(format!("repo/{repo}/"))?);
     // Turns are kept per agent, and a hook can't tell which harness ran it.
     let mut turns = Vec::new();
     for agent in Harness::ALL.map(Harness::agent) {
-        let recent = home.read(agent, "memory_recent", &json!({"n": TURNS}))?;
+        // The server's largest window, so the newest turn always fits.
+        let args = json!({"n": TURNS, "max_bytes": crate::api::MAX_WINDOW_BYTES});
+        let recent = home.read(agent, "memory_recent", &args)?;
         turns.extend(recent["turns"].as_array().cloned().unwrap_or_default());
     }
     turns.sort_by_key(|turn| (turn["commit_time_ns"].as_u64(), turn["lsn"].as_u64()));

@@ -342,8 +342,12 @@ fn tool_calls_over_stdio() {
     assert_eq!((&ask["method"], &ask["id"]), (&json!("roots/list"), &json!("zerodb-roots-1")));
     let src = app.join("src").to_str().unwrap().replace('%', "%25").replace(' ', "%20");
     let roots = json!([{"uri": "https://example.com/"}, {"uri": format!("file://{src}")}]);
+    // A call without `session` sent before the answer waits for it. A ping behind it waits too.
+    rooted.post_call("memory_append", json!({"content": "rooted"}));
+    rooted.post("ping", json!({}));
     rooted.send(&json!({"jsonrpc": "2.0", "id": ask["id"], "result": {"roots": roots}}));
-    appended(&rooted.call("memory_append", json!({"content": "rooted"})), "rooted");
+    appended(&rooted.response()["result"], "rooted");
+    assert_eq!(rooted.response()["result"], json!({}), "the ping is answered after the call");
     let window = rooted.call("memory_recent", json!({"session": "my 100% app"}));
     assert_eq!(contents(&window), ["rooted"], "session from the root");
     rooted.send(&json!({"jsonrpc": "2.0", "method": "notifications/roots/list_changed"}));
