@@ -5,7 +5,7 @@ Status: early. Don't run it in production. Built so far: the tape, session engin
 
 ## Where to run it
 
-macOS and Linux only. Windows isn't supported. No release binaries yet, so build from source as below. 1-command install and connect is planned in [#71](https://github.com/Clawdlinux/zerodb/issues/71).
+macOS and Linux only. Windows isn't supported. No release binaries yet, so install from source as below. Then 1 command connects it to VS Code or Copilot CLI.
 
 Every write is acked only after `fdatasync`, so the disk under the data directory sets your write latency. Keep it on a local disk:
 
@@ -19,6 +19,17 @@ Every write is acked only after `fdatasync`, so the disk under the data director
 The data directory must be mode `0700` (D75). Below a free-space floor zerodb goes read-only and keeps serving reads (I14).
 
 ## Quick start
+
+For VS Code's Copilot chat or Copilot CLI, from a checkout:
+
+```sh
+cargo install --path crates/zerodb --locked   # puts zerodb in ~/.cargo/bin
+zerodb connect vscode                         # or: zerodb connect copilot
+```
+
+`connect` stores the installed binary's path in the entry. An entry that points into a checkout's `target/` breaks on `cargo clean`.
+
+To run a server by hand:
 
 ```sh
 cargo build -p zerodb --release
@@ -45,7 +56,8 @@ The model can read and write any session in the tenant. Don't give it to a model
 
 With no connection flags, `zerodb mcp` and the shell verbs use a per-user home, created on first use.
 On macOS it is `~/Library/Application Support/zerodb`. On Linux it is `$XDG_DATA_HOME/zerodb`, else `~/.local/share/zerodb`.
-It holds `zerodb.json` with tenant `me`, and `data/`. Any connection flag, or `ZERODB_TOKEN`, skips the home. Use absolute paths in flags.
+It holds `zerodb.json` with tenant `me`, and `data/`. Any connection flag skips the home. Use absolute paths in flags.
+With no connection flags, `ZERODB_TOKEN` is ignored and a note says so. The home's token is used.
 
 ## Connect
 
@@ -60,12 +72,16 @@ It edits the user MCP config and keeps a backup of the old file. The entry holds
 Notes go to a session named after the repo, so each repo keeps its own.
 VS Code reports its workspace folders, and the first one is the repo.
 Copilot's agent host and Copilot CLI start zerodb in the working folder, which is the repo.
-Turns saved before this with no `--session` stay in session `default`. Read them with `--agent copilot --session default` (the agent that saved them), or find them with `search`.
+Turns saved before this with no `--session` stay in session `default`. Read them with `--session default` and the agent that saved them.
+That is `--agent copilot` for the `connect copilot` entry. A bare `zerodb mcp` saved them as agent `mcp`, so pass no `--agent`. Or find them with `search`.
 After upgrading zerodb, run `connect` again. It reports `updated` when the entry changed.
+An old entry with connection flags, such as `--data-dir`, keeps its own store. `connect` refuses to switch it without `--force`.
+To keep that memory, stop that store's server. Then move its data files into the home's empty `data/`. This works only if its tenant is `me`.
 
 It also adds a Copilot hook file, `~/.copilot/hooks/zerodb.json`. VS Code's Copilot chat and Copilot CLI both read it.
 At the start of each chat, the hook adds a small memory block.
-It lists your `user/` rules, this repo's facts and the 5 newest notes of this repo's session.
+It lists your `user/` rules and this repo's facts.
+It adds the 5 newest notes in this repo's session from agents `vscode-copilot` and `copilot`.
 The repo is the folder holding `.git`, at or above the chat's working directory.
 The block is at most 6,000 characters. Each content is cut to 300 characters.
 It is a snapshot. The model can call `memory_search` or `fact_list` for more.
