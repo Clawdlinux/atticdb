@@ -133,7 +133,9 @@ fn session_start_prints_the_memory_block() {
         let (code, _, err) = zerodb(&home, &cwd, &args, b"", 0);
         assert_eq!(code, Some(0), "{args:?}: {err}");
     }
-    let out: Value = serde_json::from_str(&hook(&home, &cwd(&home.join("app/src")), 0).0).unwrap();
+    // A symlinked cwd names the repo it points into, as the adapter's `current_dir` does.
+    std::os::unix::fs::symlink(home.join("app/src"), home.join("link")).unwrap();
+    let out: Value = serde_json::from_str(&hook(&home, &cwd(&home.join("link")), 0).0).unwrap();
     let block = format!(
         "zerodb memory (snapshot at chat start; call memory_search or fact_list for more)\n\
          Rules:\n- user/big-1: {}\n- user/big-2: {}\n\
