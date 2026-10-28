@@ -116,9 +116,8 @@ pub(crate) struct HomeReader {
 
 impl HomeReader {
     /// Resolves the home as `zerodb mcp` with no connection flags does. All reads together,
-    /// connects and server starts included, end by `budget` from now.
-    pub(crate) fn new(session: &str, budget: Duration) -> Result<Self, String> {
-        let deadline = Instant::now() + budget;
+    /// connects and server starts included, end by `deadline`.
+    pub(crate) fn new(session: &str, deadline: Instant) -> Result<Self, String> {
         let adapter = Adapter::new(HashMap::from([("--session".into(), session.into())]))?;
         Ok(Self { adapter, deadline })
     }

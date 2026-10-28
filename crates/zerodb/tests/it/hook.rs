@@ -144,7 +144,8 @@ fn session_start_prints_the_memory_block() {
     assert!(last.starts_with("- repo/big/") && last.ends_with(&format!(": {content}")), "{last}");
 }
 
-/// Each row prints `{}` and exits 0 in under 5 s. A slow server gets 3 s for all 4 reads.
+/// Each row prints `{}` and exits 0 in under 5 s, and not before its minimum time. A slow
+/// server gets 3 s for all 4 reads. Stdin open after part of a value hits the 4 s stop.
 #[test]
 fn session_start_prints_nothing_on_errors() {
     let dir = Dir::new();
@@ -156,17 +157,20 @@ fn session_start_prints_nothing_on_errors() {
     chmod(&data_dir(&refused), 0o755);
     let too_long = format!(r#"{{"cwd": "{}"}}"#, "a".repeat(2 << 20));
     let rows = [
-        ("not JSON", &empty, "nope".to_owned()),
-        ("no cwd", &empty, r#"{"dir": "/tmp"}"#.to_owned()),
-        ("over 1 MiB", &empty, too_long),
-        ("no memory", &empty, cwd(&empty.join("repo"))),
-        ("data directory mode 0755", &refused, cwd(&refused.join("repo"))),
-        ("1.5 s per read", &slow, cwd(&slow.join("repo"))),
+        ("not JSON", &empty, "nope".to_owned(), 0),
+        ("no cwd", &empty, r#"{"dir": "/tmp"}"#.to_owned(), 0),
+        ("over 1 MiB", &empty, too_long, 0),
+        ("no memory", &empty, cwd(&empty.join("repo")), 0),
+        ("data directory mode 0755", &refused, cwd(&refused.join("repo")), 0),
+        ("1.5 s per read", &slow, cwd(&slow.join("repo")), 1_400),
+        ("partial JSON, stdin open", &empty, r#"{"cwd": "/tm"#.to_owned(), 3_900),
     ];
-    for (case, home, stdin) in rows {
+    for (case, home, stdin, min_ms) in rows {
         std::fs::create_dir_all(home).unwrap();
         let started = Instant::now();
         assert_eq!(hook(home, &stdin), "{}\n", "{case}");
-        assert!(started.elapsed() < Duration::from_secs(5), "{case}: {:?}", started.elapsed());
+        let elapsed = started.elapsed();
+        let range = Duration::from_millis(min_ms)..Duration::from_secs(5);
+        assert!(range.contains(&elapsed), "{case}: {elapsed:?}");
     }
 }

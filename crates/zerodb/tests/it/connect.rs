@@ -201,11 +201,14 @@ fn connect_writes_the_session_start_hook() {
         other["hooks"]["sessionStart"][0]["bash"] =
             json!(r"'/opt/it'\''s/zerodb' hook session-start");
         let other = serde_json::to_string_pretty(&other).unwrap() + "\n";
-        for (content, removed) in [(other.as_str(), true), ("{}", false)] {
+        let rows = [
+            (other.as_str(), "removed the sessionStart hook", None),
+            ("{}", "alone: it differs from the hook zerodb writes", Some("{}")),
+        ];
+        for (content, said, found) in rows {
             std::fs::write(&file, content).unwrap();
             let out = run(&["disconnect", "copilot"]);
-            let (verb, found) = if removed { ("removed", None) } else { ("left", Some(content)) };
-            assert!(out.contains(&format!("{verb} ")), "{var:?} {content}: {out}");
+            assert!(out.contains(said), "{var:?} {content}: {out}");
             let left = std::fs::read_to_string(&file).ok();
             assert_eq!(left.as_deref(), found, "{var:?}: {out}");
         }

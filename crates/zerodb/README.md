@@ -166,14 +166,14 @@ A hook file with other content is left alone, and `disconnect` says so.
 ## `zerodb hook session-start`
 
 The Copilot `sessionStart` hook. It reads at most 1 MiB of JSON on stdin and uses only `cwd`.
-Parsing stops after the first JSON value, so stdin left open does not block it.
+Parsing stops after the first JSON value, so stdin left open after it does not block it.
 The repo is the name of the first directory from `cwd` up that has a `.git` entry, else of `cwd`.
 It reads the home like `zerodb mcp` with no flags, and starts the server if needed.
-All its reads share 1 deadline, 3 s after they start. A read with under 2 s left fails at once.
+Its reads share a 3 s budget from the hook's start. A read with under 2 s left fails at once.
 It lists facts under `user/` and under `repo/<repo>/`, 50 each, in key order.
 It reads the last 5 turns of session `<repo>` for agents `vscode-copilot` and `copilot`, then keeps the newest 5.
 It prints 1 line, `{"additionalContext": "<block>"}`. With nothing to show, or on any error, it prints `{}`.
-It always exits 0. Errors go to stderr.
+At 4 s it prints `{}` and exits, whatever is blocking, stdin included. It always exits 0. Errors go to stderr.
 
 ```text
 zerodb memory (snapshot at chat start; call memory_search or fact_list for more)

@@ -7,13 +7,18 @@ use crate::mcp::HomeReader;
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::path::Path;
-use std::time::Duration;
+use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 /// Most stdin bytes read.
 const MAX_INPUT: u64 = 1 << 20;
-/// Time for all reads together, under the hook's 5 s timeout. A read needs 2 s left to
-/// start, so the first one has 1 s to connect or start the server.
+/// Time from the hook's start for its reads, so stdin and setup use it up too. A read needs
+/// 2 s left to start, so the first one has at most 1 s to connect or start the server.
 const BUDGET: Duration = Duration::from_secs(3);
+/// Past this, whatever blocks, the hook prints `{}` and exits, under Copilot's 5 s timeout.
+const HARD_STOP: Duration = Duration::from_secs(4);
+/// Set once a line is printed, so exactly one ever is.
+static PRINTED: Mutex<bool> = Mutex::new(false);
 const FACTS: u64 = 50;
 const TURNS: usize = 5;
 const MAX_CONTENT: usize = 300;
@@ -23,9 +28,18 @@ const HEADER: &str =
 const MORE: &str = "(more in zerodb)";
 
 /// Reads the hook's JSON on stdin and prints `{"additionalContext": "<block>"}`, or `{}`
-/// when there is nothing to show or on any error. Errors go to stderr. Returns exit code 0.
+/// when there is nothing to show, on any error, or 4 s after the start. Errors go to stderr.
+/// Returns exit code 0.
 pub fn session_start() -> u8 {
-    let output = match block(std::io::stdin().lock().take(MAX_INPUT)) {
+    let start = Instant::now();
+    std::thread::spawn(move || {
+        std::thread::sleep(HARD_STOP.saturating_sub(start.elapsed()));
+        if print_once(&json!({})) {
+            let _ = writeln!(std::io::stderr(), "zerodb: hook session-start: stopped at 4 s");
+        }
+        std::process::exit(0);
+    });
+    let output = match block(std::io::stdin().lock().take(MAX_INPUT), start + BUDGET) {
         Ok(Some(block)) => json!({"additionalContext": block}),
         Ok(None) => json!({}),
         Err(error) => {
@@ -33,19 +47,33 @@ pub fn session_start() -> u8 {
             json!({})
         }
     };
-    let _ = writeln!(std::io::stdout(), "{output}");
+    let _ = print_once(&output);
     0
 }
 
-/// The block for the `cwd` in `input`, or `None` when memory has nothing for it.
-fn block(input: impl Read) -> Result<Option<String>, String> {
+/// Prints `output` unless a line was printed, and says whether it did. Holds the gate while
+/// printing, so the watchdog's exit waits for a line the main path is writing.
+fn print_once(output: &Value) -> bool {
+    let mut printed = PRINTED.lock().unwrap_or_else(PoisonError::into_inner);
+    let first = !*printed;
+    if first {
+        let mut stdout = std::io::stdout();
+        let _ = writeln!(stdout, "{output}").and_then(|()| stdout.flush());
+        *printed = true;
+    }
+    first
+}
+
+/// The block for the `cwd` in `input`, or `None` when memory has nothing for it. Reads end
+/// by `deadline`.
+fn block(input: impl Read, deadline: Instant) -> Result<Option<String>, String> {
     // Parsing stops at the end of the first value, so an open stdin cannot hang the hook.
     let first = serde_json::Deserializer::from_reader(input).into_iter::<Value>().next();
     let input = first.ok_or("stdin is empty")?;
     let input = input.map_err(|error| format!("stdin is not JSON of at most 1 MiB: {error}"))?;
     let cwd = input["cwd"].as_str().ok_or("stdin has no cwd string")?;
     let repo = repo(Path::new(cwd))?;
-    let mut home = HomeReader::new(&repo, BUDGET)?;
+    let mut home = HomeReader::new(&repo, deadline)?;
     let mut facts = |prefix: String| {
         let list = home.read("hook", "fact_list", &json!({"prefix": prefix, "limit": FACTS}))?;
         let list = list["facts"].as_array().cloned().unwrap_or_default();
