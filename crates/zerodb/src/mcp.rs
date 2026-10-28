@@ -801,6 +801,10 @@ fn root_repo(result: &Value) -> Option<String> {
             byte => byte,
         });
     }
+    // PATH_MAX. A longer path is no real folder, and walking its ancestors costs a stat each.
+    if decoded.len() > 4096 {
+        return None;
+    }
     let path = PathBuf::from(String::from_utf8(decoded).ok()?);
     path.is_absolute().then(|| crate::home::repo(&path)).flatten()
 }

@@ -108,13 +108,15 @@ Integers beyond ±(2^53 - 1), such as `commit_time_ns`, come back as strings in 
 `--agent` defaults to `mcp`. A tool may pass `session`. The tenant still comes from the token.
 `--session` defaults to a repo name, by the same rule as the session-start hook.
 When the client reports roots, as VS Code does, it is the repo of the first `file://` root.
+A root that can't be read leaves the session as it was.
 Until then, or without roots, it is the repo of the current directory. The shell verbs use that too.
 The repo is the name of the first directory up with a `.git` entry, else of that directory.
-It is `default` when that cannot be read or has no UTF-8 name.
+For the current directory, it is `default` when that cannot be read or has no UTF-8 name.
 The adapter sends `roots/list` after `notifications/initialized`, and again on `notifications/roots/list_changed`.
 With `--session`, it asks for no roots.
 2 repos with the same folder name share a session and `repo/<name>/` facts.
-Turns saved before this with no `--session` stay in session `default`. Read them with `--agent copilot --session default` (the agent that saved them), or find them with `search`.
+Turns saved before this with no `--session` stay in session `default`. Read them with `--session default` and the agent that saved them.
+That is `--agent copilot` for the `connect copilot` entry, and no `--agent` for a bare `zerodb mcp`. Or find them with `search`.
 The token comes from `--token-file`, `ZERODB_TOKEN`, or the config entry for `--tenant`. A token file must be 0600 and yours.
 
 With none of `--url`, `--data-dir`, `--config`, `--token-file`, `--tenant` or `ZERODB_TOKEN`, it uses a per-user home.

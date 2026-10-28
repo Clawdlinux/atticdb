@@ -138,7 +138,10 @@ fn tool_calls_over_stdio() {
         assert_eq!(reply["error"]["code"], -32601, "{method} before initialize");
     }
     for (asked, answered) in [("2024-11-05", "2024-11-05"), ("2099-01-01", "2025-11-25")] {
-        let reply = mcp.request("initialize", init(asked));
+        // The client reports roots, but `--session` is set, so none are asked for.
+        let mut params = init(asked);
+        params["capabilities"] = json!({"roots": {}});
+        let reply = mcp.request("initialize", params);
         assert_eq!(reply["result"]["protocolVersion"], answered, "asked for {asked}");
         assert_eq!(reply["result"]["capabilities"], json!({"tools": {}}), "asked for {asked}");
     }
@@ -361,7 +364,10 @@ fn tool_calls_over_stdio() {
     let hidden = !hex_run && !stdout.contains("idem") && !stdout.contains("if_lsn");
     assert!(hidden, "no retry key or condition reaches the model: {stdout}");
     assert!(!stdout.contains(TOKEN_A) && !stdout.contains("tenant"), "{stdout}");
-    assert!(!stdout.contains("roots/list"), "no roots asked of a client without them");
+    assert!(
+        !stdout.contains("roots/list"),
+        "--session: no roots asked, though the client has them"
+    );
 
     // The same tools from a shell: one JSON line on stdout, the reason on stderr.
     let cli = |verb: &[&str], code: i32| {
