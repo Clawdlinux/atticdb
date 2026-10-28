@@ -18,6 +18,17 @@ fn contents(result: &Value) -> Vec<&str> {
 }
 
 /// Checks a committed `memory_append` result. Returns its `seq`.
+fn js_safe(value: &Value) -> bool {
+    match value {
+        Value::Number(n) => {
+            n.as_i64().or(n.as_u64().map(|_| i64::MAX)).is_none_or(|n| n.abs() < 1 << 53)
+        }
+        Value::Array(items) => items.iter().all(js_safe),
+        Value::Object(fields) => fields.values().all(js_safe),
+        _ => true,
+    }
+}
+
 fn contents_of_hits(result: &Value) -> Vec<&str> {
     let hits = result["structuredContent"]["hits"].as_array().unwrap();
     hits.iter().map(|hit| hit["content"].as_str().unwrap()).collect()
@@ -313,7 +324,10 @@ fn tool_calls_over_stdio() {
     for line in stdout.lines() {
         let message: Value = serde_json::from_str(line).unwrap();
         assert_eq!(message["jsonrpc"], "2.0", "stdout holds only JSON-RPC: {line}");
+        // JavaScript clients fail on integers past 2^53: commit_time_ns must arrive as text.
+        assert!(js_safe(&message), "integer past 2^53 in: {line}");
     }
+    assert!(stdout.contains("\"commit_time_ns\":\""), "commit_time_ns kept, as a string");
     let hex_run = stdout.as_bytes().windows(32).any(|w| w.iter().all(u8::is_ascii_hexdigit));
     let hidden = !hex_run && !stdout.contains("idem") && !stdout.contains("if_lsn");
     assert!(hidden, "no retry key or condition reaches the model: {stdout}");

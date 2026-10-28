@@ -191,7 +191,10 @@ impl Adapter {
             "tools/call" if self.initialized => {
                 let name = params["name"].as_str().unwrap_or_default();
                 match self.call(name, &params["arguments"]) {
-                    Some(result) => result,
+                    Some(mut result) => {
+                        safe_integers(&mut result);
+                        result
+                    }
                     None => return Some(rpc_error(id, -32602, "unknown tool")),
                 }
             }
@@ -517,6 +520,24 @@ fn number(args: &Value, name: &str, default: u64) -> Result<u64, String> {
 }
 
 /// A tool result with one text block.
+/// Turns integers beyond ±(2^53 - 1), such as `commit_time_ns`, into strings. JavaScript
+/// clients can't hold them exactly, and some parse them as `BigInt`, which then fails to
+/// serialize. I-JSON (RFC 7493) allows only this range. Shell verbs keep the numbers.
+fn safe_integers(value: &mut Value) {
+    const MAX: u64 = (1 << 53) - 1;
+    match value {
+        Value::Number(number) => {
+            let too_big = number.as_u64().map(|n| n > MAX);
+            if too_big.or_else(|| number.as_i64().map(|n| n < -(MAX as i64))) == Some(true) {
+                *value = Value::String(number.to_string());
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(safe_integers),
+        Value::Object(fields) => fields.values_mut().for_each(safe_integers),
+        _ => {}
+    }
+}
+
 fn answer(text: String, structured: Value) -> Value {
     json!({"content": [{"type": "text", "text": text}], "structuredContent": structured})
 }
