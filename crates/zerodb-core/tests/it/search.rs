@@ -212,6 +212,13 @@ fn sessions_and_records_list_what_a_tenant_wrote() {
             2,
             &["total 3 6: agent/s1=3 agent/s2=2", "total 3 6: bot/s1=1"][..],
         ),
+        ("a full last page has no next", "tenant", 3, &listed[..]),
+        (
+            "1 per page with the cursor",
+            "tenant",
+            1,
+            &["total 3 6: agent/s1=3", "total 3 6: agent/s2=2", "total 3 6: bot/s1=1"][..],
+        ),
         ("1 page", "tenant", 1000, &listed[..]),
         ("tenant B sees none of A's", "other", 100, &["total 1 1: agent/s1=1"][..]),
         ("an unknown tenant", "nobody", 100, &["total 0 0:"][..]),
