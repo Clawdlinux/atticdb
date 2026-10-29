@@ -31,7 +31,12 @@ def log():
         with open(path, "a") as f:
             f.write(json.dumps({"prog": PROG, "argv": ARGS, "cwd": os.getcwd(),
                                 "zerodb_home": bool(os.environ.get("ZERODB_HOME")),
-                                "api_keys": sorted(k for k in ACCOUNT_ENV if k in os.environ)}) + "\n")
+                                "api_keys": sorted(k for k in ACCOUNT_ENV if k in os.environ),
+                                "git_env": sorted(k for k in os.environ if k.startswith("GIT_")),
+                                "outside_home": sorted(
+                                    k for k in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "COPILOT_HOME")
+                                    if not os.environ.get(k, os.environ["HOME"]).startswith(os.environ["HOME"]))})
+                    + "\n")
 
 
 def read_json(path, default):

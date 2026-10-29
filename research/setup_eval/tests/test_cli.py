@@ -192,3 +192,22 @@ def test_batch_warns_on_changes_to_user_config_and_the_parent_zerodb_home(monkey
     assert cli.batch(a, cli.config(a.zerodb), out=lines.append) == 0
     assert "WARNING" not in "\n".join(lines)
     assert "The top level of ~/.claude*, ~/.codex and ~/.copilot did not change" in "\n".join(lines)
+
+
+def test_inherited_git_vars_are_dropped_before_extra():
+    base = {"PATH": "/bin", "GIT_DIR": "/real/.git", "GIT_WORK_TREE": "/real", "GIT_INDEX_FILE": "/real/.git/index",
+            "GIT_SSH_COMMAND": "ssh -i k", "GIT_CONFIG_GLOBAL": "/real/gitconfig", "GITHUB_TOKEN": "kept-by-name"}
+    kw = dict(home="/h", zerodb_home="/r/zh", claude_dir="/e/claude", codex_dir="/e/codex")
+    env = agents.child_env(base, **kw)
+    assert not any(k.startswith("GIT_") for k in env), "no inherited GIT_* reaches any child"
+    assert env["GITHUB_TOKEN"] == "kept-by-name", "only the GIT_ prefix is dropped"
+    env = agents.child_env(base, extra=agents.git_env(), **kw)
+    assert env["GIT_CONFIG_GLOBAL"] == os.devnull and "GIT_DIR" not in env and "GIT_WORK_TREE" not in env
+
+
+def test_fake_home_overrides_the_users_config_locations(monkeypatch, tmp_path):
+    for name in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "COPILOT_HOME"):
+        monkeypatch.setenv(name, "/Users/someone/real")
+    paths = fake_home(monkeypatch, tmp_path)
+    for name in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "COPILOT_HOME"):
+        assert os.environ[name].startswith(paths["home"] + os.sep), name

@@ -1,4 +1,5 @@
 import builtins
+import stat
 import os
 import sys
 
@@ -234,7 +235,8 @@ def test_config_snapshot_stats_the_top_level_without_opening(home, monkeypatch, 
     before = guard.config_snapshot(home)
     monkeypatch.undo()
     assert sorted(before) == ["~/.claude", "~/.claude.json", "~/.claude/projects", "~/.claude/settings.json",
-                              "~/.codex", "~/.copilot", "~/.copilot/a"], "top level only, through a link"
+                              "~/.codex", "~/.copilot", "~/.copilot (link target)", "~/.copilot/a"], \
+        "top level only, through a link"
     assert before["~/.claude/settings.json"][1] == 2
     with open(os.path.join(home, ".claude", "settings.json"), "w") as f:
         f.write('{"x": 1}')
@@ -254,3 +256,24 @@ def test_watched_data_dirs_add_the_parent_zerodb_home():
     assert "/z/home" not in dirs[1][0], "the label holds no env value"
     assert len(guard.watched_data_dirs(dict(env, ZERODB_HOME="rel"))) == 1
     assert len(guard.watched_data_dirs(dict(env, ZERODB_HOME=""))) == 1
+
+
+def test_config_snapshot_sees_writes_behind_a_link(home, tmp_path):
+    target = tmp_path / "dotfiles" / "claude.json"
+    target.parent.mkdir()
+    target.write_text("{}")
+    os.symlink(target, os.path.join(home, ".claude.json"))
+    real_dir = tmp_path / "dotfiles" / "claude"
+    real_dir.mkdir()
+    (real_dir / "settings.json").write_text("{}")
+    os.makedirs(os.path.join(home, ".claude"))
+    os.symlink(real_dir / "settings.json", os.path.join(home, ".claude", "settings.json"))
+    before = guard.config_snapshot(home)
+    assert before["~/.claude.json"][0] == stat.S_IFLNK, "the link's own stat"
+    assert before["~/.claude.json (link target)"][:2] == (stat.S_IFREG, 2), "and its target's"
+    assert "~/.claude/settings.json (link target)" in before, "links inside a dir too"
+    # Writes behind both links leave the links' own stats as they were.
+    target.write_text('{"a": 1}')
+    (real_dir / "settings.json").write_text('{"b": 2}')
+    changed = guard.compare(before, guard.config_snapshot(home))
+    assert changed == ["~/.claude.json (link target)", "~/.claude/settings.json (link target)"]

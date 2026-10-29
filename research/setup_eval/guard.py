@@ -218,11 +218,19 @@ def _stat(path: str, follow: bool = False) -> tuple:
     return (stat.S_IFMT(st.st_mode), st.st_size, st.st_mtime_ns)
 
 
+def _record(out: dict, label: str, path: str) -> None:
+    """The entry's own stat, and for a symlink also its target's, through `os.stat`, so a
+    write behind the link shows. Stats only."""
+    out[label] = _stat(path)
+    if os.path.islink(path):
+        out[f"{label} (link target)"] = _stat(path, follow=True)
+
+
 def config_snapshot(home: str) -> dict[str, tuple]:
     """The top level of the user's own agent config, as label -> (type, size, mtime_ns): each
     `~/.claude*` entry (`~/.claude.json` too), `~/.codex` and `~/.copilot`, and each entry
-    directly inside those that are dirs. Names and stats only: no file is opened, and no
-    dir below the top level is listed."""
+    directly inside those that are dirs. A symlink also records its target's stat. Names and
+    stats only: no file is opened, and no dir below the top level is listed."""
     out: dict[str, tuple] = {}
     try:
         entries = own_entries(home)
@@ -230,13 +238,13 @@ def config_snapshot(home: str) -> dict[str, tuple]:
         return {"~": ("unlistable",)}
     for entry in entries:
         label = "~/" + os.path.basename(entry)
-        out[label] = _stat(entry)
+        _record(out, label, entry)
         if not os.path.isdir(entry):  # follows a link to a dir
             continue
         try:
             with os.scandir(entry) as it:
                 for child in it:
-                    out[f"{label}/{child.name}"] = _stat(child.path)
+                    _record(out, f"{label}/{child.name}", child.path)
         except OSError as e:
             out[f"{label}/"] = ("unlistable", e.errno)
     return out

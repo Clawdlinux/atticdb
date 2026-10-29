@@ -38,6 +38,13 @@ def rows(path) -> list[dict]:
 
 def test_full_batch_with_stub_agents(monkeypatch, tmp_path, short_tmp, capsys):
     paths = fake_home(monkeypatch, tmp_path)
+    # A decoy repo that inherited git vars point at. No step may touch it.
+    decoy = tmp_path / "decoy"
+    subprocess.run(["git", "init", "-q", str(decoy)], check=True, timeout=30)
+    monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(decoy))
+    monkeypatch.setenv("GIT_INDEX_FILE", str(decoy / ".git" / "index"))
+    decoy_before = sorted(p.relative_to(decoy) for p in decoy.rglob("*"))
     for name in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "OPENAI_API_KEY",
                  "OPENAI_BASE_URL"):
         monkeypatch.setenv(name, "v")
@@ -61,6 +68,7 @@ def test_full_batch_with_stub_agents(monkeypatch, tmp_path, short_tmp, capsys):
             assert r["setup_exit"] == "0" and r["parse_ok"] == "1" and r["date"]
             assert r["input_tokens"] == "1110" and r["cache_read_tokens"] == "1000" and r["output_tokens"] == "20"
             assert "reply=" in r["notes"] and "/tmp/zse-t-" not in r["notes"]
+    assert sorted(p.relative_to(decoy) for p in decoy.rglob("*")) == decoy_before, "the decoy repo is untouched"
     # Nothing is left: no temp root, no server, and the eval config dirs hold no zerodb part.
     assert os.listdir(short_tmp) == []
     assert servers_under(short_tmp) == []
@@ -80,7 +88,8 @@ def test_full_batch_with_stub_agents(monkeypatch, tmp_path, short_tmp, capsys):
     first = agent_calls[0]["argv"]
     assert first[0] == "-p" and first[-3:] == ["--permission-mode", "acceptEdits",
                                                "--allowedTools=mcp__zerodb__fact_set"]
-    assert all(c["zerodb_home"] and c["api_keys"] == [] for c in stub_calls(paths["log"]))
+    assert all(c["zerodb_home"] and c["api_keys"] == [] and c["git_env"] == [] and c["outside_home"] == []
+               for c in stub_calls(paths["log"]))
     assert "Every child had ZERODB_HOME set under its own run root" in text
     assert "real zerodb home's data dir did not change" in text
 

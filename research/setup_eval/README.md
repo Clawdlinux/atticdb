@@ -31,7 +31,8 @@ Then it seeds the store, and runs `zerodb disconnect <h>` and `zerodb setup --ye
 It names 1 harness at a time, so `connect vscode` and `connect copilot` never run.
 After the agent, it runs `zerodb disconnect <h>`, stops the zerodb server the run started, and deletes the root.
 
-Every child gets the inherited env without `ZERODB_*`, `CLAUDE_CONFIG_DIR` and `CODEX_HOME`, then the run's own values.
+Every child gets the inherited env without `ZERODB_*`, `GIT_*`, `CLAUDE_CONFIG_DIR` and `CODEX_HOME`, then the run's own values.
+Dropping `GIT_*` keeps an inherited `GIT_DIR`, `GIT_WORK_TREE` or `GIT_INDEX_FILE` from pointing the fixture's git steps at a real repo.
 It also drops the credential and provider vars, so runs use the logins in the eval dirs and nothing else:
 
 - credentials: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`, `CODEX_API_KEY`;
@@ -39,14 +40,14 @@ It also drops the credential and provider vars, so runs use the logins in the ev
 
 `--keep-api-keys` passes them all on.
 The harness refuses to start any child whose `ZERODB_HOME` is not under its run root, after both resolve, so a link that points out is refused.
-The harness's own git calls skip the user's git config.
+The harness's own git calls then get their own `GIT_*` vars, which skip the user's git config.
 
 The real zerodb home and the user's own agent config are never used.
 Before and after a batch, the harness records, by stat only:
 
 - the size and mtime of each file in the default zerodb home's `data/` dir. On macOS that is `~/Library/Application Support/zerodb/data`. On Linux it is `$XDG_DATA_HOME/zerodb/data`, else `~/.local/share/zerodb/data`;
 - the same for `$ZERODB_HOME/data`, when the parent env sets `ZERODB_HOME`;
-- the names, sizes and mtimes at the top level of each `~/.claude*` entry, `~/.claude.json` included, `~/.codex` and `~/.copilot`.
+- the names, sizes and mtimes at the top level of each `~/.claude*` entry, `~/.claude.json` included, `~/.codex` and `~/.copilot`. A symlink records its own stat and its target's.
 
 It never opens a file, and lists no dir below the top level.
 If anything changed, it prints a warning. That is not a failure, as another session may write there.
@@ -69,7 +70,7 @@ python3 -m research.setup_eval run --harness both --scenarios S1,S2,S3,S4,B1,B2 
 python3 -m pytest research/setup_eval/tests
 ```
 
-The end-to-end test runs the real zerodb with stub agents. It uses `$ZERODB_BIN`, else `target/debug/zerodb`, and is skipped when neither exists.
+The end-to-end test runs the real zerodb with stub agents, in a fake home. `XDG_*` and `COPILOT_HOME` point into it, so setup can't read the user's harness files. It uses `$ZERODB_BIN`, else `target/debug/zerodb`, and is skipped when neither exists.
 
 `check` runs `claude auth status` and `codex login status` on the eval dirs, 20 s each.
 It prints only whether each is logged in, never their output.

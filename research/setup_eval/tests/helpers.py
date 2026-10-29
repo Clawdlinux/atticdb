@@ -27,8 +27,8 @@ def install_stubs(bin_dir) -> None:
 
 
 def fake_home(monkeypatch, tmp_path, make_eval_dirs: bool = True) -> dict:
-    """HOME in tmp_path, stubs first on a PATH with only system dirs after them, and a stub log.
-    Nothing under the user's real home is used."""
+    """HOME in tmp_path, the XDG dirs and COPILOT_HOME inside it, stubs first on a PATH with
+    only system dirs after them, and a stub log. Nothing under the user's real home is used."""
     home = tmp_path / "home"
     home.mkdir()
     bin_dir = tmp_path / "bin"
@@ -37,7 +37,10 @@ def fake_home(monkeypatch, tmp_path, make_eval_dirs: bool = True) -> dict:
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
     monkeypatch.setenv("STUB_LOG", str(log))
-    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    # The real zerodb setup reads harness files through these, so they point into the fake home.
+    for name, rel in (("XDG_CONFIG_HOME", ".config"), ("XDG_DATA_HOME", ".local/share"),
+                      ("XDG_STATE_HOME", ".local/state"), ("XDG_CACHE_HOME", ".cache"), ("COPILOT_HOME", ".copilot")):
+        monkeypatch.setenv(name, str(home / rel))
     for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL",
                  "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "OPENAI_API_KEY", "CODEX_API_KEY",
                  "OPENAI_BASE_URL", "OPENAI_ORG_ID", "ZERODB_HOME", "ZERODB_TOKEN", "CLAUDE_CONFIG_DIR",
