@@ -371,11 +371,12 @@ fn setup_store_check_waits_for_a_starting_server() {
         format!("pid={} instance=X unix={} tcp=none\n", std::process::id(), socket.display());
     lock.write_all(holder.as_bytes()).unwrap();
     let late = socket.clone();
+    // Started first, so the server can't come up less than 8 s after it.
+    let started = Instant::now();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(8));
         support::slow_store(&late, Some(Duration::ZERO));
     });
-    let started = Instant::now();
     let (code, out, err) = setup(&home, &dir.0, &path, &[], &["--yes", "--harness", "codex"], "");
     let took = started.elapsed();
     drop(lock);
