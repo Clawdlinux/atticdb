@@ -230,7 +230,7 @@ The request count and the time spent fetching are capped. A row whose `trajector
 The sample cuts the rows into equal strata and takes 1 random run of rows per stratum, with seed 87.
 SWE-agent rows come grouped by instance: 100 consecutive rows held 8 instances. So SWE-agent takes 1 row from each of 1,000 strata.
 OpenHands rows are close to independent: 100 consecutive rows held 99 instances and 85 repos. The API allowed about 15 calls a minute.
-So OpenHands takes 10 consecutive rows from each of 100 strata. The bootstrap resamples instances in both.
+So OpenHands takes 10 consecutive rows from each of 100 strata. The bootstrap resamples instances for SWE-agent and sampled blocks for OpenHands.
 
 ## Threats to validity
 
@@ -256,7 +256,7 @@ We changed nothing in the data. The results are aggregate counts derived from it
 
 ## Tests
 
-`python3 -m pytest research/ctxcache/tests` runs in under 1 s, with no network and synthetic fixtures only.
+`python3 -m pytest research/ctxcache/tests` runs in about 3.5 s, with no network and synthetic fixtures only.
 - `test_bounds.py`: the bound property on 500 random tiny traces, and on every trace up to 6 accesses over 3 objects.
 - `test_policies.py`: hand-checked results per policy, with reuse distances, peak live and dead tokens.
 - `test_adapters.py`: 1 table per adapter, on rows shaped like the real ones.

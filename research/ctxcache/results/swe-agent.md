@@ -22,7 +22,7 @@ Every ratio is over proxy accesses: re-reads plus references inferred from later
 | Dead tokens (objects never accessed again) | 57.3% of object tokens. Files 47.1%, outputs 87.5% |
 | Reuse distance p50 / p90 / p99 | 171 / 1,633 / 5,334 tokens |
 | Peak live tokens per trajectory, p50 / p90, separate percentiles | 1,071 / 2,086. The optimum never misses at this budget |
-| Tool output tokens per trajectory, p50 / p90, separate percentiles | 6,032 / 20,331. The context with no eviction |
+| Tool output tokens per trajectory, p50 / p90, separate percentiles | 6,032 / 20,331. All tool output the trace records |
 | Tool output over peak live, per trajectory, p50 / p90 | 5.8x / 16.9x, over the 987 trajectories that reuse anything. 13 reuse nothing |
 | The 10 trajectories with the most proxy-access tokens | hold 8.6% of them |
 | Message tokens, all trajectories | 3,940,279, outside the model (tool output: 9,063,846) |

@@ -31,7 +31,8 @@ Intervals are 95%, from 1,000 bootstrap resamples of instances (SWE-agent), samp
 | Trajectories that reuse nothing | 13 | 0 | 14 |
 | The 10 largest trajectories' share of proxy-access tokens | 8.6% | 5.2% | 100.0% |
 
-Peak live tokens is the budget at which the optimum never misses. The tool output over peak live row pairs each trajectory with itself.
+Peak live tokens is the budget at which the optimum never misses, under the proxy model. Tool output tokens is the tool-output volume a trace records.
+The tool output over peak live row pairs each trajectory with itself.
 
 Proxy-access tokens by subtype:
 
@@ -114,9 +115,9 @@ On the public sets these budgets hold nearly every trajectory's live set. Our lo
 
 ## Finding
 
-On these observed traces, an offline oracle needs a small part of the context the agents carry. Recency policies at that size miss several times more.
+Under the proxy model, an offline oracle needs a small part of the tool-output volume recorded in these traces. Recency policies at that size miss several times more.
 
-- On OpenHands, each trajectory's tool output is 28.0x its own peak live tokens at p50, and 85.6x at p90.
+- On OpenHands, the tool-output volume each trajectory records is 28.0x its own peak live tokens at p50, and 85.6x at p90.
 - At 4K, LRU misses 44.1% of proxy-access tokens. The optimum misses between 9.1% and 13.2%, so LRU misses 3.3 to 4.8 times as much. Macro, it is 35.9% against 4.2% to 6.0%.
 - At 8K, LRU misses 29.9%, against at most 1.0%.
 - From 1K to 8K, FIFO, both clearing variants and GDSF miss between 0.4 points less and 7.2 points more than LRU. None comes near the optimum.
@@ -130,7 +131,7 @@ Caveats, in order of weight:
 - **The proxy drives OpenHands.** Inferred references hold 98% of its proxy-access tokens: `run` 42.7% and `edit_span` 40.0%. The narrower proxies agree, but none is validated yet. `label-sample` writes a sheet for a human to label.
 - **The agent's own content is outside the model.** 8,218 OpenHands uses name a file with no view of its version, mostly scripts the agent wrote.
 - **Stored trajectories may differ from what the model saw.** 5 OpenHands rows hit the 100-iteration cap with only 63 to 98 assistant messages. The condenser probably ran.
-- **The budget holds tool output only.** Message tokens are another 14.1M on OpenHands, against 37.6M of tool output.
+- **Tool output is not the whole context.** The comparisons above count recorded tool output only. Message tokens are another 14.1M on OpenHands, against 37.6M of tool output. Fixed overhead is outside both.
 - **Our logs are descriptive only.** 21 sessions from 1 user. 7 reuse anything, and leaving out 1 moves LRU at 4K between 42.2% and 58.8%.
 
 ## Changes since the first draft

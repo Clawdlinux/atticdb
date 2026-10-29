@@ -21,7 +21,7 @@ Descriptive only: 21 sessions from 1 user. The intervals resample these sessions
 | Dead tokens (objects never accessed again) | 90.6% of object tokens. Files 67.0%, outputs 100.0% |
 | Reuse distance p50 / p90 / p99 | 3,499 / 107,083 / 267,568 tokens |
 | Peak live tokens per trajectory, p50 / p90, separate percentiles | 0 / 8,002. The optimum never misses at this budget |
-| Tool output tokens per trajectory, p50 / p90, separate percentiles | 9,278 / 427,863. The context with no eviction |
+| Tool output tokens per trajectory, p50 / p90, separate percentiles | 9,278 / 427,863. All tool output the trace records |
 | Tool output over peak live, per trajectory, p50 / p90 | 72.6x / 83.3x, over the 7 trajectories that reuse anything. 14 reuse nothing |
 | The 10 trajectories with the most proxy-access tokens | hold 100.0% of them |
 | Message tokens, all trajectories | 501,469, outside the model (tool output: 2,127,542) |

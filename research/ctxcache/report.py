@@ -59,7 +59,7 @@ def summarize(recs: Sequence[dict], distances: Sequence[int], skipped: dict) -> 
     get = s.__getitem__
     d = sorted(distances)
     per = lambda k, q: percentile(sorted(r["counts"][k] for r in recs), q)  # noqa: E731
-    # Each trajectory's own carry over its own peak live, not a ratio of 2 marginals.
+    # Each trajectory's recorded tool output over its own peak live, not a ratio of 2 marginals.
     paired = sorted(r["counts"]["output_tokens_seen"] / r["counts"]["peak_live"]
                     for r in recs if r["counts"]["peak_live"] > 0)
     out = {
@@ -309,7 +309,7 @@ def markdown(rows: list[dict], sens: list[dict], s: dict, meta: dict) -> str:
         f"| Peak live tokens per trajectory, p50 / p90, separate percentiles | {num(s['peak_live_p50'])} / "
         f"{num(s['peak_live_p90'])}. The optimum never misses at this budget |",
         f"| Tool output tokens per trajectory, p50 / p90, separate percentiles | {num(s['context_p50'])} / "
-        f"{num(s['context_p90'])}. The context with no eviction |",
+        f"{num(s['context_p90'])}. All tool output the trace records |",
         f"| Tool output over peak live, per trajectory, p50 / p90 | {_x(s['carry_over_peak_p50'])} / "
         f"{_x(s['carry_over_peak_p90'])}, over the {num(s['carry_over_peak_n'])} trajectories that reuse "
         f"anything. {num(s['no_reuse'])} reuse nothing |",
