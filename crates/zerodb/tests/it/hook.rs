@@ -18,7 +18,8 @@ fn slow_server(home: &Path) {
 
 /// The block lists rules, then this repo's facts, both in key order, then the newest 5
 /// turns of the repo's session from both Copilot agents and the shell verbs, oldest first.
-/// A worktree gets its main repo's block. Stdin stays open.
+/// A worktree gets its main repo's block, and a table of layouts names its repos. Stdin
+/// stays open.
 #[test]
 fn session_start_prints_the_memory_block() {
     let dir = Dir::new();
@@ -89,6 +90,107 @@ fn session_start_prints_the_memory_block() {
         let out: Value =
             serde_json::from_str(&hook(&home, &cwd(&home.join(chat)), 0, &[]).0).unwrap();
         assert_eq!(out, json!({"additionalContext": block}), "{chat}");
+    }
+
+    // The hook, the shell verbs and MCP roots name repos by `home::repo`. Each layout puts
+    // its files in its own folder. A path ending in `/` is a directory. `{dir}` in a text is
+    // the layout's folder. Every directory listed must get the name.
+    let layouts = [
+        ("plain repo", vec![("app/.git/", "")], vec!["app/src"], "app"),
+        (
+            "worktree, relative paths",
+            vec![
+                ("app/.git/worktrees/wt/commondir", "../..\n"),
+                ("wt/.git", "gitdir: ../app/.git/worktrees/wt\n"),
+            ],
+            vec!["wt/src"],
+            "app",
+        ),
+        (
+            "worktree, absolute paths",
+            vec![
+                ("app/.git/worktrees/wt/commondir", "{dir}/app/.git\n"),
+                ("wt/.git", "gitdir: {dir}/app/.git/worktrees/wt\n"),
+            ],
+            vec!["wt"],
+            "app",
+        ),
+        (
+            "submodule",
+            vec![
+                ("app/.git/modules/library/", ""),
+                ("app/lib/.git", "gitdir: ../.git/modules/library\n"),
+            ],
+            vec!["app/lib"],
+            "lib",
+        ),
+        (
+            "malformed .git file",
+            vec![
+                ("app/.git/worktrees/wt/commondir", "../..\n"),
+                ("wt/.git", "../app/.git/worktrees/wt\n"),
+            ],
+            vec!["wt"],
+            "wt",
+        ),
+        (
+            "common dir gone",
+            vec![
+                ("app/.git/worktrees/wt/commondir", "{dir}/gone/.git\n"),
+                ("wt/.git", "gitdir: {dir}/app/.git/worktrees/wt\n"),
+            ],
+            vec!["wt"],
+            "wt",
+        ),
+        (
+            "commondir names a file",
+            vec![
+                ("app/config.json", "{}\n"),
+                ("app/.git/worktrees/wt/commondir", "../../../config.json\n"),
+                ("wt/.git", "gitdir: {dir}/app/.git/worktrees/wt\n"),
+            ],
+            vec!["wt"],
+            "wt",
+        ),
+        (
+            "bare common dir",
+            vec![
+                ("app.git/worktrees/wt/commondir", "../..\n"),
+                ("wt/.git", "gitdir: {dir}/app.git/worktrees/wt\n"),
+            ],
+            vec!["wt"],
+            "app",
+        ),
+        (
+            // `git clone --bare <url> proj/.bare`, then `gitdir: ./.bare` in `proj/.git`.
+            "bare common dir named with a dot",
+            vec![
+                ("proj/.bare/worktrees/feature/commondir", "../..\n"),
+                ("proj/.git", "gitdir: ./.bare\n"),
+                ("proj/feature/.git", "gitdir: {dir}/proj/.bare/worktrees/feature\n"),
+            ],
+            vec!["proj", "proj/feature"],
+            "proj",
+        ),
+        ("no .git", vec![], vec!["app/src"], "src"),
+    ];
+    for (n, (case, files, dirs, name)) in layouts.into_iter().enumerate() {
+        let folder = dir.0.join("layouts").join(n.to_string());
+        for (path, text) in files {
+            match path.strip_suffix('/') {
+                Some(path) => std::fs::create_dir_all(folder.join(path)).unwrap(),
+                None => {
+                    let path = folder.join(path);
+                    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    std::fs::write(path, text.replace("{dir}", folder.to_str().unwrap())).unwrap();
+                }
+            }
+        }
+        for path in dirs {
+            std::fs::create_dir_all(folder.join(path)).unwrap();
+            let found = zerodb::home::repo(&folder.join(path));
+            assert_eq!(found.as_deref(), Some(name), "{case}: {path}");
+        }
     }
 
     // 100 facts of 300 characters pass the cap, which stops at a whole line.

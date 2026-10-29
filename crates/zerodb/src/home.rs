@@ -42,15 +42,16 @@ pub fn repo(dir: &Path) -> Option<String> {
 }
 
 /// The main repo's name when `git`, a `.git` entry, is a worktree's file `gitdir: <dir>`
-/// and `<dir>/commondir` names the common git dir. A common dir named `.git` gives its
-/// parent's name. Any other gives its own name, without a `.git` suffix. `None` for a
-/// `.git` directory, a file without `commondir` such as a submodule's, or anything
-/// unreadable.
+/// and `<dir>/commondir` names the common git dir. A common dir whose name starts with `.`,
+/// such as `.git` or a bare `.bare`, gives its parent's name. Any other gives its own name,
+/// without a `.git` suffix. `None` for a `.git` directory, a file without `commondir` such
+/// as a submodule's, a common dir that is not a directory, or anything unreadable.
 fn main_repo(git: &Path) -> Option<String> {
     let git_dir = path_in(git, "gitdir: ")?;
-    let common = std::fs::canonicalize(path_in(&git_dir.join("commondir"), "")?).ok()?;
+    let common = path_in(&git_dir.join("commondir"), "")?;
+    let common = std::fs::canonicalize(common).ok().filter(|common| common.is_dir())?;
     let name = common.file_name()?.to_str()?;
-    if name == ".git" {
+    if name.starts_with('.') {
         return common.parent()?.file_name()?.to_str().map(str::to_owned);
     }
     Some(name.strip_suffix(".git").unwrap_or(name).to_owned())
@@ -152,93 +153,4 @@ fn publish(dir: &Path, config: &Path) -> Result<(), String> {
     };
     let _ = std::fs::remove_file(&tmp);
     linked
-}
-
-#[cfg(test)]
-mod tests {
-    #![allow(clippy::unwrap_used)]
-
-    /// Each row lays out files in its own folder, then names the repo of 1 directory there.
-    #[test]
-    fn repo_names_a_worktree_after_its_main_repo() {
-        let scratch = std::env::temp_dir().join(format!("zerodb-repo-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&scratch);
-        // (case, files with their text, the directory, its repo name). A path ending in `/`
-        // is a directory. `{dir}` in a text is the row's folder.
-        let rows = [
-            ("plain repo", vec![("app/.git/", "")], "app/src", "app"),
-            (
-                "worktree, relative commondir",
-                vec![
-                    ("app/.git/worktrees/wt/commondir", "../..\n"),
-                    ("wt/.git", "gitdir: ../app/.git/worktrees/wt\n"),
-                ],
-                "wt/src",
-                "app",
-            ),
-            (
-                "worktree, absolute commondir",
-                vec![
-                    ("app/.git/worktrees/wt/commondir", "{dir}/app/.git\n"),
-                    ("wt/.git", "gitdir: {dir}/app/.git/worktrees/wt\n"),
-                ],
-                "wt",
-                "app",
-            ),
-            (
-                "submodule",
-                vec![
-                    ("app/.git/modules/library/", ""),
-                    ("app/lib/.git", "gitdir: ../.git/modules/library\n"),
-                ],
-                "app/lib",
-                "lib",
-            ),
-            (
-                "malformed .git file",
-                vec![
-                    ("app/.git/worktrees/wt/commondir", "../..\n"),
-                    ("wt/.git", "../app/.git/worktrees/wt\n"),
-                ],
-                "wt",
-                "wt",
-            ),
-            (
-                "common dir gone",
-                vec![
-                    ("app/.git/worktrees/wt/commondir", "{dir}/gone/.git\n"),
-                    ("wt/.git", "gitdir: {dir}/app/.git/worktrees/wt\n"),
-                ],
-                "wt",
-                "wt",
-            ),
-            (
-                "bare common dir",
-                vec![
-                    ("app.git/worktrees/wt/commondir", "../..\n"),
-                    ("wt/.git", "gitdir: {dir}/app.git/worktrees/wt\n"),
-                ],
-                "wt",
-                "app",
-            ),
-            ("no .git", vec![], "app/src", "src"),
-        ];
-        for (n, (case, files, dir, name)) in rows.into_iter().enumerate() {
-            let folder = scratch.join(n.to_string());
-            for (path, text) in files {
-                match path.strip_suffix('/') {
-                    Some(path) => std::fs::create_dir_all(folder.join(path)).unwrap(),
-                    None => {
-                        let path = folder.join(path);
-                        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-                        let text = text.replace("{dir}", folder.to_str().unwrap());
-                        std::fs::write(path, text).unwrap();
-                    }
-                }
-            }
-            std::fs::create_dir_all(folder.join(dir)).unwrap();
-            assert_eq!(super::repo(&folder.join(dir)).as_deref(), Some(name), "{case}");
-        }
-        std::fs::remove_dir_all(&scratch).unwrap();
-    }
 }

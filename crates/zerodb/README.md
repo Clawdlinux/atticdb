@@ -121,8 +121,8 @@ Until then, or without roots, it is the repo of the current directory. The shell
 The repo is the name of the first directory up with a `.git` entry, else of that directory.
 A worktree takes its main repo's name, so both share memory. Its `.git` file reads `gitdir: <dir>`.
 The file `<dir>/commondir` names the common git dir. A relative path in either file counts from that file's folder.
-A common dir named `.git` gives its parent's name. Any other gives its own name without `.git`, as for a bare repo.
-A `.git` file without `commondir`, as in a submodule, keeps its folder's name. So does a file that can't be read or parsed.
+A common dir whose name starts with `.`, such as `.git` or a bare `.bare`, gives its parent's name. Any other gives its own name without `.git`, as for a bare repo.
+A `.git` file without `commondir`, as in a submodule, keeps its folder's name. So does a common dir that is not a directory, or anything that can't be read or parsed.
 For the current directory, it is `default` when that cannot be read or has no UTF-8 name.
 The adapter sends `roots/list` after `notifications/initialized`, and again on `notifications/roots/list_changed`.
 With `--session`, it asks for no roots.
