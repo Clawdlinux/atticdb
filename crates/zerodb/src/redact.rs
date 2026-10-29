@@ -18,19 +18,6 @@ const MIN_ENV: usize = 12;
 /// Env names that hold secrets end in one of these, compared in upper case.
 const ENV_ENDS: [&str; 4] = ["_KEY", "_TOKEN", "_SECRET", "_PAT"];
 
-/// The types of the known formats.
-const TYPES: [&str; 9] = [
-    "github-token",
-    "aws-key-id",
-    "slack-token",
-    "stripe-key",
-    "anthropic-key",
-    "openai-key",
-    "private-key",
-    "bearer-token",
-    "url-password",
-];
-
 /// Prefixes, the bytes that may follow, the fewest of them, and the type. The first match
 /// wins, so `sk-ant-` comes before `sk-`.
 type Token = (&'static [&'static str], fn(u8) -> bool, usize, &'static str);
@@ -135,19 +122,11 @@ fn scan(
     String::from_utf8(out).unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into())
 }
 
-/// The length of the format placeholder, such as `[secret:github-token]`, that `rest` starts
-/// with. These hold no text from the input. Env placeholders do, so they don't count.
-fn placeholder(rest: &[u8]) -> Option<usize> {
-    let inner = rest.strip_prefix(b"[secret:")?;
-    let kind = TYPES.iter().find(|kind| inner.starts_with(kind.as_bytes()))?;
-    (inner.get(kind.len()) == Some(&b']')).then_some(b"[secret:".len() + kind.len() + 1)
-}
-
 /// `text` with the known formats hidden.
 fn formats(text: &str, counts: &mut Counts) -> String {
     let mut line = KeyLine::default();
     scan(text, |bytes, at, before| {
-        let (end, kind, with) = format_at(bytes, at, before, counts, &mut line)?;
+        let (end, kind, with) = format_at(bytes, at, before, &mut line)?;
         *counts.entry(kind.into()).or_default() += 1;
         Some((end, with))
     })
@@ -158,12 +137,11 @@ fn format_at(
     bytes: &[u8],
     at: usize,
     before: Option<u8>,
-    counts: &mut Counts,
     line: &mut KeyLine,
 ) -> Option<(usize, &'static str, String)> {
     let rest = &bytes[at..];
     if rest.starts_with(b"://") {
-        if let Some((end, with)) = url_password(bytes, at + 3, counts) {
+        if let Some((end, with)) = url_password(bytes, at + 3) {
             return Some((end, "url-password", with));
         }
     }
@@ -246,25 +224,24 @@ fn private_key(bytes: &[u8], at: usize, line: &mut KeyLine) -> Option<usize> {
 
 /// The URL password after the `://` that ends at `start`, as WHATWG splits it. The authority
 /// ends at the first `/`, `?`, `#` or whitespace. The userinfo is what comes before its last
-/// `@`. The password follows the first `:` in it outside a format placeholder. Any password
-/// but `[secret:url-password]` is replaced, and the user part is checked for formats. Returns
-/// where the `@` ends and the replacement from `://`.
-fn url_password(bytes: &[u8], start: usize, counts: &mut Counts) -> Option<(usize, String)> {
+/// `@`. Formats in it are hidden first, then the password follows its first `:`. A colon
+/// inside a placeholder counts too, so a second run splits the same way. Returns where the
+/// `@` ends and the replacement from `://`.
+fn url_password(bytes: &[u8], start: usize) -> Option<(usize, String)> {
     let stop = |byte: &u8| b"/?#".contains(byte) || byte.is_ascii_whitespace();
     let authority = bytes[start..].iter().position(stop).unwrap_or(bytes.len() - start);
     let at = bytes[start..start + authority].iter().rposition(|byte| *byte == b'@')?;
-    let userinfo = &bytes[start..start + at];
-    let mut colon = 0;
-    while colon < userinfo.len() && userinfo[colon] != b':' {
-        colon += placeholder(&userinfo[colon..]).unwrap_or(1);
-    }
-    let password = userinfo.get(colon + 1..).filter(|password| !password.is_empty())?;
-    if password == b"[secret:url-password]" {
+    // Both ends are ASCII bytes, so the userinfo is whole UTF-8.
+    let userinfo = formats(&String::from_utf8_lossy(&bytes[start..start + at]), &mut Counts::new());
+    let colon = userinfo.find(':')?;
+    let password = &userinfo[colon + 1..];
+    // Already hidden, as this writes it.
+    if password.is_empty() || password == "[secret:url-password]" {
         return None;
     }
-    // Both ends are ASCII bytes, so the user part is whole UTF-8.
-    let user = String::from_utf8_lossy(&userinfo[..colon]);
-    let user = formats(&user, counts);
+    // The user part holds no `:`, so no whole placeholder. The start of one goes too.
+    let user = &userinfo[..colon];
+    let user = user.strip_suffix("[secret").unwrap_or(user);
     Some((start + at + 1, format!("://{user}:[secret:url-password]@")))
 }
 
@@ -393,8 +370,8 @@ mod tests {
             (
                 "url, token as user",
                 url(&github, "x"),
-                "https://[secret:github-token]:[secret:url-password]@host/x",
-                "github-token=1 url-password=1",
+                "https://:[secret:url-password]@host/x",
+                "url-password=1",
             ),
             ("env", "a tok-12345678 b".into(), "a [secret:env:MY_TOKEN] b", "env:MY_TOKEN=1"),
             ("env, 11 bytes", "tok-1234567 ".into(), "", ""),
@@ -430,6 +407,24 @@ mod tests {
                 "url-password=1",
             ),
             ("url, empty password", "https://user:@host".into(), "", ""),
+            (
+                "url, placeholder then password",
+                format!("https://[secret:github-token]{}@host/x", "cleartext-password"),
+                "https://:[secret:url-password]@host/x",
+                "url-password=1",
+            ),
+            (
+                "url, token then more as user",
+                url(&format!("{github}_abc"), "pw"),
+                "https://:[secret:url-password]@host/x",
+                "url-password=1",
+            ),
+            (
+                "url, token as user and no password",
+                format!("https://{github}_abc@host/x"),
+                "https://:[secret:url-password]@host/x",
+                "url-password=1",
+            ),
             (
                 "a format right after a hidden one",
                 format!("{aws}{}\nabc", key("BEGIN")),
@@ -470,7 +465,7 @@ mod tests {
             (
                 "token in a placeholder in a url",
                 format!("x://[secret:env:{github}]:[secret:url-password]@h"),
-                "x://[secret:[secret:url-password]@h",
+                "x://:[secret:url-password]@h",
                 "url-password=1",
             ),
         ];

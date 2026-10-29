@@ -495,14 +495,23 @@ fn guide_text() -> String {
     )
 }
 
-/// Another `*.instructions.md` file in `dir` that mentions zerodb, in any case. A backup,
-/// such as `*.instructions.md.bak-1`, doesn't count.
+/// The most of another instructions file read to look for `zerodb`.
+const GUIDE_READ: u64 = 1 << 20;
+
+/// Another `*.instructions.md` file in `dir` that mentions zerodb, in any case, in its first
+/// [`GUIDE_READ`] bytes. A backup, such as `*.instructions.md.bak-1`, doesn't count. Only
+/// regular files are read, so a FIFO can't block.
 fn other_guide(dir: &Path) -> Option<PathBuf> {
     let mut names: Vec<_> = std::fs::read_dir(dir).ok()?.flatten().map(|e| e.file_name()).collect();
     names.sort();
     names.into_iter().map(|name| dir.join(name)).find(|path| {
         let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
-        let bytes = || std::fs::read(path).unwrap_or_default().to_ascii_lowercase();
+        let bytes = || {
+            let mut bytes = Vec::new();
+            let file = crate::config::open_regular(OpenOptions::new().read(true), path);
+            let _ = file.and_then(|file| file.take(GUIDE_READ).read_to_end(&mut bytes));
+            bytes.to_ascii_lowercase()
+        };
         name.ends_with(".instructions.md") && name != GUIDE && find(&bytes(), b"zerodb")
     })
 }

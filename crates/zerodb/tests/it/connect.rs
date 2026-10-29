@@ -1,4 +1,4 @@
-use crate::support::{self, chmod, files, Dir, Process};
+use crate::support::{self, chmod, files, mkfifo, Dir, Process};
 use serde_json::{json, Value};
 use std::os::unix::fs::MetadataExt;
 use std::process::Stdio;
@@ -280,6 +280,9 @@ fn connect_writes_the_session_start_hook() {
         let backup = instructions.join("zerodb-memory.instructions.md.bak-1");
         std::fs::write(&other, "Save notes in ZeroDB.\n").unwrap();
         std::fs::write(&backup, "zerodb").unwrap();
+        // A FIFO is not read, so it can't block connect.
+        let fifo = instructions.join("x.instructions.md");
+        mkfifo(&fifo);
         let out = run(&["connect", "copilot"]);
         let skipped = format!("skipped the zerodb instructions: {} already", other.display());
         assert!(out.contains(&skipped) && !guide.exists(), "{var:?}: {out}");
@@ -294,6 +297,7 @@ fn connect_writes_the_session_start_hook() {
         assert_eq!(std::fs::read_to_string(&guide).unwrap(), text.clone() + "my edit\n");
         std::fs::remove_file(&guide).unwrap();
         std::fs::remove_file(&backup).unwrap();
+        std::fs::remove_file(&fifo).unwrap();
 
         // The hook for another binary goes. A hook file with other content stays.
         let mut other = wanted.clone();
