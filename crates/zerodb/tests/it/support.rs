@@ -136,7 +136,8 @@ with open(path, "w") as f:
 /// "command", "args", "env", ...}, ...}`. With `FAKE_CODEX=mismatch`, it shows another
 /// command. With `FAKE_CODEX=garbage`, it prints text that isn't JSON. With
 /// `FAKE_CODEX=fails`, it prints `$FAKE_CODEX_TOKEN` on stdout and stderr, as an error quoting
-/// the config would, and exits 1.
+/// the config would, and exits 1. With `FAKE_CODEX=edits`, it appends a table to `config.toml`,
+/// as Codex trusting a project would, then shows another command.
 pub fn fake_codex(bin: &Path) -> PathBuf {
     let path = std::env::var_os("PATH").unwrap_or_default();
     let python = std::env::split_paths(&path).map(|dir| dir.join("python3")).find(|p| p.is_file());
@@ -194,7 +195,10 @@ if server.get("default_tools_approval_mode", "auto") not in modes or any(
     tool.get("approval_mode", "auto") not in modes for tool in tools.values()
 ):
     sys.exit("Error loading config.toml: unknown approval mode")
-if mode == "mismatch":
+if mode == "edits":
+    with open(os.path.join(home, "config.toml"), "a") as f:
+        f.write('\n[projects."/edited"]\ntrust_level = "trusted"\n')
+if mode in ("mismatch", "edits"):
     server["command"] = "/elsewhere/zerodb"
 if mode == "garbage" or not as_json:
     print(name + "\n  enabled: true")

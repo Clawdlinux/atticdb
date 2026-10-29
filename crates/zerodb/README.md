@@ -316,6 +316,8 @@ With a block in the file, any other `mcp_servers.zerodb` setting, such as a `[mc
 After a write, `codex mcp get zerodb --json` must show the binary, `mcp --agent codex` and the home. That command only prints config.
 It runs in the config dir, so a project's `.codex/config.toml` can't answer. It has 10 s, as `claude` does above.
 If it shows something else, fails or prints no JSON, the file is put back: the backup is renamed over it, or a file zerodb made is deleted. The part fails.
+The file is put back only if it still holds exactly what zerodb wrote. If Codex changed it meanwhile, it stays as it is, and the line gives the backup's path to restore by hand.
+Removal advice never says to delete everything between the markers, as Codex may have put its own tables there. It says to remove the marker lines and the `[mcp_servers.zerodb]` and `[mcp_servers.zerodb.*]` tables, and keep the rest.
 Its output is never shown, as its env and its errors may hold secrets. A failure says `codex mcp get zerodb --json failed (exit <n>); run it yourself to see why`.
 Without `codex` on `PATH`, the block is written but not checked. The line says so, and the exit code stays 0.
 `disconnect` removes zerodb's bytes and the blank line before the block, with a backup. The tables Codex put inside stay, byte for byte. A `zerodb` server outside the block stays, which counts as skipped. So does a root `mcp_servers = { ... }` when there is no block, as it may hold `zerodb`.

@@ -318,6 +318,16 @@ fn without(text: &str, block: &Block) -> String {
 /// lines, after the file's path. Changing only the block would leave part of a server.
 const OUTSIDE: &str = "has mcp_servers.zerodb settings besides zerodb's own lines in its \
                        block, and zerodb doesn't edit them";
+/// How to remove zerodb's lines from the file at `shown` by hand. Codex may have put other
+/// tables between the markers, so they must stay.
+fn remove_ours(shown: impl std::fmt::Display) -> String {
+    format!(
+        "Remove the zerodb marker lines and the [mcp_servers.zerodb] and \
+         [mcp_servers.zerodb.*] tables from {shown} by hand, and keep anything else between \
+         the markers"
+    )
+}
+
 /// What to do then. Inside the block they would count as zerodb's, and a rewrite drops them.
 const TIDY: &str = "Remove them by hand, then re-run the command";
 
@@ -402,8 +412,8 @@ fn set_block(path: &Path, exe: &str, home: Option<&str>, notes: Notes) -> Line {
     })?;
     let found = find_block(&entries).map_err(|why| {
         skipped(format!(
-            "{shown}: {why}. Nothing changed. Remove the zerodb lines there by hand, then re-run \
-             zerodb connect codex"
+            "{shown}: {why}. Nothing changed. {}, then re-run zerodb connect codex",
+            remove_ours(&shown)
         ))
     })?;
     if found.is_some() && clash(&entries, found.as_ref()) == Some(Clash::Server) {
@@ -431,8 +441,8 @@ fn set_block(path: &Path, exe: &str, home: Option<&str>, notes: Notes) -> Line {
         }
         Some(block) => {
             let by_hand = format!(
-                "Remove zerodb's marker lines and mcp_servers.zerodb tables from {shown} by \
-                 hand, then add this block at its end:\n{}",
+                "{}, then add this block at its end:\n{}",
+                remove_ours(&shown),
                 wanted.trim_end()
             );
             (without(text, &block), "updated", by_hand)
@@ -455,9 +465,10 @@ fn set_block(path: &Path, exe: &str, home: Option<&str>, notes: Notes) -> Line {
         return Ok(format!("{done}, not verified: codex is not on PATH"));
     };
     let dir = path.parent().unwrap_or(Path::new("/"));
-    check(&codex, dir, exe, home)
-        .map(|()| done)
-        .map_err(|why| format!("MCP entry: failed, {why}. {}", restore(path, backup.as_deref())))
+    check(&codex, dir, exe, home).map(|()| done).map_err(|why| {
+        let undone = restore(path, backup.as_deref(), new.as_bytes());
+        format!("MCP entry: failed, {why}. {undone}")
+    })
 }
 
 /// Checks that `codex mcp get zerodb --json`, run in `dir`, shows zerodb's command and args
@@ -490,11 +501,26 @@ fn check(codex: &Path, dir: &Path, exe: &str, home: Option<&str>) -> Result<(), 
     Err(format!("{line} does not show {} mcp --agent {agent}{on}", json!(exe)))
 }
 
-/// Puts `path` back as it was before zerodb's write: renames `backup` over it, or deletes it
-/// when zerodb made it. Returns what to print.
-fn restore(path: &Path, backup: Option<&Path>) -> String {
+/// Puts `path` back as it was before zerodb wrote `written` there: renames `backup` over
+/// it, or deletes it when zerodb made it. A file that no longer holds `written` was changed
+/// since, say by Codex, so it stays as it is. Returns what to print.
+fn restore(path: &Path, backup: Option<&Path>, written: &[u8]) -> String {
     let shown = path.display();
     let parent = path.parent().unwrap_or(Path::new("/"));
+    if !matches!(read(path), Ok(Some((bytes, _))) if bytes == written) {
+        return match backup {
+            Some(backup) => format!(
+                "{shown} changed while zerodb was checking it, so zerodb didn't put it back. The \
+                 file as it was before zerodb wrote it is in {}, to restore by hand",
+                backup.display()
+            ),
+            None => format!(
+                "{shown} changed while zerodb was checking it, so zerodb didn't delete it, \
+                 though zerodb made it. {}",
+                remove_ours(&shown)
+            ),
+        };
+    }
     let undone = match backup {
         Some(backup) => std::fs::rename(backup, path)
             .map_err(|error| format!("{shown}: cannot restore {}: {error}", backup.display()))
@@ -522,7 +548,7 @@ fn restore(path: &Path, backup: Option<&Path>) -> String {
 /// Removes zerodb's bytes in its block from the `config.toml` at `path`, by [`without`].
 fn drop_block(path: &Path) -> Line {
     let shown = path.display();
-    let by_hand = format!("Remove zerodb's block, through its line {END}, from {shown} by hand");
+    let by_hand = remove_ours(&shown);
     let old = read(path).map_err(|why| format!("MCP entry: skipped, {shown} {why}. {by_hand}"))?;
     let Some((bytes, _)) = &old else { return Ok(format!("MCP entry: not found ({shown})")) };
     let text = std::str::from_utf8(bytes)
@@ -551,8 +577,8 @@ fn drop_block(path: &Path) -> Line {
         }
         Err(why) => {
             return Err(format!(
-                "MCP entry: skipped, {shown}: {why}. Nothing changed. Remove the zerodb lines \
-                 there by hand"
+                "MCP entry: skipped, {shown}: {why}. Nothing changed. {}",
+                remove_ours(&shown)
             ));
         }
     };

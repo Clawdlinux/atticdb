@@ -1547,6 +1547,44 @@ fn connect_codex_adds_its_parts() {
         }
     }
 
+    // codex changes config.toml while zerodb checks it, then shows another command. zerodb
+    // doesn't put the file back over that change: it keeps the backup, or a file it made, and
+    // says how to restore by hand.
+    let edit = "\n[projects.\"/edited\"]\ntrust_level = \"trusted\"\n";
+    for kept in [Some(CODEX_CONFIG), None] {
+        let home = dir.0.join(format!("e-{}", kept.is_some()));
+        let codex_dir = home.join(".codex");
+        let config = codex_dir.join("config.toml");
+        if let Some(kept) = kept {
+            std::fs::create_dir_all(&codex_dir).unwrap();
+            std::fs::write(&config, kept).unwrap();
+        }
+        let fake = [("FAKE_CODEX", Path::new("edits"))];
+        let (code, out) = run(&home, None, &bin, &fake, &["connect", "codex", "--no-hook"]);
+        assert_eq!(code, Some(1), "{out}");
+        assert!(out.starts_with("MCP entry: failed, codex mcp get zerodb --json does not show "));
+        let changed =
+            format!("{} changed while zerodb was checking it, so zerodb didn't ", config.display());
+        assert!(out.contains(&changed), "{out}");
+        let wrote = match kept {
+            Some(kept) => format!("{kept}\n{}", block(None, true)),
+            None => block(None, true),
+        };
+        assert_eq!(text(&config), format!("{wrote}{edit}"), "codex's edit stays");
+        valid(&config);
+        match kept {
+            Some(kept) => {
+                let backup = out.split("before zerodb wrote it is in ").nth(1).unwrap();
+                let backup = backup.split(", to restore by hand").next().unwrap();
+                assert_eq!(text(Path::new(backup)), kept, "the backup is kept");
+            }
+            None => {
+                let advice = "and the [mcp_servers.zerodb] and [mcp_servers.zerodb.*] tables";
+                assert!(out.contains(advice) && out.contains("keep anything else"), "{out}");
+            }
+        }
+    }
+
     // Marker lines that don't pair up skip the part in both verbs, and change nothing.
     let home = dir.0.join("k");
     let config = home.join(".codex/config.toml");
