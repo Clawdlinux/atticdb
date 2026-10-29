@@ -269,18 +269,22 @@ fn binary() -> Result<String, String> {
     exe.into_os_string().into_string().map_err(|_| "the zerodb binary's path must be UTF-8".into())
 }
 
-/// Whether `harness` looks installed: its config dir exists, or its program is on `PATH`.
-/// For VS Code, the dir is the profile that holds `mcp.json`. Nothing runs.
+/// Whether `harness` looks installed: its config exists, or its program is on `PATH`. For
+/// VS Code, that is the profile dir that holds `mcp.json`. Claude Code and Codex: their config
+/// dir. Copilot CLI: its `mcp-config.json` or `config.json`, not the dir, as connecting VS
+/// Code writes the shared hook and instructions there. Nothing runs.
 pub fn detect(harness: Harness) -> bool {
-    let (dir, program) = match harness {
+    let copilot = |name: &str| copilot_home().ok().map(|dir| dir.join(name));
+    let (paths, program) = match harness {
         Harness::Vscode => {
-            (harness.file().ok().and_then(|file| Some(file.parent()?.into())), "code")
+            (vec![harness.file().ok().and_then(|f| Some(f.parent()?.into()))], "code")
         }
-        Harness::Copilot => (copilot_home().ok(), "copilot"),
-        Harness::ClaudeCode => (claude::config_dir().ok(), "claude"),
-        Harness::Codex => (codex::codex_home().ok(), "codex"),
+        Harness::Copilot => (vec![copilot("mcp-config.json"), copilot("config.json")], "copilot"),
+        Harness::ClaudeCode => (vec![claude::config_dir().ok()], "claude"),
+        Harness::Codex => (vec![codex::codex_home().ok()], "codex"),
     };
-    dir.is_some_and(|dir: PathBuf| dir.exists()) || claude::find_program(program).is_some()
+    paths.into_iter().flatten().any(|path: PathBuf| path.exists())
+        || claude::find_program(program).is_some()
 }
 
 /// Connects `harness`, or in [`Mode::Plan`] says what that would do. Prints nothing.

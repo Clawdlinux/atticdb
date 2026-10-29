@@ -176,12 +176,17 @@ fn setup_asks_and_stops_without_answers() {
     let empty = dir.0.join("empty");
     std::fs::create_dir(&empty).unwrap();
     let empty = OsString::from(&empty);
+    // Only VS Code's program, so Copilot CLI is found only by its own files.
+    let code_only = dir.0.join("code-only");
+    std::fs::create_dir(&code_only).unwrap();
+    fake_program(&code_only, "code");
+    let code_only = OsString::from(&code_only);
     let exe = std::fs::canonicalize(env!("CARGO_BIN_EXE_zerodb")).unwrap();
     let exe = exe.to_str().unwrap().to_owned();
     let terminal = [("ZERODB_SETUP_INTERACTIVE", "1")];
     let needs = "zerodb setup needs a terminal, or --yes. See zerodb setup --help.";
     let own = "keep the user's instructions, which mention zerodb";
-    let rows: [Row<'_>; 7] = [
+    let rows: [Row<'_>; 8] = [
         ("claude-code and codex", &[], &terminal, &path, "claude-code,codex\n\nn\ny\n", 0, ""),
         ("declined", &[], &terminal, &path, "codex\nn\n\nno\n", 0, "N] Nothing changed.\n"),
         ("not a terminal", &[], &[], &path, "claude-code\n\n\ny\n", 2, needs),
@@ -189,6 +194,7 @@ fn setup_asks_and_stops_without_answers() {
         ("3 unknown apps", &[], &terminal, &path, "claude\nvs code\ncodex,\n", 2, "after 3 tries"),
         ("no apps", &["--yes"], &[], &empty, "", 1, "zerodb found no apps"),
         ("own guide", &["--yes", "--harness", "copilot"], &[], &path, "", 0, own),
+        ("VS Code only", &["--yes"], &[], &code_only, "", 0, "\n1 connected, 0 with skipped"),
     ];
     for (row, (case, args, env, path, stdin, wanted, said)) in rows.into_iter().enumerate() {
         let home = dir.0.join(format!("h{row}"));
@@ -216,6 +222,16 @@ fn setup_asks_and_stops_without_answers() {
             assert!(out.contains("\n  Copilot CLI: ok\n"), "{case}: {out}");
             assert_eq!(std::fs::read_to_string(guides.join("x.instructions.md")).unwrap(), guide);
             assert!(!guides.join("zerodb.instructions.md").exists(), "{case}");
+            continue;
+        }
+        if case == "VS Code only" {
+            // VS Code wrote the shared hook in ~/.copilot. That is not Copilot CLI's config.
+            assert!(home.join(".copilot/hooks/zerodb.json").is_file(), "{case}");
+            let (code, out, err) = setup(&home, &dir.0, path, env, args, stdin);
+            assert_eq!(code, Some(0), "{case}: again: {out}{err}");
+            assert!(out.starts_with("Plan:\nVS Code:\n"), "{case}: {out}");
+            assert!(!out.contains("Copilot CLI"), "{case}: {out}");
+            assert!(!home.join(".copilot/mcp-config.json").exists(), "{case}");
             continue;
         }
         if row > 0 {
