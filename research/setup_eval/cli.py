@@ -147,6 +147,17 @@ def dry_run(a: argparse.Namespace, cfg: Config, out=print) -> int:
     return 0
 
 
+def warn(out, what: str, changed: list[str], same: str) -> None:
+    """A warning naming up to 5 changes, or `same`. Never a failure: another session, such as
+    the controller's, may write there."""
+    if not changed:
+        out(same)
+        return
+    shown = ", ".join(changed[:5]) + (", ..." if len(changed) > 5 else "")
+    out(f"WARNING: {len(changed)} {what} changed during the batch ({shown}). "
+        "Another session, such as the controller's, may have written them.")
+
+
 def batch(a: argparse.Namespace, cfg: Config, out=print, environ=None) -> int:
     guard.check_config_dirs(cfg.claude_dir, cfg.codex_dir, cfg.home)
     for folder, harness in ((cfg.claude_dir, "claude-code"), (cfg.codex_dir, "codex")):
@@ -155,8 +166,10 @@ def batch(a: argparse.Namespace, cfg: Config, out=print, environ=None) -> int:
                                 f"{agents.login_hint(harness, cfg.claude_dir, cfg.codex_dir)}, then run check")
     if not (os.path.isfile(a.zerodb) and os.access(a.zerodb, os.X_OK)):
         raise guard.Refused(f"--zerodb {a.zerodb} is not an executable file. Build it: cargo build -p zerodb")
-    data_dir = guard.real_data_dir(environ)
-    before = guard.snapshot(data_dir)
+    environ = cfg.base_env if environ is None else environ
+    data_dirs = guard.watched_data_dirs(environ)
+    before = {label: guard.snapshot(path) for label, path in data_dirs}
+    config_before = guard.config_snapshot(cfg.home)
     runner, done, today = Runner(), [], datetime.date.today().isoformat()
     try:
         for n in range(1, a.runs + 1):
@@ -168,18 +181,17 @@ def batch(a: argparse.Namespace, cfg: Config, out=print, environ=None) -> int:
                     verdict = "error" if res.errored else ("pass" if res.passed else "fail")
                     out(f"[{len(done)}/{a.total}] {harness} {sid} run {n}: {verdict}")
     finally:
-        changed = guard.compare(before, guard.snapshot(data_dir))
         for line in results.summary(done):
             out(line)
         out("")
         out(f"Rows: {a.out}")
         out(f"Every child had ZERODB_HOME set under its own run root: {runner.children} children checked.")
-        if changed:
-            shown = ", ".join(changed[:5]) + (", ..." if len(changed) > 5 else "")
-            out(f"WARNING: {len(changed)} files in the real zerodb home's data dir changed during the batch "
-                f"({shown}). Another session, such as the controller's, may have written them.")
-        else:
-            out("The real zerodb home's data dir did not change (size and mtime of each file).")
+        for label, path in data_dirs:
+            warn(out, f"files in {label}", guard.compare(before[label], guard.snapshot(path)),
+                 f"{label[0].upper()}{label[1:]} did not change (size and mtime of each file).")
+        warn(out, "entries at the top level of ~/.claude*, ~/.codex or ~/.copilot",
+             guard.compare(config_before, guard.config_snapshot(cfg.home)),
+             "The top level of ~/.claude*, ~/.codex and ~/.copilot did not change (names, sizes and mtimes).")
     return 1 if any(r.errored for r in done) else 0
 
 

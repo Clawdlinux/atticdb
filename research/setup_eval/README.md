@@ -41,11 +41,15 @@ It also drops the credential and provider vars, so runs use the logins in the ev
 The harness refuses to start any child whose `ZERODB_HOME` is not under its run root, after both resolve, so a link that points out is refused.
 The harness's own git calls skip the user's git config.
 
-The real zerodb home is never used.
-Before and after a batch, the harness records the size and mtime of each file in its `data/` dir.
-On macOS that is `~/Library/Application Support/zerodb/data`. On Linux it is `$XDG_DATA_HOME/zerodb/data`, else `~/.local/share/zerodb/data`.
-It only stats the files and never opens one.
-If any changed, it prints a warning. That is not a failure, as another session may write there.
+The real zerodb home and the user's own agent config are never used.
+Before and after a batch, the harness records, by stat only:
+
+- the size and mtime of each file in the default zerodb home's `data/` dir. On macOS that is `~/Library/Application Support/zerodb/data`. On Linux it is `$XDG_DATA_HOME/zerodb/data`, else `~/.local/share/zerodb/data`;
+- the same for `$ZERODB_HOME/data`, when the parent env sets `ZERODB_HOME`;
+- the names, sizes and mtimes at the top level of each `~/.claude*` entry, `~/.claude.json` included, `~/.codex` and `~/.copilot`.
+
+It never opens a file, and lists no dir below the top level.
+If anything changed, it prints a warning. That is not a failure, as another session may write there.
 
 ## Log in once
 

@@ -5,6 +5,7 @@ import tempfile
 import pytest
 
 from research.setup_eval import agents, cli, proc
+from research.setup_eval import harness as harness_mod
 from research.setup_eval.scenarios import SCENARIOS
 
 from .helpers import ZERODB, fake_home, stub_calls
@@ -156,3 +157,38 @@ def test_check_reports_a_missing_dir(monkeypatch, tmp_path, capsys):
     text = capsys.readouterr().out
     assert "CLAUDE_CONFIG_DIR=" in text and "codex login" in text
     assert stub_calls(paths["log"]) == []
+
+
+def test_batch_warns_on_changes_to_user_config_and_the_parent_zerodb_home(monkeypatch, tmp_path):
+    paths = fake_home(monkeypatch, tmp_path)
+    home = paths["home"]
+    os.makedirs(os.path.join(home, ".claude"))
+    parent_home = tmp_path / "parent-zh"
+    (parent_home / "data").mkdir(parents=True)
+    (parent_home / "data" / "seg").write_text("1")
+    monkeypatch.setenv("ZERODB_HOME", str(parent_home))
+    a = cli.parse(["run", "--harness", "claude-code", "--scenarios", "S1", "--zerodb", "/bin/sh",
+                   "--out", str(tmp_path / "o.csv")])
+
+    def fake_run(cfg, runner, harness, scenario, n):
+        with open(os.path.join(home, ".claude", "settings.json"), "w") as f:
+            f.write("{}")
+        (parent_home / "data" / "seg").write_text("22")
+        return harness_mod.RunResult(harness, scenario.id, n)
+
+    monkeypatch.setattr(cli, "run_one", fake_run)
+    lines = []
+    assert cli.batch(a, cli.config(a.zerodb), out=lines.append) == 0
+    text = "\n".join(lines)
+    assert "WARNING: 1 files in $ZERODB_HOME/data of the parent env changed during the batch (seg)" in text
+    # The new file, and the mtime of the dir that holds it.
+    assert ("WARNING: 2 entries at the top level of ~/.claude*, ~/.codex or ~/.copilot changed during the "
+            "batch (~/.claude, ~/.claude/settings.json)") in text
+    assert "The real zerodb home's data dir did not change" in text
+    assert str(parent_home) not in text
+
+    lines.clear()
+    monkeypatch.setattr(cli, "run_one", lambda cfg, runner, h, s, n: harness_mod.RunResult(h, s.id, n))
+    assert cli.batch(a, cli.config(a.zerodb), out=lines.append) == 0
+    assert "WARNING" not in "\n".join(lines)
+    assert "The top level of ~/.claude*, ~/.codex and ~/.copilot did not change" in "\n".join(lines)

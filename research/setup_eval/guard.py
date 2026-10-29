@@ -8,14 +8,17 @@ user's own zerodb store. So:
   and ancestry, both ways. An entry that can't be inspected is refused.
 - `check_env` refuses to start a child whose env has no `ZERODB_HOME` under the run's root,
   after both resolve.
-- `snapshot` records the size and mtime of each file in the real home's `data/`. It only
-  stats them and never opens one.
+- `snapshot` records the size and mtime of each file in the real home's `data/`, and in
+  `$ZERODB_HOME/data` when the parent env sets it. `config_snapshot` records the names, sizes
+  and mtimes at the top level of `~/.claude*`, `~/.codex` and `~/.copilot`. Both only stat,
+  and never open a file.
 """
 
 from __future__ import annotations
 
 import os
 import re
+import stat
 import sys
 
 EVAL_DIR = os.path.join(".cache", "zerodb-setup-eval")
@@ -188,6 +191,54 @@ def snapshot(data_dir: str) -> dict[str, tuple[int, int]]:
             except OSError:
                 continue  # removed while walking
             out[os.path.relpath(path, data_dir)] = (st.st_size, st.st_mtime_ns)
+    return out
+
+
+def watched_data_dirs(environ=None) -> list[tuple[str, str]]:
+    """The zerodb data dirs a batch must leave alone, as (label, path): the default home's,
+    and `$ZERODB_HOME/data` when the parent env sets an absolute `ZERODB_HOME`. The label
+    never holds the env value."""
+    environ = os.environ if environ is None else environ
+    dirs = [("the real zerodb home's data dir", real_data_dir(environ))]
+    parent = environ.get(HOME_ENV, "")
+    if os.path.isabs(parent):
+        data = os.path.join(parent, "data")
+        if os.path.realpath(data) != os.path.realpath(dirs[0][1]):
+            dirs.append(("$ZERODB_HOME/data of the parent env", data))
+    return dirs
+
+
+def _stat(path: str, follow: bool = False) -> tuple:
+    try:
+        st = os.stat(path, follow_symlinks=follow)
+    except FileNotFoundError:
+        return ("missing",)
+    except OSError as e:
+        return ("error", e.errno)
+    return (stat.S_IFMT(st.st_mode), st.st_size, st.st_mtime_ns)
+
+
+def config_snapshot(home: str) -> dict[str, tuple]:
+    """The top level of the user's own agent config, as label -> (type, size, mtime_ns): each
+    `~/.claude*` entry (`~/.claude.json` too), `~/.codex` and `~/.copilot`, and each entry
+    directly inside those that are dirs. Names and stats only: no file is opened, and no
+    dir below the top level is listed."""
+    out: dict[str, tuple] = {}
+    try:
+        entries = own_entries(home)
+    except Refused:
+        return {"~": ("unlistable",)}
+    for entry in entries:
+        label = "~/" + os.path.basename(entry)
+        out[label] = _stat(entry)
+        if not os.path.isdir(entry):  # follows a link to a dir
+            continue
+        try:
+            with os.scandir(entry) as it:
+                for child in it:
+                    out[f"{label}/{child.name}"] = _stat(child.path)
+        except OSError as e:
+            out[f"{label}/"] = ("unlistable", e.errno)
     return out
 
 

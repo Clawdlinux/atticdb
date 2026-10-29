@@ -211,3 +211,46 @@ def test_check_env_resolves_links_first(tmp_path):
     # A root reached through a link still holds its own home.
     os.symlink(root, tmp_path / "alias")
     guard.check_env({"ZERODB_HOME": str(tmp_path / "alias" / "real" / "zh")}, str(root))
+
+
+def test_config_snapshot_stats_the_top_level_without_opening(home, monkeypatch, tmp_path):
+    os.makedirs(os.path.join(home, ".claude", "projects", "deep"))
+    with open(os.path.join(home, ".claude", "settings.json"), "w") as f:
+        f.write("{}")
+    with open(os.path.join(home, ".claude.json"), "w") as f:
+        f.write("{}")
+    os.makedirs(os.path.join(home, ".codex"))
+    os.makedirs(os.path.join(home, ".unrelated"))
+    elsewhere = tmp_path / "linked"
+    elsewhere.mkdir()
+    (elsewhere / "a").write_text("x")
+    os.symlink(elsewhere, os.path.join(home, ".copilot"))
+
+    def no_open(*a, **k):
+        raise AssertionError("config_snapshot must not open files")
+
+    monkeypatch.setattr(builtins, "open", no_open)
+    monkeypatch.setattr(os, "open", no_open)
+    before = guard.config_snapshot(home)
+    monkeypatch.undo()
+    assert sorted(before) == ["~/.claude", "~/.claude.json", "~/.claude/projects", "~/.claude/settings.json",
+                              "~/.codex", "~/.copilot", "~/.copilot/a"], "top level only, through a link"
+    assert before["~/.claude/settings.json"][1] == 2
+    with open(os.path.join(home, ".claude", "settings.json"), "w") as f:
+        f.write('{"x": 1}')
+    with open(os.path.join(home, ".claude", "projects", "deep", "ignored"), "w") as f:
+        f.write("deeper than the top level")
+    os.makedirs(os.path.join(home, ".claude-new"))
+    changed = guard.compare(before, guard.config_snapshot(home))
+    assert "~/.claude/settings.json" in changed and "~/.claude-new" in changed
+    assert not any("ignored" in c or "unrelated" in c for c in changed)
+
+
+def test_watched_data_dirs_add_the_parent_zerodb_home():
+    env = {"HOME": "/h"}
+    assert [label for label, _ in guard.watched_data_dirs(env)] == ["the real zerodb home's data dir"]
+    dirs = guard.watched_data_dirs(dict(env, ZERODB_HOME="/z/home"))
+    assert dirs[1] == ("$ZERODB_HOME/data of the parent env", "/z/home/data")
+    assert "/z/home" not in dirs[1][0], "the label holds no env value"
+    assert len(guard.watched_data_dirs(dict(env, ZERODB_HOME="rel"))) == 1
+    assert len(guard.watched_data_dirs(dict(env, ZERODB_HOME=""))) == 1

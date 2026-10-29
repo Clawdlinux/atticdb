@@ -1,8 +1,9 @@
 """Defensive parsers for the 2 agents' JSONL streams.
 
 A line that is not a JSON object, an event whose `type` is not a string, or a known event
-whose fields have the wrong shape, counts as unparsed. An event of a type the parser doesn't know counts as unknown. Neither
-stops the parse. `parse_ok` holds when the final reply was found and no line was unparsed.
+whose fields have the wrong shape, counts as unparsed. An event of a type the parser doesn't
+know counts as unknown. Neither stops the parse. `parse_ok` holds when the final reply was
+found and no line was unparsed.
 
 Tool calls keep the bare tool name of the zerodb server: `mcp__zerodb__fact_set` in
 Claude Code and `{"server": "zerodb", "tool": "fact_set"}` in Codex both give `fact_set`.
