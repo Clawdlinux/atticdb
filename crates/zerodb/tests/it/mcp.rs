@@ -444,7 +444,7 @@ fn tool_calls_over_stdio() {
         }
     });
     let unknown = ["append", "--url", &lossy_url, "--content", "x", "--retry-deadline", "2500ms"];
-    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_zerodb"));
+    let mut command = support::command(env!("CARGO_BIN_EXE_zerodb"));
     command.args(unknown).current_dir(&dir.0).env("ZERODB_TOKEN", TOKEN_A);
     let (status, out) = support::Process::start(command.stdin(std::process::Stdio::null())).wait();
     assert_eq!(status.code(), Some(3), "unknown outcome: {out}");
@@ -699,36 +699,43 @@ fn launch_race_starts_one_server() {
 
 /// With no connection flags, the shell verbs create and use a per-user home, ignoring a stray
 /// `ZERODB_TOKEN` with a note. 4 parallel first runs all succeed and leave no temp config.
-/// One left by a killed run is ignored.
+/// One left by a killed run is ignored. `ZERODB_HOME` moves the home, and `HOME` stays
+/// empty. It needs no `HOME`. An empty `ZERODB_HOME` counts as unset.
 #[test]
 fn no_flags_use_the_home() {
     let dir = Dir::new();
     let (stray, stray_row) = (".zerodb.json.0123456789abcdef", "stray temp left alone");
     let mut rows = vec![];
     if cfg!(target_os = "linux") {
-        rows.push(("XDG_DATA_HOME", dir.0.clone(), Some(dir.0.join("x")), dir.0.join("x/zerodb")));
+        let xdg = Some(("XDG_DATA_HOME", dir.0.join("x")));
+        rows.push(("XDG_DATA_HOME", Some(dir.0.clone()), xdg, dir.0.join("x/zerodb")));
     }
     let home =
         if cfg!(target_os = "macos") { "Library/Application Support" } else { ".local/share" };
-    rows.push(("HOME", dir.0.clone(), None, dir.0.join(home).join("zerodb")));
-    rows.push((stray_row, dir.0.join("t"), None, dir.0.join("t").join(home).join("zerodb")));
+    rows.push(("HOME", Some(dir.0.clone()), None, dir.0.join(home).join("zerodb")));
+    let t = dir.0.join("t");
+    rows.push((stray_row, Some(t.clone()), None, t.join(home).join("zerodb")));
+    let moved = |name| Some(("ZERODB_HOME", dir.0.join(name)));
+    rows.push(("ZERODB_HOME", Some(dir.0.join("f")), moved("z"), dir.0.join("z")));
+    rows.push(("ZERODB_HOME, HOME unset", None, moved("y"), dir.0.join("y")));
     let _holders = Holders(rows.iter().map(|(.., home)| home.join("data")).collect());
-    for (case, home_env, xdg, home) in rows {
+    for (case, home_env, var, home) in rows {
         let staging = home.join("data/.zs.01234567/s");
         assert!(
             staging.as_os_str().len() < zerodb::listen::SUN_PATH_BYTES,
             "{case}: {} is too deep, set ZERODB_TEST_DIR to a short directory",
             staging.display()
         );
+        home_env.iter().for_each(|home_env| std::fs::create_dir_all(home_env).unwrap());
         if case == stray_row {
             std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&home).unwrap();
             std::fs::write(home.join(stray), "").unwrap();
         }
         let start = |verb: &[&str]| {
-            let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_zerodb"));
-            command.args(verb).current_dir(&dir.0).env("HOME", &home_env);
-            command.env("ZERODB_TOKEN", "x").env_remove("XDG_DATA_HOME");
-            command.envs(xdg.iter().map(|xdg| ("XDG_DATA_HOME", xdg)));
+            let mut command = support::command(env!("CARGO_BIN_EXE_zerodb"));
+            command.args(verb).current_dir(&dir.0).env("ZERODB_TOKEN", "x");
+            command.envs(home_env.iter().map(|home_env| ("HOME", home_env)));
+            command.env("ZERODB_HOME", "").envs(var.iter().map(|(name, value)| (name, value)));
             Process::start(command.stdin(std::process::Stdio::null()))
         };
         let note = "zerodb: ignoring ZERODB_TOKEN: no --url, --data-dir or --config given, so \
@@ -758,17 +765,43 @@ fn no_flags_use_the_home() {
             let found = std::fs::metadata(home.join(path)).unwrap().mode() & 0o777;
             assert_eq!(found, mode, "{case}: {path:?} mode");
         }
+        if let Some(home_env) = home_env.filter(|home_env| !home.starts_with(home_env)) {
+            let left = std::fs::read_dir(&home_env).unwrap().count();
+            assert_eq!(left, 0, "{case}: nothing in HOME");
+        }
     }
-    // Any connection flag keeps the old rule: no token is an error and no home is made.
-    for flags in [["--url", "unix:///nowhere.sock"], ["--data-dir", "d"]] {
-        let home_env = dir.0.join("u");
-        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_zerodb"));
+    // No home is made where it can't be used. Any connection flag keeps the old rule, so no
+    // token is an error. A relative ZERODB_HOME is a usage error, with no fallback to HOME.
+    // A home made in a parent that can't be read fails, as its new entry can't be synced.
+    let mut rows: Vec<(&[&str], String, i32, String)> = vec![
+        (&["--url", "unix:///nowhere.sock"], "".into(), 1, "set ZERODB_TOKEN".into()),
+        (&["--data-dir", "d"], "".into(), 1, "set ZERODB_TOKEN".into()),
+        (&[], "r".into(), 2, "zerodb: ZERODB_HOME must be an absolute path\n".into()),
+    ];
+    let unreadable = dir.0.join("p");
+    // Root reads any directory, so the row needs a normal user.
+    if !rustix::process::geteuid().is_root() {
+        std::fs::create_dir(&unreadable).unwrap();
+        chmod(&unreadable, 0o300);
+        let says = format!(
+            "zerodb: {}: cannot sync the entry for the directory made in it",
+            unreadable.display()
+        );
+        rows.push((&[], unreadable.join("new").display().to_string(), 1, says));
+    }
+    for (flags, zerodb_home, code, says) in rows {
+        let (case, home_env) = (format!("{flags:?} ZERODB_HOME={zerodb_home:?}"), dir.0.join("u"));
+        let mut command = support::command(env!("CARGO_BIN_EXE_zerodb"));
         command.arg("recent").args(flags).current_dir(&dir.0).env("HOME", &home_env);
-        command.env_remove("ZERODB_TOKEN").env_remove("XDG_DATA_HOME");
+        command.env_remove("ZERODB_TOKEN").env("ZERODB_HOME", &zerodb_home);
         let (status, out) = Process::start(command.stdin(std::process::Stdio::null())).wait();
-        assert_eq!(status.code(), Some(1), "{flags:?}: {out}");
-        assert!(out.contains("set ZERODB_TOKEN"), "{flags:?}: {out}");
-        assert!(!home_env.exists(), "{flags:?}: no home");
+        assert_eq!(status.code(), Some(code), "{case}: {out}");
+        assert!(out.contains(&says), "{case}: {out}");
+        assert!(!home_env.exists(), "{case}: no home");
+    }
+    // Dir can then remove it.
+    if unreadable.exists() {
+        chmod(&unreadable, 0o700);
     }
 }
 

@@ -108,12 +108,9 @@ impl Studio {
 
 /// `zerodb studio` with `HOME` set to `home`, and `env` added.
 fn command(home: &Path, args: &[&str], env: &[(&str, &OsStr)]) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_zerodb"));
+    let mut command = crate::support::command(env!("CARGO_BIN_EXE_zerodb"));
     command.arg("studio").args(args).current_dir(home).env("HOME", home).stdin(Stdio::null());
-    for var in ["COPILOT_HOME", "XDG_DATA_HOME", "ZERODB_TOKEN"] {
-        command.env_remove(var);
-    }
-    command.envs(env.iter().copied());
+    command.env_remove("ZERODB_TOKEN").envs(env.iter().copied());
     command
 }
 
@@ -374,7 +371,7 @@ fn studio_forwards_reads_and_refuses_the_rest() {
     }
 
     // The block is the one the hook prints for a chat in that repo.
-    let (out, _) = hook(&home, &cwd(&home.join("app")), 0);
+    let (out, _) = hook(&home, &cwd(&home.join("app")), 0, &[]);
     let block = serde_json::from_str::<Value>(&out).unwrap()["additionalContext"].clone();
     let chars = block.as_str().unwrap().chars().count();
     let reply = studio.get("/api/block?repo=app", true);

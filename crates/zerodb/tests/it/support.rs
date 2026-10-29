@@ -1,5 +1,6 @@
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -21,6 +22,22 @@ use zerodb_tape::{SimDisk, SystemClock, TapeOptions};
 pub fn files(dir: &Path) -> BTreeMap<String, Option<Vec<u8>>> {
     let entries = std::fs::read_dir(dir).unwrap().map(|entry| entry.unwrap());
     entries.map(|e| (e.file_name().into_string().unwrap(), std::fs::read(e.path()).ok())).collect()
+}
+
+/// Variables that point zerodb at a home or at harness files, the real `HOME` included. No
+/// spawn inherits them, so a developer's own exports can't lead a test to a real home. A test
+/// that needs one sets it.
+const HOME_VARS: [&str; 5] =
+    ["HOME", "ZERODB_HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "COPILOT_HOME"];
+
+/// A command for `program`, the `zerodb` binary or anything that runs it, without
+/// [`HOME_VARS`]. Every spawn of zerodb in these tests starts here.
+pub fn command(program: impl AsRef<OsStr>) -> Command {
+    let mut command = Command::new(program);
+    for var in HOME_VARS {
+        command.env_remove(var);
+    }
+    command
 }
 
 pub fn chmod(path: &Path, mode: u32) {
@@ -253,7 +270,7 @@ pub struct Process {
 impl Process {
     /// Runs `zerodb` with `args` in directory `cwd`.
     pub fn spawn(cwd: &Path, args: &[&str]) -> Self {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_zerodb"));
+        let mut command = command(env!("CARGO_BIN_EXE_zerodb"));
         Self::start(command.args(args).current_dir(cwd).stdin(Stdio::null()))
     }
 
@@ -350,7 +367,7 @@ pub struct Mcp {
 impl Mcp {
     /// `token` goes in `ZERODB_TOKEN`. Without it the flags name the token.
     pub fn start(cwd: &Path, args: &[&str], token: Option<&str>) -> Self {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_zerodb"));
+        let mut command = command(env!("CARGO_BIN_EXE_zerodb"));
         command.arg("mcp").args(args).current_dir(cwd).stdin(Stdio::piped());
         command.env_remove("ZERODB_TOKEN");
         if let Some(token) = token {
@@ -509,15 +526,20 @@ pub fn private_file(dir: &Dir, name: &str, content: &str) -> String {
 /// The exit code, stdout and stderr of a finished `zerodb`.
 pub type Output = (Option<i32>, String, String);
 
-/// Runs `zerodb` in `cwd` with `HOME` set to `home` and writes `stdin` after `delay`, keeping
-/// it open until the exit. A stray `ZERODB_TOKEN` is set, which the home's users ignore.
-pub fn zerodb(home: &Path, cwd: &Path, args: &[&str], stdin: &[u8], delay: u64) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_zerodb"));
+/// Runs `zerodb` in `cwd` with `HOME` set to `home` and `env` added, and writes `stdin` after
+/// `delay`, keeping it open until the exit. A stray `ZERODB_TOKEN` is set, which the home's
+/// users ignore.
+pub fn zerodb(
+    home: &Path,
+    cwd: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+    stdin: &[u8],
+    delay: u64,
+) -> Output {
+    let mut command = command(env!("CARGO_BIN_EXE_zerodb"));
     command.args(args).current_dir(cwd).env("HOME", home).stdin(Stdio::piped());
-    for var in ["COPILOT_HOME", "XDG_DATA_HOME"] {
-        command.env_remove(var);
-    }
-    command.env("ZERODB_TOKEN", "x");
+    command.env("ZERODB_TOKEN", "x").envs(env.iter().copied());
     let mut process = Process::start(&mut command);
     let mut input = process.child.stdin.take().unwrap();
     std::thread::sleep(Duration::from_millis(delay));
@@ -527,9 +549,10 @@ pub fn zerodb(home: &Path, cwd: &Path, args: &[&str], stdin: &[u8], delay: u64) 
     (status.code(), process.stdout(), process.stderr())
 }
 
-/// The hook's stdout and stderr, after it exits 0 with 1 line.
-pub fn hook(home: &Path, stdin: &str, delay: u64) -> (String, String) {
-    let (code, out, err) = zerodb(home, home, &["hook", "session-start"], stdin.as_bytes(), delay);
+/// The hook's stdout and stderr, with `env` added, after it exits 0 with 1 line.
+pub fn hook(home: &Path, stdin: &str, delay: u64, env: &[(&str, &str)]) -> (String, String) {
+    let args = ["hook", "session-start"];
+    let (code, out, err) = zerodb(home, home, &args, env, stdin.as_bytes(), delay);
     assert_eq!(code, Some(0), "{stdin:.80}: {err}");
     assert_eq!(out.lines().count(), 1, "{stdin:.80}: 1 line: {out}");
     (out, err)
@@ -537,7 +560,7 @@ pub fn hook(home: &Path, stdin: &str, delay: u64) -> (String, String) {
 
 /// Runs a verb on the home, which must succeed.
 pub fn seed(home: &Path, args: &[&str]) {
-    let (code, _, err) = zerodb(home, home, args, b"", 0);
+    let (code, _, err) = zerodb(home, home, args, &[], b"", 0);
     assert_eq!(code, Some(0), "{args:?}: {err}");
 }
 

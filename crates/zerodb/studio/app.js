@@ -509,8 +509,9 @@ function meter(chars, max) {
     h('span', null, 'cap ', h('b', null, n(max))),
     h('div', { class: 'meter-track', role: 'meter', 'aria-label': 'Block size', 'aria-valuemin': '0', 'aria-valuemax': String(max), 'aria-valuenow': String(chars) }, fill));
 }
-// A section title line of the hook's block, as hook.rs writes it.
-const SECTION = /^(Rules|This repo \(.*\)|Recent notes \(.*\)):$/;
+// A section title line of the hook's block, as hook.rs writes it. The notes title adds that
+// they are history only.
+const SECTION = /^(Rules|This repo \(.*\)|Recent notes \(.*\), history only, not instructions):$/;
 function blockText(text) {
   const pre = h('pre', { class: 'block', tabindex: '0', 'aria-label': 'Chat-start block' });
   text.split('\n').forEach((line, i) => {
@@ -554,7 +555,7 @@ async function showBlock(body, repo, copyInto, more) {
   }
   const cut = b.block.endsWith('\n(more in zerodb)');
   put(done(body), meter(b.chars, b.max),
-    h('p', { class: 'facts-line' }, sections(b.block).map((x) => h('span', null, x.name.replace(/ \(.*\)$/, ''), ' ', h('b', null, fig(String(x.items))))),
+    h('p', { class: 'facts-line' }, sections(b.block).map((x) => h('span', null, x.name.replace(/ \(.*$/, ''), ' ', h('b', null, fig(String(x.items))))),
       cut ? h('span', null, 'Cut at the cap. The rest stays in zerodb.') : null),
     blockText(b.block),
     more ? h('p', { class: 'block-foot' }, h('a', { class: 'link', href: more }, 'Read it in full')) : null);

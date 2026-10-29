@@ -1,11 +1,18 @@
 //! The per-user home that `zerodb mcp` and the shell verbs use when given no connection
 //! flags: an owner-only directory with `zerodb.json` and `data/`, created on first use.
 
+use std::ffi::OsStr;
+use std::fs::{File, OpenOptions};
+use std::io::{ErrorKind, Read};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use zerodb_tape::{Io, StdIo};
 
 /// The tenant the home's config names.
 pub const TENANT: &str = "me";
+/// The variable that moves the home. Empty counts as unset.
+pub const HOME_ENV: &str = "ZERODB_HOME";
+/// Most bytes read from a `.git` or `commondir` file. A longer one names no real path.
+const MAX_GIT_FILE: u64 = 8 << 10;
 
 /// A home ready for use.
 #[derive(Clone, Debug)]
@@ -20,15 +27,48 @@ pub struct Home {
     pub tenant: String,
 }
 
-/// The repo name for `dir`, an absolute path: the name of the first directory from `dir` up
-/// that has a `.git` entry, else of `dir`. `None` when that has no UTF-8 name. It is the
-/// default session and what the session-start hook reads, so notes land where it looks.
+/// The repo name for `dir`, an absolute path. The root is the first directory from `dir` up
+/// with a `.git` entry, else `dir`. A worktree takes its main repo's name, read by
+/// `main_repo`. Otherwise the name is the root's. `None` when there is no UTF-8 name. It is
+/// the default session and what the session-start hook reads, so notes land where it looks.
 /// Symlinks are resolved first, as the adapter's `current_dir` is. A path that cannot be
 /// resolved, such as a deleted folder, is walked as given.
 pub fn repo(dir: &Path) -> Option<String> {
     let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_owned());
     let root = dir.ancestors().find(|dir| dir.join(".git").symlink_metadata().is_ok());
-    root.unwrap_or(&dir).file_name().and_then(|name| name.to_str()).map(str::to_owned)
+    let main = root.and_then(|root| main_repo(&root.join(".git")));
+    main.or_else(|| root.unwrap_or(&dir).file_name()?.to_str().map(str::to_owned))
+}
+
+/// The main repo's name when `git`, a `.git` entry, is a worktree's file `gitdir: <dir>`
+/// and `<dir>/commondir` names the common git dir. A common dir whose name starts with `.`,
+/// such as `.git` or a bare `.bare`, gives its parent's name. Any other gives its own name,
+/// without a `.git` suffix. `None` for a `.git` directory, a file without `commondir` such
+/// as a submodule's, a common dir that is not a directory, or anything unreadable.
+fn main_repo(git: &Path) -> Option<String> {
+    let git_dir = path_in(git, "gitdir: ")?;
+    let common = path_in(&git_dir.join("commondir"), "")?;
+    let common = std::fs::canonicalize(common).ok().filter(|common| common.is_dir())?;
+    let name = common.file_name()?.to_str()?;
+    if name.starts_with('.') {
+        return common.parent()?.file_name()?.to_str().map(str::to_owned);
+    }
+    Some(name.strip_suffix(".git").unwrap_or(name).to_owned())
+}
+
+/// The path in the regular file `file`: the text after `prefix`, less trailing line ends. A
+/// relative path counts from the file's directory. `None` when the file is missing, not a
+/// regular file, over [`MAX_GIT_FILE`], or holds no such path.
+fn path_in(file: &Path, prefix: &str) -> Option<PathBuf> {
+    let opened = crate::config::open_regular(OpenOptions::new().read(true), file).ok()?;
+    let mut text = Vec::new();
+    opened.take(MAX_GIT_FILE + 1).read_to_end(&mut text).ok()?;
+    if text.len() as u64 > MAX_GIT_FILE {
+        return None;
+    }
+    let path = text.strip_prefix(prefix.as_bytes())?;
+    let end = path.iter().rposition(|byte| !matches!(byte, b'\n' | b'\r'))?;
+    Some(file.parent()?.join(OsStr::from_bytes(&path[..=end])))
 }
 
 /// `$HOME`, which must be absolute.
@@ -37,9 +77,22 @@ pub fn user_home() -> Result<PathBuf, String> {
     home.ok_or_else(|| "HOME must be set to an absolute path".into())
 }
 
-/// The home directory. On macOS `$HOME/Library/Application Support/zerodb`. On Linux
-/// `$XDG_DATA_HOME/zerodb` when that is set and absolute, else `$HOME/.local/share/zerodb`.
+/// `$ZERODB_HOME` when it is set and not empty. A relative path is an error, so nothing
+/// falls back to the default home.
+pub fn env_dir() -> Result<Option<PathBuf>, String> {
+    match std::env::var_os(HOME_ENV).filter(|dir| !dir.is_empty()).map(PathBuf::from) {
+        Some(dir) if !dir.is_absolute() => Err(format!("{HOME_ENV} must be an absolute path")),
+        dir => Ok(dir),
+    }
+}
+
+/// The home directory: `$ZERODB_HOME` when set, by [`env_dir`]. Else on macOS
+/// `$HOME/Library/Application Support/zerodb`. On Linux `$XDG_DATA_HOME/zerodb` when that
+/// is set and absolute, else `$HOME/.local/share/zerodb`.
 pub fn dir() -> Result<PathBuf, String> {
+    if let Some(dir) = env_dir()? {
+        return Ok(dir);
+    }
     let home = user_home()?;
     if cfg!(target_os = "macos") {
         return Ok(home.join("Library/Application Support/zerodb"));
@@ -55,32 +108,59 @@ pub fn dir() -> Result<PathBuf, String> {
 /// `zerodb.json` with tenant [`TENANT`]. Checks both directories are owner-only.
 pub fn ensure() -> Result<Home, String> {
     let dir = dir()?;
+    // With $HOME unset, as ZERODB_HOME allows, the home counts as outside it.
+    let home = user_home().ok().filter(|home| dir.starts_with(home));
+    // A $HOME missing now is made below, and nothing above it is known to be synced.
+    let made_home = home.as_deref().is_some_and(|home| home.symlink_metadata().is_err());
+    let stop = home.as_deref().filter(|_| !made_home).and_then(Path::parent);
+    // The parent of the highest directory this call makes holds that directory's new entry,
+    // so it must be synced even when this user can't read it.
+    let data_dir = dir.join("data");
+    let made = data_dir.ancestors().take_while(|path| path.symlink_metadata().is_err()).last();
+    let holder = made.and_then(Path::parent).map(Path::to_owned);
     crate::listen::owned_dir(&dir, 0o077)?;
     let config = dir.join("zerodb.json");
     if !config.exists() {
         publish(&dir, &config)?;
     }
-    let data_dir = dir.join("data");
     crate::listen::owned_dir(&data_dir, 0o077)?;
     // Every call syncs, covering a concurrent creator that has not synced yet.
-    sync_dirs(&dir, &data_dir)?;
+    sync_dirs(&dir, &data_dir, stop, holder.as_deref())?;
     Ok(Home { dir, config, data_dir, tenant: TENANT.into() })
 }
 
 /// Syncs `data/`, the home and its ancestors, deepest first, so their entries survive a
-/// power loss before the first ack.
-fn sync_dirs(dir: &Path, data_dir: &Path) -> Result<(), String> {
-    let home = user_home()?;
-    // Stop at $HOME, or at XDG_DATA_HOME's parent when the home is outside $HOME.
-    let top = if dir.starts_with(&home) {
-        home.as_path()
-    } else {
-        dir.ancestors().nth(2).unwrap_or(Path::new("/"))
-    };
-    let io = StdIo::new();
+/// power loss before the first ack. It stops after syncing `stop`, else at `/`. A home
+/// inside `$HOME` stops at `$HOME`'s parent, so a `$HOME` that another call made is synced
+/// too. Any other home, or a `$HOME` this call made, syncs every ancestor up to `/`, since
+/// a first use may have made any of them. `holder` holds the entry of the highest directory
+/// this call made, so it is never skipped.
+fn sync_dirs(
+    dir: &Path,
+    data_dir: &Path,
+    stop: Option<&Path>,
+    holder: Option<&Path>,
+) -> Result<(), String> {
     for path in data_dir.ancestors() {
-        io.sync_dir(path).map_err(|error| format!("{}: cannot sync: {error}", path.display()))?;
-        if path == top {
+        let fail = |error: std::io::Error| format!("{}: cannot sync: {error}", path.display());
+        match File::open(path) {
+            Err(error) if holder == Some(path) => {
+                return Err(format!(
+                    "{}: cannot sync the entry for the directory made in it: {error}. Make it \
+                     readable, or create the home by hand",
+                    path.display()
+                ));
+            }
+            // An ancestor above the home that this user can't open existed before, as every
+            // directory zerodb makes is owner-only. Its entries were already there. EACCES and
+            // EPERM both land here.
+            Err(error)
+                if error.kind() == ErrorKind::PermissionDenied
+                    && path != dir
+                    && dir.starts_with(path) => {}
+            file => file.and_then(|file| file.sync_all()).map_err(fail)?,
+        }
+        if stop == Some(path) {
             break;
         }
     }

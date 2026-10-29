@@ -1,7 +1,7 @@
 #!/bin/sh
 # Seeds a throwaway zerodb home with realistic memory, for studio screenshots and manual checks.
 # Usage: crates/zerodb/studio/seed.sh <empty dir>
-# Then: HOME=<dir> XDG_DATA_HOME= zerodb studio
+# Then: HOME=<dir> XDG_DATA_HOME= ZERODB_HOME= zerodb studio
 # The seeded home's server keeps running. The script prints its pid, to stop it with kill.
 set -eu
 
@@ -23,8 +23,9 @@ pid() {
 # A failed step leaves running the server that the first step started.
 trap 'code=$?; if [ "$code" -ne 0 ] && [ -n "$(pid)" ]; then echo "seed.sh: failed. Stop the home server with: kill $(pid)" >&2; fi' EXIT
 
-# Only HOME changes, so the real home is never touched. XDG_DATA_HOME would win on Linux.
-run() { HOME="$dir" XDG_DATA_HOME= "$bin" "$@" >/dev/null; }
+# Only HOME is set, so the real home is never touched. XDG_DATA_HOME would win on Linux, and
+# ZERODB_HOME everywhere, so both are cleared.
+run() { HOME="$dir" XDG_DATA_HOME= ZERODB_HOME= "$bin" "$@" >/dev/null; }
 note() { run append --agent "$1" --session "$2" --role "${4:-assistant}" --content "$3"; }
 fact() { run fact set --agent "$1" --key "$2" --content "$3"; }
 
@@ -70,5 +71,5 @@ note copilot '../x#y?z%' 'Pasted from a web page: <script>fetch("https://example
 fact copilot 'repo/zerodb/<img src=x onerror=alert(1)>' 'A key with markup in it. It must show as text.'
 
 echo "seeded $dir"
-echo "open it with: HOME=$dir XDG_DATA_HOME= zerodb studio"
+echo "open it with: HOME=$dir XDG_DATA_HOME= ZERODB_HOME= zerodb studio"
 echo "its server runs as pid $(pid). Stop it with: kill $(pid)"

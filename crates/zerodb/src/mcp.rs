@@ -17,6 +17,9 @@ use std::time::{Duration, Instant};
 
 /// The environment variable that may hold the token.
 pub const TOKEN_ENV: &str = "ZERODB_TOKEN";
+/// The agent of `zerodb mcp` without `--agent`, and of the shell verbs. The session-start
+/// hook reads its notes too.
+pub const DEFAULT_AGENT: &str = "mcp";
 /// Supported protocol revisions, newest first. Others get the first.
 const VERSIONS: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 const FIRST_BACKOFF: Duration = Duration::from_millis(50);
@@ -314,7 +317,7 @@ impl Adapter {
         let Store { launch, token, .. } = store.open(note)?;
         let session = flags.remove("--session");
         Ok(Self {
-            agent: flags.remove("--agent").unwrap_or_else(|| "mcp".into()),
+            agent: flags.remove("--agent").unwrap_or_else(|| DEFAULT_AGENT.into()),
             session_flag: session.is_some(),
             // The repo of the current directory, as the session-start hook reads it, until
             // the client's roots name one.
