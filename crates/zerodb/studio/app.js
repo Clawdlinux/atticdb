@@ -455,8 +455,9 @@ async function factRepos() {
     const page = await api('v1/facts/list', { prefix: 'repo/', after, limit: 1000 });
     for (const f of page.facts) { const r = repoOf({ kind: 'fact', key: f.key }); if (r) names.add(r); }
     if (page.next === null) return { names, next: null };
-    const m = /^repo\/[^/]+\//.exec(page.next);
-    after = (m && pastGroup(m[0])) || page.next;
+    // `next` can be a deleted key that opens a repo with no live key read yet, so skip only a known repo.
+    const m = /^repo\/([^/]+)\//.exec(page.next);
+    after = (m && names.has(m[1]) && pastGroup(m[0])) || page.next;
   }
   return { names, next: after };
 }
