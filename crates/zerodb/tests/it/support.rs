@@ -93,9 +93,27 @@ with open(path, "w") as f:
     );
     std::fs::create_dir(bin).unwrap();
     let claude = bin.join("claude");
+    // `fs::write` closes the file before it returns, so no write fd outlives this helper.
     std::fs::write(&claude, script).unwrap();
     chmod(&claude, 0o755);
     bin.join("argv")
+}
+
+/// Spawns `command`, retrying while Linux says the program is busy. A test may run a file it
+/// just wrote, such as a fake `claude` or a copied binary. If another test thread forks
+/// while that file is open for writing, the child holds the write fd until it execs, and an
+/// exec of the file meanwhile fails with ETXTBSY. Helpers close each file before returning,
+/// so the window is short: up to 50 tries, 20 ms apart.
+fn spawn(command: &mut Command) -> Child {
+    for _ in 1..50 {
+        match command.spawn() {
+            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            spawned => return spawned.unwrap(),
+        }
+    }
+    command.spawn().unwrap()
 }
 
 pub fn chmod(path: &Path, mode: u32) {
@@ -334,7 +352,7 @@ impl Process {
 
     /// Runs a command with stdout and stderr collected.
     pub fn start(command: &mut Command) -> Self {
-        let mut child = command.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        let mut child = spawn(command.stdout(Stdio::piped()).stderr(Stdio::piped()));
         let mut readers = Vec::new();
         let mut collect = |stream: Box<dyn Read + Send>| {
             let sink = Arc::new(Mutex::new(String::new()));
