@@ -1,7 +1,7 @@
-//! `zerodb hook session-start`: the Copilot `sessionStart` hook. It prints a small block of
-//! the user's rules, this repo's facts and its recent notes, which the harness adds to the
-//! chat. The block's text depends only on the repo name and memory, so the prompt prefix
-//! stays the same.
+//! `zerodb hook session-start`: the session-start hook of Copilot, Claude Code and Codex. It
+//! prints a small block of the user's rules, this repo's facts and its recent notes, which
+//! the harness adds to the chat. The block's text depends only on the repo name and memory,
+//! so the prompt prefix stays the same.
 
 use crate::connect::Harness;
 use crate::mcp::{HomeReader, DEFAULT_AGENT};
@@ -27,11 +27,31 @@ const MAX_CONTENT: usize = 300;
 pub(crate) const MAX_BLOCK: usize = 6_000;
 const MORE: &str = "(more in zerodb)";
 
-/// Reads the hook's JSON on stdin and prints `{"additionalContext": "<block>"}`, or `{}`
+/// Reads the hook's JSON on stdin and prints the block in the shape `harness` reads, or `{}`
 /// when there is nothing to show, on any error, or 4 s after the start. Errors go to stderr.
+/// `claude-code` and `codex` read
+/// `{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "<block>"}}`.
+/// `None`, `vscode` and `copilot` read `{"additionalContext": "<block>"}`. Any other name,
+/// or an empty one for a `--harness` with no value, prints `{}`, as a hook must not fail.
 /// Returns exit code 0.
-pub fn session_start() -> u8 {
+pub fn session_start(harness: Option<&str>) -> u8 {
     let start = Instant::now();
+    let specific = match harness {
+        None | Some("vscode" | "copilot") => false,
+        Some("claude-code" | "codex") => true,
+        Some(name) => {
+            let why = match name {
+                "" => "--harness needs a name".to_owned(),
+                name => format!("unknown --harness {name:?}"),
+            };
+            let _ = writeln!(
+                std::io::stderr(),
+                "zerodb: hook session-start: {why}. Use vscode, copilot, claude-code or codex"
+            );
+            print_once(&json!({}));
+            return 0;
+        }
+    };
     // Without the thread, the 3 s budget still bounds the reads, but not stdin.
     let _ = std::thread::Builder::new().spawn(move || {
         std::thread::sleep(HARD_STOP.saturating_sub(start.elapsed()));
@@ -41,6 +61,8 @@ pub fn session_start() -> u8 {
         std::process::exit(0);
     });
     let output = match block(std::io::stdin().lock().take(MAX_INPUT), start + BUDGET) {
+        Ok(Some(block)) if specific => json!({"hookSpecificOutput":
+            {"hookEventName": "SessionStart", "additionalContext": block}}),
         Ok(Some(block)) => json!({"additionalContext": block}),
         Ok(None) => json!({}),
         Err(error) => {
@@ -97,8 +119,9 @@ pub(crate) fn block_for(repo: &str, deadline: Instant) -> Result<Option<String>,
         Ok::<Vec<_>, String>(list.iter().map(fact).collect())
     };
     let (rules, this_repo) = (facts("user/".into())?, facts(format!("repo/{repo}/"))?);
-    // Turns are kept per agent, and a hook can't tell which harness ran it. The shell verbs
-    // write as DEFAULT_AGENT. Each agent is read once, so no note shows twice.
+    // Turns are kept per agent. Every harness reads every agent's notes, so they share
+    // memory. The shell verbs write as DEFAULT_AGENT. Each agent is read once, so no note
+    // shows twice.
     let agents = Harness::ALL.map(Harness::agent).into_iter();
     let mut windows = Vec::new();
     for agent in agents.filter(|agent| *agent != DEFAULT_AGENT).chain([DEFAULT_AGENT]) {

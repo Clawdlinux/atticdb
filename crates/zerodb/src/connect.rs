@@ -1,7 +1,12 @@
 //! `zerodb connect` and `zerodb disconnect`: add or remove zerodb's entry in a harness's
-//! user MCP config, and 2 Copilot files both harnesses share: the `sessionStart` hook and
-//! the instructions file. The entry and the hook run the binary on the home, so they hold no
-//! token. The only paths they hold are the binary's and, under `ZERODB_HOME`, the home's.
+//! user MCP config, and 2 Copilot files VS Code and Copilot CLI share: the `sessionStart`
+//! hook and the instructions file. Claude Code has its own parts, in [`claude`]. The entry
+//! and the hook run the binary on the home, so they hold no token. The only paths they hold
+//! are the binary's and, under `ZERODB_HOME`, the home's.
+
+mod claude;
+
+pub use claude::Notes;
 
 use crate::home::{user_home, HOME_ENV};
 use serde_json::{json, Map, Value};
@@ -18,17 +23,23 @@ pub enum Harness {
     Vscode,
     /// Copilot CLI's `mcp-config.json`.
     Copilot,
+    /// Claude Code, through the `claude` CLI and its `settings.json`.
+    ClaudeCode,
 }
+
+/// The harnesses that share the Copilot hook and instructions files, which read 1 home.
+const COPILOT_SHARED: [Harness; 2] = [Harness::Vscode, Harness::Copilot];
 
 impl Harness {
     /// Every harness.
-    pub const ALL: [Self; 2] = [Self::Vscode, Self::Copilot];
+    pub const ALL: [Self; 3] = [Self::Vscode, Self::Copilot, Self::ClaudeCode];
 
     /// The harness called `name` on the command line.
     pub fn parse(name: &str) -> Option<Self> {
         match name {
             "vscode" => Some(Self::Vscode),
             "copilot" => Some(Self::Copilot),
+            "claude-code" => Some(Self::ClaudeCode),
             _ => None,
         }
     }
@@ -37,6 +48,7 @@ impl Harness {
         match self {
             Self::Vscode => "vscode",
             Self::Copilot => "copilot",
+            Self::ClaudeCode => "claude-code",
         }
     }
 
@@ -45,10 +57,12 @@ impl Harness {
         match self {
             Self::Vscode => "vscode-copilot",
             Self::Copilot => "copilot",
+            Self::ClaudeCode => "claude-code",
         }
     }
 
     /// The config file. VS Code's lives in its user profile. Copilot's in `$COPILOT_HOME`.
+    /// Claude Code's is `.claude.json`, which only the `claude` CLI writes.
     fn file(self) -> Result<PathBuf, String> {
         Ok(match self {
             Self::Vscode if cfg!(target_os = "macos") => {
@@ -60,6 +74,7 @@ impl Harness {
             }
             .join("Code/User/mcp.json"),
             Self::Copilot => copilot_home()?.join("mcp-config.json"),
+            Self::ClaudeCode => claude::state_file()?,
         })
     }
 
@@ -67,7 +82,7 @@ impl Harness {
     fn section(self) -> &'static str {
         match self {
             Self::Vscode => "servers",
-            Self::Copilot => "mcpServers",
+            Self::Copilot | Self::ClaudeCode => "mcpServers",
         }
     }
 
@@ -81,6 +96,8 @@ impl Harness {
                 "args": ["mcp", "--agent", self.agent()]}),
             Self::Copilot => json!({"type": "local", "command": command,
                 "args": ["mcp", "--agent", self.agent()], "tools": ["*"]}),
+            Self::ClaudeCode => json!({"type": "stdio", "command": command,
+                "args": ["mcp", "--agent", self.agent()]}),
         };
         with_home(entry, home)
     }
@@ -111,13 +128,17 @@ fn binary() -> Result<String, String> {
 }
 
 /// Adds zerodb's entry to `harness`'s config and writes the hook and the instructions file,
-/// after creating the home.
+/// after creating the home. Claude Code gets its 3 parts by [`connect_claude_code`], with the
+/// hook and `--notes auto`.
 /// An entry with connection flags is replaced only with `force`. Under `ZERODB_HOME`, the
 /// entry and the hook pass it on. The other harness must pass the same home, as both share
 /// the hook. Else nothing changes, unless `force`. The flags are checked first, so `force`
 /// is never advised past a check that was not shown. Returns the exit code.
 pub fn connect(harness: Harness, force: bool) -> u8 {
-    finish(moved_home().and_then(|moved| {
+    if harness == Harness::ClaudeCode {
+        return connect_claude_code(force, true, Notes::Auto);
+    }
+    finish(moved_home(harness).and_then(|moved| {
         if !force {
             check_flags(harness, &crate::home::dir()?.join("data"))?;
         }
@@ -136,13 +157,21 @@ pub fn connect(harness: Harness, force: bool) -> u8 {
     }))
 }
 
+/// Adds Claude Code's MCP entry, and unless `hook` is false its SessionStart hook, and its
+/// allow rules for `notes`. An entry that differs is replaced only with `force`. Each part
+/// prints 1 line. A part that can't be applied is skipped, with what to do by hand, and the
+/// others still apply. Returns the exit code: 1 when any part was skipped.
+pub fn connect_claude_code(force: bool, hook: bool, notes: Notes) -> u8 {
+    claude::connect(force, hook, notes)
+}
+
 /// Runs [`refuse_flags`] on `harness`'s current entry, before any file changes. `data` is
 /// the home's data directory. A config that doesn't load is left for `edit` to report.
 fn check_flags(harness: Harness, data: &Path) -> Result<(), String> {
     let path = harness.file()?;
     let Ok((_, root)) = load(&path) else { return Ok(()) };
     match root.get(harness.section()).and_then(|servers| servers.get("zerodb")) {
-        Some(current) => refuse_flags(harness.name(), &path, current, data),
+        Some(current) => refuse_flags(harness, &path, current, data),
         None => Ok(()),
     }
 }
@@ -152,7 +181,7 @@ fn check_flags(harness: Harness, data: &Path) -> Result<(), String> {
 /// changes. With `force`, it comes back as a note to print.
 fn split_home(harness: Harness, home: Option<&str>, force: bool) -> Result<Option<String>, String> {
     let ours = home_words(home);
-    for other in Harness::ALL.into_iter().filter(|other| *other != harness) {
+    for other in COPILOT_SHARED.into_iter().filter(|other| *other != harness) {
         let name = other.name();
         // With HOME unset, the other config can't be located. It may still have been
         // connected from a shell where HOME was set, so its home is unknown.
@@ -225,24 +254,29 @@ fn home_words(home: Option<&str>) -> String {
 
 /// `$ZERODB_HOME` for the entry and the hook, or `None` when it is unset. A harness started
 /// from the Dock doesn't get the shell's variables, so its files must name the home.
-/// Copilot expands variables in a hook's env, so a path with a `$` is refused.
-fn moved_home() -> Result<Option<String>, String> {
+/// Copilot expands variables in a hook's env, and Claude Code in its MCP config, so a path
+/// with a `$` is refused. The message names `harness`.
+fn moved_home(harness: Harness) -> Result<Option<String>, String> {
     let Some(dir) = crate::home::env_dir()? else { return Ok(None) };
     let dir = dir.into_os_string().into_string();
     let dir = dir.map_err(|_| format!("{HOME_ENV} must be UTF-8 to go in a harness config"))?;
     if dir.contains('$') {
         return Err(format!(
-            "{HOME_ENV} {dir} holds a $. Copilot expands variables in a hook's env, so the hook \
-             would read another home. Nothing changed. Use a path without $"
+            "{HOME_ENV} {dir} holds a $. {} may expand variables in its config, so zerodb would \
+             read another home there. Nothing changed. Use a path without $",
+            harness.name()
         ));
     }
     Ok(Some(dir))
 }
 
 /// Removes zerodb's entry from `harness`'s config, and the instructions file and the hook
-/// once no harness has one. Both removals are tried, and every error is reported. Returns the
-/// exit code.
+/// once neither VS Code nor Copilot CLI has one. Both removals are tried, and every error is
+/// reported. Claude Code's parts go by [`claude`]'s rules. Returns the exit code.
 pub fn disconnect(harness: Harness) -> u8 {
+    if harness == Harness::ClaudeCode {
+        return claude::disconnect();
+    }
     finish(edit(harness, None, None).and_then(|message| {
         println!("{message}");
         let mut errors = Vec::new();
@@ -300,7 +334,7 @@ fn edit(harness: Harness, wanted: Option<Value>, guard: Option<&Path>) -> Result
         (None, None) => return Ok(format!("zerodb is not connected to {name}")),
         (Some(entry), current) => {
             if let (Some(current), Some(data)) = (current, guard) {
-                refuse_flags(name, &path, current, data)?;
+                refuse_flags(harness, &path, current, data)?;
             }
             servers.insert("zerodb".into(), entry.clone());
             if current.is_some() {
@@ -329,9 +363,9 @@ fn edit(harness: Harness, wanted: Option<Value>, guard: Option<&Path>) -> Result
 /// Flags that point an entry at a store other than the home.
 const CONNECTION: [&str; 5] = ["--url", "--data-dir", "--config", "--token-file", "--tenant"];
 
-/// Fails when `current`, the entry in `file`, passes connection flags, because its memory
-/// would not follow a switch to the home, whose data directory is `data`.
-fn refuse_flags(name: &str, file: &Path, current: &Value, data: &Path) -> Result<(), String> {
+/// Fails when `current`, `harness`'s entry in `file`, passes connection flags, because its
+/// memory would not follow a switch to the home, whose data directory is `data`.
+fn refuse_flags(harness: Harness, file: &Path, current: &Value, data: &Path) -> Result<(), String> {
     let args = current["args"].as_array().map(Vec::as_slice).unwrap_or_default();
     let args: Vec<&str> = args.iter().filter_map(Value::as_str).collect();
     let mut used = Vec::new();
@@ -345,10 +379,13 @@ fn refuse_flags(name: &str, file: &Path, current: &Value, data: &Path) -> Result
         return Ok(());
     }
     let (used, file, data) = (used.join(", "), file.display(), data.display());
+    let name = harness.name();
+    let apps =
+        if harness == Harness::ClaudeCode { "Claude Code" } else { "VS Code and Copilot CLI" };
     Err(format!(
         "{file}: the zerodb entry for {name} uses {used}. {file} was not changed.\n\
          Its memory stays in that store and would not follow a switch to the home.\n\
-         To keep it, quit VS Code and Copilot CLI, then stop that store's server.\n\
+         To keep it, quit {apps}, then stop that store's server.\n\
          Move the files in its data directory into {data}.\n\
          Do that only while {data} is empty, and only if the old config's tenant is \"me\".\n\
          Or keep using the old entry.\n\
@@ -429,10 +466,10 @@ fn connected(harness: Harness) -> Result<bool, String> {
     })
 }
 
-/// Why a shared Copilot file stays: a harness still has a zerodb entry, or its config
-/// cannot be read and so may still have one.
+/// Why a shared Copilot file stays: VS Code or Copilot CLI still has a zerodb entry, or its
+/// config cannot be read and so may still have one. Claude Code doesn't read these files.
 fn still_used() -> Option<String> {
-    for harness in Harness::ALL {
+    for harness in COPILOT_SHARED {
         let name = harness.name();
         match connected(harness) {
             Ok(true) => return Some(format!("zerodb is still connected to {name}")),

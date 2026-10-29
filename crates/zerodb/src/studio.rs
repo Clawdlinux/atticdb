@@ -174,7 +174,8 @@ fn open_page(url: &str) -> Result<(), String> {
         return Err(format!("{}: {error}", page.display()));
     }
     let program = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .arg(&page)
         // The browser it starts gets this environment, and a token there may be live.
         .env_remove(crate::mcp::TOKEN_ENV)
@@ -182,9 +183,9 @@ fn open_page(url: &str) -> Result<(), String> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         // Its own process group, so Ctrl-C here does not stop a browser it starts.
-        .process_group(0)
-        .spawn()
-        .map_err(|error| format!("{program}: {error}"))?;
+        .process_group(0);
+    // Tests put a fake opener on PATH, which may still be busy from its write.
+    let mut child = crate::spawn(&mut command).map_err(|error| format!("{program}: {error}"))?;
     // Snap browsers, Ubuntu's default, cannot read hidden folders such as ~/.local/share.
     // xdg-open still exits 0, so only the browser shows the error.
     if cfg!(target_os = "linux") {

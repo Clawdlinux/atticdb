@@ -27,8 +27,15 @@ pub fn files(dir: &Path) -> BTreeMap<String, Option<Vec<u8>>> {
 /// Variables that point zerodb at a home or at harness files, the real `HOME` included. No
 /// spawn inherits them, so a developer's own exports can't lead a test to a real home. A test
 /// that needs one sets it.
-const HOME_VARS: [&str; 5] =
-    ["HOME", "ZERODB_HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "COPILOT_HOME"];
+const HOME_VARS: [&str; 7] = [
+    "HOME",
+    "ZERODB_HOME",
+    "XDG_DATA_HOME",
+    "XDG_CONFIG_HOME",
+    "COPILOT_HOME",
+    "CLAUDE_CONFIG_DIR",
+    "CODEX_HOME",
+];
 
 /// A command for `program`, the `zerodb` binary or anything that runs it, without
 /// [`HOME_VARS`]. Every spawn of zerodb in these tests starts here.
@@ -38,6 +45,103 @@ pub fn command(program: impl AsRef<OsStr>) -> Command {
         command.env_remove(var);
     }
     command
+}
+
+/// A fake `claude` in the new directory `bin`, for a `PATH` of just `bin`. It appends its
+/// args as a JSON line to `bin/argv`, which it returns. `mcp add` and `mcp remove -s user
+/// <name>` edit `.claude.json` in `$CLAUDE_CONFIG_DIR`, else in `$HOME`, as Claude Code does.
+/// `mcp add` parses as the real CLI does: `-e` takes `K=V` values until `--` or the next
+/// option, so `-e K=V <name>` fails. `mcp get` answers from the file. With
+/// `FAKE_CLAUDE=slow`, it starts a python child that writes `$FAKE_CLAUDE_MARKER` after 12 s,
+/// then sleeps 60 s. With `FAKE_CLAUDE=add-fails`, `mcp add` exits 1.
+pub fn fake_claude(bin: &Path) -> PathBuf {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let python = std::env::split_paths(&path).map(|dir| dir.join("python3")).find(|p| p.is_file());
+    let python = python.unwrap_or_else(|| panic!("the fake claude needs python3 on PATH"));
+    let script = format!(
+        r#"#!{}
+import json, os, subprocess, sys, time
+args = sys.argv[1:]
+with open(os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "argv"), "a") as log:
+    log.write(json.dumps(args) + "\n")
+mode = os.environ.get("FAKE_CLAUDE", "")
+if mode == "slow":
+    marker = os.environ["FAKE_CLAUDE_MARKER"]
+    # Python itself, as PATH holds only this fake's directory, with no sleep or touch.
+    later = "import sys, time; time.sleep(12); open(sys.argv[1], 'w').close()"
+    subprocess.Popen([sys.executable, "-c", later, marker])
+    time.sleep(60)
+path = os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.environ["HOME"], ".claude.json")
+try:
+    with open(path) as f:
+        root = json.load(f)
+except FileNotFoundError:
+    root = {{}}
+servers = root.setdefault("mcpServers", {{}})
+if args[:2] == ["mcp", "get"]:
+    print(json.dumps(servers.get(args[2])))
+    sys.exit(0 if args[2] in servers else 1)
+if args[:2] == ["mcp", "add"]:
+    if mode == "add-fails":
+        sys.exit("add failed")
+    rest, env, scope, words = args[2:], {{}}, None, []
+    while rest:
+        arg = rest.pop(0)
+        if arg == "--":
+            words += rest
+            break
+        if arg in ("-s", "--scope"):
+            scope = rest.pop(0)
+        elif arg in ("-e", "--env"):
+            while rest and not rest[0].startswith("-"):
+                value = rest.pop(0)
+                if "=" not in value:
+                    sys.exit("Invalid environment variable format: " + value)
+                key, value = value.split("=", 1)
+                env[key] = value
+        elif arg.startswith("-"):
+            sys.exit("unknown option " + arg)
+        else:
+            words.append(arg)
+    if scope != "user" or len(words) < 2:
+        sys.exit("usage: claude mcp add [options] <name> <commandOrUrl> [args...]")
+    if words[0] in servers:
+        sys.exit("MCP server " + words[0] + " already exists in user config")
+    servers[words[0]] = {{"type": "stdio", "command": words[1], "args": words[2:], "env": env}}
+elif args[:4] == ["mcp", "remove", "-s", "user"] and len(args) == 5:
+    if servers.pop(args[4], None) is None:
+        sys.exit("No user-scoped MCP server found with name: " + args[4])
+else:
+    sys.exit("unexpected args")
+os.makedirs(os.path.dirname(path), exist_ok=True)
+with open(path, "w") as f:
+    json.dump(root, f, indent=2)
+"#,
+        python.display()
+    );
+    std::fs::create_dir(bin).unwrap();
+    let claude = bin.join("claude");
+    // `fs::write` closes the file before it returns, so no write fd outlives this helper.
+    std::fs::write(&claude, script).unwrap();
+    chmod(&claude, 0o755);
+    bin.join("argv")
+}
+
+/// Spawns `command`, retrying while Linux says the program is busy. A test may run a file it
+/// just wrote, such as a fake `claude` or a copied binary. If another test thread forks
+/// while that file is open for writing, the child holds the write fd until it execs, and an
+/// exec of the file meanwhile fails with ETXTBSY. Helpers close each file before returning,
+/// so the window is short: up to 50 tries, 20 ms apart.
+fn spawn(command: &mut Command) -> Child {
+    for _ in 1..50 {
+        match command.spawn() {
+            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            spawned => return spawned.unwrap(),
+        }
+    }
+    command.spawn().unwrap()
 }
 
 pub fn chmod(path: &Path, mode: u32) {
@@ -276,7 +380,7 @@ impl Process {
 
     /// Runs a command with stdout and stderr collected.
     pub fn start(command: &mut Command) -> Self {
-        let mut child = command.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        let mut child = spawn(command.stdout(Stdio::piped()).stderr(Stdio::piped()));
         let mut readers = Vec::new();
         let mut collect = |stream: Box<dyn Read + Send>| {
             let sink = Arc::new(Mutex::new(String::new()));
