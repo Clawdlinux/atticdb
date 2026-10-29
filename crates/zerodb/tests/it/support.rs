@@ -8,7 +8,7 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsE
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use zerodb::auth::Auth;
@@ -160,9 +160,10 @@ impl Via {
     /// Writes raw bytes and reads until the server closes the connection.
     pub fn raw(&self, bytes: &[u8]) -> String {
         let mut stream = self.connect();
-        // macOS fails `setsockopt` with EINVAL once the peer has closed, as after a busy
-        // answer. The read below then returns buffered data or EOF at once.
-        if let Err(error) = stream.set_read_timeout(Some(Duration::from_secs(10))) {
+        // Longer than the studio's 10 s store deadline, so a 504 arrives before this. macOS
+        // fails `setsockopt` with EINVAL once the peer has closed, as after a busy answer. The
+        // read below then returns buffered data or EOF at once.
+        if let Err(error) = stream.set_read_timeout(Some(Duration::from_secs(30))) {
             assert_eq!(error.raw_os_error(), Some(rustix::io::Errno::INVAL.raw_os_error()));
         }
         stream.write_all(bytes).unwrap();
@@ -550,4 +551,47 @@ pub fn data_dir(home: &Path) -> PathBuf {
     let data =
         if cfg!(target_os = "macos") { "Library/Application Support" } else { ".local/share" };
     home.join(data).join("zerodb/data")
+}
+
+/// A fake store on `socket`. `/healthz` answers at once with instance `X`. Any other request
+/// gets an empty read page after `delay`. With no `delay` it is never answered, and its
+/// connection stays open until the client closes it. Returns a count of those requests.
+pub fn slow_store(socket: &Path, delay: Option<Duration>) -> Arc<AtomicUsize> {
+    let listener = UnixListener::bind(socket).unwrap();
+    let reads = Arc::new(AtomicUsize::new(0));
+    let counted = reads.clone();
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().map_while(Result::ok) {
+            let counted = counted.clone();
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                loop {
+                    let mut head = String::new();
+                    while !head.ends_with("\r\n\r\n") {
+                        if reader.read_line(&mut head).unwrap_or(0) == 0 {
+                            return;
+                        }
+                    }
+                    let body = if head.starts_with("GET /healthz ") {
+                        r#"{"instance": "X"}"#
+                    } else {
+                        counted.fetch_add(1, Ordering::SeqCst);
+                        let Some(delay) = delay else {
+                            let _ = std::io::copy(&mut reader, &mut std::io::sink());
+                            return;
+                        };
+                        std::thread::sleep(delay);
+                        r#"{"facts": [], "next": null, "turns": [], "truncated": false}"#
+                    };
+                    let length = body.len();
+                    let reply =
+                        format!("HTTP/1.1 200 OK\r\nContent-Length: {length}\r\n\r\n{body}");
+                    if stream.write_all(reply.as_bytes()).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    reads
 }

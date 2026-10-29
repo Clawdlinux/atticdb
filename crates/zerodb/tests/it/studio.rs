@@ -1,14 +1,16 @@
 use crate::support::{
-    chmod, cwd, data_dir, files, hook, private_file, seed, wait_for, Dir, Holders, Process, Via,
+    chmod, cwd, data_dir, files, hook, private_file, seed, slow_store, wait_for, Dir, Holders,
+    Process, Via, TOKEN_A,
 };
 use serde_json::{json, Value};
-use std::cell::RefCell;
 use std::ffi::OsStr;
 use std::io::Read;
 use std::net::{SocketAddr, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::atomic::Ordering;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 const CSP: &str = concat!(
@@ -64,7 +66,7 @@ struct Studio {
     port: u16,
     secret: String,
     /// Every reply, as it came off the wire.
-    wires: RefCell<Vec<String>>,
+    wires: Mutex<Vec<String>>,
 }
 
 impl Studio {
@@ -86,13 +88,13 @@ impl Studio {
         let hex = secret.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'));
         assert!(secret.len() == 32 && hex, "32 lowercase hex: {link}");
         let (port, secret) = (port.parse().unwrap(), secret.to_owned());
-        Self { process, port, secret, wires: RefCell::default() }
+        Self { process, port, secret, wires: Mutex::default() }
     }
 
     /// Sends `request` as written.
     fn send(&self, case: &str, request: &str) -> Reply {
         let wire = Via::Tcp(SocketAddr::from(([127, 0, 0, 1], self.port))).raw(request.as_bytes());
-        self.wires.borrow_mut().push(wire.clone());
+        self.wires.lock().unwrap().push(wire.clone());
         Reply::parse(case, &wire)
     }
 
@@ -319,7 +321,7 @@ fn studio_forwards_reads_and_refuses_the_rest() {
 
     // The token stays in the studio. The secret is only in the link on stdout.
     for studio in [&studio, &by_dir, &by_url] {
-        for wire in studio.wires.borrow().iter() {
+        for wire in studio.wires.lock().unwrap().iter() {
             assert!(!wire.contains(&token), "the token reached the page: {wire}");
         }
         let (port, secret) = (studio.port, &studio.secret);
@@ -333,4 +335,31 @@ fn studio_forwards_reads_and_refuses_the_rest() {
         );
     }
     assert!(!data.parent().unwrap().join("studio.html").exists(), "--no-open writes no page");
+}
+
+/// A store that takes a read and never answers. 1 deadline of 10 s covers connect and
+/// exchange, then the read gets 504. The studio serves other requests meanwhile.
+#[test]
+#[ignore = "waits for the 10 s store deadline"]
+fn studio_answers_504_when_the_store_stalls() {
+    let dir = Dir::new();
+    let socket = dir.0.join("s.sock");
+    let reads = slow_store(&socket, None);
+    let (url, token) = (format!("unix://{}", socket.display()), private_file(&dir, "t", TOKEN_A));
+    let studio = Studio::start(&dir.0, &["--no-open", "--url", &url, "--token-file", &token], &[]);
+    let (reply, elapsed) = std::thread::scope(|scope| {
+        let read = scope.spawn(|| {
+            let started = Instant::now();
+            (studio.get("/api/v1/sessions", true), started.elapsed())
+        });
+        wait_for("the read reaches the store", || reads.load(Ordering::SeqCst) == 1);
+        let info = studio.get("/api/info", true).json();
+        let answered = (&info["store"], read.is_finished());
+        assert_eq!(answered, (&json!("url"), false), "/api/info answers during the stall: {info}");
+        read.join().unwrap()
+    });
+    assert_eq!((reply.status, reply.body.as_str()), (504, r#"{"error":"store_timeout"}"#));
+    eprintln!("504 after {elapsed:?}");
+    let window = Duration::from_secs(10)..Duration::from_secs(12);
+    assert!(window.contains(&elapsed), "504 after {elapsed:?}");
 }

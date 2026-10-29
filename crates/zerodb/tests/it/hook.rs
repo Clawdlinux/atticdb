@@ -1,8 +1,6 @@
-use crate::support::{chmod, cwd, data_dir, hook, seed, zerodb, Dir, Holders};
+use crate::support::{chmod, cwd, data_dir, hook, seed, slow_store, zerodb, Dir, Holders};
 use serde_json::{json, Value};
-use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::DirBuilderExt;
-use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -12,37 +10,10 @@ fn slow_server(home: &Path) {
     let data = data_dir(home);
     std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&data).unwrap();
     let socket = data.join("zerodb.sock");
-    let listener = UnixListener::bind(&socket).unwrap();
+    slow_store(&socket, Some(Duration::from_millis(1_500)));
     let lock =
         format!("pid={} instance=X unix={} tcp=none\n", std::process::id(), socket.display());
     std::fs::write(data.join("LOCK"), lock).unwrap();
-    std::thread::spawn(move || {
-        for mut stream in listener.incoming().map_while(Result::ok) {
-            std::thread::spawn(move || {
-                let mut reader = BufReader::new(stream.try_clone().unwrap());
-                loop {
-                    let mut head = String::new();
-                    while !head.ends_with("\r\n\r\n") {
-                        if reader.read_line(&mut head).unwrap_or(0) == 0 {
-                            return;
-                        }
-                    }
-                    let body = if head.starts_with("GET /healthz ") {
-                        r#"{"instance": "X"}"#
-                    } else {
-                        std::thread::sleep(Duration::from_millis(1_500));
-                        r#"{"facts": [], "next": null, "turns": [], "truncated": false}"#
-                    };
-                    let length = body.len();
-                    let reply =
-                        format!("HTTP/1.1 200 OK\r\nContent-Length: {length}\r\n\r\n{body}");
-                    if stream.write_all(reply.as_bytes()).is_err() {
-                        return;
-                    }
-                }
-            });
-        }
-    });
 }
 
 /// The block lists rules, then this repo's facts, both in key order, then the newest 5
