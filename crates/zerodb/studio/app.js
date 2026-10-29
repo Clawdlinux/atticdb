@@ -185,7 +185,7 @@ function empty(el, ...lines) {
 function errorText(err) {
   if (err.status === 401) return ['This link is out of date. Open the link ', code('zerodb studio'), ' printed.'];
   if (err.code === 'store_unreachable') return [`Couldn't reach the store${err.detail ? ': ' + err.detail : ''}. Start it with `, code('zerodb serve'), ', then retry.'];
-  if (err.code === 'store_unauthorized') return [`The store refused the studio's token${err.detail ? ': ' + err.detail : ''}. Run `, code('zerodb studio'), ' again with a token it takes.'];
+  if (err.code === 'store_unauthorized') return ["The store refused the studio's token. Run ", code('zerodb studio'), ' again with a token it takes.'];
   if (err.code === 'store_timeout') return ['The store took more than 10 s to answer. Check it with ', code('zerodb serve'), ', then retry.'];
   if (err.code === 'offline') return ['The studio stopped answering. Run ', code('zerodb studio'), ' again and open the link it prints.'];
   if (err.code === 'invalid_input') return [`The store refused the request${err.detail ? ': ' + err.detail : ''}.`];
