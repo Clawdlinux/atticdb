@@ -110,7 +110,7 @@ fn binary() -> Result<String, String> {
     exe.into_os_string().into_string().map_err(|_| "the zerodb binary's path must be UTF-8".into())
 }
 
-/// Adds zerodb's entry to `harness`'s config and writes the instructions file and the hook,
+/// Adds zerodb's entry to `harness`'s config and writes the hook and the instructions file,
 /// after creating the home.
 /// An entry with connection flags is replaced only with `force`. Under `ZERODB_HOME`, the
 /// entry and the hook pass it on. The other harness must pass the same home, as both share
@@ -127,8 +127,8 @@ pub fn connect(harness: Harness, force: bool) -> u8 {
         let guard = (!force).then_some(home.data_dir.as_path());
         let entry = harness.entry(&exe, moved.as_deref());
         println!("{}", edit(harness, Some(entry), guard)?);
-        println!("{}", set_guide()?);
         println!("{}", set_hook(&exe, moved.as_deref())?);
+        println!("{}", set_guide()?);
         if let Some(split) = split {
             eprintln!("zerodb: {split}");
         }
@@ -518,7 +518,8 @@ fn marked(bytes: &[u8]) -> bool {
 }
 
 /// Writes the instructions file, unless another file there mentions zerodb, or a file of the
-/// same name has no [`MARKER`] line. Returns the message to print.
+/// same name has no [`MARKER`] line, or can't be read, such as a symlink. Returns the message
+/// to print.
 fn set_guide() -> Result<String, String> {
     let dir = guide_dir()?;
     if let Some(other) = other_guide(&dir) {
@@ -527,8 +528,10 @@ fn set_guide() -> Result<String, String> {
     }
     let (path, text) = (dir.join(GUIDE), guide_text());
     let shown = path.display();
-    let old =
-        read(&path).map_err(|why| format!("{shown}: {why}. The instructions were not written"))?;
+    let old = match read(&path) {
+        Ok(old) => old,
+        Err(why) => return Ok(format!("left {shown} alone: {why}")),
+    };
     if old.as_ref().is_some_and(|(bytes, _)| *bytes == text.as_bytes()) {
         return Ok(format!("the zerodb instructions are already in place ({shown})"));
     }
@@ -543,8 +546,9 @@ fn set_guide() -> Result<String, String> {
     })
 }
 
-/// Deletes the instructions file once no harness has a zerodb entry, if it has [`MARKER`].
-/// Returns the message to print, empty when there is no file.
+/// Deletes the instructions file once no harness has a zerodb entry, if it is exactly what
+/// zerodb writes now. An edited one stays. Returns the message to print, empty when there is
+/// no file.
 fn remove_guide() -> Result<String, String> {
     let path = guide_dir()?.join(GUIDE);
     let shown = path.display();
@@ -558,6 +562,12 @@ fn remove_guide() -> Result<String, String> {
     }
     if !marked(&bytes) {
         return Ok(format!("left {shown} alone: it has no line {MARKER}. Delete it by hand"));
+    }
+    if bytes != guide_text().as_bytes() {
+        return Ok(format!(
+            "left {shown} alone: it differs from the instructions zerodb writes, so it may hold \
+             your edits. Delete it by hand"
+        ));
     }
     delete(&path)?;
     Ok(format!("removed the zerodb instructions: {shown}"))

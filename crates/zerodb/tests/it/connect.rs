@@ -166,7 +166,8 @@ fn connect_edits_only_the_zerodb_entry() {
 
 /// `connect` writes 1 hook file and 1 instructions file for both harnesses, and `disconnect`
 /// removes them once neither is connected. A hook file zerodb did not write stays, and so
-/// does an instructions file without the marker line, which connect doesn't overwrite. Another instructions file that
+/// does an instructions file without the marker line, which connect doesn't overwrite, or an
+/// edited one. A symlinked instructions file is left alone and doesn't stop the hook. Another instructions file that
 /// mentions zerodb stops ours. The quoted path runs in `sh`. Under `ZERODB_HOME`, both
 /// entries and the hook pass it on, and a path with a `$` is refused. Both entries must pass
 /// the same home, as the hook reads 1.
@@ -214,8 +215,8 @@ fn connect_writes_the_session_start_hook() {
         };
         let shown = file.display();
         let out = run(&["connect", "vscode"]);
-        assert!(out.ends_with(&format!("\nadded the sessionStart hook: {shown}\n")), "{out}");
-        assert!(out.contains(&said_guide("added")), "{var:?}: {out}");
+        assert!(out.contains(&format!("\nadded the sessionStart hook: {shown}\n")), "{out}");
+        assert!(out.ends_with(&said_guide("added")), "{var:?}: {out}");
         let text = format!(
             "---\napplyTo: \"**\"\ndescription: \"How to use zerodb, this user's long-term \
              memory\"\n---\n<!-- written by zerodb connect -->\n\n{}\n",
@@ -231,7 +232,7 @@ fn connect_writes_the_session_start_hook() {
         assert_eq!(env_of(&vscode, "servers"), env, "{var:?}: VS Code's entry");
         let before = (files(&hooks), std::fs::metadata(&file).unwrap().modified().unwrap());
         let out = run(&["connect", "copilot"]);
-        assert!(out.ends_with(&format!("\nthe sessionStart hook is already in place ({shown})\n")));
+        assert!(out.contains(&format!("\nthe sessionStart hook is already in place ({shown})\n")));
         let after = (files(&hooks), std::fs::metadata(&file).unwrap().modified().unwrap());
         assert_eq!(after, before, "{var:?}: nothing written");
         let in_place =
@@ -265,6 +266,15 @@ fn connect_writes_the_session_start_hook() {
         let skipped = format!("skipped the zerodb instructions: {} has no line", guide.display());
         assert!(out.contains(&skipped), "{var:?}: {out}");
         assert_eq!(std::fs::read_to_string(&guide).unwrap(), "mine\n", "{var:?}: not written");
+        // A symlink is left alone, and the hook is still written.
+        std::fs::remove_file(&guide).unwrap();
+        std::os::unix::fs::symlink("mine.md", &guide).unwrap();
+        run(&["disconnect", "copilot"]);
+        assert!(!file.exists(), "{var:?}: no hook");
+        let out = run(&["connect", "copilot"]);
+        let alone = format!("\nleft {} alone: is a symlink\n", guide.display());
+        assert!(out.contains(&alone) && file.exists(), "{var:?}: {out}");
+        assert!(std::fs::symlink_metadata(&guide).unwrap().is_symlink(), "{var:?}");
         std::fs::remove_file(&guide).unwrap();
         let other = instructions.join("zerodb-memory.instructions.md");
         let backup = instructions.join("zerodb-memory.instructions.md.bak-1");
@@ -276,8 +286,13 @@ fn connect_writes_the_session_start_hook() {
         std::fs::remove_file(&other).unwrap();
         let out = run(&["connect", "copilot"]);
         assert!(out.contains(&said_guide("added")), "{var:?}: the backup doesn't count: {out}");
+        // An edited file keeps the marker, but disconnect leaves it, as the edits are the user's.
+        std::fs::write(&guide, text.clone() + "my edit\n").unwrap();
         let out = run(&["disconnect", "copilot"]);
-        assert!(out.contains(&said_guide("removed")), "{var:?}: {out}");
+        let alone = format!("left {} alone: it differs from the instructions", guide.display());
+        assert!(out.contains(&alone), "{var:?}: {out}");
+        assert_eq!(std::fs::read_to_string(&guide).unwrap(), text.clone() + "my edit\n");
+        std::fs::remove_file(&guide).unwrap();
         std::fs::remove_file(&backup).unwrap();
 
         // The hook for another binary goes. A hook file with other content stays.

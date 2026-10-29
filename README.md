@@ -112,7 +112,7 @@ To turn it off, delete the hook file, or disconnect both harnesses.
 `connect` also writes the server's instructions to `~/.copilot/instructions/zerodb.instructions.md`, as Copilot may not read them from the server.
 The file holds the line `<!-- written by zerodb connect -->`. Without it, the file is yours, and zerodb never changes or removes it.
 `connect` also skips the file when another `.instructions.md` file there mentions zerodb, and says which.
-Disconnecting both harnesses removes it.
+Disconnecting both harnesses removes it, unless you edited it.
 
 ## Shell verbs
 
