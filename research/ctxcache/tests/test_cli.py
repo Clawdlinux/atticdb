@@ -14,9 +14,15 @@ FIXTURE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "fixtures", "
 
 def test_cli_on_the_fixture_trace(tmp_path):
     out, exported = tmp_path / "results", tmp_path / "trace.jsonl"
+    # The export path is a hard link to a stand-in repo file. No path check can see that,
+    # so the export must replace the name, never write through it.
+    repo_file = tmp_path / "repo-file.txt"
+    repo_file.write_text("keep")
+    os.link(repo_file, exported)
     argv = ["--dataset", "trace", "--input", FIXTURE, "--budgets", "0.2k,1k,4k", "--out", str(out),
             "--bootstrap", "20", "--export-trace", str(exported)]
     assert run.main(argv) == 0
+    assert repo_file.read_text() == "keep", "the linked file keeps its content"
 
     rows = list(csv.DictReader(open(out / "trace.csv")))
     assert [(r["budget"], r["policy"]) for r in rows][:2] == [("200", "lru"), ("200", "fifo")]

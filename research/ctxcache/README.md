@@ -44,7 +44,10 @@ python3 -m pytest research/ctxcache/tests
 The repo check compares files, not strings, so a path to the checkout under another case or through `/System/Volumes/Data` is refused too.
 Every file a run writes is checked that way, after symlinks resolve: each cached row, the exported trace and the sheet.
 So a symlink below the cache directory cannot pull rows into the repo.
-`--export-trace` must not be the `--input` file, under any symlink or hard link. Opening the export would empty the input.
+No path check can see a hard link, which is an outside name for a repo file. So a write never opens its destination.
+It writes a new file in the same folder, then renames it over the destination. A rename replaces the name, so a linked repo file keeps its content.
+On an error, the destination stays as it was.
+`--export-trace` must not be the `--input` file, under any symlink or hard link. The export would replace the input.
 Bad flags and fetch or file errors exit with code 2. A run writes 4 files to `--out`:
 - `<dataset>.csv`: 1 row per budget and policy, pooled and macro, with intervals and leave-one-out ranges.
 - `<dataset>-sensitivity.csv`: the same policies on narrower proxies, at the sensitivity budgets.

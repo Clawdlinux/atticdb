@@ -17,8 +17,8 @@ import random
 import sys
 from collections import Counter
 
-from . import hf, openhands, swe_agent
-from .guard import inside, outside
+from . import guard, hf, openhands, swe_agent
+from .guard import inside
 from .run import positive
 from .trace import REF_KINDS
 
@@ -102,10 +102,8 @@ def main(argv=None) -> int:
         for k in REF_KINDS:
             picked = rng.sample(groups[k], quota.get(k, 0))
             rows += sorted(picked, key=lambda r: (r["row"], r["step"]))
-        # Again at write time, after symlinks resolve: a labels folder may link into the repo.
-        out = outside(os.path.abspath(a.out), "the sheet")
-        os.makedirs(os.path.dirname(out), exist_ok=True)
-        with open(out, "w", newline="") as f:
+        out = os.path.abspath(a.out)
+        with guard.replacing(out, "the sheet", newline="") as f:
             w = csv.DictWriter(f, fieldnames=FIELDS)
             w.writeheader()
             for i, r in enumerate(rows, 1):

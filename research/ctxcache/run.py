@@ -10,6 +10,7 @@ README.md lists the flags and the trace format.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import sys
 import time
@@ -19,7 +20,7 @@ if __package__ in (None, ""):  # run as a script: make `research` importable
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from research.ctxcache import copilot, hf, openhands, report, swe_agent, trace  # noqa: E402
-from research.ctxcache.guard import inside  # noqa: E402
+from research.ctxcache.guard import inside, replacing  # noqa: E402
 from research.ctxcache.stats import measure, reuse_distances  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -87,7 +88,7 @@ def parse(argv=None) -> argparse.Namespace:
     if a.export_trace and inside(a.export_trace):
         p.error("--export-trace must point outside the repo, so traces are never committed")
     if a.export_trace and a.input and _same_file(a.export_trace, a.input):
-        p.error("--export-trace must not be the --input file: the export would empty it before it is read")
+        p.error("--export-trace must not be the --input file: the export would replace it")
     if inside(a.cache_dir):
         p.error("--cache-dir must point outside the repo, so downloaded rows are never committed")
     return a
@@ -202,22 +203,20 @@ def run(a: argparse.Namespace) -> int:
     sizes = a.budgets
     skipped: Counter = Counter()
     recs, distances = [], []
-    export = open(a.export_trace, "w") if a.export_trace else None
+    # The export replaces its destination only after the last trajectory, never writing through it.
+    export = replacing(a.export_trace, "--export-trace") if a.export_trace else contextlib.nullcontext()
     start = time.time()
-    try:
+    with export as out:
         for traj, cluster, acc, info in source(a, skipped):
             trace.check(acc)
-            if export:
-                trace.dump(traj, acc, export)
+            if out is not None:
+                trace.dump(traj, acc, out)
             rec = measure(acc, info, sizes, a.sensitivity_budgets)
             rec["cluster"] = cluster
             recs.append(rec)
             distances += reuse_distances(acc)
             if len(recs) % 100 == 0:
                 print(f"{len(recs)} trajectories, {time.time() - start:.0f} s", file=sys.stderr)
-    finally:
-        if export:
-            export.close()
     if not recs:
         print("no trajectories", file=sys.stderr)
         return 1

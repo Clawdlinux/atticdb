@@ -20,9 +20,13 @@ def test_label_sheet_is_stratified_and_lands_outside_the_repo(tmp_path):
             ("edit 1:1\nx = 1\nend_of_edit", None),
             ("python a.py", swe_obs("ok", A))))
     sheet = tmp_path / "sheet.csv"
+    repo_file = tmp_path / "repo-file.txt"  # a stand-in repo file, hard-linked at the sheet's path
+    repo_file.write_text("keep")
+    os.link(repo_file, sheet)
     argv = ["label-sample", "--dataset", "swe-agent", "--sample", "2", "--n", "3", "--cache-dir", str(tmp_path),
             "--offline", "--out", str(sheet)]
     assert run.main(argv) == 0
+    assert repo_file.read_text() == "keep", "the sheet replaces the name, never writes through the link"
 
     rows = list(csv.DictReader(open(sheet)))
     assert list(rows[0]) == label.FIELDS

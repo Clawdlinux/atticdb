@@ -114,13 +114,11 @@ class Fetcher:
             if self.offline:
                 raise FetchError(f"row {offset} is not cached and --offline is set")
             # Before the request, so a refused cache costs no call.
-            os.makedirs(guard.outside(self.dir, "the row cache", self.repo), exist_ok=True)
+            guard.outside(self.dir, "the row cache", self.repo)
             for cached in self._fetch(offset, length):
-                path = guard.outside(self._path(cached["offset"]), "the cached row", self.repo)
-                tmp = guard.outside(f"{path}.{os.getpid()}.tmp", "the cached row", self.repo)
-                with gzip.open(tmp, "wt", encoding="utf-8") as f:
-                    json.dump(cached, f)
-                os.replace(tmp, path)
+                with guard.replacing(self._path(cached["offset"]), "the cached row", "wb", self.repo) as raw:
+                    with gzip.open(raw, "wt", encoding="utf-8") as f:
+                        json.dump(cached, f)
         with gzip.open(self._path(offset), "rt", encoding="utf-8") as f:
             cached = json.load(f)
         if cached["truncated"]:
