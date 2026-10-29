@@ -183,6 +183,8 @@ They are `system`, `user` (the task), then `assistant` messages with 1 tool call
 | `think`, `task_tracker`, others | Outputs. |
 
 A `cat -n` in the shell and an editor view of the same lines are 1 object.
+That holds only when every line of the shell output is a `cat -n` line. Other output keeps its full text.
+No shell output in the sample has a line numbered with a tab, so on this sample the rule never fires.
 3 signs flag a row as condensed. It has a second `user` message that is not the auto-continue prompt, or a tool result with no matching call. Or it stopped at the iteration cap with fewer assistant messages than the cap.
 
 ### Shell commands: `bash.py`

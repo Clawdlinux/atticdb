@@ -134,6 +134,19 @@ OH_CASES = [
         [],
         {"condensed": 1},
     ),
+    (
+        "a shell read of a plain file keeps every line, even one that looks numbered",
+        oh_row(
+            ("execute_bash", {"command": "cd /repo && cat data.tsv"}, oh_bash("id\tname\n1\talpha\ntotal: 1")),
+            ("execute_bash", {"command": "cd /repo && python gen.py"}, oh_bash("done")),
+            ("execute_bash", {"command": "cd /repo && cat data.tsv"}, oh_bash("id\tname\n1\talpha\ntotal: 2")),
+        ),
+        # A script changed the file, and no write was seen. The 2 reads differ outside the
+        # line "1<TAB>alpha", so they are 2 objects, not a re-read.
+        ["A*:file", "B*:output", "C*:file"],
+        [],
+        {"writes": 0},
+    ),
 ]
 
 

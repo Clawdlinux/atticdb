@@ -28,7 +28,8 @@ AUTO_CONTINUE = "Please continue working on the task"
 
 
 def numbered(text: str):
-    """(body, (first, last) line, text) of the `cat -n` lines in an editor output."""
+    """(body, (first, last) line, text) of the `cat -n` lines in a tool output. Other
+    lines, such as the editor's header and footer, are dropped."""
     body, nums, plain = [], [], []
     for line in text.split("\n"):
         m = NUMBERED.match(line)
@@ -136,8 +137,13 @@ def _shell(b: TraceBuilder, args: dict, content: str, cwd: str | None) -> str | 
         b.use_url(url)
     ok = exit_code is None or exit_code.group(1) == "0" or (exit_code.group(1) == "1" and "grep" in command)
     if eff.read and ok:
+        # `cat -n` output is the editor's view of the same lines, but only if every line
+        # is a `cat -n` line. A data file with a line such as "1<TAB>alpha" stays whole.
         nbody, lines, plain = numbered(body)
-        b.read_file(eff.read, nbody if lines else body, lines, plain if lines else body)
+        if lines and nbody == body:
+            b.read_file(eff.read, body, lines, plain)
+        else:
+            b.read_file(eff.read, body, None, body)
     elif eff.url and ok:
         b.read_url(eff.url, command, body)
     else:
