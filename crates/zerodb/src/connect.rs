@@ -113,9 +113,13 @@ fn binary() -> Result<String, String> {
 /// Adds zerodb's entry to `harness`'s config and writes the hook, after creating the home.
 /// An entry with connection flags is replaced only with `force`. Under `ZERODB_HOME`, the
 /// entry and the hook pass it on. The other harness must pass the same home, as both share
-/// the hook. Else nothing changes, unless `force`. Returns the exit code.
+/// the hook. Else nothing changes, unless `force`. The flags are checked first, so `force`
+/// is never advised past a check that was not shown. Returns the exit code.
 pub fn connect(harness: Harness, force: bool) -> u8 {
     finish(moved_home().and_then(|moved| {
+        if !force {
+            check_flags(harness, &crate::home::dir()?.join("data"))?;
+        }
         let split = split_home(harness, moved.as_deref(), force)?;
         let home = crate::home::ensure()?;
         let exe = binary()?;
@@ -128,6 +132,17 @@ pub fn connect(harness: Harness, force: bool) -> u8 {
         }
         Ok(String::new())
     }))
+}
+
+/// Runs [`refuse_flags`] on `harness`'s current entry, before any file changes. `data` is
+/// the home's data directory. A config that doesn't load is left for `edit` to report.
+fn check_flags(harness: Harness, data: &Path) -> Result<(), String> {
+    let path = harness.file()?;
+    let Ok((_, root)) = load(&path) else { return Ok(()) };
+    match root.get(harness.section()).and_then(|servers| servers.get("zerodb")) {
+        Some(current) => refuse_flags(harness.name(), &path, current, data),
+        None => Ok(()),
+    }
 }
 
 /// Checks the home `harness` would pass against the other connected harness's. Both share

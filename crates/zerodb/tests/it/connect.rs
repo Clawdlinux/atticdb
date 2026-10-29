@@ -320,4 +320,15 @@ fn connect_writes_the_session_start_hook() {
     assert_eq!(code, Some(0), "comments: {out}");
     assert!(!out.contains("still uses"), "comments: {out}");
     assert_eq!((env_of(&entry, "mcpServers"), hook_env()), (Value::Null, Value::Null), "comments");
+    // Copilot's own entry with --data-dir, under a home that also splits from VS Code's. The
+    // flags refusal shows first, so --force is never advised past a warning not yet shown.
+    let mut flagged: Value = serde_json::from_slice(&std::fs::read(&entry).unwrap()).unwrap();
+    flagged["mcpServers"]["zerodb"]["args"] = json!(["mcp", "--data-dir", "/old"]);
+    std::fs::write(&entry, serde_json::to_vec(&flagged).unwrap()).unwrap();
+    let before = now();
+    let (code, out) = connect(&["connect", "copilot"], true);
+    assert_eq!(code, Some(1), "flags and split: {out}");
+    assert!(out.contains("uses --data-dir /old."), "flags and split: {out}");
+    assert!(!out.contains("sessionStart hook"), "flags and split: {out}");
+    assert_eq!(now(), before, "flags and split: no file changed");
 }
