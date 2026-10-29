@@ -1,4 +1,4 @@
-"""Per-trajectory measures, pooled ratios, and a cluster bootstrap."""
+"""Per-trajectory measures, pooled and macro ratios, influence, and a cluster bootstrap."""
 
 from __future__ import annotations
 
@@ -6,10 +6,30 @@ import math
 import operator
 import random
 from collections import Counter
-from typing import Iterable, Sequence
+from typing import Callable, Iterable, Sequence
 
 from . import policies
-from .trace import Access
+from .trace import EDITS, REF_KINDS, Access
+
+# Which references each proxy variant keeps. Every variant keeps every re-read.
+VARIANTS = {
+    "all": REF_KINDS,
+    "reread": (),
+    "edits": EDITS,
+    "exact": ("edit_span", "line_span"),
+    "no_run_git": tuple(k for k in REF_KINDS if k not in ("run", "git")),
+}
+
+
+def proxy_only(acc: Sequence[Access], kinds) -> list[Access]:
+    """The trace with every first access and re-read, and only the references of the
+    given kinds. A reference with no subtype counts as "path"."""
+    keep = set(kinds)
+    return [a for a in acc if a.first or not a.ref or (a.sub or "path") in keep]
+
+
+def subtype(a: Access) -> str:
+    return a.sub or ("first" if a.first else ("path" if a.ref else "reread"))
 
 
 def reuse_distances(acc: Sequence[Access]) -> list[int]:
@@ -59,8 +79,10 @@ def peak_live(acc: Sequence[Access]) -> int:
     return peak
 
 
-def measure(acc: Sequence[Access], info: dict, budgets: Iterable[int]) -> dict:
-    """Counts for 1 trajectory, and every policy's result at every budget."""
+def measure(acc: Sequence[Access], info: dict, budgets: Iterable[int], sens_budgets: Iterable[int] = ()) -> dict:
+    """Counts for 1 trajectory, every policy's result at every budget, and every proxy
+    variant's result at the sensitivity budgets."""
+    budgets, sens_budgets = list(budgets), list(sens_budgets)
     rec: Counter = Counter()
     seen: dict[str, int] = {}
     kind: dict[str, str] = {}
@@ -69,6 +91,8 @@ def measure(acc: Sequence[Access], info: dict, budgets: Iterable[int]) -> dict:
         rec[cls] += 1
         rec[f"{cls}_tokens"] += a.tokens
         rec[f"{a.kind}_{cls}"] += 1
+        rec[f"sub_{subtype(a)}"] += 1
+        rec[f"sub_{subtype(a)}_tokens"] += a.tokens
         seen[a.obj] = seen.get(a.obj, 0) + 1
         kind[a.obj] = a.kind
         if not a.ref:
@@ -99,7 +123,15 @@ def measure(acc: Sequence[Access], info: dict, budgets: Iterable[int]) -> dict:
         for name, policy in policies.POLICIES.items():
             results[(name, b)] = policy(acc, b)
         rec[f"clearing_n@{b}"] = policies.clearing_keep(acc, b)
-    return {"counts": rec, "results": results, "cluster": info.get("cluster")}
+    variants = {}
+    for v, kinds in VARIANTS.items():
+        part = list(acc) if v == "all" else proxy_only(acc, kinds)
+        rec[f"re@{v}"] = sum(1 for a in part if not a.first)
+        rec[f"re_tokens@{v}"] = sum(a.tokens for a in part if not a.first)
+        for b in sens_budgets:
+            for name, policy in policies.POLICIES.items():
+                variants[(v, name, b)] = results[(name, b)] if v == "all" and b in budgets else policy(part, b)
+    return {"counts": rec, "results": results, "variants": variants, "cluster": info.get("cluster")}
 
 
 def pooled(recs: Sequence[dict], key: str) -> int:
@@ -117,18 +149,33 @@ def ratio(num: float, den: float) -> float:
     return num / den if den else math.nan
 
 
-def bootstrap(recs: Sequence[dict], stats, resamples: int, seed: int, columns: Iterable[str] = ()) -> dict:
-    """95% percentile intervals over clusters (instances or sessions), resampled with
-    replacement. `stats` maps a name to f(sums), where sums maps a column to its total.
-    Columns are the given counts keys and (policy, budget, "misses" or "missed")."""
+def macro(recs: Sequence[dict], num: Callable[[dict], float], den: Callable[[dict], float]) -> float:
+    """The mean of per-trajectory ratios, over trajectories whose denominator is above 0."""
+    vals = [num(r) / den(r) for r in recs if den(r) > 0]
+    return sum(vals) / len(vals) if vals else math.nan
+
+
+def leave_one_out(recs: Sequence[dict], num, den) -> tuple[float, float]:
+    """The lowest and highest pooled ratio with 1 trajectory left out."""
+    n, d = sum(num(r) for r in recs), sum(den(r) for r in recs)
+    vals = [(n - num(r)) / (d - den(r)) for r in recs if d - den(r) > 0]
+    return (min(vals), max(vals)) if vals else (math.nan, math.nan)
+
+
+def top_share(recs: Sequence[dict], key: str, k: int = 10) -> float:
+    """The share of a pooled count held by its k largest trajectories."""
+    vals = sorted((r["counts"][key] for r in recs), reverse=True)
+    return ratio(sum(vals[:k]), sum(vals))
+
+
+def bootstrap(recs: Sequence[dict], columns: dict, stats: dict, resamples: int, seed: int) -> dict:
+    """95% percentile intervals over clusters, resampled with replacement. `columns`
+    maps a name to f(record), summed per cluster. `stats` maps a name to f(sums)."""
     clusters: dict = {}
     for r in recs:
         clusters.setdefault(r["cluster"], []).append(r)
     groups = list(clusters.values())
-    table: dict = {c: [sum(r["counts"][c] for r in g) for g in groups] for c in columns}
-    for k in sorted({k for r in recs for k in r["results"]}, key=str):
-        table[(*k, "misses")] = [sum(r["results"][k][0] for r in g) for g in groups]
-        table[(*k, "missed")] = [sum(r["results"][k][1] for r in g) for g in groups]
+    table = {c: [sum(f(r) for r in g) for g in groups] for c, f in columns.items()}
     rng, n = random.Random(seed), len(groups)
     draws: dict[str, list[float]] = {name: [] for name in stats}
     for _ in range(resamples):

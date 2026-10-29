@@ -73,7 +73,8 @@ def parse(argv=None) -> argparse.Namespace:
     p.add_argument("--copilot-root", default=copilot.ROOT)
     p.add_argument("--export-trace", help="also write the hashed trace here (outside the repo)")
     p.add_argument("--bootstrap", type=int, default=1000, help="cluster bootstrap resamples, 0 for none")
-    p.add_argument("--drop-refs", action="store_true", help="keep re-reads only, to test the reference proxy")
+    p.add_argument("--sensitivity-budgets", type=budget_list, default="4k,8k",
+                   help="budgets for the reference proxy check")
     a = p.parse_args(argv)
     if a.dataset == "trace" and not a.input:
         p.error("--dataset trace needs --input")
@@ -104,10 +105,14 @@ def source(a: argparse.Namespace, skipped: Counter):
         fetcher = hf.Fetcher(a.dataset, a.cache_dir, a.sleep, max_requests=a.max_requests,
                              deadline=a.deadline, offline=a.offline)
         counts: Counter = Counter()
+        offsets = hf.sample_offsets(hf.DATASETS[a.dataset].rows, a.sample, a.seed, a.block)
+        block = {o: offsets[i - i % a.block] for i, o in enumerate(offsets)}  # offset -> its block's first row
         for offset, row in hf.sampled_rows(a.dataset, a.sample, a.seed, fetcher, counts, a.block):
             traj = f"{a.dataset}:{offset}"
             acc, info = module.trajectory(row, traj)
-            yield traj, info.get("cluster") or traj, acc, info
+            # The bootstrap resamples the units drawn: blocks of rows, or else instances.
+            cluster = f"block:{block[offset]}" if a.block > 1 else (info.get("cluster") or traj)
+            yield traj, cluster, acc, info
         skipped["truncated"] += counts["truncated"]
     elif a.dataset == "copilot":
         for traj, cluster, acc, info in copilot.traces(a.copilot_root):
@@ -122,18 +127,21 @@ def source(a: argparse.Namespace, skipped: Counter):
 
 
 def describe(a: argparse.Namespace, s: dict) -> dict:
-    cmd = f"python3 -m research.ctxcache --dataset {a.dataset}" + (" --drop-refs" if a.drop_refs else "")
+    cmd = f"python3 -m research.ctxcache --dataset {a.dataset}"
     if a.dataset in ("swe-agent", "openhands"):
         cmd += f" --sample {a.sample} --seed {a.seed}" + (f" --block {a.block}" if a.block > 1 else "")
     if a.budgets != budget_list(DEFAULT_BUDGETS):
         cmd += f" --budgets {budget_text(a.budgets)}"
     if a.dataset == "trace":
         cmd += f" --input {os.path.basename(a.input)}"
-    title = TITLES[a.dataset] + (", re-reads only" if a.drop_refs else "")
-    meta = {"title": title, "command": cmd, "source": [], "extra_rows": [], "scaffold": []}
+    meta = {"title": TITLES[a.dataset], "command": cmd, "source": [], "extra_rows": [], "scaffold": [], "notes": [],
+            "measures": {}}
     if a.dataset in hf.DATASETS:
         ds = hf.DATASETS[a.dataset]
         drawn = len(hf.sample_offsets(ds.rows, a.sample, a.seed, a.block))
+        meta["measures"]["rows_drawn"] = drawn
+        unit = "instances" if a.block == 1 else f"the sampled blocks of {a.block} rows"
+        meta["notes"].append(f"95% intervals resample {unit}, 1,000 times.")
         meta["source"] = [
             f"Data: [{ds.repo}]({ds.url}). {ds.cite}. Only aggregate counts appear here.",
             f"Sample: {drawn:,} rows. The {ds.rows:,} rows are cut into {max(1, a.sample // a.block)} equal "
@@ -142,13 +150,15 @@ def describe(a: argparse.Namespace, s: dict) -> dict:
         ]
     elif a.dataset == "copilot":
         meta["source"] = ["Data: our own Copilot CLI session logs, main agent only. Aggregates only."]
+        meta["notes"].append(f"Descriptive only: {s['trajectories']} sessions from 1 user. The intervals resample "
+                             "these sessions. They do not describe other users.")
     else:
         meta["source"] = [f"Data: {os.path.basename(a.input)}."]
     held = lambda x: report.num(x)  # noqa: E731
     meta["scaffold"] = [
         f"- Keep the last 5 tool outputs, the shape of SWE-agent's `LastNObservations`: "
-        f"{report.pct(s['last5_token_miss'])}% of re-accessed tokens missed "
-        f"({report.pct(s['last5_miss'])}% of re-accesses), {held(s['last5_mean_held'])} tokens held on average.",
+        f"{report.pct(s['last5_token_miss'])}% of proxy-access tokens missed "
+        f"({report.pct(s['last5_miss'])}% of proxy accesses), {held(s['last5_mean_held'])} tokens held on average.",
         f"- Keep everything: no misses, {held(s['all_mean_held'])} tokens held on average.",
     ]
     if a.dataset == "openhands":
@@ -185,9 +195,7 @@ def run(a: argparse.Namespace) -> int:
             trace.check(acc)
             if export:
                 trace.dump(traj, acc, export)
-            if a.drop_refs:
-                acc = [x for x in acc if not x.ref]
-            rec = measure(acc, info, sizes)
+            rec = measure(acc, info, sizes, a.sensitivity_budgets)
             rec["cluster"] = cluster
             recs.append(rec)
             distances += reuse_distances(acc)
@@ -201,8 +209,8 @@ def run(a: argparse.Namespace) -> int:
         return 1
     summary = report.summarize(recs, distances, skipped)
     rows = report.table(recs, sizes, a.bootstrap, a.seed)
-    name = a.dataset + ("-rereads" if a.drop_refs else "")
-    paths = report.write(a.out, name, rows, summary, describe(a, summary))
+    sens = report.sensitivity(recs, a.sensitivity_budgets, a.bootstrap, a.seed)
+    paths = report.write(a.out, a.dataset, rows, sens, summary, describe(a, summary))
     print(f"{a.dataset}: {summary['trajectories']} trajectories, {summary['accesses']:,} accesses, "
           f"skipped {dict(skipped) or 0}, {time.time() - start:.0f} s")
     for path in paths:

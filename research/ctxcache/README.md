@@ -35,10 +35,14 @@ python3 -m pytest research/ctxcache/tests
 | `--offline` | off | use cached rows only |
 | `--export-trace` | | also write the hashed trace. Refused inside the repo |
 | `--bootstrap` | 1000 | cluster bootstrap resamples. 0 turns it off |
-| `--drop-refs` | off | keep re-reads only, to test the reference proxy. Output names end in `-rereads` |
+| `--sensitivity-budgets` | `4k,8k` | budgets for the reference proxy check |
 | `--input`, `--copilot-root` | | a trace file, or another Copilot log directory |
 
-Bad flags and fetch or file errors exit with code 2. A run writes 3 files to `--out`: `<dataset>.csv` has 1 row per budget and policy, `<dataset>-trace.csv` has the trace measures, and `<dataset>.md` shows both.
+Bad flags and fetch or file errors exit with code 2. A run writes 4 files to `--out`:
+- `<dataset>.csv`: 1 row per budget and policy, pooled and macro, with intervals and leave-one-out ranges.
+- `<dataset>-sensitivity.csv`: the same policies on narrower proxies, at the sensitivity budgets.
+- `<dataset>-trace.csv`: the trace measures.
+- `<dataset>.md`: all of it, for reading.
 
 ## The model
 
@@ -102,7 +106,7 @@ Every policy runs under 1 cache model. The brute-force optimum uses the same one
 - An access hits if its object is held. Only the accessed object can enter. Any object can leave at any time, for free.
 - A policy may skip admitting an object (bypass). An object larger than `B` is never held.
 
-Each policy returns misses and missed tokens over non-first accesses. First accesses miss under every policy, so they are reported once, as the compulsory share.
+Each policy returns misses and missed tokens over proxy accesses, the non-first accesses. First accesses miss under every policy, so they are reported once, as the compulsory share.
 
 | Policy | Kind | Rule |
 |---|---|---|
@@ -120,13 +124,16 @@ An earlier draft took PFOO-L's missed tokens from the count-optimal intervals. T
 
 ## Measures
 
-- **Miss ratio**: misses over non-first accesses. **Token miss ratio**: missed tokens over the tokens of non-first accesses. Both pool all trajectories.
+- **Miss ratio**: misses over proxy accesses. **Token miss ratio**: missed tokens over proxy-access tokens. Pooled ratios sum over all trajectories, so long ones weigh more. Macro ratios average each trajectory's own ratio, over trajectories with proxy accesses.
 - **Compulsory share**: first accesses over all accesses, by count and by tokens.
 - **Dead tokens**: tokens of objects never accessed after their first access, over the tokens of all objects. Reported overall, for files and for outputs. Most outputs are dead by construction, since only an unchanged rerun can access them again.
 - **Reuse distance**: for each non-first access, the tokens of distinct other objects accessed since the previous access to the same object. This is the token-weighted LRU stack distance. When no object exceeds the budget, LRU hits exactly when it plus the object's size fits. p50, p90 and p99 pool all non-first accesses.
 - **Peak live tokens**: per trajectory, the most tokens that are live at once. An object is live from an access until its next access. The optimum never misses at this budget.
+- **Tool output over peak live**: each trajectory's own tool output tokens over its own peak live tokens. p50 and p90 are over trajectories that reuse anything. The separate p50 and p90 of each are also given, but their quotient pairs no trajectory with itself.
 - **Gap to the optimum**: a policy's missed tokens over Belady-Size's, then over PFOO-L's. The policy's multiple of the true optimum lies between the 2. `inf` means the lower bound is 0.
-- **Intervals**: 95% percentile intervals from 1,000 bootstrap resamples of instances, or of sessions for our logs, with replacement.
+- **Influence**: the share of proxy-access tokens that the 10 largest trajectories hold. Also the range of each pooled ratio with any 1 trajectory left out.
+- **Intervals**: 95% percentile intervals from 1,000 bootstrap resamples, with replacement, of the units drawn. Those are instances for SWE-agent, the sampled blocks of 10 rows for OpenHands, and sessions for our logs.
+- **Proxy check**: each variant keeps every re-read and only some references. `reread` keeps none, `edits` keeps the 4 edit subtypes, `exact` keeps `edit_span` and `line_span`, and `no_run_git` drops `run` and `git`.
 
 ## Adapters
 
