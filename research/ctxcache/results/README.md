@@ -1,92 +1,149 @@
-# First results, 2026-10-29
+# Offline cache headroom on observed traces, 2026-10-29
 
 Aggregate counts only. The model, the policies and the parsing rules are in [../README.md](../README.md).
+
+These numbers replay fixed traces offline. An agent's next step depends on what its own context held.
+So another context policy would change the trace itself, and these numbers are not what an agent would do under each policy.
+They measure offline cache headroom: what a policy could save on these exact traces.
+
+Every ratio is over proxy accesses: re-reads plus references inferred from later actions.
+On OpenHands, re-reads hold only 2.0% of the proxy-access tokens, so the inferred references drive its numbers.
+
 There are 3 sources: 1,000 trajectories from each nebius set, and our own Copilot CLI logs.
+Our logs are descriptive only: 21 sessions from 1 user.
 Budgets count tool output tokens only, as characters / 4. 1K is 1,000 tokens.
-Each ratio pools all trajectories. Intervals are 95%, from 1,000 bootstrap resamples of instances (sessions for our logs).
+Intervals are 95%, from 1,000 bootstrap resamples of instances (SWE-agent), sampled blocks of 10 rows (OpenHands) or sessions (our logs).
 
 ## At a glance
 
 | Measure | SWE-agent | OpenHands | Our Copilot logs |
 |---|---|---|---|
-| Trajectories used | 1,000 (0 truncated, skipped) | 1,000 (0 truncated, skipped) | 21 (2 forks skipped) |
-| Accesses | 35,269 | 71,453 | 6,400 |
-| Re-reads / references | 6,049 / 11,417 | 580 / 7,814 | 27 / 409 |
-| Compulsory share, accesses / tokens | 50.5% / 46.7% | 88.3% / 90.1% | 93.2% / 86.1% |
-| Dead tokens: all / files | 56.9% / 46.2% | 91.7% / 75.0% | 90.5% / 67.0% |
-| Reuse distance p50 / p90 / p99 | 285 / 1,723 / 5,586 | 388 / 11,173 / 27,458 | 3,499 / 107,083 / 267,568 |
-| Peak live tokens per trajectory p50 / p90 | 1,129 / 2,140 | 1,394 / 4,356 | 0 / 8,002 |
-| Tool output tokens per trajectory p50 / p90 | 6,589 / 21,315 | 38,343 / 57,304 | 9,278 / 427,863 |
+| Trajectories used | 1,000 (0 truncated) | 1,000 (0 truncated) | 21 (2 forks skipped) |
+| Accesses | 35,305 | 71,464 | 6,443 |
+| Proxy accesses: re-reads / references | 6,049 / 11,453 | 580 / 7,825 | 27 / 409 |
+| Re-reads' share of proxy-access tokens | 27.8% | 2.0% | 4.8% |
+| Compulsory share, accesses / tokens | 50.4% / 46.8% | 88.2% / 90.5% | 93.2% / 86.2% |
+| Dead tokens: all / files | 57.3% / 47.1% | 92.1% / 75.7% | 90.6% / 67.0% |
+| Reuse distance p50 / p90 / p99 | 171 / 1,633 / 5,334 | 321 / 10,462 / 26,069 | 3,499 / 107,083 / 267,568 |
+| Peak live tokens p50 / p90, separate percentiles | 1,071 / 2,086 | 1,290 / 4,273 | 0 / 8,002 |
+| Tool output tokens p50 / p90, separate percentiles | 6,032 / 20,331 | 36,281 / 54,351 | 9,278 / 427,863 |
+| Tool output over peak live, per trajectory, p50 / p90 | 5.8x / 16.9x | 28.0x / 85.6x | 72.6x / 83.3x |
+| Trajectories that reuse nothing | 13 | 0 | 14 |
+| The 10 largest trajectories' share of proxy-access tokens | 8.6% | 5.2% | 100.0% |
 
-Peak live tokens is the budget at which the optimum never misses. Tool output tokens is what a window holds with no eviction.
-More than half of our sessions re-access nothing, so their peak live is 0.
+Peak live tokens is the budget at which the optimum never misses. The tool output over peak live row pairs each trajectory with itself.
 
-## Missed tokens, % of re-accessed tokens
+Proxy-access tokens by subtype:
 
-At 4K:
-
-| Policy | SWE-agent | OpenHands | Our Copilot logs |
+| Subtype | SWE-agent | OpenHands | Our Copilot logs |
 |---|---|---|---|
-| LRU | 4.4 (3.0 to 6.3) | 43.7 (41.5 to 46.1) | 52.8 (26.5 to 71.7) |
-| FIFO | 5.9 (4.5 to 7.9) | 44.4 (42.2 to 46.7) | 54.8 (26.5 to 73.4) |
-| Clearing | 9.0 (7.2 to 11.3) | 46.5 (44.1 to 48.9) | 63.3 (55.7 to 73.4) |
-| GDSF | 5.8 (4.3 to 7.6) | 47.5 (45.4 to 49.7) | 68.6 (55.0 to 84.3) |
-| PFOO-L, lower bound | 0.8 (0.0 to 2.4) | 8.3 (6.3 to 10.5) | 5.5 (0.0 to 11.2) |
-| Belady-Size, upper bound | 1.4 (0.4 to 3.1) | 12.2 (9.9 to 14.6) | 27.7 (0.0 to 43.9) |
+| `reread` | 27.8% | 2.0% | 4.8% |
+| `edit_span` | 0.0% | 40.0% | 1.6% |
+| `edit` | 0.0% | 9.8% | 21.1% |
+| `line_span` | 55.1% | 0.0% | 0.0% |
+| `line` | 10.0% | 0.0% | 0.0% |
+| `run` | 6.9% | 42.7% | 1.4% |
+| `git` | 0.0% | 3.1% | 2.2% |
+| `path` | 0.3% | 2.5% | 68.9% |
 
-At 32K:
+## OpenHands at 4K and 8K
 
-| Policy | SWE-agent | OpenHands | Our Copilot logs |
+Missed tokens, % of proxy-access tokens. Pooled sums all trajectories, so long ones weigh more. Macro weighs each trajectory the same.
+
+| Budget | Policy | Pooled | Macro |
 |---|---|---|---|
-| LRU | 0.0 | 0.9 (0.5 to 1.3) | 27.2 (0.0 to 35.1) |
-| FIFO | 0.0 | 1.6 (1.1 to 2.1) | 27.6 (0.0 to 36.1) |
-| Clearing | 0.0 | 0.5 (0.2 to 1.0) | 36.9 (0.0 to 50.9) |
-| GDSF | 0.0 | 1.1 (0.5 to 2.0) | 35.9 (0.0 to 47.2) |
-| PFOO-L, lower bound | 0.0 | 0.0 | 0.0 |
-| Belady-Size, upper bound | 0.0 | 0.0 | 0.0 |
+| 4K | LRU | 44.1 (41.7 to 46.6) | 35.9 (34.0 to 38.0) |
+| 4K | FIFO | 44.9 (42.4 to 47.2) | 36.7 (34.8 to 38.8) |
+| 4K | Clearing (oracle N) | 47.1 (44.5 to 49.6) | 38.8 (36.9 to 40.8) |
+| 4K | Clearing (cap) | 48.3 (45.7 to 51.0) | 38.9 (37.0 to 40.9) |
+| 4K | GDSF | 47.7 (45.2 to 50.1) | 37.4 (35.4 to 39.3) |
+| 4K | PFOO-L, lower bound | 9.1 (6.7 to 11.6) | 4.2 (3.1 to 5.3) |
+| 4K | Belady-Size, upper bound | 13.2 (10.6 to 15.7) | 6.0 (4.9 to 7.3) |
+| 8K | LRU | 29.9 (27.6 to 32.4) | 22.9 (21.3 to 24.7) |
+| 8K | FIFO | 30.7 (28.5 to 33.2) | 23.6 (22.0 to 25.3) |
+| 8K | Clearing (oracle N) | 37.1 (34.4 to 39.9) | 30.2 (28.1 to 32.5) |
+| 8K | Clearing (cap) | 34.2 (31.6 to 36.9) | 25.6 (23.8 to 27.5) |
+| 8K | GDSF | 32.9 (30.4 to 35.6) | 23.4 (21.5 to 25.4) |
+| 8K | PFOO-L, lower bound | 0.0 | 0.0 |
+| 8K | Belady-Size, upper bound | 1.0 (0.4 to 1.6) | 0.3 (0.1 to 0.5) |
 
-At 128K, every policy misses 0.0% on both public sets.
-On our logs LRU misses 7.5% (0.0 to 13.1), FIFO 7.9%, Clearing 14.7% and GDSF 13.1%. Both bounds are 0.0.
-The per-source files have every budget from 1K to 128K.
+Leaving out any 1 trajectory moves LRU between 43.9% and 44.2% at 4K, and between 29.6% and 30.1% at 8K.
+The 10 largest trajectories hold 5.2% of the proxy-access tokens.
 
-## Gap to the optimum
+The same, on narrower proxies. Each variant keeps every re-read and only the named references. Pooled %, macro in brackets:
 
-LRU's missed tokens as a multiple of the optimum's. The 2 bounds bracket it.
+| Variant | Budget | Proxy tokens | LRU | FIFO | Clearing (cap) | GDSF | PFOO-L | Belady-Size |
+|---|---|---|---|---|---|---|---|---|
+| all proxy accesses | 4K | 3,930,508 | 44.1 (35.9) | 44.9 (36.7) | 48.3 (38.9) | 47.7 (37.4) | 9.1 (4.2) | 13.2 (6.0) |
+| re-reads only | 4K | 77,306 | 58.6 (33.4) | 58.5 (33.4) | 58.6 (33.4) | 50.4 (19.6) | 12.7 (0.6) | 12.7 (0.6) |
+| re-reads and edits | 4K | 2,031,344 | 42.9 (31.7) | 42.9 (31.8) | 43.6 (31.9) | 47.1 (32.3) | 11.5 (3.8) | 13.1 (4.3) |
+| re-reads and exact-span edits | 4K | 1,647,659 | 51.7 (35.9) | 51.7 (36.0) | 52.4 (36.1) | 56.6 (36.1) | 13.9 (4.1) | 15.6 (4.6) |
+| all but run and git references | 4K | 2,128,374 | 43.3 (31.5) | 43.4 (31.6) | 44.3 (31.9) | 47.4 (32.6) | 12.3 (4.1) | 14.1 (4.7) |
+| all proxy accesses | 8K | 3,930,508 | 29.9 (22.9) | 30.7 (23.6) | 34.2 (25.6) | 32.9 (23.4) | 0.0 (0.0) | 1.0 (0.3) |
+| re-reads only | 8K | 77,306 | 38.2 (22.0) | 38.8 (22.4) | 38.2 (22.0) | 24.7 (9.5) | 0.0 (0.0) | 0.0 (0.0) |
+| re-reads and edits | 8K | 2,031,344 | 27.4 (17.5) | 27.4 (17.5) | 27.9 (17.6) | 32.1 (17.8) | 0.0 (0.0) | 0.7 (0.1) |
+| re-reads and exact-span edits | 8K | 1,647,659 | 33.3 (19.7) | 33.3 (19.7) | 33.5 (19.7) | 38.8 (19.6) | 0.0 (0.0) | 0.9 (0.1) |
+| all but run and git references | 8K | 2,128,374 | 27.3 (17.5) | 27.3 (17.5) | 28.5 (17.8) | 31.8 (18.0) | 0.0 (0.0) | 0.7 (0.1) |
 
-| Budget | SWE-agent | OpenHands | Our Copilot logs |
-|---|---|---|---|
-| 2K | 2.64x to 9.37x | 1.93x to 2.32x | 1.45x to 2.64x |
-| 4K | 3.15x to 5.55x | 3.59x to 5.28x | 1.90x to 9.65x |
-| 8K | at least 34.71x | at least 32.28x | 4.68x to 172.84x |
-| 16K | the optimum misses 0, LRU 0.0% | the optimum misses 0, LRU 9.7% | the optimum misses at most 2.6%, LRU 35.6% |
+At 4K on re-reads alone, both bounds are 12.7%: those tokens sit in objects larger than 4K, which no policy holds.
+Re-reads alone are only 580 accesses, so that row is the noisiest.
 
-FIFO, Clearing and GDSF are close to LRU or worse. The [per-source files](swe-agent.md) list their gaps.
+## SWE-agent at 2K and 4K
+
+SWE-agent needs less context, so its gap shows at smaller budgets. Pooled, with 95% intervals:
+
+| Budget | LRU | FIFO | Clearing (cap) | GDSF | PFOO-L | Belady-Size |
+|---|---|---|---|---|---|---|
+| 2K | 14.6 (12.1 to 17.4) | 18.3 (15.4 to 21.2) | 28.5 (25.1 to 31.9) | 22.1 (19.0 to 25.4) | 1.8 (0.6 to 3.6) | 6.1 (4.4 to 8.1) |
+| 4K | 4.2 (2.7 to 6.3) | 5.7 (4.1 to 7.7) | 10.6 (8.0 to 13.6) | 5.3 (3.7 to 7.3) | 0.9 (0.0 to 2.6) | 1.5 (0.4 to 3.3) |
+
+On re-reads alone at 2K, LRU misses 21.6% against 2.6% to 8.4% for the optimum. [swe-agent.md](swe-agent.md) has every variant.
+
+## 32K and 128K
+
+| Policy | SWE-agent 32K | OpenHands 32K | Copilot 32K | SWE-agent 128K | OpenHands 128K | Copilot 128K |
+|---|---|---|---|---|---|---|
+| LRU | 0.0 | 0.8 | 27.2 | 0.0 | 0.0 | 7.5 |
+| FIFO | 0.0 | 1.5 | 27.6 | 0.0 | 0.0 | 7.9 |
+| Clearing (oracle N) | 0.0 | 0.4 | 36.9 | 0.0 | 0.0 | 14.7 |
+| Clearing (cap) | 0.0 | 1.7 | 37.8 | 0.0 | 0.0 | 15.6 |
+| GDSF | 0.0 | 0.7 | 35.9 | 0.0 | 0.0 | 13.1 |
+| PFOO-L to Belady-Size | 0.0 to 0.0 | 0.0 to 0.0 | 0.0 to 0.0 | 0.0 to 0.0 | 0.0 to 0.0 | 0.0 to 0.0 |
+
+On the public sets these budgets hold nearly every trajectory's live set. Our logs are the exception, from 3 long sessions.
 
 ## Finding
 
-The optimum needs a small part of the context these agents carry. Practical policies at that size miss several times more than it.
+On these observed traces, an offline oracle needs a small part of the context the agents carry. Recency policies at that size miss several times more.
 
-- On OpenHands, the optimum never misses in 90% of trajectories with 4,356 tokens of tool output held. At p90 those trajectories carry 57,304 tokens of tool output, 13 times more.
-- At 4K, LRU misses 43.7% of re-accessed tokens (41.5 to 46.1). The optimum misses between 8.3% and 12.2%, so LRU misses 3.6 to 5.3 times as much.
-- At 8K, LRU misses 30.0% (27.7 to 32.3), against at most 0.9% for the optimum.
-- On OpenHands, FIFO, tool-result clearing and GDSF sit within 7 points of LRU at every budget. The gap to the optimum is far larger than the gap between them.
-- SWE-agent shows the same shape at smaller budgets. At 2K, LRU misses 16.1% against 1.7% to 6.1%.
-- 91.7% of OpenHands object tokens are never accessed again. So the headroom is in predicting reuse, not in a better recency rule.
+- On OpenHands, each trajectory's tool output is 28.0x its own peak live tokens at p50, and 85.6x at p90.
+- At 4K, LRU misses 44.1% of proxy-access tokens. The optimum misses between 9.1% and 13.2%, so LRU misses 3.3 to 4.8 times as much. Macro, it is 35.9% against 4.2% to 6.0%.
+- At 8K, LRU misses 29.9%, against at most 1.0%.
+- From 1K to 8K, FIFO, both clearing variants and GDSF miss between 0.4 points less and 7.2 points more than LRU. None comes near the optimum.
+- Every narrower proxy shows the same gap, including re-reads alone and exact-span edits.
+
+This is offline-oracle headroom. An oracle that knows every future reference could save it. No recency rule we tried captures it, and no deployable policy is measured here.
 
 Caveats, in order of weight:
 
-- **References are a proxy.** Only paths at their current version and URLs count. Error text, identifiers and search results that steer later steps do not. A broader model would make the optimum need more context. The gap could move either way.
-- **The check without the proxy agrees.** On re-reads alone, the agent's own repeat reads, OpenHands at 8K: LRU misses 36.4% (27.3 to 45.5) and the optimum 0. SWE-agent at 2K: LRU 22.4%, the optimum 2.6% to 8.4%. See the `-rereads` files.
-- **The agent's own content is outside the model.** On OpenHands, 8,218 uses name a file with no view of its version. 8,196 of them are files the agent wrote and never viewed, mostly scripts it then ran.
-- **Stored trajectories may differ from what the model saw.** 5 OpenHands rows hit the 100-iteration cap. They have only 63 to 98 assistant messages. Their tool output is 70K to 103K tokens, so the condenser probably ran. Their stored histories still start at the task. The SWE-agent card does not say whether old observations were dropped from each call.
-- **The budget holds tool output only.** Message tokens are another 14.1M on OpenHands, against 39.9M of tool output.
-- **Clearing is favored.** Its N is tuned per trajectory on average use, and it can exceed the budget at peaks. It still trails LRU at most budgets.
-- **Our logs are 21 sessions** from 1 user. 3 long sessions dominate them, so their intervals are wide.
+- **Replay is not causal.** A policy that dropped a view would change what the agent did next.
+- **The proxy drives OpenHands.** Inferred references hold 98% of its proxy-access tokens: `run` 42.7% and `edit_span` 40.0%. The narrower proxies agree, but none is validated yet. `label-sample` writes a sheet for a human to label.
+- **The agent's own content is outside the model.** 8,218 OpenHands uses name a file with no view of its version, mostly scripts the agent wrote.
+- **Stored trajectories may differ from what the model saw.** 5 OpenHands rows hit the 100-iteration cap with only 63 to 98 assistant messages. The condenser probably ran.
+- **The budget holds tool output only.** Message tokens are another 14.1M on OpenHands, against 37.6M of tool output.
+- **Our logs are descriptive only.** 21 sessions from 1 user. 7 reuse anything, and leaving out 1 moves LRU at 4K between 42.2% and 58.8%.
+
+## Changes since the first draft
+
+- Sizes come from the same canonical body as the key, without tool chrome. That cut OpenHands proxy-access tokens by about 10%.
+- The earlier "13 times" compared 2 separate p90s. The paired ratio is 28.0x at p50.
+- Clearing is split into an oracle-tuned, average-budget variant and a causal hard-cap variant.
+- The shell parser keeps quoted operators and comments apart, and `rg` on a directory is an output.
 
 ## Scaffold baselines
 
-- SWE-agent's `LastNObservations` shape, keeping the last 5 outputs, misses 27.5% of re-accessed tokens. It holds 1,609 tokens on average. LRU at 2K misses 16.1%.
-- OpenHands keeps everything unless its condenser runs: 21,367 tokens held on average, 0 misses.
+- Keeping the last 5 tool outputs, the shape of SWE-agent's `LastNObservations`, misses 27.7% of SWE-agent's proxy-access tokens. It holds 1,492 tokens on average.
+- OpenHands keeps everything unless its condenser runs: 20,120 tokens held on average, 0 misses.
 - Our Copilot sessions made 37 compactions. 12 re-reads came in the same compaction window as the previous access, and 15 after a compaction.
 
 ## Files
@@ -94,12 +151,12 @@ Caveats, in order of weight:
 | File | Contents |
 |---|---|
 | `<source>.md` | every table for 1 source |
-| `<source>.csv` | 1 row per budget and policy: counts, ratios, 95% intervals, and the gap to the bounds |
+| `<source>.csv` | 1 row per budget and policy: pooled and macro ratios, 95% intervals, leave-one-out range, and the gap to the bounds |
+| `<source>-sensitivity.csv` | the same policies on the narrower proxies |
 | `<source>-trace.csv` | the trace measures |
-| `<source>-rereads.*` | the same with references dropped (`--drop-refs`) |
 
 In the CSV, `x_opt_min` is the policy's missed tokens over Belady-Size's and `x_opt_max` over PFOO-L's. The multiple of the optimum lies between them.
-Rerun with the commands at the top of each `<source>.md`. Our Copilot numbers change as sessions are added.
+Rerun with the command at the top of each `<source>.md`. Our Copilot numbers change as sessions are added.
 
 ## Data and license
 
