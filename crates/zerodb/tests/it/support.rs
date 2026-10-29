@@ -24,6 +24,32 @@ pub fn files(dir: &Path) -> BTreeMap<String, Option<Vec<u8>>> {
     entries.map(|e| (e.file_name().into_string().unwrap(), std::fs::read(e.path()).ok())).collect()
 }
 
+/// Every path under `dir`, with a file's bytes, or `None` for a directory.
+pub fn tree(dir: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+    let (mut all, mut todo) = (BTreeMap::new(), vec![dir.to_owned()]);
+    while let Some(dir) = todo.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if std::fs::symlink_metadata(&path).unwrap().is_dir() {
+                todo.push(path.clone());
+                all.insert(path, None);
+            } else {
+                all.insert(path.clone(), Some(std::fs::read(&path).unwrap()));
+            }
+        }
+    }
+    all
+}
+
+/// A program `name` in the existing directory `bin` that appends its args to `bin/<name>.argv`
+/// and exits 1, for a harness that must be found on `PATH` but never run.
+pub fn fake_program(bin: &Path, name: &str) {
+    let program = bin.join(name);
+    let script = "#!/bin/sh\necho \"$*\" >> \"$0.argv\"\nexit 1\n";
+    std::fs::write(&program, script).unwrap();
+    chmod(&program, 0o755);
+}
+
 /// Variables that point zerodb at a home or at harness files, the real `HOME` included. No
 /// spawn inherits them, so a developer's own exports can't lead a test to a real home. A test
 /// that needs one sets it.

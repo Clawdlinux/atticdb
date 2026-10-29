@@ -12,8 +12,8 @@
 //! identical part added by hand.
 
 use super::{
-    absolute_env, binary, entry_home, home_words, moved_home, read, refuse_flags, save, write,
-    Harness, COPILOT_SHARED,
+    absolute_env, binary, entry_home, home_words, moved_home, planned, read, refuse_flags, save,
+    write, Change, Harness, Line, Mode, Report, COPILOT_SHARED,
 };
 use crate::home::{user_home, HOME_ENV};
 use crate::jsonedit;
@@ -58,9 +58,6 @@ const MAX_STDOUT: usize = 1 << 20;
 /// How long a `claude` or `codex` command may run.
 const CHILD_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// What a part did, as the line to print. `Err` when it was skipped or failed.
-pub(super) type Line = Result<String, String>;
-
 /// The variable that moves Claude Code's config dir.
 const CONFIG_ENV: &str = "CLAUDE_CONFIG_DIR";
 
@@ -78,7 +75,7 @@ fn check_config_env() -> Result<(), String> {
 }
 
 /// `$CLAUDE_CONFIG_DIR` when set and absolute, else `~/.claude`.
-fn config_dir() -> Result<PathBuf, String> {
+pub(super) fn config_dir() -> Result<PathBuf, String> {
     absolute_env(CONFIG_ENV).map_or_else(|| Ok(user_home()?.join(".claude")), Ok)
 }
 
@@ -90,12 +87,11 @@ pub(super) fn state_file() -> Result<PathBuf, String> {
 }
 
 /// Adds the MCP entry, the hook when `hook`, and the allow rules for `notes`. An entry that
-/// differs is refused before anything changes, unless `force`. Returns the exit code: 2 for
-/// a relative `CLAUDE_CONFIG_DIR`.
-pub(super) fn connect(force: bool, hook: bool, notes: Notes) -> u8 {
+/// differs is refused before anything changes, unless `force`. It stops with exit code 2 for
+/// a relative `CLAUDE_CONFIG_DIR`. In Plan mode, it writes nothing and runs no `claude`.
+pub(super) fn connect(force: bool, hook: bool, notes: Notes, mode: Mode) -> Report {
     if let Err(error) = check_config_env() {
-        eprintln!("zerodb: {error}");
-        return 2;
+        return Report::stopped(2, error);
     }
     let prepared = (|| {
         let home = moved_home(Harness::ClaudeCode)?;
@@ -110,19 +106,18 @@ pub(super) fn connect(force: bool, hook: bool, notes: Notes) -> u8 {
             }
         }
         let warnings = split(Harness::ClaudeCode, home.as_deref());
-        crate::home::ensure()?;
+        if mode == Mode::Apply {
+            crate::home::ensure()?;
+        }
         Ok((home, exe, state, current, warnings))
     })();
     let (home, exe, state, current, warnings) = match prepared {
         Ok(prepared) => prepared,
-        Err(error) => {
-            eprintln!("zerodb: {error}");
-            return 1;
-        }
+        Err(error) => return Report::stopped(1, error),
     };
     let home = home.as_deref();
     let entry = match current {
-        Ok(current) => set_entry(&state, current.as_ref(), &exe, home),
+        Ok(current) => set_entry(&state, current.as_ref(), &exe, home, mode),
         Err(why) => Err(format!(
             "MCP entry: skipped, {}: {why}. Run by hand: {}",
             state.display(),
@@ -140,8 +135,12 @@ pub(super) fn connect(force: bool, hook: bool, notes: Notes) -> u8 {
     let by_hand = format!("Add these to permissions.allow by hand: {}", json!(rules(notes)));
     parts.push(Part { name: "allow rules", by_hand, edit: &add_allow });
     let mut lines = vec![entry];
-    lines.extend(edit_file(settings_file(), "{\n}\n", &parts));
-    report(lines, &warnings, Some("Start a new Claude Code session to load zerodb."))
+    lines.extend(edit_file(settings_file(), "{\n}\n", &parts, mode));
+    let next = match mode {
+        Mode::Apply => vec!["Start a new Claude Code session to load zerodb.".into()],
+        Mode::Plan => Vec::new(),
+    };
+    Report { lines, warnings, next, stopped: None }
 }
 
 /// Removes the MCP entry when it is what zerodb writes, every hook group that runs zerodb's
@@ -178,30 +177,8 @@ pub(super) fn disconnect() -> u8 {
         },
     ];
     let mut lines = vec![drop_entry(&state)];
-    lines.extend(edit_file(settings_file(), "{\n}\n", &parts));
-    report(lines, &[], None)
-}
-
-/// Prints `lines` in order, then `warnings` on stderr, then `next`. Returns 1 when a part
-/// was skipped or failed, else 0.
-pub(super) fn report(lines: Vec<Line>, warnings: &[String], next: Option<&str>) -> u8 {
-    let mut code = 0;
-    for line in lines {
-        match line {
-            Ok(line) => println!("{line}"),
-            Err(line) => {
-                println!("{line}");
-                code = 1;
-            }
-        }
-    }
-    for warning in warnings {
-        eprintln!("zerodb: {warning}");
-    }
-    if let Some(next) = next {
-        println!("{next}");
-    }
-    code
+    lines.extend(edit_file(settings_file(), "{\n}\n", &parts, Mode::Apply));
+    Report { lines, ..Report::default() }.print()
 }
 
 /// Notes on the other harnesses that pass a home other than `home`. They share no file with
@@ -322,11 +299,21 @@ fn add_args(exe: &str, home: Option<&str>) -> Vec<String> {
 
 /// Makes zerodb's entry run `exe` on `home`, through `claude`. `current` is the entry read
 /// before. One that differs, such as one from an old binary path, is removed first. When
-/// that removal worked but the add failed, the line shows the old entry, to restore it.
-fn set_entry(state: &Path, current: Option<&Value>, exe: &str, home: Option<&str>) -> Line {
+/// that removal worked but the add failed, the line shows the old entry, to restore it. In
+/// Plan mode, `claude` never runs.
+fn set_entry(
+    state: &Path,
+    current: Option<&Value>,
+    exe: &str,
+    home: Option<&str>,
+    mode: Mode,
+) -> Line {
     let shown = state.display();
     if current.is_some_and(|current| same(current, exe, home)) {
-        return Ok(format!("MCP entry: unchanged ({shown})"));
+        return Ok(match mode {
+            Mode::Plan => planned(state, "MCP entry", Change::Unchanged),
+            Mode::Apply => format!("MCP entry: unchanged ({shown})"),
+        });
     }
     let (add, remove) = (add_args(exe, home), REMOVE.map(String::from).to_vec());
     let by_hand = match current {
@@ -335,6 +322,10 @@ fn set_entry(state: &Path, current: Option<&Value>, exe: &str, home: Option<&str
     };
     let claude = find_program("claude")
         .ok_or_else(|| format!("MCP entry: skipped, claude is not on PATH. Run: {by_hand}"))?;
+    if mode == Mode::Plan {
+        let change = if current.is_some() { Change::Update } else { Change::Add };
+        return Ok(planned(state, "MCP entry", change));
+    }
     let failed = |why: String| format!("MCP entry: failed, {why}. Run by hand: {by_hand}");
     if let Some(old) = current {
         run_claude(&claude, &remove).map_err(failed)?;
@@ -747,11 +738,13 @@ fn settings_file() -> Result<PathBuf, String> {
 
 /// Applies `parts` to the JSON file at `path` in turn, then writes the file once, with a
 /// backup, if it changed. A part whose edit is refused is skipped, and the others still
-/// apply. A missing file starts as `empty`. Returns 1 line per part.
+/// apply. A missing file starts as `empty`. Returns 1 line per part. In Plan mode, it
+/// writes nothing.
 pub(super) fn edit_file(
     path: Result<PathBuf, String>,
     empty: &str,
     parts: &[Part<'_>],
+    mode: Mode,
 ) -> Vec<Line> {
     let skip_all = |why: &str| {
         let skip =
@@ -786,7 +779,7 @@ pub(super) fn edit_file(
         });
     }
     let mut backup = None;
-    if text != start {
+    if text != start && mode == Mode::Apply {
         let old = original.map(|(text, mode)| (text.into_bytes(), mode));
         match write(&path, old.as_ref(), text.as_bytes()) {
             Ok(saved) => backup = saved,
@@ -799,6 +792,14 @@ pub(super) fn edit_file(
     }
     type Outcome = Result<(String, bool, bool), (String, Option<String>)>;
     let line = |(part, done): (&Part<'_>, Outcome)| match done {
+        Ok((said, false, changed)) if mode == Mode::Plan => {
+            let change = match (changed, said.as_str()) {
+                (false, _) => Change::Unchanged,
+                (true, "added") => Change::Add,
+                (true, _) => Change::Update,
+            };
+            Ok(planned(&path, part.name, change))
+        }
         Ok((said, by_hand, changed)) => {
             let line = match (&backup, changed) {
                 (Some(saved), true) => {

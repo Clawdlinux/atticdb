@@ -10,10 +10,13 @@
 //! approval per hook in `config.toml`. zerodb never writes those.
 
 use super::claude::{
-    add_hook, drop_hooks, edit_file, find_program, hook_args, hook_command, our_group, report, run,
-    shell_line, split, Edit, Line, Part,
+    add_hook, drop_hooks, edit_file, find_program, hook_args, hook_command, our_group, run,
+    shell_line, split, Edit, Part,
 };
-use super::{absolute_env, binary, delete, moved_home, read, write, Harness, Notes};
+use super::{
+    absolute_env, binary, delete, moved_home, planned, read, write, Change, Harness, Line, Mode,
+    Notes, Report,
+};
 use crate::home::{user_home, HOME_ENV};
 use serde_json::{json, Value};
 use std::cell::Cell;
@@ -43,7 +46,7 @@ const NO_HOOKS: &str = "{\n  \"hooks\": {}\n}\n";
 /// fits it whether Codex counts bytes or characters.
 const CONTEXT_LIMIT: u64 = 24_000;
 /// What to do after adding the hook.
-const APPROVE: &str =
+pub(crate) const APPROVE: &str =
     "Open Codex once and approve the zerodb hook; Codex runs a new hook only after that.";
 /// Why Codex may ask again for hooks after a group zerodb removed.
 const POSITION: &str = "Codex keys hook approvals by position, so it may ask you to approve \
@@ -62,7 +65,7 @@ fn check_codex_env() -> Result<(), String> {
 }
 
 /// `$CODEX_HOME` when set and absolute, else `~/.codex`.
-fn codex_home() -> Result<PathBuf, String> {
+pub(super) fn codex_home() -> Result<PathBuf, String> {
     absolute_env(CODEX_ENV).map_or_else(|| Ok(user_home()?.join(".codex")), Ok)
 }
 
@@ -76,30 +79,28 @@ fn hooks_file() -> Result<PathBuf, String> {
     Ok(codex_home()?.join("hooks.json"))
 }
 
-/// Adds the MCP block for `notes`, and the hook when `hook`. Returns the exit code: 2 for a
-/// relative `CODEX_HOME`.
-pub(super) fn connect(hook: bool, notes: Notes) -> u8 {
+/// Adds the MCP block for `notes`, and the hook when `hook`. It stops with exit code 2 for a
+/// relative `CODEX_HOME`. In Plan mode, it writes nothing and runs no `codex`.
+pub(super) fn connect(hook: bool, notes: Notes, mode: Mode) -> Report {
     if let Err(error) = check_codex_env() {
-        eprintln!("zerodb: {error}");
-        return 2;
+        return Report::stopped(2, error);
     }
     let prepared = (|| {
         let home = moved_home(Harness::Codex)?;
         let exe = binary()?;
         let config = config_file()?;
         let warnings = split(Harness::Codex, home.as_deref());
-        crate::home::ensure()?;
+        if mode == Mode::Apply {
+            crate::home::ensure()?;
+        }
         Ok::<_, String>((home, exe, config, warnings))
     })();
     let (home, exe, config, mut warnings) = match prepared {
         Ok(prepared) => prepared,
-        Err(error) => {
-            eprintln!("zerodb: {error}");
-            return 1;
-        }
+        Err(error) => return Report::stopped(1, error),
     };
     let home = home.as_deref();
-    let mut lines = vec![set_block(&config, &exe, home, notes)];
+    let mut lines = vec![set_block(&config, &exe, home, notes, mode)];
     let mut next = Vec::new();
     if hook {
         if hooks_off(&config) {
@@ -114,14 +115,24 @@ pub(super) fn connect(hook: bool, notes: Notes) -> u8 {
         let add = |text: &str| track(text, add_hook(Harness::Codex, text, &group), &tracked);
         let by_hand = format!("Add this group to hooks.SessionStart by hand: {group}");
         let parts = [Part { name: "SessionStart hook", by_hand, edit: &add }];
-        lines.extend(edit_file(hooks.clone(), NO_HOOKS, &parts));
+        lines.extend(edit_file(hooks.clone(), NO_HOOKS, &parts, mode));
+        // In Plan mode nothing was saved, so this finds nothing.
         if let Some(moved) = saved(&hooks, &tracked) {
-            next.push(APPROVE);
-            next.extend(moved.then_some(POSITION));
+            next.push(APPROVE.to_owned());
+            next.extend(moved.then(|| POSITION.to_owned()));
         }
     }
-    let next = next.join("\n");
-    report(lines, &warnings, Some(next.as_str()).filter(|next| !next.is_empty()))
+    Report { lines, warnings, next, stopped: None }
+}
+
+/// Checks that `codex mcp get zerodb --json`, which only reads config, shows zerodb's entry
+/// for this binary and home. `Ok` without running anything when `codex` is not on `PATH`.
+pub(super) fn verify() -> Result<(), String> {
+    check_codex_env()?;
+    let home = moved_home(Harness::Codex)?;
+    let (exe, config) = (binary()?, config_file()?);
+    let Some(codex) = find_program("codex") else { return Ok(()) };
+    check(&codex, config.parent().unwrap_or(Path::new("/")), &exe, home.as_deref())
 }
 
 /// Removes zerodb's MCP block and every hook group that runs zerodb's hook. Returns the exit
@@ -146,10 +157,10 @@ pub(super) fn disconnect() -> u8 {
     );
     let parts = [Part { name: "SessionStart hook", by_hand, edit: &drop }];
     let mut lines = vec![drop_block(&config)];
-    lines.extend(edit_file(hooks.clone(), NO_HOOKS, &parts));
+    lines.extend(edit_file(hooks.clone(), NO_HOOKS, &parts, Mode::Apply));
     // A removal that left another zerodb handler to do by hand still moved the groups after it.
-    let next = saved(&hooks, &tracked).filter(|moved| *moved).map(|_| POSITION);
-    report(lines, &[], next)
+    let next = saved(&hooks, &tracked).filter(|moved| *moved).map(|_| POSITION.to_owned());
+    Report { lines, next: next.into_iter().collect(), ..Report::default() }.print()
 }
 
 /// A hook edit that changed `hooks.json`: its new text, and whether it removed a zerodb group
@@ -395,8 +406,9 @@ fn hooks_off(path: &Path) -> bool {
 /// `path`, after 1 blank line. An older block's own bytes go first, and every other byte in
 /// it stays where it is. A block that is already right, with nothing else inside it, stays
 /// too. A file with CRLF line ends gets CRLF. A file without a final line end gets one, and the block says so. Then
-/// `codex mcp get zerodb --json` must show it, or the file is put back.
-fn set_block(path: &Path, exe: &str, home: Option<&str>, notes: Notes) -> Line {
+/// `codex mcp get zerodb --json` must show it, or the file is put back. In Plan mode, it
+/// writes nothing and runs no `codex`.
+fn set_block(path: &Path, exe: &str, home: Option<&str>, notes: Notes, mode: Mode) -> Line {
     let shown = path.display();
     let skipped = |why: String| format!("MCP entry: skipped, {why}");
     let wanted = block(exe, home, notes).map_err(skipped)?;
@@ -437,7 +449,10 @@ fn set_block(path: &Path, exe: &str, home: Option<&str>, notes: Notes) -> Line {
     };
     let (mut new, verb, by_hand) = match found {
         Some(block) if text[block.span.clone()] == ours(added_end(&text[block.span.clone()])) => {
-            return Ok(format!("MCP entry: unchanged ({shown})"));
+            return Ok(match mode {
+                Mode::Plan => planned(path, "MCP entry", Change::Unchanged),
+                Mode::Apply => format!("MCP entry: unchanged ({shown})"),
+            });
         }
         Some(block) => {
             let by_hand = format!(
@@ -449,6 +464,10 @@ fn set_block(path: &Path, exe: &str, home: Option<&str>, notes: Notes) -> Line {
         }
         None => (text.to_owned(), "added", add),
     };
+    if mode == Mode::Plan {
+        let change = if verb == "added" { Change::Add } else { Change::Update };
+        return Ok(planned(path, "MCP entry", change));
+    }
     let added = !new.is_empty() && !new.ends_with('\n');
     if !new.is_empty() {
         if added {

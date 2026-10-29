@@ -5,7 +5,7 @@ Status: early. Don't run it in production. Built so far: the tape, session engin
 
 ## Where to run it
 
-macOS and Linux only. Windows isn't supported. No release binaries yet, so install from source as below. Then 1 command connects it to VS Code or Copilot CLI.
+macOS and Linux only. Windows isn't supported. No release binaries yet, so install from source as below. Then `zerodb setup` connects it to VS Code, Copilot CLI, Claude Code and Codex.
 
 Every write is acked only after `fdatasync`, so the disk under the data directory sets your write latency. Keep it on a local disk:
 

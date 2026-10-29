@@ -15,6 +15,37 @@ zerodb verify --data-dir ./data                  # checks a stopped data dir on 
 zerodb recover --truncate-at <lsn> --data-dir ./data
 ```
 
+## Set up
+
+```sh
+zerodb setup             # finds your apps, asks 3 questions, shows the plan, then connects them
+zerodb setup --dry-run   # prints the plan and writes nothing
+```
+
+It looks for VS Code, Copilot CLI, Claude Code and Codex. An app counts as found when its config dir exists or its program is on `PATH`. Nothing runs to find it.
+It asks which apps to connect, whether to load memory at the start of each chat, and whether to save notes without asking. Empty answers take the defaults in brackets.
+The last 2 questions are for Claude Code and Codex, so they are asked only when you pick 1 of those. Saving a rule always asks.
+VS Code and Copilot CLI always get the hook. They ask before every write until you allow the tool there.
+VS Code's Copilot chat reads the Copilot hook and instructions in `~/.copilot`, so connecting VS Code writes those too, and the plan says so.
+
+The plan has 1 line per file and part, such as `~/.claude/settings.json: add the SessionStart hook`.
+It comes from the same code that writes, run in a mode that writes nothing and runs no `claude` or `codex` command that changes anything.
+Then it asks `Apply? [y/N]`. It connects Copilot CLI and VS Code first, then Claude Code, then Codex, and prints each part's line as `zerodb connect` does.
+An app that fails doesn't stop the others. A summary says how many connected and how many have skipped parts.
+Then it checks each app. A new plan must find every part unchanged. The hook must print JSON within 4 s. The store must answer `fact_list`. For Codex, `codex mcp get zerodb --json` must show the entry.
+Last, it prints what to do next: approve the zerodb hook in Codex once, start new chat sessions, and reload the VS Code window.
+
+Flags replace the questions. `--harness <list>` takes a comma list of `copilot`, `vscode`, `claude-code` and `codex`. `--no-hook` drops the hook, and `--notes ask|auto` picks how notes are saved.
+`--yes` takes every default and doesn't ask `Apply?`.
+Without a terminal on stdin, it needs `--yes` or `--dry-run`, else it exits 2. The end of stdin is no answer and exits 2, and so do 3 answers it can't read.
+`zerodb connect <name> --dry-run` prints the plan for 1 app.
+
+| Exit code | Meaning |
+|---|---|
+| 0 | Every chosen app connected with no skipped part and passed its checks. Also `--dry-run`, and `Apply?` answered no |
+| 1 | A part was skipped or failed, a check failed, or no app was found |
+| 2 | Usage error, no terminal without `--yes`, or no answer |
+
 The config is JSON: `{"data_dir", "listen", "unix_socket", "unix_socket_group", "tenants": [{"name", "token"}]}`.
 Flags override fields. It must be a regular file owned by you with no group or other bits.
 Tenant names are 1 to 255 bytes. Tokens are 32 to 1024 bytes of visible ASCII, so the `Authorization` header fits the 16 KiB request head. Duplicate names or tokens fail.
@@ -163,7 +194,8 @@ An auto-started server runs in its own process group and outlives the adapters. 
 
 ## `zerodb connect` and `zerodb disconnect`
 
-`zerodb connect <vscode|copilot> [--force]` creates the home, then adds a `zerodb` entry to the harness's user MCP config.
+`zerodb connect <vscode|copilot> [--force] [--dry-run]` creates the home, then adds a `zerodb` entry to the harness's user MCP config.
+With `--dry-run`, any `connect` prints 1 line per file and part saying what it would do, and creates and runs nothing. `zerodb setup` shows that plan too.
 It also writes the session-start hook file, described below.
 `zerodb disconnect <vscode|copilot>` removes that entry. Every other key and server stays.
 Claude Code and Codex have their own parts. See [Claude Code](#claude-code) and [Codex](#codex) below.
@@ -217,7 +249,7 @@ A hook file with other content is left alone, and `disconnect` says so.
 
 ### Claude Code
 
-`zerodb connect claude-code [--force] [--no-hook] [--notes ask|auto]` creates the home, then adds 3 parts.
+`zerodb connect claude-code [--force] [--no-hook] [--notes ask|auto] [--dry-run]` creates the home, then adds 3 parts.
 `zerodb disconnect claude-code` removes them.
 `--no-hook` and `--notes` work only for `claude-code` and `codex`. `--notes` defaults to `auto`.
 The config dir is `$CLAUDE_CONFIG_DIR` when set, else `~/.claude`.
@@ -268,7 +300,7 @@ Then start a new Claude Code session.
 
 ### Codex
 
-`zerodb connect codex [--force] [--no-hook] [--notes ask|auto]` creates the home, then adds 2 parts.
+`zerodb connect codex [--force] [--no-hook] [--notes ask|auto] [--dry-run]` creates the home, then adds 2 parts.
 `zerodb disconnect codex` removes them.
 `--force` changes nothing for Codex, as zerodb never edits a `zerodb` server it didn't write.
 The config dir is `$CODEX_HOME` when set, else `~/.codex`.
