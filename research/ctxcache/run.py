@@ -2,6 +2,7 @@
 
     python3 -m research.ctxcache --dataset swe-agent --sample 1000
     python3 research/ctxcache/run.py --dataset copilot
+    python3 -m research.ctxcache label-sample --dataset openhands --n 100 --seed 87
 
 README.md lists the flags and the trace format.
 """
@@ -60,7 +61,7 @@ def parse(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="python3 -m research.ctxcache", description=__doc__.split("\n\n")[0])
     p.add_argument("--dataset", required=True, choices=sorted(TITLES))
     p.add_argument("--sample", type=positive, default=1000, help="rows to sample (public sets)")
-    p.add_argument("--block", type=positive, default=1, help="consecutive rows per stratum (public sets)")
+    p.add_argument("--block", type=positive, help="consecutive rows per stratum. Default: 10 for openhands, else 1")
     p.add_argument("--seed", type=int, default=87, help="sample and bootstrap seed")
     p.add_argument("--budgets", type=budget_list, default=DEFAULT_BUDGETS, help="comma list, 1k = 1,000 tokens")
     p.add_argument("--out", default=os.path.join(HERE, "results"), help="directory for the CSV and markdown")
@@ -76,6 +77,7 @@ def parse(argv=None) -> argparse.Namespace:
     p.add_argument("--sensitivity-budgets", type=budget_list, default="4k,8k",
                    help="budgets for the reference proxy check")
     a = p.parse_args(argv)
+    a.block = a.block or (hf.DATASETS[a.dataset].block if a.dataset in hf.DATASETS else 1)
     if a.dataset == "trace" and not a.input:
         p.error("--dataset trace needs --input")
     if a.block > a.sample:
@@ -176,6 +178,11 @@ def describe(a: argparse.Namespace, s: dict) -> dict:
 
 
 def main(argv=None) -> int:
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if argv[:1] == ["label-sample"]:
+        from research.ctxcache import label  # imports run, so import it late
+
+        return label.main(argv[1:])
     a = parse(argv)
     try:
         return run(a)

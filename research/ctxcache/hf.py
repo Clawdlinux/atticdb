@@ -32,6 +32,7 @@ class Dataset:
     rows: int  # the row count when sampled. It pins the sample.
     keep: tuple[str, ...]  # columns cached per row
     cite: str
+    block: int = 1  # consecutive rows per stratum in the published sample
 
 
 DATASETS = {
@@ -49,6 +50,7 @@ DATASETS = {
         ("trajectory_id", "instance_id", "repo", "exit_status", "resolved", "trajectory"),
         "Trofimova et al., OpenHands Trajectories with Qwen3-Coder-480B-A35B-Instruct, "
         "Nebius blog, 2025, CC-BY-4.0",
+        block=10,  # its consecutive rows are distinct instances, and the API allows few calls
     ),
 }
 

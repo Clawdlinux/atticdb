@@ -52,8 +52,8 @@ def condensed(row: dict) -> bool:
     return users > 1 or orphans or short
 
 
-def trajectory(row: dict, traj: str, salt: str = "ctxcache-v1") -> tuple[list[Access], dict]:
-    b = TraceBuilder(traj, salt)
+def trajectory(row: dict, traj: str, salt: str = "ctxcache-v1", keep_text: bool = False) -> tuple[list[Access], dict]:
+    b = TraceBuilder(traj, salt, keep_text)
     msgs = row["trajectory"]
     results = {m.get("tool_call_id"): m for m in msgs if m["role"] == "tool"}
     cwd: str | None = None
@@ -66,6 +66,7 @@ def trajectory(row: dict, traj: str, salt: str = "ctxcache-v1") -> tuple[list[Ac
         for call in m.get("tool_calls") or []:
             fn = call.get("function") or {}
             raw = fn.get("arguments") or "{}"
+            b.action = f"{fn.get('name')}: {raw}"
             b.stats["message_tokens"] += tokens(raw)
             try:
                 args = json.loads(raw)
@@ -84,6 +85,8 @@ def trajectory(row: dict, traj: str, salt: str = "ctxcache-v1") -> tuple[list[Ac
             else:
                 b.output(fn.get("name") or "", raw, content)
     info = {"cluster": row.get("instance_id"), "condensed": int(condensed(row))}
+    if keep_text:
+        info["notes"] = b.notes
     return b.accesses, {**info, **b.stats}
 
 

@@ -13,9 +13,10 @@ Python 3, standard library only. Tests use pytest.
 
 ```sh
 python3 -m research.ctxcache --dataset swe-agent --sample 1000
-python3 -m research.ctxcache --dataset openhands --sample 1000 --block 10
+python3 -m research.ctxcache --dataset openhands --sample 1000
 python3 -m research.ctxcache --dataset copilot
 python3 -m research.ctxcache --dataset trace --input research/ctxcache/fixtures/tiny-trace.jsonl
+python3 -m research.ctxcache label-sample --dataset openhands --n 100 --seed 87
 python3 -m pytest research/ctxcache/tests
 ```
 
@@ -25,7 +26,7 @@ python3 -m pytest research/ctxcache/tests
 |---|---|---|
 | `--dataset` | | `swe-agent`, `openhands`, `copilot` or `trace` |
 | `--sample` | 1000 | trajectories to sample from a public set |
-| `--block` | 1 | consecutive rows per stratum |
+| `--block` | 10 for openhands, else 1 | consecutive rows per stratum |
 | `--seed` | 87 | the sample and bootstrap seed |
 | `--budgets` | `1k,2k,4k,8k,16k,32k,64k,128k` | token budgets. 1k is 1,000 tokens |
 | `--out` | `research/ctxcache/results` | where the CSV and markdown go |
@@ -200,6 +201,15 @@ Main-agent tool calls are the `toolRequests` of `assistant.message` events with 
 - Sessions sort by tool call count, then by directory name. So the order, the kept fork and the intervals never depend on the salt.
 - Session ids and object keys are salted with a random value per run, so a hashed path cannot be guessed.
 
+## Labeling the proxy
+
+`label-sample` writes a sheet for a human to judge whether each reference really needed its view.
+It draws `--n` references from the same sample as the analysis, split evenly across the subtypes present.
+A small subtype passes its unused share on. Public sets only.
+Each row has the view's first and last 3 lines, each cut to 120 characters, and the later action, cut at 1,500.
+The `needed` (yes, no or partial) and `note` columns are left empty.
+The sheet goes to `<cache-dir>/labels/<dataset>-n<N>-seed<S>.csv`. A path inside the repo is refused. Never commit a sheet.
+
 ## Sampling
 
 The datasets-server `rows` endpoint returns at most 100 rows per call. We call it sequentially, 1.6 s apart.
@@ -240,4 +250,5 @@ We changed nothing in the data. The results are aggregate counts derived from it
 - `test_adapters.py`: 1 table per adapter, on rows shaped like the real ones.
 - `test_fetch.py`: API outcomes against a fake HTTP layer, and the pinned samples.
 - `test_shell.py`: 1 table of shell commands and the reads, writes and uses they imply.
-- `test_cli.py`: the CLI on the fixture trace.
+- `test_cli.py`: the CLI on the fixture trace, on a cached public sample, and on bad input.
+- `test_label.py`: the labeling sheet.

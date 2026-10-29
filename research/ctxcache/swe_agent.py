@@ -58,8 +58,8 @@ def window(text: str):
     return m.group("path"), "\n".join(kept), lines, "\n".join(plain)
 
 
-def trajectory(row: dict, traj: str, salt: str = "ctxcache-v1") -> tuple[list[Access], dict]:
-    b = TraceBuilder(traj, salt)
+def trajectory(row: dict, traj: str, salt: str = "ctxcache-v1", keep_text: bool = False) -> tuple[list[Access], dict]:
+    b = TraceBuilder(traj, salt, keep_text)
     steps = row["trajectory"]
     open_file: str | None = None
     cwd: str | None = None
@@ -73,6 +73,7 @@ def trajectory(row: dict, traj: str, salt: str = "ctxcache-v1") -> tuple[list[Ac
             continue
         b.stats["message_tokens"] += tokens(text)
         cmd = action(text) or ""
+        b.action = cmd
         nxt = steps[i + 1] if i + 1 < len(steps) else None
         if nxt is None or nxt["role"] != "user":
             # The run ended before an observation. The action still used its target.
@@ -90,6 +91,8 @@ def trajectory(row: dict, traj: str, salt: str = "ctxcache-v1") -> tuple[list[Ac
             open_file = None if foot.group("open") in ("n/a", "") else foot.group("open")
             cwd = foot.group("cwd") or None
     info = {"cluster": row.get("instance_id"), "model": row.get("model_name")}
+    if keep_text:
+        info["notes"] = b.notes
     return b.accesses, {**info, **b.stats}
 
 

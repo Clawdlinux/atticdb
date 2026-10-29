@@ -40,13 +40,20 @@ class View:
     obj: str
     lines: tuple[int, int] | None  # first and last line number shown
     text: str  # the shown text without line numbers, to match edit targets
+    shown: str = ""  # the body as shown, kept only for labeling sheets
 
 
 class TraceBuilder:
     """Turns 1 trajectory's tool outputs and actions into accesses."""
 
-    def __init__(self, traj: str, salt: str = "ctxcache-v1"):
+    def __init__(self, traj: str, salt: str = "ctxcache-v1", keep_text: bool = False):
         self.traj, self.salt = traj, salt
+        # Labeling sheets need the text behind each reference. Off by default, so a
+        # normal run never holds content past the access it hashes.
+        self.keep_text = keep_text
+        self.action = ""  # the action being processed, set by the adapter
+        self.notes: dict[int, dict] = {}  # access index -> {"view", "action"}, when keep_text
+        self.url_text: dict[str, str] = {}
         self.accesses: list[Access] = []
         self.version: dict[str, int] = {}  # path -> writes seen so far
         self.world = 0  # writes so far, over all paths
@@ -76,7 +83,7 @@ class TraceBuilder:
         obj = self.key("file", path, v, body)
         self._access(obj, "file", tokens(body), ref=False)
         views = [w for w in self.views.get((path, v), []) if w.obj != obj]
-        views.append(View(obj, lines, body if text is None else text))
+        views.append(View(obj, lines, body if text is None else text, body if self.keep_text else ""))
         self.views[(path, v)] = views
         return obj
 
@@ -84,6 +91,8 @@ class TraceBuilder:
         obj = self.key("url", url, request, body)
         self._access(obj, "url", tokens(body), ref=False)
         self.urls[url] = obj
+        if self.keep_text:
+            self.url_text[obj] = body
         return obj
 
     def output(self, tool: str, request: str, body: str) -> str:
@@ -111,12 +120,16 @@ class TraceBuilder:
         elif how == "line" and line is not None and pick.lines:
             sub = "line_span" if pick.lines[0] <= line and (end or line) <= pick.lines[1] else "line"
         self._access(pick.obj, "file", 0, ref=True, sub=sub)
+        if self.keep_text:
+            self.notes[len(self.accesses) - 1] = {"view": pick.shown, "action": self.action}
         return True
 
     def use_url(self, url: str) -> bool:
         obj = self.urls.get(url)
         if obj is not None:
             self._access(obj, "url", 0, ref=True, sub="path")
+            if self.keep_text:
+                self.notes[len(self.accesses) - 1] = {"view": self.url_text.get(obj, ""), "action": self.action}
         return obj is not None
 
     def write(self, path: str) -> None:
