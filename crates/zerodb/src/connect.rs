@@ -1,10 +1,12 @@
 //! `zerodb connect` and `zerodb disconnect`: add or remove zerodb's entry in a harness's
 //! user MCP config, and 2 Copilot files VS Code and Copilot CLI share: the `sessionStart`
-//! hook and the instructions file. Claude Code has its own parts, in [`claude`]. The entry
+//! hook and the instructions file. Claude Code and Codex have their own parts, in [`claude`]
+//! and [`codex`]. The entry
 //! and the hook run the binary on the home, so they hold no token. The only paths they hold
 //! are the binary's and, under `ZERODB_HOME`, the home's.
 
 mod claude;
+mod codex;
 
 pub use claude::Notes;
 
@@ -25,6 +27,8 @@ pub enum Harness {
     Copilot,
     /// Claude Code, through the `claude` CLI and its `settings.json`.
     ClaudeCode,
+    /// Codex, through its `config.toml` and `hooks.json`.
+    Codex,
 }
 
 /// The harnesses that share the Copilot hook and instructions files, which read 1 home.
@@ -32,7 +36,7 @@ const COPILOT_SHARED: [Harness; 2] = [Harness::Vscode, Harness::Copilot];
 
 impl Harness {
     /// Every harness.
-    pub const ALL: [Self; 3] = [Self::Vscode, Self::Copilot, Self::ClaudeCode];
+    pub const ALL: [Self; 4] = [Self::Vscode, Self::Copilot, Self::ClaudeCode, Self::Codex];
 
     /// The harness called `name` on the command line.
     pub fn parse(name: &str) -> Option<Self> {
@@ -40,6 +44,7 @@ impl Harness {
             "vscode" => Some(Self::Vscode),
             "copilot" => Some(Self::Copilot),
             "claude-code" => Some(Self::ClaudeCode),
+            "codex" => Some(Self::Codex),
             _ => None,
         }
     }
@@ -49,6 +54,7 @@ impl Harness {
             Self::Vscode => "vscode",
             Self::Copilot => "copilot",
             Self::ClaudeCode => "claude-code",
+            Self::Codex => "codex",
         }
     }
 
@@ -58,11 +64,13 @@ impl Harness {
             Self::Vscode => "vscode-copilot",
             Self::Copilot => "copilot",
             Self::ClaudeCode => "claude-code",
+            Self::Codex => "codex",
         }
     }
 
     /// The config file. VS Code's lives in its user profile. Copilot's in `$COPILOT_HOME`.
-    /// Claude Code's is `.claude.json`, which only the `claude` CLI writes.
+    /// Claude Code's is `.claude.json`, which only the `claude` CLI writes. Codex's is
+    /// `config.toml`, which isn't JSON, so only [`codex`] reads it.
     fn file(self) -> Result<PathBuf, String> {
         Ok(match self {
             Self::Vscode if cfg!(target_os = "macos") => {
@@ -75,6 +83,7 @@ impl Harness {
             .join("Code/User/mcp.json"),
             Self::Copilot => copilot_home()?.join("mcp-config.json"),
             Self::ClaudeCode => claude::state_file()?,
+            Self::Codex => codex::config_file()?,
         })
     }
 
@@ -83,6 +92,7 @@ impl Harness {
         match self {
             Self::Vscode => "servers",
             Self::Copilot | Self::ClaudeCode => "mcpServers",
+            Self::Codex => "mcp_servers",
         }
     }
 
@@ -96,7 +106,7 @@ impl Harness {
                 "args": ["mcp", "--agent", self.agent()]}),
             Self::Copilot => json!({"type": "local", "command": command,
                 "args": ["mcp", "--agent", self.agent()], "tools": ["*"]}),
-            Self::ClaudeCode => json!({"type": "stdio", "command": command,
+            Self::ClaudeCode | Self::Codex => json!({"type": "stdio", "command": command,
                 "args": ["mcp", "--agent", self.agent()]}),
         };
         with_home(entry, home)
@@ -128,8 +138,8 @@ fn binary() -> Result<String, String> {
 }
 
 /// Adds zerodb's entry to `harness`'s config and writes the hook and the instructions file,
-/// after creating the home. Claude Code gets its 3 parts by [`connect_claude_code`], with the
-/// hook and `--notes auto`.
+/// after creating the home. Claude Code gets its 3 parts by [`connect_claude_code`], and Codex
+/// its 2 by [`connect_codex`], with the hook and `--notes auto`.
 /// An entry with connection flags is replaced only with `force`. Under `ZERODB_HOME`, the
 /// entry and the hook pass it on. The other harness must pass the same home, as both share
 /// the hook. Else nothing changes, unless `force`. The flags are checked first, so `force`
@@ -137,6 +147,9 @@ fn binary() -> Result<String, String> {
 pub fn connect(harness: Harness, force: bool) -> u8 {
     if harness == Harness::ClaudeCode {
         return connect_claude_code(force, true, Notes::Auto);
+    }
+    if harness == Harness::Codex {
+        return connect_codex(true, Notes::Auto);
     }
     finish(moved_home(harness).and_then(|moved| {
         if !force {
@@ -163,6 +176,14 @@ pub fn connect(harness: Harness, force: bool) -> u8 {
 /// others still apply. Returns the exit code: 1 when any part was skipped.
 pub fn connect_claude_code(force: bool, hook: bool, notes: Notes) -> u8 {
     claude::connect(force, hook, notes)
+}
+
+/// Adds Codex's MCP entry and tool approvals for `notes`, as a block at the end of its
+/// `config.toml`, and unless `hook` is false its SessionStart hook. A `zerodb` server that
+/// zerodb didn't write is never edited, so there is no `force`. Each part prints 1 line, as
+/// for Claude Code. Returns the exit code: 1 when any part was skipped or failed.
+pub fn connect_codex(hook: bool, notes: Notes) -> u8 {
+    codex::connect(hook, notes)
 }
 
 /// Runs [`refuse_flags`] on `harness`'s current entry, before any file changes. `data` is
@@ -272,10 +293,14 @@ fn moved_home(harness: Harness) -> Result<Option<String>, String> {
 
 /// Removes zerodb's entry from `harness`'s config, and the instructions file and the hook
 /// once neither VS Code nor Copilot CLI has one. Both removals are tried, and every error is
-/// reported. Claude Code's parts go by [`claude`]'s rules. Returns the exit code.
+/// reported. Claude Code's and Codex's parts go by [`claude`]'s and [`codex`]'s rules.
+/// Returns the exit code.
 pub fn disconnect(harness: Harness) -> u8 {
     if harness == Harness::ClaudeCode {
         return claude::disconnect();
+    }
+    if harness == Harness::Codex {
+        return codex::disconnect();
     }
     finish(edit(harness, None, None).and_then(|message| {
         println!("{message}");

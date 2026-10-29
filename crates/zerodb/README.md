@@ -9,6 +9,7 @@ zerodb serve --config zerodb.json --data-dir ./data
 zerodb mcp                                       # no flags: the per-user home
 zerodb connect vscode                            # adds zerodb to VS Code's MCP config
 zerodb connect claude-code                       # adds zerodb to Claude Code, with its hook
+zerodb connect codex                             # adds zerodb to Codex, with its hook
 zerodb studio                                    # a read-only page about the store
 zerodb verify --data-dir ./data                  # checks a stopped data dir on a copy
 zerodb recover --truncate-at <lsn> --data-dir ./data
@@ -165,7 +166,7 @@ An auto-started server runs in its own process group and outlives the adapters. 
 `zerodb connect <vscode|copilot> [--force]` creates the home, then adds a `zerodb` entry to the harness's user MCP config.
 It also writes the session-start hook file, described below.
 `zerodb disconnect <vscode|copilot>` removes that entry. Every other key and server stays.
-Claude Code has its own parts. See [Claude Code](#claude-code) below.
+Claude Code and Codex have their own parts. See [Claude Code](#claude-code) and [Codex](#codex) below.
 
 | Name | File | Entry |
 |---|---|---|
@@ -218,7 +219,7 @@ A hook file with other content is left alone, and `disconnect` says so.
 
 `zerodb connect claude-code [--force] [--no-hook] [--notes ask|auto]` creates the home, then adds 3 parts.
 `zerodb disconnect claude-code` removes them.
-`--no-hook` and `--notes` work only for `claude-code`. `--notes` defaults to `auto`.
+`--no-hook` and `--notes` work only for `claude-code` and `codex`. `--notes` defaults to `auto`.
 The config dir is `$CLAUDE_CONFIG_DIR` when set, else `~/.claude`.
 A relative `CLAUDE_CONFIG_DIR` fails both verbs with exit 2 before any change. `claude` would inherit it and write under the current directory. An empty one counts as unset.
 
@@ -265,6 +266,64 @@ That happens for a `settings.json` with comments, trailing commas, duplicate key
 The other parts still apply. The exit code is 1 when any part was skipped or failed.
 Then start a new Claude Code session.
 
+### Codex
+
+`zerodb connect codex [--force] [--no-hook] [--notes ask|auto]` creates the home, then adds 2 parts.
+`zerodb disconnect codex` removes them.
+`--force` changes nothing for Codex, as zerodb never edits a `zerodb` server it didn't write.
+The config dir is `$CODEX_HOME` when set, else `~/.codex`.
+A relative `CODEX_HOME` fails both verbs with exit 2 before any change. `codex` would inherit it and read another config. An empty one counts as unset.
+
+| Part | Where | What |
+|---|---|---|
+| MCP entry | a block at the end of `<config dir>/config.toml` | the block below |
+| Hook | `hooks.SessionStart` in `<config dir>/hooks.json` | `{"hooks": [{"type": "command", "command": "'<binary>' hook session-start --harness codex", "timeout": 5, "statusMessage": "Loading zerodb memory", "additionalContextLimit": 24000}]}` |
+
+```toml
+# zerodb:begin v1. zerodb disconnect codex removes this block.
+[mcp_servers.zerodb]
+command = "<binary>"
+args = ["mcp", "--agent", "codex"]
+default_tools_approval_mode = "writes"
+
+[mcp_servers.zerodb.tools.memory_append]
+approval_mode = "approve"
+# zerodb:end
+```
+
+`codex mcp add` can't set tool approvals, so zerodb writes the block itself.
+`writes` asks before each tool that isn't read-only. zerodb's reads are read-only, so they run without asking. `fact_set` always asks.
+The `memory_append` table saves notes without asking. `--notes ask` leaves it out.
+Under `ZERODB_HOME`, the block also has `env = { ZERODB_HOME = "<path>" }`.
+Paths are TOML strings, with `\` and `"` escaped. A path with a control character is refused.
+The block goes after 1 blank line. A file with CRLF line ends gets CRLF.
+A missing file is created at mode 0600, and a missing config dir at 0700.
+A block that matches writes nothing. Another one, such as one from an old binary path, is replaced in place, with a backup.
+The lines between the markers are zerodb's. Don't add your own there, as `disconnect` removes them.
+Marker lines that don't pair up skip the part: an end line without a begin line, a begin line without an end line, or 2 begin lines.
+A `zerodb` server outside the block, as a `[mcp_servers.zerodb]` table or a `zerodb` key under `mcp_servers`, is refused. A second one would break the file.
+zerodb never edits it, even with `--force`. The line shows the block to merge by hand, and never that server's env.
+
+After a write, `codex mcp get zerodb --json` must show the binary, `mcp --agent codex` and the home. That command only prints config.
+It runs in the config dir, so a project's `.codex/config.toml` can't answer. It has 10 s, as `claude` does above.
+If it shows something else, fails or prints no JSON, the file is put back: the backup is renamed over it, or a file zerodb made is deleted. The part fails.
+Its output is never shown, as its env may hold secrets.
+Without `codex` on `PATH`, the block is written but not checked. The line says so, and the exit code stays 0.
+`disconnect` removes the block and the blank line before it, with a backup. A `zerodb` server outside the block stays, which counts as skipped.
+
+The hook group is appended last, with no matcher, through the same JSON editor as Claude Code's `settings.json`.
+It's found the same way: a group whose every handler runs an absolute binary path with `hook session-start --harness codex`.
+Under `ZERODB_HOME`, the hook command starts with `ZERODB_HOME='<path>' `.
+The block is at most 6,000 characters. `additionalContextLimit` is 24,000, so the block arrives whole whether Codex counts bytes or characters.
+A missing `hooks.json` starts as `{"hooks": {}}`.
+Codex runs a new hook only after you approve it once in Codex. `connect` says so after it adds or updates the hook.
+Codex keeps 1 approval per hook in `config.toml`, keyed by the hook's position. zerodb doesn't write those.
+When groups follow zerodb's, removing or replacing it moves them up, so Codex may ask to approve them again. Both verbs say so.
+`hooks = false` in `[features]` turns hooks off. `connect` warns when it finds that line.
+Codex reads the MCP server's instructions, so `AGENTS.md` isn't touched.
+
+Each part prints 1 line, and the exit code works as for Claude Code. Then open Codex.
+
 ## `zerodb hook session-start`
 
 `zerodb hook session-start [--harness <name>]` is the session-start hook. It reads at most 1 MiB of JSON on stdin and uses only `cwd`.
@@ -273,7 +332,7 @@ The repo comes from `cwd` by the rule in `zerodb mcp` above, so a worktree gets 
 It reads the home like `zerodb mcp` with no flags, and starts the server if needed. It ignores `ZERODB_TOKEN`.
 Its reads share a 3 s budget from the hook's start. A read with under 2 s left fails at once.
 It lists facts under `user/` and under `repo/<repo>/`, 50 each, in key order.
-It reads the last 5 turns of session `<repo>` for agents `vscode-copilot`, `copilot`, `claude-code` and `mcp`, then keeps the newest 5.
+It reads the last 5 turns of session `<repo>` for agents `vscode-copilot`, `copilot`, `claude-code`, `codex` and `mcp`, then keeps the newest 5.
 `mcp` is the agent of the shell verbs, so a note from `zerodb append` shows too.
 A window cut short by its 8 MiB cap hides older turns, so then it may show fewer than 5.
 It prints 1 line, `{"additionalContext": "<block>"}`. With nothing to show, or on any error, it prints `{}`.

@@ -127,6 +127,80 @@ with open(path, "w") as f:
     bin.join("argv")
 }
 
+/// A fake `codex` in the new directory `bin`, for a `PATH` of just `bin`. It appends its args
+/// as a JSON line to `bin/argv`, which it returns. It answers only `mcp get <name> [--json]`,
+/// as Codex 0.147.0 does: it parses `config.toml` in `$CODEX_HOME`, else in `$HOME/.codex`,
+/// with Python's `tomllib`, so a file that isn't valid TOML fails. A missing server exits 1.
+/// `--json` prints the server as `{"name", "enabled", "transport": {"type": "stdio",
+/// "command", "args", "env", ...}, ...}`. With `FAKE_CODEX=mismatch`, it shows another
+/// command. With `FAKE_CODEX=garbage`, it prints text that isn't JSON.
+pub fn fake_codex(bin: &Path) -> PathBuf {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let python = std::env::split_paths(&path).map(|dir| dir.join("python3")).find(|p| p.is_file());
+    let python = python.unwrap_or_else(|| panic!("the fake codex needs python3 on PATH"));
+    let script = format!(
+        r#"#!{}
+import json, os, sys
+try:
+    import tomllib
+except ImportError:
+    sys.exit("the fake codex needs Python 3.11 or later, for tomllib")
+args = sys.argv[1:]
+with open(os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "argv"), "a") as log:
+    log.write(json.dumps(args) + "\n")
+mode = os.environ.get("FAKE_CODEX", "")
+if args[:2] != ["mcp", "get"]:
+    sys.exit("unexpected args")
+name, as_json = None, False
+for arg in args[2:]:
+    if arg == "--json":
+        as_json = True
+    elif arg.startswith("-") or name is not None:
+        sys.exit("error: unexpected argument '" + arg + "' found")
+    else:
+        name = arg
+if name is None:
+    sys.exit("error: the following required arguments were not provided: <NAME>")
+home = os.environ.get("CODEX_HOME") or os.path.join(os.environ["HOME"], ".codex")
+if not os.path.isdir(home):
+    sys.exit("Error: CODEX_HOME points to " + repr(home) + ", but that path does not exist")
+try:
+    with open(os.path.join(home, "config.toml"), "rb") as f:
+        config = tomllib.load(f)
+except FileNotFoundError:
+    config = {{}}
+except tomllib.TOMLDecodeError as error:
+    sys.exit("Error loading config.toml: " + str(error))
+server = config.get("mcp_servers", {{}}).get(name)
+if server is None:
+    sys.exit("Error: No MCP server named '" + name + "' found.")
+modes = ("auto", "prompt", "writes", "approve")
+tools = server.get("tools", {{}})
+if server.get("default_tools_approval_mode", "auto") not in modes or any(
+    tool.get("approval_mode", "auto") not in modes for tool in tools.values()
+):
+    sys.exit("Error loading config.toml: unknown approval mode")
+if mode == "mismatch":
+    server["command"] = "/elsewhere/zerodb"
+if mode == "garbage" or not as_json:
+    print(name + "\n  enabled: true")
+    sys.exit(0)
+transport = {{"type": "stdio", "command": server.get("command"), "args": server.get("args", []),
+    "env": server.get("env"), "env_vars": server.get("env_vars", []), "cwd": server.get("cwd")}}
+print(json.dumps({{"name": name, "enabled": server.get("enabled", True),
+    "disabled_reason": None, "transport": transport, "enabled_tools": None,
+    "disabled_tools": None, "startup_timeout_sec": None, "tool_timeout_sec": None}}, indent=2))
+"#,
+        python.display()
+    );
+    std::fs::create_dir(bin).unwrap();
+    let codex = bin.join("codex");
+    // `fs::write` closes the file before it returns, so no write fd outlives this helper.
+    std::fs::write(&codex, script).unwrap();
+    chmod(&codex, 0o755);
+    bin.join("argv")
+}
+
 /// Spawns `command`, retrying while Linux says the program is busy. A test may run a file it
 /// just wrote, such as a fake `claude` or a copied binary. If another test thread forks
 /// while that file is open for writing, the child holds the write fd until it execs, and an

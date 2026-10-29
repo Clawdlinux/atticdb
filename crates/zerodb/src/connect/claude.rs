@@ -24,12 +24,13 @@ use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
-/// Whether Claude Code asks before zerodb saves a note.
+/// Whether Claude Code or Codex asks before zerodb saves a note.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Notes {
-    /// Claude Code asks before each `memory_append`.
+    /// The harness asks before each `memory_append`.
     Ask,
     /// `memory_append` is allowed, so notes are saved without asking.
     Auto,
@@ -44,23 +45,23 @@ const READS: [&str; 4] = [
 ];
 /// The rule that saves notes without asking.
 const APPEND: &str = "mcp__zerodb__memory_append";
-/// Where the hook groups go in `settings.json`.
+/// Where the hook groups go in `settings.json`, and in Codex's `hooks.json`.
 const HOOKS: [&str; 2] = ["hooks", "SessionStart"];
 /// Where the allow rules go.
 const ALLOW: [&str; 2] = ["permissions", "allow"];
-/// What the hook command passes the binary.
-const HOOK_ARGS: &str = " hook session-start --harness claude-code";
 /// The `claude` args that remove zerodb's entry.
 const REMOVE: [&str; 5] = ["mcp", "remove", "-s", "user", "zerodb"];
 /// The most of `.claude.json` read. It holds all of Claude's state, so it can be large.
 const MAX_STATE: u64 = 64 << 20;
-/// The most of `claude`'s stderr kept, from its end.
+/// The most of a child's stderr kept, from its end.
 const KEPT_STDERR: usize = 64 << 10;
-/// How long a `claude` command may run.
-const CLAUDE_TIMEOUT: Duration = Duration::from_secs(10);
+/// The most of a child's stdout read back.
+const MAX_STDOUT: usize = 1 << 20;
+/// How long a `claude` or `codex` command may run.
+const CHILD_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What a part did, as the line to print. `Err` when it was skipped or failed.
-type Line = Result<String, String>;
+pub(super) type Line = Result<String, String>;
 
 /// The variable that moves Claude Code's config dir.
 const CONFIG_ENV: &str = "CLAUDE_CONFIG_DIR";
@@ -110,7 +111,7 @@ pub(super) fn connect(force: bool, hook: bool, notes: Notes) -> u8 {
                 return Err(differs(&state, entry, &exe, home.as_deref()));
             }
         }
-        let warnings = split(home.as_deref());
+        let warnings = split(Harness::ClaudeCode, home.as_deref());
         crate::home::ensure()?;
         Ok((home, exe, state, current, warnings))
     })();
@@ -127,11 +128,11 @@ pub(super) fn connect(force: bool, hook: bool, notes: Notes) -> u8 {
         Err(why) => Err(format!(
             "MCP entry: skipped, {}: {why}. Run by hand: {}",
             state.display(),
-            shell_line(&add_args(&exe, home))
+            shell_line("claude", &add_args(&exe, home))
         )),
     };
     let group = hook_group(&exe, home);
-    let add_group = |text: &str| add_hook(text, &group);
+    let add_group = |text: &str| add_hook(Harness::ClaudeCode, text, &group);
     let add_allow = |text: &str| add_rules(text, notes);
     let mut parts = Vec::new();
     if hook {
@@ -141,7 +142,7 @@ pub(super) fn connect(force: bool, hook: bool, notes: Notes) -> u8 {
     let by_hand = format!("Add these to permissions.allow by hand: {}", json!(rules(notes)));
     parts.push(Part { name: "allow rules", by_hand, edit: &add_allow });
     let mut lines = vec![entry];
-    lines.extend(edit_settings(&parts));
+    lines.extend(edit_file(settings_file(), "{\n}\n", &parts));
     report(lines, &warnings, Some("Start a new Claude Code session to load zerodb."))
 }
 
@@ -162,13 +163,15 @@ pub(super) fn disconnect() -> u8 {
     };
     let mut every = READS.to_vec();
     every.push(APPEND);
+    let drop_group = |text: &str| drop_hooks(Harness::ClaudeCode, text);
     let parts = [
         Part {
             name: "SessionStart hook",
             by_hand: format!(
-                "Remove the groups that run zerodb{HOOK_ARGS} from hooks.SessionStart by hand"
+                "Remove the groups that run zerodb{} from hooks.SessionStart by hand",
+                hook_args(Harness::ClaudeCode)
             ),
-            edit: &drop_hooks,
+            edit: &drop_group,
         },
         Part {
             name: "allow rules",
@@ -177,13 +180,13 @@ pub(super) fn disconnect() -> u8 {
         },
     ];
     let mut lines = vec![drop_entry(&state)];
-    lines.extend(edit_settings(&parts));
+    lines.extend(edit_file(settings_file(), "{\n}\n", &parts));
     report(lines, &[], None)
 }
 
 /// Prints `lines` in order, then `warnings` on stderr, then `next`. Returns 1 when a part
 /// was skipped or failed, else 0.
-fn report(lines: Vec<Line>, warnings: &[String], next: Option<&str>) -> u8 {
+pub(super) fn report(lines: Vec<Line>, warnings: &[String], next: Option<&str>) -> u8 {
     let mut code = 0;
     for line in lines {
         match line {
@@ -204,8 +207,8 @@ fn report(lines: Vec<Line>, warnings: &[String], next: Option<&str>) -> u8 {
 }
 
 /// Notes on the other harnesses that pass a home other than `home`. They share no file with
-/// Claude Code, so connecting goes ahead, but memory splits between the homes.
-fn split(home: Option<&str>) -> Vec<String> {
+/// `harness`, so connecting goes ahead, but memory splits between the homes.
+pub(super) fn split(harness: Harness, home: Option<&str>) -> Vec<String> {
     let ours = home_words(home);
     let other = |other: Harness| {
         let theirs = match entry_home(other, &other.file().ok()?) {
@@ -217,9 +220,10 @@ fn split(home: Option<&str>) -> Vec<String> {
             Err(why) => format!("an unknown home, as {why}"),
         };
         Some(format!(
-            "{} uses {theirs}, but claude-code now uses {ours}. Memory splits: each harness \
-             reads and saves only its own home. Connect both under the same {HOME_ENV} to share it",
-            other.name()
+            "{} uses {theirs}, but {} now uses {ours}. Memory splits: each harness reads and \
+             saves only its own home. Connect both under the same {HOME_ENV} to share it",
+            other.name(),
+            harness.name()
         ))
     };
     COPILOT_SHARED.into_iter().filter_map(other).collect()
@@ -328,10 +332,10 @@ fn set_entry(state: &Path, current: Option<&Value>, exe: &str, home: Option<&str
     }
     let (add, remove) = (add_args(exe, home), REMOVE.map(String::from).to_vec());
     let by_hand = match current {
-        Some(_) => format!("{} && {}", shell_line(&remove), shell_line(&add)),
-        None => shell_line(&add),
+        Some(_) => format!("{} && {}", shell_line("claude", &remove), shell_line("claude", &add)),
+        None => shell_line("claude", &add),
     };
-    let claude = find_claude()
+    let claude = find_program("claude")
         .ok_or_else(|| format!("MCP entry: skipped, claude is not on PATH. Run: {by_hand}"))?;
     let failed = |why: String| format!("MCP entry: failed, {why}. Run by hand: {by_hand}");
     if let Some(old) = current {
@@ -397,7 +401,7 @@ fn read_back(state: &Path, done: impl Fn(Option<&Value>) -> bool) -> Result<Opti
 /// Removes zerodb's entry through `claude` when it is what zerodb writes.
 fn drop_entry(state: &Path) -> Line {
     let shown = state.display();
-    let by_hand = shell_line(&REMOVE.map(String::from));
+    let by_hand = shell_line("claude", &REMOVE.map(String::from));
     let entry = current(state)
         .map_err(|why| format!("MCP entry: skipped, {shown} {why}. Run by hand: {by_hand}"))?;
     let Some(entry) = entry else { return Ok(format!("MCP entry: not found ({shown})")) };
@@ -407,7 +411,7 @@ fn drop_entry(state: &Path) -> Line {
              anyway, run: {by_hand}"
         ));
     }
-    let claude = find_claude()
+    let claude = find_program("claude")
         .ok_or_else(|| format!("MCP entry: skipped, claude is not on PATH. Run: {by_hand}"))?;
     let failed = |why: String| format!("MCP entry: failed, {why}. Run by hand: {by_hand}");
     run_claude(&claude, &REMOVE.map(String::from)).map_err(failed)?;
@@ -421,53 +425,67 @@ fn drop_entry(state: &Path) -> Line {
     }
 }
 
-/// The first `claude` on `PATH` that is an executable regular file. Relative `PATH` entries
+/// The first `name` on `PATH` that is an executable regular file. Relative `PATH` entries
 /// are skipped.
-fn find_claude() -> Option<PathBuf> {
+pub(super) fn find_program(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     let dirs = std::env::split_paths(&path).filter(|dir| dir.is_absolute());
-    dirs.map(|dir| dir.join("claude")).find(|claude| {
-        std::fs::metadata(claude)
+    dirs.map(|dir| dir.join(name)).find(|program| {
+        std::fs::metadata(program)
             .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
     })
 }
 
-/// Runs `claude` with `args` and stdin closed, for at most [`CLAUDE_TIMEOUT`]. It runs in
-/// its own process group, so a timeout kills whatever it started too. An error ends with the
-/// last line `claude` printed on stderr.
+/// Runs `claude` with `args`, by [`run`].
 fn run_claude(claude: &Path, args: &[String]) -> Result<(), String> {
-    let line = shell_line(args);
     let mut command = Command::new(claude);
-    command.args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
-    command.process_group(0);
+    command.args(args);
     // zerodb reads an empty CLAUDE_CONFIG_DIR as unset, so `claude` must too.
     if std::env::var_os(CONFIG_ENV).is_some_and(|dir| dir.is_empty()) {
         command.env_remove(CONFIG_ENV);
     }
+    run(&mut command, &shell_line("claude", args), false).map(drop)
+}
+
+/// Reads `from` to its end on a thread, so a full pipe or a closed one can't stall or break
+/// a chatty child. Sends the last `keep` bytes, and how many bytes came in all.
+fn drain(mut from: impl Read + Send + 'static, keep: usize) -> Receiver<(Vec<u8>, usize)> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let (mut kept, mut chunk, mut total) = (Vec::new(), [0; 8192], 0);
+        loop {
+            match from.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    total += n;
+                    kept.extend_from_slice(&chunk[..n]);
+                    kept.drain(..kept.len().saturating_sub(keep));
+                }
+                Err(error) if error.kind() == ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
+        }
+        let _ = sender.send((kept, total));
+    });
+    receiver
+}
+
+/// Runs `command` with stdin closed, for at most [`CHILD_TIMEOUT`]. `line` names it in
+/// errors. It runs in its own process group, so a timeout kills whatever it started too.
+/// Its stderr, and with `capture` its stdout, are read to their end. Returns its stdout, up
+/// to [`MAX_STDOUT`], or nothing without `capture`. An error ends with the last line it
+/// printed on stderr, but never a line that quotes a config file.
+pub(super) fn run(command: &mut Command, line: &str, capture: bool) -> Result<Vec<u8>, String> {
+    let stdout = if capture { Stdio::piped() } else { Stdio::null() };
+    command.stdin(Stdio::null()).stdout(stdout).stderr(Stdio::piped());
+    command.process_group(0);
     // Retries take at most 200 ms of the 10 s budget.
     let mut child =
-        crate::spawn(&mut command).map_err(|error| format!("{line} could not start: {error}"))?;
-    // Drain stderr to its end on a thread, so a full pipe or a closed one can't stall or
-    // break a chatty `claude`. Only the last 64 KiB are kept, for the last line.
-    let (sender, receiver) = std::sync::mpsc::channel();
-    if let Some(mut stderr) = child.stderr.take() {
-        std::thread::spawn(move || {
-            let (mut kept, mut chunk) = (Vec::new(), [0; 8192]);
-            loop {
-                match stderr.read(&mut chunk) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        kept.extend_from_slice(&chunk[..n]);
-                        kept.drain(..kept.len().saturating_sub(KEPT_STDERR));
-                    }
-                    Err(error) if error.kind() == ErrorKind::Interrupted => {}
-                    Err(_) => break,
-                }
-            }
-            let _ = sender.send(kept);
-        });
-    }
-    let deadline = Instant::now() + CLAUDE_TIMEOUT;
+        crate::spawn(command).map_err(|error| format!("{line} could not start: {error}"))?;
+    // Only the last 64 KiB of stderr are kept, for the last line.
+    let stderr = child.stderr.take().map(|stderr| drain(stderr, KEPT_STDERR));
+    let stdout = child.stdout.take().map(|stdout| drain(stdout, MAX_STDOUT));
+    let deadline = Instant::now() + CHILD_TIMEOUT;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
@@ -484,14 +502,30 @@ fn run_claude(claude: &Path, args: &[String]) -> Result<(), String> {
             Err(error) => return Err(format!("{line}: {error}")),
         }
     };
-    if status.success() {
-        return Ok(());
+    // A process the child left behind may hold a pipe open, so wait for its end only briefly.
+    let read = |from: Option<Receiver<(Vec<u8>, usize)>>| {
+        from.and_then(|from| from.recv_timeout(Duration::from_secs(1)).ok())
+    };
+    if !status.success() {
+        let (stderr, _) = read(stderr).unwrap_or_default();
+        let stderr = String::from_utf8_lossy(&stderr);
+        // A config parse error shows the bad line as `12 | <line>`, which may hold a secret.
+        let quoted = |line: &str| {
+            let rest = line.trim_start().trim_start_matches(|c: char| c.is_ascii_digit());
+            rest.trim_start().starts_with('|')
+        };
+        let mut lines = stderr.lines().rev();
+        let last = lines.find(|line| !line.trim().is_empty() && !quoted(line)).unwrap_or_default();
+        return Err(format!("{line} exited with {status}: {}", last.trim()));
     }
-    // A process `claude` left behind may hold stderr open, so wait for it only briefly.
-    let stderr = receiver.recv_timeout(Duration::from_secs(1)).unwrap_or_default();
-    let stderr = String::from_utf8_lossy(&stderr);
-    let last = stderr.lines().rev().find(|line| !line.trim().is_empty()).unwrap_or_default();
-    Err(format!("{line} exited with {status}: {}", last.trim()))
+    if !capture {
+        return Ok(Vec::new());
+    }
+    match read(stdout) {
+        Some((stdout, total)) if total == stdout.len() => Ok(stdout),
+        Some(_) => Err(format!("{line} printed over 1 MiB")),
+        None => Err(format!("{line} did not close its output")),
+    }
 }
 
 /// `word` single-quoted for `sh`, with each `'` written as `'\''`.
@@ -499,8 +533,8 @@ fn quote(word: &str) -> String {
     format!("'{}'", word.replace('\'', r"'\''"))
 }
 
-/// The `claude` command line for `args`, as typed in a shell.
-fn shell_line(args: &[String]) -> String {
+/// The `program` command line for `args`, as typed in a shell.
+pub(super) fn shell_line(program: &str, args: &[String]) -> String {
     let plain = |word: &str| {
         !word.is_empty()
             && word
@@ -508,19 +542,26 @@ fn shell_line(args: &[String]) -> String {
                 .all(|byte| byte.is_ascii_alphanumeric() || b"_./=:@%+,-".contains(&byte))
     };
     let words = args.iter().map(|arg| if plain(arg) { arg.clone() } else { quote(arg) });
-    std::iter::once("claude".to_owned()).chain(words).collect::<Vec<_>>().join(" ")
+    std::iter::once(program.to_owned()).chain(words).collect::<Vec<_>>().join(" ")
 }
 
-/// The hook's command: the quoted binary, after `ZERODB_HOME='<home>' ` when `home` is set.
-/// Claude's command hooks have no env field, so the home goes in the command.
-fn hook_command(exe: &str, home: Option<&str>) -> String {
+/// What `harness`'s hook command passes the binary.
+pub(super) fn hook_args(harness: Harness) -> String {
+    format!(" hook session-start --harness {}", harness.name())
+}
+
+/// `harness`'s hook command: the quoted binary, after `ZERODB_HOME='<home>' ` when `home`
+/// is set. Claude's and Codex's command hooks have no env field, so the home goes in the
+/// command.
+pub(super) fn hook_command(harness: Harness, exe: &str, home: Option<&str>) -> String {
     let prefix = home.map(|home| format!("{HOME_ENV}={} ", quote(home))).unwrap_or_default();
-    format!("{prefix}{}{HOOK_ARGS}", quote(exe))
+    format!("{prefix}{}{}", quote(exe), hook_args(harness))
 }
 
 /// The SessionStart group zerodb adds. It has no matcher, so it also runs after compaction.
 fn hook_group(exe: &str, home: Option<&str>) -> Value {
-    json!({"hooks": [{"type": "command", "command": hook_command(exe, home), "timeout": 5}]})
+    let command = hook_command(Harness::ClaudeCode, exe, home);
+    json!({"hooks": [{"type": "command", "command": command, "timeout": 5}]})
 }
 
 /// Splits a single-quoted word, with `'\''` for each `'`, off the start of `text`. Returns
@@ -542,9 +583,10 @@ fn unquote(text: &str) -> Option<(String, &str)> {
     }
 }
 
-/// Whether `command` is a hook command zerodb writes, for any absolute binary path and any
-/// home. The binary's file name doesn't count, as an install may name it `zerodb-0.1.0`.
-fn our_command(command: &str) -> bool {
+/// Whether `command` is a hook command zerodb writes for `harness`, for any absolute binary
+/// path and any home. The binary's file name doesn't count, as an install may name it
+/// `zerodb-0.1.0`.
+fn our_command(harness: Harness, command: &str) -> bool {
     let parse = || {
         let (home, rest) = match command.strip_prefix(&format!("{HOME_ENV}=")) {
             Some(rest) => {
@@ -555,17 +597,19 @@ fn our_command(command: &str) -> bool {
         };
         let (exe, rest) = unquote(rest)?;
         // Writing the command again for that binary and home must give the same text.
-        let again = hook_command(&exe, home.as_deref());
-        (Path::new(&exe).is_absolute() && rest == HOOK_ARGS && again == command).then_some(())
+        let again = hook_command(harness, &exe, home.as_deref());
+        let args = hook_args(harness);
+        (Path::new(&exe).is_absolute() && rest == args && again == command).then_some(())
     };
     parse().is_some()
 }
 
-/// Whether `group` is a SessionStart group whose every handler runs zerodb's hook.
-fn our_group(group: &Value) -> bool {
+/// Whether `group` is a SessionStart group whose every handler runs `harness`'s zerodb hook.
+pub(super) fn our_group(harness: Harness, group: &Value) -> bool {
     let handlers = group["hooks"].as_array().map(Vec::as_slice).unwrap_or_default();
     let ours = |handler: &Value| {
-        handler["type"] == "command" && handler["command"].as_str().is_some_and(our_command)
+        let command = handler["command"].as_str();
+        handler["type"] == "command" && command.is_some_and(|command| our_command(harness, command))
     };
     !handlers.is_empty() && handlers.iter().all(ours)
 }
@@ -579,22 +623,22 @@ fn rules(notes: Notes) -> Vec<&'static str> {
     rules
 }
 
-/// What an edit to `settings.json` did.
-struct Done {
+/// What an edit to `settings.json` or `hooks.json` did.
+pub(super) struct Done {
     /// The new text.
-    text: String,
+    pub(super) text: String,
     /// What it did, in words.
     said: String,
     /// Whether it left something to do by hand, which counts as skipped.
     by_hand: bool,
 }
 
-/// An edit to `settings.json`'s text. `Err` says why it was refused.
-type Edit = Result<Done, Refused>;
+/// An edit to a JSON file's text. `Err` says why it was refused.
+pub(super) type Edit = Result<Done, Refused>;
 
-/// Why an edit to `settings.json` was refused, and what to do by hand when the part's usual
+/// Why an edit to a JSON file was refused, and what to do by hand when the part's usual
 /// advice doesn't fit.
-struct Refused {
+pub(super) struct Refused {
     /// Why it was refused.
     why: String,
     /// The advice to give instead of the part's.
@@ -612,16 +656,16 @@ fn done(text: String, said: &str) -> Edit {
     Ok(Done { text, said: said.into(), by_hand: false })
 }
 
-/// The zerodb hook commands in SessionStart groups that also run other hooks. `text` must be
-/// strict JSON.
-fn mixed(text: &str) -> Vec<String> {
+/// `harness`'s zerodb hook commands in SessionStart groups that also run other hooks. `text`
+/// must be strict JSON.
+fn mixed(harness: Harness, text: &str) -> Vec<String> {
     let root: Value = serde_json::from_str(text).unwrap_or_default();
     let groups = root["hooks"]["SessionStart"].as_array().cloned().unwrap_or_default();
-    let handlers = groups.iter().filter(|group| !our_group(group));
+    let handlers = groups.iter().filter(|group| !our_group(harness, group));
     let handlers =
         handlers.flat_map(|group| group["hooks"].as_array().cloned().unwrap_or_default());
     let ours = |handler: Value| {
-        let command = handler["command"].as_str().filter(|command| our_command(command));
+        let command = handler["command"].as_str().filter(|command| our_command(harness, command));
         command.filter(|_| handler["type"] == "command").map(str::to_owned)
     };
     handlers.filter_map(ours).collect()
@@ -630,11 +674,11 @@ fn mixed(text: &str) -> Vec<String> {
 /// `text` with `group` in `hooks.SessionStart`, and without zerodb's other groups. When
 /// zerodb's handler already sits in a group with other hooks, no group is added. An older
 /// one there is refused, as it can't be updated without touching the other hooks.
-fn add_hook(text: &str, group: &Value) -> Edit {
-    let stale = |old: &Value| our_group(old) && old != group;
+pub(super) fn add_hook(harness: Harness, text: &str, group: &Value) -> Edit {
+    let stale = |old: &Value| our_group(harness, old) && old != group;
     let (text, stale) = jsonedit::remove(text, &HOOKS, stale)?;
     let command = group["hooks"][0]["command"].as_str().unwrap_or_default();
-    let mixed = mixed(&text);
+    let mixed = mixed(harness, &text);
     if mixed.iter().any(|other| other != command) {
         return Err(Refused {
             why: "an older zerodb hook is inside a group with other hooks".into(),
@@ -675,11 +719,12 @@ fn add_rules(text: &str, notes: Notes) -> Edit {
     done(text, said)
 }
 
-/// `text` without the SessionStart groups that run zerodb's hook. A zerodb handler in a
-/// group with other hooks stays, and is left to do by hand.
-fn drop_hooks(text: &str) -> Edit {
-    let (text, removed) = jsonedit::remove(text, &HOOKS, our_group)?;
-    let by_hand = !mixed(&text).is_empty();
+/// `text` without the SessionStart groups that run `harness`'s zerodb hook. A zerodb handler
+/// in a group with other hooks stays, and is left to do by hand.
+pub(super) fn drop_hooks(harness: Harness, text: &str) -> Edit {
+    let ours = |group: &Value| our_group(harness, group);
+    let (text, removed) = jsonedit::remove(text, &HOOKS, ours)?;
+    let by_hand = !mixed(harness, &text).is_empty();
     let said = match (removed, by_hand) {
         (0, false) => "not found",
         (_, false) => "removed",
@@ -700,27 +745,36 @@ fn drop_rules(text: &str) -> Edit {
     done(text, if removed == 0 { "not found" } else { "removed" })
 }
 
-/// A part that lives in `settings.json`.
-struct Part<'a> {
+/// A part that lives in a JSON file, such as `settings.json`.
+pub(super) struct Part<'a> {
     /// Its name in the printed line.
-    name: &'static str,
+    pub(super) name: &'static str,
     /// What to do by hand when it is skipped.
-    by_hand: String,
+    pub(super) by_hand: String,
     /// The edit that applies it.
-    edit: &'a dyn Fn(&str) -> Edit,
+    pub(super) edit: &'a dyn Fn(&str) -> Edit,
 }
 
-/// Applies `parts` to `settings.json` in turn, then writes the file once, with a backup, if
-/// it changed. A part whose edit is refused is skipped, and the others still apply. A
-/// missing file starts as `{}`. Returns 1 line per part.
-fn edit_settings(parts: &[Part<'_>]) -> Vec<Line> {
+/// Claude's `settings.json`, in its config dir.
+fn settings_file() -> Result<PathBuf, String> {
+    Ok(config_dir()?.join("settings.json"))
+}
+
+/// Applies `parts` to the JSON file at `path` in turn, then writes the file once, with a
+/// backup, if it changed. A part whose edit is refused is skipped, and the others still
+/// apply. A missing file starts as `empty`. Returns 1 line per part.
+pub(super) fn edit_file(
+    path: Result<PathBuf, String>,
+    empty: &str,
+    parts: &[Part<'_>],
+) -> Vec<Line> {
     let skip_all = |why: &str| {
         let skip =
             |part: &Part<'_>| Err(format!("{}: skipped, {why}. {}", part.name, part.by_hand));
         parts.iter().map(skip).collect()
     };
-    let path = match config_dir() {
-        Ok(dir) => dir.join("settings.json"),
+    let path = match path {
+        Ok(path) => path,
         Err(why) => return skip_all(&why),
     };
     let shown = path.display();
@@ -732,7 +786,7 @@ fn edit_settings(parts: &[Part<'_>]) -> Vec<Line> {
         Ok(None) => None,
         Err(why) => return skip_all(&format!("{shown} {why}")),
     };
-    let start = original.as_ref().map_or("{\n}\n", |(text, _)| text.as_str());
+    let start = original.as_ref().map_or(empty, |(text, _)| text.as_str());
     let mut text = start.to_owned();
     // Per part: what it did, and whether it changed the text.
     let mut done = Vec::new();

@@ -994,3 +994,452 @@ fn connect_claude_code_kills_a_slow_claude() {
     std::thread::sleep(std::time::Duration::from_secs(14).saturating_sub(started.elapsed()));
     assert!(!marker.exists(), "a child of claude outlived the timeout");
 }
+
+/// A config.toml as people keep it: a few tables, `[features]`, another MCP server and a hook
+/// approval.
+const CODEX_CONFIG: &str = r#"model = "gpt-5.5"
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+
+[features]
+web_search_request = true
+
+[mcp_servers.github]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+env_vars = ["GITHUB_TOKEN"]
+
+[projects."/Users/me/src/app"]
+trust_level = "trusted"
+
+[hooks.state."/Users/me/.codex/hooks.json:SessionStart:0:0"]
+trusted_hash = "sha256:0f3e5a"
+"#;
+
+/// A hooks.json as people keep it: 2 SessionStart groups and a Stop group.
+const CODEX_HOOKS: &str = r#"{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.codex/hooks/branch.sh",
+            "timeout": 10,
+            "statusMessage": "Reading the branch"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cat ~/notes/today.md"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "say done"
+          }
+        ]
+      }
+    ]
+  }
+}
+"#;
+
+/// `connect codex` puts the MCP block at the end of `config.toml`, checks it with
+/// `codex mcp get zerodb --json`, and appends the SessionStart hook to `hooks.json`, in
+/// `$CODEX_HOME` or `~/.codex`. A rerun writes nothing and runs no codex. `disconnect`
+/// leaves hand-kept files byte for byte as they were, CRLF ones too. `--notes ask` leaves out
+/// the `memory_append` approval, and `--no-hook` the hook. A zerodb server outside the block
+/// is never edited, even with `--force`. A failed read-back puts the file back. Malformed
+/// markers skip the part. The other part still applies, and the exit code is 1.
+#[test]
+fn connect_codex_adds_its_parts() {
+    let dir = Dir::new();
+    let exe = std::fs::canonicalize(env!("CARGO_BIN_EXE_zerodb")).unwrap();
+    let exe = exe.to_str().unwrap().to_owned();
+    let (bin, empty) = (dir.0.join("bin"), dir.0.join("empty"));
+    let log = support::fake_codex(&bin);
+    std::fs::create_dir(&empty).unwrap();
+    let calls = || -> Vec<Vec<String>> {
+        let text = std::fs::read_to_string(&log).unwrap_or_default();
+        text.lines().map(|line| serde_json::from_str(line).unwrap()).collect()
+    };
+    let get = ["mcp", "get", "zerodb", "--json"].map(String::from).to_vec();
+    let run =
+        |home: &Path, codex: Option<&Path>, path: &Path, env: &[(&str, &Path)], args: &[&str]| {
+            let mut command = support::command(&exe);
+            command.args(args).current_dir(&dir.0).env("HOME", home).env("PATH", path);
+            command.env_remove("ZERODB_TOKEN").envs(codex.map(|codex| ("CODEX_HOME", codex)));
+            command.envs(env.iter().copied());
+            let (status, out) = Process::start(command.stdin(Stdio::null())).wait();
+            (status.code(), out)
+        };
+    let toml = |text: &str| format!("\"{}\"", text.replace('\\', r"\\").replace('"', "\\\""));
+    let block = |home: Option<&str>, approve: bool| {
+        let mut lines = vec![
+            "# zerodb:begin v1. zerodb disconnect codex removes this block.".to_owned(),
+            "[mcp_servers.zerodb]".into(),
+            format!("command = {}", toml(&exe)),
+            r#"args = ["mcp", "--agent", "codex"]"#.into(),
+            r#"default_tools_approval_mode = "writes""#.into(),
+        ];
+        lines.extend(home.map(|home| format!("env = {{ ZERODB_HOME = {} }}", toml(home))));
+        if approve {
+            let table =
+                ["", "[mcp_servers.zerodb.tools.memory_append]", "approval_mode = \"approve\""];
+            lines.extend(table.map(String::from));
+        }
+        lines.push("# zerodb:end".into());
+        lines.iter().map(|line| format!("{line}\n")).collect::<String>()
+    };
+    let quoted = format!("'{}'", exe.replace('\'', r"'\''"));
+    let command = format!("{quoted} hook session-start --harness codex");
+    let group = |command: &str| {
+        json!({"hooks": [{"type": "command", "command": command, "timeout": 5,
+            "statusMessage": "Loading zerodb memory", "additionalContextLimit": 24000}]})
+    };
+    let read =
+        |path: &Path| serde_json::from_slice::<Value>(&std::fs::read(path).unwrap()).unwrap();
+    let text = |path: &Path| std::fs::read_to_string(path).unwrap();
+    let perms = |path: &Path| std::fs::metadata(path).unwrap().mode() & 0o777;
+    let groups = |path: &Path| read(path)["hooks"]["SessionStart"].as_array().unwrap().clone();
+    let approve =
+        "Open Codex once and approve the zerodb hook; Codex runs a new hook only after that.";
+    let position = "Codex keys hook approvals by position, so it may ask you to approve the \
+                    SessionStart hooks after zerodb's again.";
+
+    let crlf = CODEX_CONFIG.replace('\n', "\r\n");
+    let rows = [
+        ("fresh", false, None),
+        ("CODEX_HOME", true, None),
+        ("hand-kept", true, Some(CODEX_CONFIG)),
+        ("CRLF", true, Some(crlf.as_str())),
+    ];
+    for (row, (case, moved, kept)) in rows.into_iter().enumerate() {
+        let home = dir.0.join(format!("h{row}"));
+        let codex_dir = if moved { home.join("c") } else { home.join(".codex") };
+        let (config, hooks) = (codex_dir.join("config.toml"), codex_dir.join("hooks.json"));
+        if let Some(kept) = kept {
+            std::fs::create_dir_all(&codex_dir).unwrap();
+            std::fs::write(&config, kept).unwrap();
+            std::fs::write(&hooks, CODEX_HOOKS).unwrap();
+            chmod(&config, 0o644);
+            chmod(&hooks, 0o644);
+        }
+        let codex = moved.then_some(codex_dir.as_path());
+        let connect =
+            |args: &[&str]| run(&home, codex, &bin, &[], &[&["connect", "codex"], args].concat());
+        let disconnect = || run(&home, codex, &bin, &[], &["disconnect", "codex"]);
+        let original = kept.unwrap_or_default();
+        let eol = if case == "CRLF" { "\r\n" } else { "\n" };
+        let with = |block: &str| match original {
+            "" => block.to_owned(),
+            original => format!("{original}{eol}{}", block.replace('\n', eol)),
+        };
+        let (at, shown) = (config.display().to_string(), hooks.display().to_string());
+        let start = calls().len();
+
+        let (code, out) = connect(&[]);
+        assert_eq!(code, Some(0), "{case}: {out}");
+        let lines: Vec<&str> = out.lines().collect();
+        let backup = |line: &str, was: &str| match kept {
+            Some(_) => {
+                let backup = line.split(", backup: ").nth(1).unwrap().trim_end_matches(')');
+                assert_eq!(std::fs::read_to_string(backup).unwrap(), was, "{case}: backup");
+                format!(", backup: {backup}")
+            }
+            None => String::new(),
+        };
+        let saved = backup(lines[0], original);
+        assert_eq!(lines[0], format!("MCP entry: added ({at}{saved})"), "{case}");
+        let saved = backup(lines[1], CODEX_HOOKS);
+        assert_eq!(lines[1], format!("SessionStart hook: added ({shown}{saved})"), "{case}");
+        assert_eq!(lines[2..], [approve], "{case}");
+        assert_eq!(calls()[start..], *std::slice::from_ref(&get), "{case}: read back");
+        assert_eq!(text(&config), with(&block(None, true)), "{case}");
+        let mut wanted: Value = serde_json::from_str(kept.map_or("{}", |_| CODEX_HOOKS)).unwrap();
+        let mut list = wanted["hooks"]["SessionStart"].as_array().cloned().unwrap_or_default();
+        list.push(group(&command));
+        wanted["hooks"]["SessionStart"] = json!(list);
+        assert_eq!(read(&hooks), wanted, "{case}: appended last");
+        let wanted_mode = if kept.is_some() { 0o644 } else { 0o600 };
+        assert_eq!((perms(&config), perms(&hooks)), (wanted_mode, wanted_mode), "{case}");
+        if kept.is_none() {
+            assert_eq!(perms(&codex_dir), 0o700, "{case}: a new config dir is private");
+        }
+
+        let now = || (files(&codex_dir), calls().len());
+        let before = now();
+        let (code, out) = connect(&[]);
+        let unchanged =
+            format!("MCP entry: unchanged ({at})\nSessionStart hook: unchanged ({shown})\n");
+        assert_eq!((code, out), (Some(0), unchanged), "{case}");
+        assert_eq!(now(), before, "{case}: nothing written, no backup, no codex");
+
+        let (code, out) = connect(&["--notes", "ask"]);
+        assert_eq!(code, Some(0), "{case}: {out}");
+        assert!(out.starts_with(&format!("MCP entry: updated ({at}, backup: ")), "{case}: {out}");
+        let hook = format!("\nSessionStart hook: unchanged ({shown})\n");
+        assert!(out.ends_with(&hook), "{case}: {out}");
+        assert_eq!(text(&config), with(&block(None, false)), "{case}: --notes ask");
+        assert_eq!(calls()[before.1..], *std::slice::from_ref(&get), "{case}: read back");
+
+        let (code, out) = disconnect();
+        assert_eq!(code, Some(0), "{case}: {out}");
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(lines[0].starts_with(&format!("MCP entry: removed ({at}, backup: ")), "{out}");
+        let removed = format!("SessionStart hook: removed ({shown}, backup: ");
+        assert!(lines[1].starts_with(&removed), "{case}: {out}");
+        assert_eq!(lines.len(), 2, "{case}: no note, as no group followed zerodb's: {out}");
+        let check = |when: &str| {
+            assert_eq!(text(&config), original, "{case} {when}");
+            match kept {
+                Some(_) => assert_eq!(text(&hooks), CODEX_HOOKS, "{case} {when}"),
+                None => {
+                    assert_eq!(read(&hooks), json!({"hooks": {"SessionStart": []}}), "{case}")
+                }
+            }
+        };
+        check("disconnect");
+
+        let (code, out) = connect(&["--no-hook"]);
+        assert_eq!(code, Some(0), "{case}: {out}");
+        assert!(out.starts_with("MCP entry: added (") && out.lines().count() == 1, "{out}");
+        assert_eq!(text(&config), with(&block(None, true)), "{case}: --no-hook");
+        assert_eq!(disconnect().0, Some(0), "{case}");
+        check("--no-hook disconnect");
+    }
+
+    // Under ZERODB_HOME, the block passes it in env, as a TOML string with `\` and `"`
+    // escaped, and the hook command sets it, quoted. The hook then reads that home.
+    let home = dir.0.join("z");
+    let zh = home.join("it's \"z\\h\"");
+    let _holders = support::Holders(vec![zh.join("data")]);
+    let zh_str = zh.to_str().unwrap();
+    let (code, out) = run(&home, None, &bin, &[("ZERODB_HOME", &zh)], &["connect", "codex"]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.starts_with("MCP entry: added ("), "the fake codex read it back: {out}");
+    let (config, hooks) = (home.join(".codex/config.toml"), home.join(".codex/hooks.json"));
+    assert_eq!(text(&config), block(Some(zh_str), true));
+    let moved = &groups(&hooks)[0]["hooks"][0]["command"];
+    let prefix = format!("ZERODB_HOME='{}' ", zh_str.replace('\'', r"'\''"));
+    assert_eq!(*moved, format!("{prefix}{command}"));
+    let seeded = ["fact", "set", "--key", "user/style", "--content", "short sentences"];
+    let (code, _, err) = support::zerodb(&home, &home, &seeded, &[("ZERODB_HOME", zh_str)], b"", 0);
+    assert_eq!(code, Some(0), "{err}");
+    std::fs::write(home.join("stdin"), support::cwd(&home)).unwrap();
+    let mut sh = support::command("sh");
+    sh.args(["-c", &format!("{} < stdin", moved.as_str().unwrap())]);
+    sh.current_dir(&home).env("HOME", &home).stdin(Stdio::null());
+    let (status, out) = Process::start(&mut sh).wait();
+    assert_eq!(status.code(), Some(0), "{out}");
+    let out: Value = serde_json::from_str(out.lines().next().unwrap()).unwrap();
+    let block_text = out["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+    assert!(block_text.contains("\n- user/style: short sentences"), "{block_text}");
+    assert_eq!(run(&home, None, &bin, &[], &["disconnect", "codex"]).0, Some(0));
+    assert_eq!(text(&config), "");
+
+    // A zerodb server zerodb didn't write is refused, with --force too, and its env never
+    // shows. The hook still goes in. disconnect leaves it too.
+    let home = dir.0.join("f");
+    let config = home.join(".codex/config.toml");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    let secret = format!("sk-{}", "s3cret".repeat(6));
+    let theirs = [
+        format!("[mcp_servers.zerodb]\ncommand = \"npx\"\nenv = {{ API_KEY = \"{secret}\" }}\n"),
+        format!(
+            "[mcp_servers]\nzerodb = {{ command = \"npx\", env = {{ KEY = \"{secret}\" }} }}\n"
+        ),
+        format!("model = \"o3\"\nmcp_servers.zerodb.env.API_KEY = \"{secret}\"\n"),
+    ];
+    let refused = format!(
+        "MCP entry: skipped, {} has a zerodb MCP server that zerodb didn't write. zerodb doesn't \
+         edit it, even with --force, and a second one would break the file. Nothing changed. \
+         Merge this block into it by hand:\n{}",
+        config.display(),
+        block(None, true)
+    );
+    for theirs in &theirs {
+        for force in [&[][..], &["--force"]] {
+            std::fs::write(&config, theirs).unwrap();
+            let start = calls().len();
+            let (code, out) = run(&home, None, &bin, &[], &[&["connect", "codex"], force].concat());
+            assert_eq!(code, Some(1), "{theirs} {force:?}: {out}");
+            assert!(out.starts_with(&refused), "{theirs} {force:?}: {out}");
+            assert!(out.contains("\nSessionStart hook: "), "{out}");
+            assert!(!out.contains(&secret), "{out}");
+            assert_eq!(text(&config), *theirs, "{force:?}: unchanged");
+            assert_eq!(calls().len(), start, "no codex ran");
+        }
+    }
+    let (code, out) = run(&home, None, &bin, &[], &["disconnect", "codex"]);
+    assert_eq!(code, Some(1), "{out}");
+    let said = "has a zerodb MCP server that zerodb didn't write. Remove it by hand";
+    assert!(out.starts_with("MCP entry: skipped, ") && out.contains(said), "{out}");
+    assert!(out.contains("\nSessionStart hook: removed ("), "{out}");
+    assert_eq!(text(&config), *theirs.last().unwrap());
+
+    // zerodb's block from an old binary path is updated in place, with a backup, and the
+    // tables after it stay.
+    let home = dir.0.join("o");
+    let config = home.join(".codex/config.toml");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    let old = block(None, true).replace(&toml(&exe), "\"/opt/old/zerodb\"");
+    let after = "\n[profiles.fast]\nmodel = \"o4-mini\"\n";
+    let kept = format!("{CODEX_CONFIG}\n{old}{after}");
+    std::fs::write(&config, &kept).unwrap();
+    let (code, out) = run(&home, None, &bin, &[], &["connect", "codex", "--no-hook"]);
+    assert_eq!(code, Some(0), "{out}");
+    let first = out.lines().next().unwrap();
+    let prefix = format!("MCP entry: updated ({}, backup: ", config.display());
+    assert!(first.starts_with(&prefix), "{out}");
+    assert_eq!(text(Path::new(first[prefix.len()..].trim_end_matches(')'))), kept);
+    assert_eq!(text(&config), format!("{CODEX_CONFIG}\n{}{after}", block(None, true)));
+
+    // Without codex on PATH, the block goes in, unverified, and that is not an error.
+    let home = dir.0.join("m");
+    let start = calls().len();
+    let (code, out) = run(&home, None, &empty, &[], &["connect", "codex", "--no-hook"]);
+    assert_eq!(code, Some(0), "{out}");
+    let config = home.join(".codex/config.toml");
+    let said =
+        format!("MCP entry: added ({}), not verified: codex is not on PATH\n", config.display());
+    assert_eq!(out, said);
+    assert_eq!((text(&config), calls().len()), (block(None, true), start));
+
+    // A read-back that doesn't show zerodb's entry, or isn't JSON, puts the file back, with
+    // its mode, and leaves no backup. One zerodb made is deleted again. The hook still goes in.
+    for (mode, said) in [("mismatch", "does not show "), ("garbage", "did not print JSON")] {
+        for kept in [Some(CODEX_CONFIG), None] {
+            let home = dir.0.join(format!("b-{mode}-{}", kept.is_some()));
+            let codex_dir = home.join(".codex");
+            let config = codex_dir.join("config.toml");
+            if let Some(kept) = kept {
+                std::fs::create_dir_all(&codex_dir).unwrap();
+                std::fs::write(&config, kept).unwrap();
+                chmod(&config, 0o640);
+            }
+            let fake = [("FAKE_CODEX", Path::new(mode))];
+            let (code, out) = run(&home, None, &bin, &fake, &["connect", "codex"]);
+            assert_eq!(code, Some(1), "{mode}: {out}");
+            let failed = format!("MCP entry: failed, codex mcp get zerodb --json {said}");
+            assert!(out.starts_with(&failed), "{mode}: {out}");
+            assert!(out.contains("\nSessionStart hook: added ("), "{mode}: {out}");
+            let names: Vec<String> = files(&codex_dir).into_keys().collect();
+            let left =
+                if kept.is_some() { &["config.toml", "hooks.json"][..] } else { &["hooks.json"] };
+            assert_eq!(names, left, "{mode}: no backup left");
+            match kept {
+                Some(kept) => {
+                    let back = format!("{} is back as it was.", config.display());
+                    assert!(out.contains(&back), "{mode}: {out}");
+                    assert_eq!((text(&config), perms(&config)), (kept.to_owned(), 0o640));
+                }
+                None => {
+                    assert!(out.contains(" is deleted again, as zerodb made it."), "{out}");
+                    assert!(!config.exists(), "{mode}");
+                }
+            }
+        }
+    }
+
+    // Marker lines that don't pair up skip the part in both verbs, and change nothing.
+    let home = dir.0.join("k");
+    let config = home.join(".codex/config.toml");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    let pairs = "its lines # zerodb:begin and # zerodb:end don't pair up: each must come once, in \
+                 that order";
+    let rows = [
+        ("# zerodb:end\n", "it has a line # zerodb:end without a line # zerodb:begin"),
+        ("# zerodb:begin v1\n", "it has a line # zerodb:begin without a line # zerodb:end"),
+        ("# zerodb:begin v1\n# zerodb:begin v1\n# zerodb:end\n", pairs),
+        ("# zerodb:end\n# zerodb:begin v1\n", pairs),
+    ];
+    for (marks, said) in rows {
+        let kept = format!("{CODEX_CONFIG}\n{marks}");
+        std::fs::write(&config, &kept).unwrap();
+        for verb in ["connect", "disconnect"] {
+            let start = calls().len();
+            let (code, out) = run(&home, None, &bin, &[], &[verb, "codex"]);
+            assert_eq!(code, Some(1), "{verb} {marks}: {out}");
+            let skipped =
+                format!("MCP entry: skipped, {}: {said}. Nothing changed.", config.display());
+            assert!(out.starts_with(&skipped), "{verb} {marks}: {out}");
+            assert!(out.contains("\nSessionStart hook: "), "{verb}: {out}");
+            assert_eq!((text(&config), calls().len()), (kept.clone(), start), "{verb} {marks}");
+        }
+    }
+
+    // hooks = false in [features] warns, unless there is no hook.
+    let home = dir.0.join("w");
+    let config = home.join(".codex/config.toml");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    let warning = format!("zerodb: {} sets hooks = false in [features]", config.display());
+    for off in ["[features]\nhooks = false # for now\n", "features.hooks = false\n"] {
+        for (flags, warns) in [(&[][..], true), (&["--no-hook"], false)] {
+            std::fs::write(&config, off).unwrap();
+            let (code, out) = run(&home, None, &bin, &[], &[&["connect", "codex"], flags].concat());
+            assert_eq!(code, Some(0), "{off}: {out}");
+            assert_eq!(out.contains(&warning), warns, "{off} {flags:?}: {out}");
+        }
+    }
+
+    // Groups after zerodb's move up when it goes, so Codex asks to approve them again. Both
+    // verbs say so. An older zerodb group is replaced by 1 at the end.
+    let home = dir.0.join("p");
+    let hooks = home.join(".codex/hooks.json");
+    std::fs::create_dir_all(hooks.parent().unwrap()).unwrap();
+    let kept: Value = serde_json::from_str(CODEX_HOOKS).unwrap();
+    let theirs = kept["hooks"]["SessionStart"].as_array().unwrap().clone();
+    let first = |ours: Value| {
+        let mut hooks = kept.clone();
+        let list = [&[ours][..], &theirs].concat();
+        hooks["hooks"]["SessionStart"] = json!(list);
+        serde_json::to_string_pretty(&hooks).unwrap()
+    };
+    std::fs::write(&hooks, first(group("'/opt/old/zerodb' hook session-start --harness codex")))
+        .unwrap();
+    let (code, out) = run(&home, None, &bin, &[], &["connect", "codex"]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.contains("\nSessionStart hook: updated ("), "{out}");
+    assert!(out.ends_with(&format!("\n{approve}\n{position}\n")), "{out}");
+    assert_eq!(groups(&hooks), [&theirs[..], &[group(&command)]].concat());
+    std::fs::write(&hooks, first(group(&command))).unwrap();
+    let (code, out) = run(&home, None, &bin, &[], &["disconnect", "codex"]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(
+        out.contains("\nSessionStart hook: removed (") && out.ends_with(&format!("\n{position}\n"))
+    );
+    assert_eq!(groups(&hooks), theirs);
+
+    // A relative CODEX_HOME would point codex at another config. Both verbs refuse it before
+    // any change, with exit 2.
+    let home = dir.0.join("r");
+    let start = calls().len();
+    for verb in ["connect", "disconnect"] {
+        let (code, out) = run(&home, Some(Path::new("rel")), &bin, &[], &[verb, "codex"]);
+        assert_eq!(code, Some(2), "{verb}: {out}");
+        assert!(out.contains("CODEX_HOME rel must be an absolute path"), "{verb}: {out}");
+    }
+    assert!(!home.exists() && !dir.0.join("rel").exists(), "nothing written");
+    assert_eq!(calls().len(), start, "no codex ran");
+
+    for args in [
+        &["codex", "--notes", "maybe"][..],
+        &["codex", "--bogus"],
+        &["codex", "--no-hook", "--no-hook"],
+    ] {
+        let (code, out) = run(&dir.0, None, &empty, &[], &[&["connect"], args].concat());
+        assert_eq!(code, Some(2), "{args:?}: {out}");
+    }
+    assert!(calls().iter().all(|call| *call == get), "only codex mcp get zerodb --json runs");
+}
