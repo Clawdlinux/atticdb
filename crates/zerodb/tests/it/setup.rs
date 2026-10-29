@@ -186,7 +186,8 @@ fn setup_asks_and_stops_without_answers() {
     let terminal = [("ZERODB_SETUP_INTERACTIVE", "1")];
     let needs = "zerodb setup needs a terminal, or --yes. See zerodb setup --help.";
     let own = "keep the user's instructions, which mention zerodb";
-    let rows: [Row<'_>; 8] = [
+    let config_dir = [("CLAUDE_CONFIG_DIR", "rel")];
+    let rows: [Row<'_>; 9] = [
         ("claude-code and codex", &[], &terminal, &path, "claude-code,codex\n\nn\ny\n", 0, ""),
         ("declined", &[], &terminal, &path, "codex\nn\n\nno\n", 0, "N] Nothing changed.\n"),
         ("not a terminal", &[], &[], &path, "claude-code\n\n\ny\n", 2, needs),
@@ -195,6 +196,8 @@ fn setup_asks_and_stops_without_answers() {
         ("no apps", &["--yes"], &[], &empty, "", 1, "zerodb found no apps"),
         ("own guide", &["--yes", "--harness", "copilot"], &[], &path, "", 0, own),
         ("VS Code only", &["--yes"], &[], &code_only, "", 0, "\n1 connected, 0 with skipped"),
+        // Claude Code stops with exit 2 first. Codex then connects, and 2 stays the code.
+        ("2 wins", &["--yes", "--harness", "claude-code,codex"], &config_dir, &path, "", 2, ""),
     ];
     for (row, (case, args, env, path, stdin, wanted, said)) in rows.into_iter().enumerate() {
         let home = dir.0.join(format!("h{row}"));
@@ -222,6 +225,15 @@ fn setup_asks_and_stops_without_answers() {
             assert!(out.contains("\n  Copilot CLI: ok\n"), "{case}: {out}");
             assert_eq!(std::fs::read_to_string(guides.join("x.instructions.md")).unwrap(), guide);
             assert!(!guides.join("zerodb.instructions.md").exists(), "{case}");
+            continue;
+        }
+        if case == "2 wins" {
+            let stopped =
+                "\n  failed: CLAUDE_CONFIG_DIR rel must be an absolute path. Nothing changed\n";
+            assert!(out.contains(stopped), "{case}: {out}");
+            assert!(out.contains("\n1 connected, 1 with skipped parts.\n"), "{case}: {out}");
+            assert!(out.contains("\n  Codex: ok\n"), "{case}: {out}");
+            assert!(home.join(".codex/config.toml").is_file() && !home.join(".claude").exists());
             continue;
         }
         if case == "VS Code only" {

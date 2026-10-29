@@ -257,7 +257,8 @@ fn show_plan(harnesses: &[Harness], options: Options) {
 }
 
 /// Connects each app in turn, past any that fails, then checks each one and prints what to
-/// do next. Returns the exit code.
+/// do next. Returns the exit code: the highest an app stopped with, else 1 when a part was
+/// skipped or a check failed.
 fn apply(harnesses: &[Harness], options: Options) -> u8 {
     println!("Applying:");
     let mut reports = Vec::new();
@@ -268,6 +269,8 @@ fn apply(harnesses: &[Harness], options: Options) -> u8 {
     }
     let skipped = reports.iter().filter(|(_, report)| report.skipped()).count();
     println!("{} connected, {skipped} with skipped parts.", reports.len() - skipped);
+    let stopped = reports.iter().filter_map(|(_, report)| report.stopped.as_ref());
+    let stopped = stopped.map(|(code, _)| *code).max().unwrap_or(0);
     let mut code = u8::from(skipped > 0);
     println!("Checks:");
     let cwd = std::env::current_dir().map_err(|error| format!("no current dir: {error}"));
@@ -321,7 +324,7 @@ fn apply(harnesses: &[Harness], options: Options) -> u8 {
             println!("  {step}");
         }
     }
-    code
+    code.max(stopped)
 }
 
 /// Whether a plan line says its part needs nothing: it is unchanged, or the user's own file
@@ -335,6 +338,8 @@ fn in_place(line: &Line) -> bool {
 /// which holds memory, is never shown.
 fn check_hook(harness: Harness, cwd: &Path) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|error| format!("no zerodb binary: {error}"))?;
+    // The harness sends `cwd` as a JSON string, which must be UTF-8.
+    let cwd = cwd.to_str().ok_or("the current dir is not UTF-8, so it can't go in JSON")?;
     let input = match harness {
         Harness::ClaudeCode | Harness::Codex => {
             json!({"cwd": cwd, "hook_event_name": "SessionStart"})
