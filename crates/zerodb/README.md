@@ -311,6 +311,7 @@ Marker lines that don't pair up skip the part: an end line without a begin line,
 A `zerodb` server outside the block is refused: a `[mcp_servers.zerodb]` table or one under it, a `zerodb` key under `[mcp_servers]`, or a dotted key `mcp_servers.zerodb`. A second one would break the file.
 So is `mcp_servers = { ... }` at the root. zerodb doesn't read inside it, so it can't tell whether it holds `zerodb`, and the block's tables can't extend it.
 zerodb never edits either, even with `--force`. The line shows the block to merge by hand, and never a server's env.
+With a block in the file, any other `mcp_servers.zerodb` setting, such as a `[mcp_servers.zerodb.env]` table after the block, skips the part in both verbs. Changing only the block would leave part of a server. Remove those settings by hand. Moved inside the markers, they would count as zerodb's, and a rewrite would drop them.
 
 After a write, `codex mcp get zerodb --json` must show the binary, `mcp --agent codex` and the home. That command only prints config.
 It runs in the config dir, so a project's `.codex/config.toml` can't answer. It has 10 s, as `claude` does above.
@@ -326,7 +327,7 @@ The block is at most 6,000 characters. `additionalContextLimit` is 24,000, so th
 A missing `hooks.json` starts as `{"hooks": {}}`.
 Codex runs a new hook only after you approve it once in Codex. `connect` says so after it adds or updates the hook.
 Codex keeps 1 approval per hook in `config.toml`, keyed by the hook's position. zerodb doesn't write those.
-When groups follow zerodb's, removing or replacing it moves them up, so Codex may ask to approve them again. Both verbs say so.
+When groups follow zerodb's, removing or replacing it moves them up, so Codex may ask to approve them again. Both verbs say so whenever that change was saved, even if a zerodb handler in a mixed group is left to remove by hand.
 `hooks = false` in `[features]` turns hooks off. `connect` warns when it finds that line.
 Codex reads the MCP server's instructions, so `AGENTS.md` isn't touched.
 

@@ -1436,6 +1436,58 @@ fn connect_codex_adds_its_parts() {
         valid(&config);
     }
 
+    // mcp_servers.zerodb settings besides zerodb's own lines: a table after the block, or one
+    // before it. Changing only the block would leave part of a server, so both
+    // verbs skip the part, change nothing, and say to clean up by hand. Exit 1.
+    let home = dir.0.join("u");
+    let config = home.join(".codex/config.toml");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    let orphans = [
+        format!(
+            "{CODEX_CONFIG}\n{}\n[mcp_servers.zerodb.env]\nKEY = \"{secret}\"\n",
+            block(None, true)
+        ),
+        format!(
+            "{CODEX_CONFIG}[mcp_servers.zerodb.env]\nKEY = \"{secret}\"\n\n{}",
+            block(None, true)
+        ),
+    ];
+    let said = format!(
+        "MCP entry: skipped, {} has mcp_servers.zerodb settings besides zerodb's own lines in \
+         its block, and zerodb doesn't edit them. Nothing changed. Remove them by hand, then \
+         re-run the command\n",
+        config.display()
+    );
+    for kept in &orphans {
+        std::fs::write(&config, kept).unwrap();
+        valid(&config);
+        for args in [&["connect", "codex", "--no-hook"][..], &["disconnect", "codex"]] {
+            let start = calls().len();
+            let (code, out) = run(&home, None, &bin, &[], args);
+            assert_eq!(code, Some(1), "{args:?} {kept}: {out}");
+            assert!(out.starts_with(&said) && !out.contains(&secret), "{args:?}: {out}");
+            assert_eq!((text(&config), calls().len()), (kept.clone(), start), "{args:?}");
+        }
+    }
+
+    // A removed zerodb group with groups after it moves them up, so disconnect says Codex may
+    // ask to approve them again, even when a zerodb handler in a mixed group after it is left
+    // to remove by hand.
+    let home = dir.0.join("g");
+    let hooks = home.join(".codex/hooks.json");
+    std::fs::create_dir_all(hooks.parent().unwrap()).unwrap();
+    let mixed = json!({"hooks": [{"type": "command", "command": "echo hi"},
+        {"type": "command", "command": command, "timeout": 5}]});
+    let other = json!({"hooks": [{"type": "command", "command": "cat notes.md"}]});
+    let kept = json!({"hooks": {"SessionStart": [group(&command), &mixed, &other]}});
+    std::fs::write(&hooks, serde_json::to_string_pretty(&kept).unwrap()).unwrap();
+    let (code, out) = run(&home, None, &bin, &[], &["disconnect", "codex"]);
+    assert_eq!(code, Some(1), "{out}");
+    let left = "\nSessionStart hook: removed, but found another inside a group with other hooks; \
+                remove that by hand there (";
+    assert!(out.contains(left) && out.ends_with(&format!("\n{position}\n")), "{out}");
+    assert_eq!(groups(&hooks), [mixed, other]);
+
     // Without codex on PATH, the block goes in, unverified, and that is not an error.
     let home = dir.0.join("m");
     let start = calls().len();

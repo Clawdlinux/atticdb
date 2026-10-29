@@ -110,17 +110,15 @@ pub(super) fn connect(hook: bool, notes: Notes) -> u8 {
             ));
         }
         let group = hook_group(&exe, home);
-        let (changed, moved) = (Cell::new(false), Cell::new(false));
-        let add =
-            |text: &str| track(text, add_hook(Harness::Codex, text, &group), &changed, &moved);
+        let (tracked, hooks) = (Tracked::default(), hooks_file());
+        let add = |text: &str| track(text, add_hook(Harness::Codex, text, &group), &tracked);
         let by_hand = format!("Add this group to hooks.SessionStart by hand: {group}");
         let parts = [Part { name: "SessionStart hook", by_hand, edit: &add }];
-        let hook_lines = edit_file(hooks_file(), NO_HOOKS, &parts);
-        if hook_lines.iter().all(Result::is_ok) {
-            next.extend(changed.get().then_some(APPROVE));
-            next.extend(moved.get().then_some(POSITION));
+        lines.extend(edit_file(hooks.clone(), NO_HOOKS, &parts));
+        if let Some(moved) = saved(&hooks, &tracked) {
+            next.push(APPROVE);
+            next.extend(moved.then_some(POSITION));
         }
-        lines.extend(hook_lines);
     }
     let next = next.join("\n");
     report(lines, &warnings, Some(next.as_str()).filter(|next| !next.is_empty()))
@@ -140,33 +138,45 @@ pub(super) fn disconnect() -> u8 {
             return 1;
         }
     };
-    let (changed, moved) = (Cell::new(false), Cell::new(false));
-    let drop = |text: &str| track(text, drop_hooks(Harness::Codex, text), &changed, &moved);
+    let (tracked, hooks) = (Tracked::default(), hooks_file());
+    let drop = |text: &str| track(text, drop_hooks(Harness::Codex, text), &tracked);
     let by_hand = format!(
         "Remove the groups that run zerodb{} from hooks.SessionStart by hand",
         hook_args(Harness::Codex)
     );
     let parts = [Part { name: "SessionStart hook", by_hand, edit: &drop }];
     let mut lines = vec![drop_block(&config)];
-    let hook_lines = edit_file(hooks_file(), NO_HOOKS, &parts);
-    let next = (moved.get() && hook_lines.iter().all(Result::is_ok)).then_some(POSITION);
-    lines.extend(hook_lines);
+    lines.extend(edit_file(hooks.clone(), NO_HOOKS, &parts));
+    // A removal that left another zerodb handler to do by hand still moved the groups after it.
+    let next = saved(&hooks, &tracked).filter(|moved| *moved).map(|_| POSITION);
     report(lines, &[], next)
 }
 
-/// Passes `edit` of `text` through. Sets `changed` when it changed the text, and `moved`
-/// when it also removed a zerodb group that other groups followed, so they moved up.
-fn track(text: &str, edit: Edit, changed: &Cell<bool>, moved: &Cell<bool>) -> Edit {
-    if edit.as_ref().is_ok_and(|done| done.text != text) {
-        changed.set(true);
+/// A hook edit that changed `hooks.json`: its new text, and whether it removed a zerodb group
+/// that other groups followed, so they moved up.
+type Tracked = Cell<Option<(String, bool)>>;
+
+/// Passes `edit` of `text` through, and records it in `tracked` when it changed the text.
+fn track(text: &str, edit: Edit, tracked: &Tracked) -> Edit {
+    if let Some(done) = edit.as_ref().ok().filter(|done| done.text != text) {
         let root: Value = serde_json::from_str(text).unwrap_or_default();
         let groups = root["hooks"]["SessionStart"].as_array().map(Vec::as_slice);
         let groups = groups.unwrap_or_default();
         let ours = |group: &Value| our_group(Harness::Codex, group);
         let first = groups.iter().position(ours);
-        moved.set(first.is_some_and(|first| !groups[first..].iter().all(ours)));
+        let moved = first.is_some_and(|first| !groups[first..].iter().all(ours));
+        tracked.set(Some((done.text.clone(), moved)));
     }
     edit
+}
+
+/// Whether the groups after a removed zerodb group moved up, when the edit in `tracked` was
+/// saved: the file at `path` now holds its text. `None` when nothing was saved. The part's
+/// line may still say to do more by hand.
+fn saved(path: &Result<PathBuf, String>, tracked: &Tracked) -> Option<bool> {
+    let (text, moved) = tracked.take()?;
+    let path = path.as_ref().ok()?;
+    matches!(read(path), Ok(Some((bytes, _))) if bytes == text.as_bytes()).then_some(moved)
 }
 
 /// The SessionStart group zerodb adds. It has no matcher, so it also runs after compaction.
@@ -304,6 +314,13 @@ fn without(text: &str, block: &Block) -> String {
     format!("{head}{kept}{tail}")
 }
 
+/// Why a block isn't edited when other `mcp_servers.zerodb` settings sit outside its own
+/// lines, after the file's path. Changing only the block would leave part of a server.
+const OUTSIDE: &str = "has mcp_servers.zerodb settings besides zerodb's own lines in its \
+                       block, and zerodb doesn't edit them";
+/// What to do then. Inside the block they would count as zerodb's, and a rewrite drops them.
+const TIDY: &str = "Remove them by hand, then re-run the command";
+
 /// What outside zerodb's block keeps zerodb from adding it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Clash {
@@ -389,6 +406,9 @@ fn set_block(path: &Path, exe: &str, home: Option<&str>, notes: Notes) -> Line {
              zerodb connect codex"
         ))
     })?;
+    if found.is_some() && clash(&entries, found.as_ref()) == Some(Clash::Server) {
+        return Err(skipped(format!("{shown} {OUTSIDE}. Nothing changed. {TIDY}")));
+    }
     if let Some(clash) = clash(&entries, found.as_ref()) {
         return Err(skipped(format!(
             "{shown} {}. Nothing changed. Merge this block into it by hand:\n{}",
@@ -511,6 +531,10 @@ fn drop_block(path: &Path) -> Line {
         format!("MCP entry: skipped, {shown} isn't TOML zerodb can read: {why}. {by_hand}")
     })?;
     let block = match find_block(&entries) {
+        // Removing zerodb's lines would leave the others as part of a server.
+        Ok(Some(block)) if clash(&entries, Some(&block)) == Some(Clash::Server) => {
+            return Err(format!("MCP entry: skipped, {shown} {OUTSIDE}. Nothing changed. {TIDY}"));
+        }
         Ok(Some(block)) => block,
         Ok(None) => {
             return match clash(&entries, None) {
