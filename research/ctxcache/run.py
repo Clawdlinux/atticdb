@@ -134,6 +134,8 @@ def describe(a: argparse.Namespace, s: dict) -> dict:
         cmd += f" --sample {a.sample} --seed {a.seed}" + (f" --block {a.block}" if a.block > 1 else "")
     if a.budgets != budget_list(DEFAULT_BUDGETS):
         cmd += f" --budgets {budget_text(a.budgets)}"
+    if a.sensitivity_budgets != budget_list("4k,8k"):
+        cmd += f" --sensitivity-budgets {budget_text(a.sensitivity_budgets)}"
     if a.dataset == "trace":
         cmd += f" --input {os.path.basename(a.input)}"
     meta = {"title": TITLES[a.dataset], "command": cmd, "source": [], "extra_rows": [], "scaffold": [], "notes": [],
