@@ -15,12 +15,12 @@ Every ratio is over proxy accesses: re-reads plus references inferred from later
 | Measure | Value |
 |---|---|
 | Trajectories used | 1,000 (skipped: 0 truncated) |
-| Accesses | 35,306: 17,916 first, 5,936 re-reads, 11,454 references |
-| Proxy accesses | 17,390, 7,816,755 tokens. Re-reads hold 27.8% of the tokens |
+| Accesses | 35,306: 17,913 first, 5,939 re-reads, 11,454 references |
+| Proxy accesses | 17,393, 7,816,851 tokens. Re-reads hold 27.8% of the tokens |
 | Compulsory share (first accesses) | 50.7% of accesses, 46.9% of access tokens |
 | Object tokens by kind | file 74.9%, output 25.0%, url 0.1% |
 | Dead tokens (objects never accessed again) | 57.3% of object tokens. Files 47.1%, outputs 87.6% |
-| Reuse distance p50 / p90 / p99 | 166 / 1,653 / 5,337 tokens |
+| Reuse distance p50 / p90 / p99 | 167 / 1,653 / 5,337 tokens |
 | Peak live tokens per trajectory, p50 / p90, separate percentiles | 1,071 / 2,086. The optimum never misses at this budget |
 | Tool output tokens per trajectory, p50 / p90, separate percentiles | 6,032 / 20,331. All tool output the trace records |
 | Tool output over peak live, per trajectory, p50 / p90 | 5.8x / 17.0x, over the 987 trajectories that reuse anything. 13 reuse nothing |
@@ -32,7 +32,7 @@ Every ratio is over proxy accesses: re-reads plus references inferred from later
 
 | Subtype | Accesses | Tokens | Share of proxy-access tokens |
 |---|---|---|---|
-| `reread` | 5,936 | 2,171,039 | 27.8% |
+| `reread` | 5,939 | 2,171,135 | 27.8% |
 | `edit_span` | 0 | 0 | 0.0% |
 | `edit` | 1 | 1,149 | 0.0% |
 | `line_span` | 7,013 | 4,304,732 | 55.1% |
@@ -107,21 +107,21 @@ Each variant keeps every re-read and only the named references. Cells are pooled
 
 | Variant | Budget | Proxy tokens | LRU | FIFO | Clearing (oracle N) | Clearing (cap) | GDSF | PFOO-L (lower) | Belady-Size (upper) |
 |---|---|---|---|---|---|---|---|---|---|
-| all proxy accesses | 2K | 7,816,755 | 14.7 | 18.3 | 24.3 | 28.5 | 22.1 | 1.8 | 6.1 |
-| all proxy accesses | 4K | 7,816,755 | 4.2 | 5.7 | 8.2 | 10.6 | 5.3 | 0.9 | 1.5 |
-| all proxy accesses | 8K | 7,816,755 | 0.5 | 1.1 | 0.7 | 2.9 | 0.9 | 0.0 | 0.0 |
-| re-reads only | 2K | 2,171,039 | 21.6 | 21.8 | 16.5 | 21.6 | 24.1 | 2.6 | 8.4 |
-| re-reads only | 4K | 2,171,039 | 8.8 | 9.4 | 4.8 | 8.8 | 9.3 | 0.0 | 1.4 |
-| re-reads only | 8K | 2,171,039 | 1.4 | 1.8 | 0.0 | 1.4 | 1.5 | 0.0 | 0.1 |
-| re-reads and edits | 2K | 7,257,613 | 14.1 | 18.2 | 24.3 | 28.5 | 21.7 | 1.9 | 6.4 |
-| re-reads and edits | 4K | 7,257,613 | 4.3 | 5.4 | 7.7 | 9.9 | 5.4 | 0.9 | 1.6 |
-| re-reads and edits | 8K | 7,257,613 | 0.5 | 0.9 | 0.4 | 2.2 | 1.0 | 0.0 | 0.0 |
-| re-reads and exact-span edits | 2K | 6,475,771 | 13.2 | 16.7 | 21.9 | 26.7 | 20.3 | 1.1 | 5.2 |
-| re-reads and exact-span edits | 4K | 6,475,771 | 3.5 | 4.6 | 6.2 | 8.1 | 4.6 | 0.0 | 0.7 |
-| re-reads and exact-span edits | 8K | 6,475,771 | 0.5 | 0.8 | 0.4 | 1.4 | 0.7 | 0.0 | 0.0 |
-| all but run and git references | 2K | 7,280,654 | 14.1 | 18.2 | 24.3 | 28.6 | 21.8 | 1.9 | 6.3 |
-| all but run and git references | 4K | 7,280,654 | 4.2 | 5.4 | 7.7 | 9.9 | 5.4 | 0.9 | 1.6 |
-| all but run and git references | 8K | 7,280,654 | 0.5 | 0.9 | 0.4 | 2.2 | 1.0 | 0.0 | 0.0 |
+| all proxy accesses | 2K | 7,816,851 | 14.7 | 18.3 | 24.3 | 28.5 | 22.1 | 1.8 | 6.1 |
+| all proxy accesses | 4K | 7,816,851 | 4.2 | 5.7 | 8.2 | 10.6 | 5.3 | 0.9 | 1.5 |
+| all proxy accesses | 8K | 7,816,851 | 0.5 | 1.1 | 0.7 | 2.9 | 0.9 | 0.0 | 0.0 |
+| re-reads only | 2K | 2,171,135 | 21.6 | 21.8 | 16.5 | 21.6 | 24.1 | 2.6 | 8.4 |
+| re-reads only | 4K | 2,171,135 | 8.8 | 9.4 | 4.8 | 8.8 | 9.3 | 0.0 | 1.4 |
+| re-reads only | 8K | 2,171,135 | 1.4 | 1.8 | 0.0 | 1.4 | 1.5 | 0.0 | 0.1 |
+| re-reads and edits | 2K | 7,257,709 | 14.1 | 18.2 | 24.3 | 28.5 | 21.7 | 1.9 | 6.4 |
+| re-reads and edits | 4K | 7,257,709 | 4.3 | 5.4 | 7.7 | 9.9 | 5.4 | 0.9 | 1.6 |
+| re-reads and edits | 8K | 7,257,709 | 0.5 | 0.9 | 0.4 | 2.2 | 1.0 | 0.0 | 0.0 |
+| re-reads and exact-span edits | 2K | 6,475,867 | 13.2 | 16.7 | 21.9 | 26.7 | 20.3 | 1.1 | 5.2 |
+| re-reads and exact-span edits | 4K | 6,475,867 | 3.5 | 4.6 | 6.2 | 8.1 | 4.6 | 0.0 | 0.7 |
+| re-reads and exact-span edits | 8K | 6,475,867 | 0.5 | 0.8 | 0.4 | 1.4 | 0.7 | 0.0 | 0.0 |
+| all but run and git references | 2K | 7,280,750 | 14.1 | 18.2 | 24.3 | 28.6 | 21.8 | 1.9 | 6.3 |
+| all but run and git references | 4K | 7,280,750 | 4.2 | 5.4 | 7.7 | 9.9 | 5.4 | 0.9 | 1.6 |
+| all but run and git references | 8K | 7,280,750 | 0.5 | 0.9 | 0.4 | 2.2 | 1.0 | 0.0 | 0.0 |
 
 ## Influence
 
