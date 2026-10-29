@@ -151,7 +151,10 @@ fn check_flags(harness: Harness, data: &Path) -> Result<(), String> {
 fn split_home(harness: Harness, home: Option<&str>, force: bool) -> Result<Option<String>, String> {
     let ours = home_words(home);
     for other in Harness::ALL.into_iter().filter(|other| *other != harness) {
-        let theirs = match entry_home(other, &other.file()?) {
+        // Nothing can be connected at a path that can't be named, as with HOME unset, so
+        // there is no entry to split from.
+        let Ok(file) = other.file() else { continue };
+        let theirs = match entry_home(other, &file) {
             Ok(None) => continue,
             Ok(Some(theirs)) if theirs.as_deref().map(Path::new) == home.map(Path::new) => continue,
             Ok(Some(theirs)) => home_words(theirs.as_deref()),

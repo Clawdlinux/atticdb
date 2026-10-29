@@ -331,4 +331,16 @@ fn connect_writes_the_session_start_hook() {
     assert!(out.contains("uses --data-dir /old."), "flags and split: {out}");
     assert!(!out.contains("sessionStart hook"), "flags and split: {out}");
     assert_eq!(now(), before, "flags and split: no file changed");
+    // With HOME unset, VS Code's config can't be named, so it holds no entry to split from.
+    let (copilot, zh) = (dir.0.join("5/c"), dir.0.join("5/zh"));
+    let mut command = support::command(&exe);
+    command.args(["connect", "copilot"]).current_dir(&dir.0).env_remove("HOME");
+    command.env("COPILOT_HOME", &copilot).env("ZERODB_HOME", &zh);
+    let (status, out) = Process::start(command.stdin(Stdio::null())).wait();
+    assert_eq!(status.code(), Some(0), "HOME unset: {out}");
+    let env = json!({"ZERODB_HOME": zh});
+    let hook: Value =
+        serde_json::from_slice(&std::fs::read(copilot.join("hooks/zerodb.json")).unwrap()).unwrap();
+    let entry = env_of(&copilot.join("mcp-config.json"), "mcpServers");
+    assert_eq!((entry, hook["hooks"]["sessionStart"][0]["env"].clone()), (env.clone(), env));
 }
