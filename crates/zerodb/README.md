@@ -15,41 +15,61 @@ zerodb verify --data-dir ./data                  # checks a stopped data dir on 
 zerodb recover --truncate-at <lsn> --data-dir ./data
 ```
 
+The config is JSON: `{"data_dir", "listen", "unix_socket", "unix_socket_group", "tenants": [{"name", "token"}]}`.
+Flags override fields. It must be a regular file owned by you with no group or other bits.
+Tenant names are 1 to 255 bytes. Tokens are 32 to 1024 bytes of visible ASCII, so the `Authorization` header fits the 16 KiB request head. Duplicate names or tokens fail.
+
 ## Set up
 
 ```sh
 zerodb setup             # finds your apps, asks 3 questions, shows the plan, then connects them
 zerodb setup --dry-run   # prints the plan and writes nothing
+zerodb setup --help      # the flags
 ```
 
-It looks for VS Code, Copilot CLI, Claude Code and Codex. An app counts as found when its config dir exists or its program is on `PATH`. Nothing runs to find it.
-It asks which apps to connect, whether to load memory at the start of each chat, and whether to save notes without asking. Empty answers take the defaults in brackets.
-The last 2 questions are for Claude Code and Codex, so they are asked only when you pick 1 of those. Saving a rule always asks.
-VS Code and Copilot CLI always get the hook. They ask before every write until you allow the tool there.
-VS Code's Copilot chat reads the Copilot hook and instructions in `~/.copilot`, so connecting VS Code writes those too, and the plan says so.
-An instructions file you wrote, 1 that mentions zerodb or has zerodb's file name without its marker line, is kept. It counts as in place, so it doesn't fail the checks.
+It looks for VS Code, Copilot CLI, Claude Code and Codex. Nothing runs to find them.
+An app counts as found when its program is on `PATH`, or its config exists.
+For VS Code, Claude Code and Codex, the config is their config dir.
+For Copilot CLI, it is `mcp-config.json` or `config.json` in `~/.copilot`.
+The dir alone doesn't count, as connecting VS Code writes there too.
+
+It asks which apps to connect. Empty answers take the defaults in brackets.
+For Claude Code and Codex, it also asks 2 things.
+Should memory load at the start of each chat? Should notes be saved without asking?
+Saving a rule always asks.
+VS Code and Copilot CLI always get the hook. They ask before every write until you allow the tool.
+VS Code's Copilot chat reads the hook and instructions in `~/.copilot`. So VS Code gets those too, and the plan says so.
+zerodb keeps an instructions file you wrote. It counts as in place.
+That is 1 that mentions zerodb, or has zerodb's file name without its marker line.
 
 The plan has 1 line per file and part, such as `~/.claude/settings.json: add the SessionStart hook`.
-It comes from the same code that writes, run in a mode that writes nothing and runs no `claude` or `codex` command that changes anything.
-Then it asks `Apply? [y/N]`. It connects Copilot CLI and VS Code first, then Claude Code, then Codex, and prints each part's line as `zerodb connect` does.
-An app that fails doesn't stop the others. A summary says how many connected and how many have skipped parts.
-Then it checks each app. A new plan must find every part unchanged. The hook must print JSON within 4 s. The store must answer `fact_list`. For Codex, `codex mcp get zerodb --json` must show the entry.
-Last, it prints what to do next: approve the zerodb hook in Codex once, start new chat sessions, and reload the VS Code window.
+It comes from the code that writes, run in a mode that writes nothing.
+That mode runs no `claude` or `codex` command that changes anything.
+Then it asks `Apply? [y/N]`.
+It connects Copilot CLI and VS Code first, then Claude Code, then Codex.
+Each part prints 1 line, as in `zerodb connect`. An app that fails doesn't stop the others.
+A summary counts the apps connected, and those with skipped parts.
 
-Flags replace the questions. `--harness <list>` takes a comma list of `copilot`, `vscode`, `claude-code` and `codex`. `--no-hook` drops the hook, and `--notes ask|auto` picks how notes are saved.
+Then it checks each app. A new plan must find every part in place.
+The hook must print JSON within 4 s. The store must answer `fact_list`.
+For Codex, `codex mcp get zerodb --json` must show the entry.
+Last, it prints what to do next.
+That can be: approve the zerodb hook in Codex once, start new chat sessions, and reload VS Code.
+If `hooks = false` turns Codex's hooks off, it says memory won't load at chat start instead.
+
+Flags replace the questions. `--harness <list>` takes a comma list of app names.
+The names are `copilot`, `vscode`, `claude-code` and `codex`.
+`--no-hook` drops the hook. `--notes ask|auto` picks how notes are saved.
 `--yes` takes every default and doesn't ask `Apply?`.
-Without a terminal on stdin, it needs `--yes` or `--dry-run`, else it exits 2. The end of stdin is no answer and exits 2, and so do 3 answers it can't read.
+Without a terminal on stdin, it needs `--yes` or `--dry-run`. Else it exits 2.
+The end of stdin exits 2. So do 3 answers it can't read.
 `zerodb connect <name> --dry-run` prints the plan for 1 app.
 
 | Exit code | Meaning |
 |---|---|
-| 0 | Every chosen app connected with no skipped part and passed its checks. Also `--dry-run`, and `Apply?` answered no |
+| 0 | Every chosen app connected, with no skipped part, and passed its checks. Also `--dry-run`, and `Apply?` answered no |
 | 1 | A part was skipped or failed, a check failed, or no app was found |
-| 2 | Usage error, no terminal without `--yes`, or no answer |
-
-The config is JSON: `{"data_dir", "listen", "unix_socket", "unix_socket_group", "tenants": [{"name", "token"}]}`.
-Flags override fields. It must be a regular file owned by you with no group or other bits.
-Tenant names are 1 to 255 bytes. Tokens are 32 to 1024 bytes of visible ASCII, so the `Authorization` header fits the 16 KiB request head. Duplicate names or tokens fail.
+| 2 | A usage error, no terminal without `--yes`, or no answer. Also an app that stopped with exit 2 |
 
 ## `zerodb serve`
 

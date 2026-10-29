@@ -188,7 +188,7 @@ fn setup_asks_and_stops_without_answers() {
     let own = "keep the user's instructions, which mention zerodb";
     let config_dir = [("CLAUDE_CONFIG_DIR", "rel")];
     let codex = ["--yes", "--harness", "codex"];
-    let rows: [Row<'_>; 11] = [
+    let rows: [Row<'_>; 12] = [
         ("claude-code and codex", &[], &terminal, &path, "claude-code,codex\n\nn\ny\n", 0, ""),
         ("declined", &[], &terminal, &path, "codex\nn\n\nno\n", 0, "N] Nothing changed.\n"),
         ("not a terminal", &[], &[], &path, "claude-code\n\n\ny\n", 2, needs),
@@ -202,6 +202,7 @@ fn setup_asks_and_stops_without_answers() {
         // The MCP entry is in place, but not the hook, so there is nothing to approve.
         ("Codex hook skipped", &codex, &[], &path, "", 1, "\n  SessionStart hook: skipped, "),
         ("Codex hooks off", &codex, &[], &path, "", 0, "\n  Codex: ok\n"),
+        ("help", &["--yes", "--help"], &[], &path, "", 0, "\n  --dry-run         print the plan"),
     ];
     for (row, (case, args, env, path, stdin, wanted, said)) in rows.into_iter().enumerate() {
         let home = dir.0.join(format!("h{row}"));
@@ -269,6 +270,10 @@ fn setup_asks_and_stops_without_answers() {
             assert!(!out.contains("Copilot CLI"), "{case}: {out}");
             assert!(!home.join(".copilot/mcp-config.json").exists(), "{case}");
             continue;
+        }
+        if case == "help" {
+            assert!(out.starts_with("usage: zerodb setup [--yes] [--harness <list>]"), "{out}");
+            assert!(err.is_empty(), "{case}: {err}");
         }
         if row > 0 {
             assert!(tree(&home).is_empty(), "{case}: nothing written");

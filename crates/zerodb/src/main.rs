@@ -45,8 +45,7 @@ const USAGE: &str = "usage:
   3 when a write may or may not be saved.
   studio serves a read-only page on 127.0.0.1 and opens it. It runs until Ctrl-C.
   setup finds VS Code, Copilot CLI, Claude Code and Codex, asks which to connect, shows the
-  plan, then connects them and checks each. --yes takes the defaults. --harness takes a comma
-  list of vscode, copilot, claude-code and codex. --dry-run prints the plan and writes nothing.";
+  plan, then connects them and checks each. See zerodb setup --help.";
 
 /// Commands that use the home. A relative `ZERODB_HOME` fails them with exit 2, so none falls
 /// back to the default home. The hook prints `{}` for it, as for any error.
@@ -106,6 +105,10 @@ fn main() -> ExitCode {
                     flags(rest, &["--notes"], &["--force", "--no-hook", "--dry-run"])?,
                 )
             }),
+            "setup" if rest.iter().any(|arg| arg == "--help") => {
+                println!("{}", zerodb::setup::USAGE);
+                Some(0)
+            }
             "setup" => flags(rest, &["--harness", "--notes"], &["--yes", "--no-hook", "--dry-run"])
                 .and_then(setup),
             "disconnect" => match rest {

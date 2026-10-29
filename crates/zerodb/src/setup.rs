@@ -25,6 +25,22 @@ pub struct Flags {
     pub dry_run: bool,
 }
 
+/// What `zerodb setup --help` prints.
+pub const USAGE: &str =
+    "usage: zerodb setup [--yes] [--harness <list>] [--no-hook] [--notes ask|auto] [--dry-run]
+
+Finds VS Code, Copilot CLI, Claude Code and Codex, asks which to connect, and shows the plan.
+Then it connects them, checks each one, and says what to do next.
+
+  --yes             take every default, and don't ask Apply?
+  --harness <list>  connect these apps, a comma list of copilot, vscode, claude-code and codex
+  --no-hook         don't load memory at the start of each chat in Claude Code and Codex
+  --notes ask|auto  ask before saving notes in Claude Code and Codex, or don't (the default)
+  --dry-run         print the plan, and write nothing
+
+Without a terminal on stdin, it needs --yes or --dry-run.
+Exit 0 when every app connected and passed its checks, 1 when not, 2 for a usage error.";
+
 /// What setup says when it can't ask.
 const NEEDS_TERMINAL: &str = "zerodb setup needs a terminal, or --yes. See zerodb setup --help.";
 
