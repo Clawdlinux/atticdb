@@ -734,7 +734,7 @@ fn no_flags_use_the_home() {
         let start = |verb: &[&str]| {
             let mut command = support::command(env!("CARGO_BIN_EXE_zerodb"));
             command.args(verb).current_dir(&dir.0).env("ZERODB_TOKEN", "x");
-            command.env_remove("HOME").envs(home_env.iter().map(|home_env| ("HOME", home_env)));
+            command.envs(home_env.iter().map(|home_env| ("HOME", home_env)));
             command.env("ZERODB_HOME", "").envs(var.iter().map(|(name, value)| (name, value)));
             Process::start(command.stdin(std::process::Stdio::null()))
         };

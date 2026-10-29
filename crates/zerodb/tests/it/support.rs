@@ -24,9 +24,11 @@ pub fn files(dir: &Path) -> BTreeMap<String, Option<Vec<u8>>> {
     entries.map(|e| (e.file_name().into_string().unwrap(), std::fs::read(e.path()).ok())).collect()
 }
 
-/// Variables that point zerodb at a home or at harness files. No spawn inherits them, so a
-/// developer's own exports can't lead a test to a real home. A test that needs one sets it.
-const HOME_VARS: [&str; 4] = ["ZERODB_HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "COPILOT_HOME"];
+/// Variables that point zerodb at a home or at harness files, the real `HOME` included. No
+/// spawn inherits them, so a developer's own exports can't lead a test to a real home. A test
+/// that needs one sets it.
+const HOME_VARS: [&str; 5] =
+    ["HOME", "ZERODB_HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "COPILOT_HOME"];
 
 /// A command for `program`, the `zerodb` binary or anything that runs it, without
 /// [`HOME_VARS`]. Every spawn of zerodb in these tests starts here.
