@@ -269,7 +269,7 @@ It reads the last 5 turns of session `<repo>` for agents `vscode-copilot`, `copi
 A window cut short by its 8 MiB cap hides older turns, so then it may show fewer than 5.
 It prints 1 line, `{"additionalContext": "<block>"}`. With nothing to show, or on any error, it prints `{}`.
 With `--harness claude-code` or `--harness codex`, the line is `{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "<block>"}}`.
-`--harness vscode` or `--harness copilot` gives the first shape. Any other name prints `{}` and says why on stderr.
+`--harness vscode` or `--harness copilot` gives the first shape. Any other name, or `--harness` with no name, prints `{}` and says why on stderr. It still exits 0.
 At 4 s it prints `{}` and exits, whatever is blocking, stdin included. It always exits 0. Errors go to stderr.
 The stop cannot help if the harness stops reading the hook's output mid-line. That needs a stalled harness.
 

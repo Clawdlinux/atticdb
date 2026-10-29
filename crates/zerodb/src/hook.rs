@@ -31,18 +31,22 @@ const MORE: &str = "(more in zerodb)";
 /// when there is nothing to show, on any error, or 4 s after the start. Errors go to stderr.
 /// `claude-code` and `codex` read
 /// `{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "<block>"}}`.
-/// `None`, `vscode` and `copilot` read `{"additionalContext": "<block>"}`. Any other name
-/// prints `{}`, as a hook must not fail. Returns exit code 0.
+/// `None`, `vscode` and `copilot` read `{"additionalContext": "<block>"}`. Any other name,
+/// or an empty one for a `--harness` with no value, prints `{}`, as a hook must not fail.
+/// Returns exit code 0.
 pub fn session_start(harness: Option<&str>) -> u8 {
     let start = Instant::now();
     let specific = match harness {
         None | Some("vscode" | "copilot") => false,
         Some("claude-code" | "codex") => true,
         Some(name) => {
+            let why = match name {
+                "" => "--harness needs a name".to_owned(),
+                name => format!("unknown --harness {name:?}"),
+            };
             let _ = writeln!(
                 std::io::stderr(),
-                "zerodb: hook session-start: unknown --harness {name:?}. Use vscode, copilot, \
-                 claude-code or codex"
+                "zerodb: hook session-start: {why}. Use vscode, copilot, claude-code or codex"
             );
             print_once(&json!({}));
             return 0;

@@ -104,7 +104,8 @@ fn session_start_prints_the_memory_block() {
             serde_json::from_str(&hook(&home, &cwd(&home.join(chat)), 0, &[]).0).unwrap();
         assert_eq!(out, json!({"additionalContext": block}), "{chat}");
     }
-    // The shape follows --harness. An unknown name prints {} and says why, and still exits 0.
+    // The shape follows --harness. An unknown or missing name prints {} and says why, and
+    // still exits 0.
     let specific = json!({"hookSpecificOutput":
         {"hookEventName": "SessionStart", "additionalContext": block}});
     let plain = json!({"additionalContext": block});
@@ -114,11 +115,14 @@ fn session_start_prints_the_memory_block() {
         ("copilot", &plain, ""),
         ("vscode", &plain, ""),
         ("emacs", &json!({}), "unknown --harness \"emacs\""),
+        ("", &json!({}), "--harness needs a name"),
     ];
     let stdin = cwd(&home.join("wt"));
     for (name, shape, says) in rows {
+        // The empty row passes no value at all.
         let args = ["hook", "session-start", "--harness", name];
-        let (code, out, err) = zerodb(&home, &home, &args, &[], stdin.as_bytes(), 0);
+        let args = if name.is_empty() { &args[..3] } else { &args[..] };
+        let (code, out, err) = zerodb(&home, &home, args, &[], stdin.as_bytes(), 0);
         assert_eq!(code, Some(0), "{name}: {err}");
         assert_eq!(serde_json::from_str::<Value>(&out).unwrap(), *shape, "{name}");
         assert!(err.contains(says), "{name}: {err}");

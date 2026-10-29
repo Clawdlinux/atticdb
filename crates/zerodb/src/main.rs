@@ -110,6 +110,10 @@ fn main() -> ExitCode {
                 [event, flag, name] if event == "session-start" && flag == "--harness" => {
                     Some(zerodb::hook::session_start(Some(name)))
                 }
+                // A hook must not fail, so a missing name prints `{}` like an unknown one.
+                [event, flag] if event == "session-start" && flag == "--harness" => {
+                    Some(zerodb::hook::session_start(Some("")))
+                }
                 _ => None,
             },
             "studio" => flags(rest, &CONNECT[..5], &["--no-open"]).map(zerodb::studio::start),
