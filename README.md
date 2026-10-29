@@ -122,6 +122,8 @@ Snap browsers, the default on Ubuntu, cannot open the page from the hidden home 
 Then open the printed link by hand, or pass `--no-open`.
 The page needs that secret to read anything. The tenant token never leaves the studio process.
 It never writes to the store. Details: [zerodb studio](crates/zerodb/README.md#zerodb-studio).
+The page has 7 screens: Overview, Log, Sessions, Facts, Search, Chat start and Health.
+To try it on realistic memory, run `crates/zerodb/studio/seed.sh <empty dir>`, then `HOME=<dir> XDG_DATA_HOME= zerodb studio`.
 
 ## Numbers
 

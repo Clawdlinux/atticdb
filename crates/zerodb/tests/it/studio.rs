@@ -117,8 +117,24 @@ fn command(home: &Path, args: &[&str], env: &[(&str, &OsStr)]) -> Command {
     command
 }
 
+/// The paths `html` links with `src` or `href` on its own server, relative to `/`. Not a
+/// fragment, a `data:` URL or another origin.
+fn links(html: &str) -> Vec<String> {
+    let mut links = Vec::new();
+    for (attr, quote) in [("src=\"", '"'), ("src='", '\''), ("href=\"", '"'), ("href='", '\'')] {
+        for (at, _) in html.match_indices(attr) {
+            let value = html[at + attr.len()..].split(quote).next().unwrap_or_default();
+            if !value.starts_with('#') && !value.starts_with("//") && !value.contains(':') {
+                links.push(value.trim_start_matches('/').to_owned());
+            }
+        }
+    }
+    links
+}
+
 /// Studios on the home, on its data directory and on a `--url`. Each serves its page, forwards
-/// reads with the token it holds, and refuses everything else, with the same headers.
+/// reads with the token it holds, and refuses everything else, with the same headers. The page
+/// files show store text only as text.
 #[test]
 fn studio_forwards_reads_and_refuses_the_rest() {
     let dir = Dir::new();
@@ -138,17 +154,55 @@ fn studio_forwards_reads_and_refuses_the_rest() {
     let store = Via::Unix(data.join(zerodb::listen::SOCKET_NAME));
     let studio = Studio::start(&home, &["--no-open"], &[]);
 
-    // The page needs no secret. It holds no data.
-    let pages = [
-        ("/", "text/html; charset=utf-8", r#"<script src="/app.js""#),
-        ("/app.js", "text/javascript; charset=utf-8", "X-Zerodb-Studio"),
-        ("/app.css", "text/css; charset=utf-8", "font-family"),
-    ];
-    for (target, kind, holds) in pages {
+    // The page needs no secret. It holds no data. `/` and every asset it links are the files in
+    // `studio/`, each with its content type.
+    let page_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("studio");
+    let file = |name: &str| std::fs::read_to_string(page_dir.join(name)).unwrap();
+    let html = file("index.html");
+    let mut pages = vec![("/".to_owned(), "index.html".to_owned())];
+    pages.extend(links(&html).into_iter().map(|link| (format!("/{link}"), link)));
+    let names: Vec<&str> = pages.iter().map(|(_, name)| name.as_str()).collect();
+    assert!(names.contains(&"app.js") && names.contains(&"app.css"), "{names:?}");
+    for (target, name) in &pages {
+        let kind = match name.rsplit_once('.').map(|(_, ext)| ext) {
+            Some("html") => "text/html; charset=utf-8",
+            Some("js") => "text/javascript; charset=utf-8",
+            Some("css") => "text/css; charset=utf-8",
+            _ => panic!("{target}: no content type for {name}"),
+        };
         let reply = studio.get(target, false);
         assert_eq!((reply.status, reply.header("Content-Type")), (200, Some(kind)), "{target}");
-        assert!(reply.body.contains(holds), "{target}: {}", reply.body);
+        assert!(reply.body == file(name), "{target}: not {name}");
     }
+    // Store text reaches the page only as text: no API that parses markup or runs a string,
+    // and nothing inline for the CSP to refuse.
+    let js = file("app.js");
+    for api in
+        ["innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(", "new Function"]
+    {
+        assert!(!js.contains(api), "app.js uses {api}");
+    }
+    for timer in ["setTimeout(", "setInterval("] {
+        for (at, _) in js.match_indices(timer) {
+            let arg = js[at + timer.len()..].trim_start();
+            assert!(!arg.starts_with(['"', '\'', '`']), "app.js passes a string to {timer}");
+        }
+    }
+    let lower = html.to_ascii_lowercase();
+    for (at, _) in lower.match_indices("<script") {
+        let tag = &lower[at..at + lower[at..].find('>').unwrap()];
+        assert!(tag.contains(" src="), "index.html has an inline script: {tag}");
+    }
+    assert!(!lower.contains("<style") && !lower.contains("style="), "index.html styles inline");
+    // An inline handler is `on`, letters and `=`, after a space, a slash or a quote.
+    for (at, _) in lower.match_indices("on") {
+        let after = lower[..at].ends_with(|c: char| c.is_ascii_whitespace() || "/\"'".contains(c));
+        let rest = &lower[at + 2..];
+        let name = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_lowercase()).len();
+        let handler = after && name > 0 && rest[name..].trim_start().starts_with('=');
+        assert!(!handler, "index.html has an inline event handler: {}", &html[at..at + 2 + name]);
+    }
+    assert!(!lower.contains("javascript:"), "index.html has a javascript: URL");
 
     // Each read gets the store's own status and body, a 400 included.
     let reads = [
