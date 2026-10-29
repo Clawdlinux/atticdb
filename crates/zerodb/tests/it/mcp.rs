@@ -328,6 +328,26 @@ fn tool_calls_over_stdio() {
     let reply = mcp.request("tools/call", json!({"name": "memory_delete", "arguments": {}}));
     assert_eq!(reply["error"]["code"], -32602, "unknown tool");
 
+    // Tokens in the content and in nested meta are stored as placeholders, and counted.
+    // They are built here, as a token-shaped literal would trip push protection.
+    let github = format!("ghp_{}", "x1".repeat(18));
+    let (aws, slack) = (format!("AKIA{}", "AB12".repeat(4)), format!("xoxb-{}", "12345-abcd"));
+    let meta = json!({"nested": {"key": aws}, "list": ["kept", slack], "n": 1});
+    let note = json!({"content": format!("push with {github}"), "session": "r", "meta": meta});
+    let saved = mcp.call("memory_append", note);
+    let counts = json!({"aws-key-id": 1, "github-token": 1, "slack-token": 1});
+    let content = &saved["structuredContent"];
+    assert_eq!((&content["committed"], &content["redacted"]), (&json!(true), &counts), "{saved}");
+    assert!(text(&saved).ends_with(&format!("; redacted {counts}")), "{saved}");
+    let turn =
+        mcp.call("memory_recent", json!({"session": "r"}))["structuredContent"]["turns"][0].clone();
+    assert_eq!(turn["content"], "push with [secret:github-token]");
+    let meta = json!({"nested": {"key": "[secret:aws-key-id]"},
+        "list": ["kept", "[secret:slack-token]"], "n": 1});
+    assert_eq!(turn["meta"], meta, "meta strings hidden, keys and numbers kept");
+    let stored = turn.to_string();
+    assert!(![&github, &aws, &slack].iter().any(|token| stored.contains(*token)), "{stored}");
+
     // A line over 8 MiB is refused, and the next line is read as usual.
     mcp.next_id += 1;
     let long =

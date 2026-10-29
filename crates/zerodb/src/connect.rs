@@ -1,7 +1,7 @@
 //! `zerodb connect` and `zerodb disconnect`: add or remove zerodb's entry in a harness's
-//! user MCP config, and the Copilot `sessionStart` hook file both harnesses share. The
-//! entry and the hook run the binary on the home, so they hold no token. The only paths
-//! they hold are the binary's and, under `ZERODB_HOME`, the home's.
+//! user MCP config, and 2 Copilot files both harnesses share: the `sessionStart` hook and
+//! the instructions file. The entry and the hook run the binary on the home, so they hold no
+//! token. The only paths they hold are the binary's and, under `ZERODB_HOME`, the home's.
 
 use crate::home::{user_home, HOME_ENV};
 use serde_json::{json, Map, Value};
@@ -110,7 +110,8 @@ fn binary() -> Result<String, String> {
     exe.into_os_string().into_string().map_err(|_| "the zerodb binary's path must be UTF-8".into())
 }
 
-/// Adds zerodb's entry to `harness`'s config and writes the hook, after creating the home.
+/// Adds zerodb's entry to `harness`'s config and writes the hook and the instructions file,
+/// after creating the home.
 /// An entry with connection flags is replaced only with `force`. Under `ZERODB_HOME`, the
 /// entry and the hook pass it on. The other harness must pass the same home, as both share
 /// the hook. Else nothing changes, unless `force`. The flags are checked first, so `force`
@@ -127,6 +128,7 @@ pub fn connect(harness: Harness, force: bool) -> u8 {
         let entry = harness.entry(&exe, moved.as_deref());
         println!("{}", edit(harness, Some(entry), guard)?);
         println!("{}", set_hook(&exe, moved.as_deref())?);
+        println!("{}", set_guide()?);
         if let Some(split) = split {
             eprintln!("zerodb: {split}");
         }
@@ -237,12 +239,25 @@ fn moved_home() -> Result<Option<String>, String> {
     Ok(Some(dir))
 }
 
-/// Removes zerodb's entry from `harness`'s config, and the hook once no harness has one.
-/// Returns the exit code.
+/// Removes zerodb's entry from `harness`'s config, and the instructions file and the hook
+/// once no harness has one. Both removals are tried, and every error is reported. Returns the
+/// exit code.
 pub fn disconnect(harness: Harness) -> u8 {
     finish(edit(harness, None, None).and_then(|message| {
         println!("{message}");
-        remove_hook()
+        let mut errors = Vec::new();
+        for removed in [remove_guide(), remove_hook()] {
+            match removed {
+                Ok(message) if !message.is_empty() => println!("{message}"),
+                Ok(_) => {}
+                Err(error) => errors.push(error),
+            }
+        }
+        if errors.is_empty() {
+            Ok(String::new())
+        } else {
+            Err(errors.join("\nzerodb: "))
+        }
     }))
 }
 
@@ -414,6 +429,30 @@ fn connected(harness: Harness) -> Result<bool, String> {
     })
 }
 
+/// Why a shared Copilot file stays: a harness still has a zerodb entry, or its config
+/// cannot be read and so may still have one.
+fn still_used() -> Option<String> {
+    for harness in Harness::ALL {
+        let name = harness.name();
+        match connected(harness) {
+            Ok(true) => return Some(format!("zerodb is still connected to {name}")),
+            Ok(false) => {}
+            Err(error) => return Some(format!("cannot read {name}'s config: {error}")),
+        }
+    }
+    None
+}
+
+/// Deletes `path` and syncs its directory.
+fn delete(path: &Path) -> Result<(), String> {
+    std::fs::remove_file(path)
+        .map_err(|error| format!("{}: cannot delete: {error}", path.display()))?;
+    let parent = path.parent().unwrap_or(Path::new("/"));
+    StdIo::new()
+        .sync_dir(parent)
+        .map_err(|error| format!("{}: cannot sync: {error}", parent.display()))
+}
+
 /// Deletes the hook file once no harness has a zerodb entry, if zerodb wrote it. Returns
 /// the message to print, empty when there is no hook file.
 fn remove_hook() -> Result<String, String> {
@@ -424,26 +463,123 @@ fn remove_hook() -> Result<String, String> {
         Ok(None) => return Ok(String::new()),
         Err(why) => return Ok(format!("left {shown} alone: {why}")),
     };
-    let kept = format!("kept the sessionStart hook ({shown})");
-    for harness in Harness::ALL {
-        let name = harness.name();
-        match connected(harness) {
-            Ok(true) => return Ok(format!("{kept}: zerodb is still connected to {name}")),
-            Ok(false) => {}
-            // A config that cannot be read may still have the entry.
-            Err(error) => return Ok(format!("{kept}: cannot read {name}'s config: {error}")),
-        }
+    if let Some(why) = still_used() {
+        return Ok(format!("kept the sessionStart hook ({shown}): {why}"));
     }
     if !ours(&bytes) {
         let why = "it differs from the hook zerodb writes. Delete it by hand to stop the block";
         return Ok(format!("left {shown} alone: {why}"));
     }
-    std::fs::remove_file(&path).map_err(|error| format!("{shown}: cannot delete: {error}"))?;
-    let parent = path.parent().unwrap_or(Path::new("/"));
-    StdIo::new()
-        .sync_dir(parent)
-        .map_err(|error| format!("{}: cannot sync: {error}", parent.display()))?;
+    delete(&path)?;
     Ok(format!("removed the sessionStart hook: {shown}"))
+}
+
+/// The line that marks the instructions file as zerodb's.
+const MARKER: &str = "<!-- written by zerodb connect -->";
+
+/// The instructions folder, `instructions` in `$COPILOT_HOME` or `~/.copilot`. VS Code's
+/// Copilot chat and Copilot CLI both read it.
+fn guide_dir() -> Result<PathBuf, String> {
+    Ok(copilot_home()?.join("instructions"))
+}
+
+/// The name of zerodb's instructions file in [`guide_dir`].
+const GUIDE: &str = "zerodb.instructions.md";
+
+/// The instructions file's text: frontmatter, [`MARKER`], then the MCP server's instructions.
+fn guide_text() -> String {
+    format!(
+        "---\napplyTo: \"**\"\ndescription: \"How to use zerodb, this user's long-term memory\"\n\
+         ---\n{MARKER}\n\n{}\n",
+        crate::mcp::INSTRUCTIONS
+    )
+}
+
+/// The most of another instructions file read to look for `zerodb`.
+const GUIDE_READ: u64 = 1 << 20;
+
+/// Another `*.instructions.md` file in `dir` that mentions zerodb, in any case, in its first
+/// [`GUIDE_READ`] bytes. A backup, such as `*.instructions.md.bak-1`, doesn't count. Only
+/// regular files are read, so a FIFO can't block.
+fn other_guide(dir: &Path) -> Option<PathBuf> {
+    let mut names: Vec<_> = std::fs::read_dir(dir).ok()?.flatten().map(|e| e.file_name()).collect();
+    names.sort();
+    names.into_iter().map(|name| dir.join(name)).find(|path| {
+        let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+        let bytes = || {
+            let mut bytes = Vec::new();
+            let file = crate::config::open_regular(OpenOptions::new().read(true), path);
+            let _ = file.and_then(|file| file.take(GUIDE_READ).read_to_end(&mut bytes));
+            bytes.to_ascii_lowercase()
+        };
+        name.ends_with(".instructions.md") && name != GUIDE && find(&bytes(), b"zerodb")
+    })
+}
+
+/// Whether `needle` appears in `haystack`.
+fn find(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|window| window == needle)
+}
+
+/// Whether `bytes` hold the [`MARKER`] line, so zerodb wrote them.
+fn marked(bytes: &[u8]) -> bool {
+    String::from_utf8_lossy(bytes).lines().any(|line| line.trim_end() == MARKER)
+}
+
+/// Writes the instructions file, unless another file there mentions zerodb, or a file of the
+/// same name has no [`MARKER`] line, or can't be read, such as a symlink. Returns the message
+/// to print.
+fn set_guide() -> Result<String, String> {
+    let dir = guide_dir()?;
+    if let Some(other) = other_guide(&dir) {
+        let other = other.display();
+        return Ok(format!("skipped the zerodb instructions: {other} already mentions zerodb"));
+    }
+    let (path, text) = (dir.join(GUIDE), guide_text());
+    let shown = path.display();
+    let old = match read(&path) {
+        Ok(old) => old,
+        Err(why) => return Ok(format!("left {shown} alone: {why}")),
+    };
+    if old.as_ref().is_some_and(|(bytes, _)| *bytes == text.as_bytes()) {
+        return Ok(format!("the zerodb instructions are already in place ({shown})"));
+    }
+    if old.as_ref().is_some_and(|(bytes, _)| !marked(bytes)) {
+        return Ok(format!("skipped the zerodb instructions: {shown} has no line {MARKER}"));
+    }
+    Ok(match write(&path, old.as_ref(), text.as_bytes())? {
+        Some(backup) => {
+            format!("updated the zerodb instructions: {shown} (backup: {})", backup.display())
+        }
+        None => format!("added the zerodb instructions: {shown}"),
+    })
+}
+
+/// Deletes the instructions file once no harness has a zerodb entry, if it is exactly what
+/// zerodb writes now. An edited one stays. Returns the message to print, empty when there is
+/// no file.
+fn remove_guide() -> Result<String, String> {
+    let path = guide_dir()?.join(GUIDE);
+    let shown = path.display();
+    let bytes = match read(&path) {
+        Ok(Some((bytes, _))) => bytes,
+        Ok(None) => return Ok(String::new()),
+        Err(why) => return Ok(format!("left {shown} alone: {why}")),
+    };
+    if let Some(why) = still_used() {
+        return Ok(format!("kept the zerodb instructions ({shown}): {why}"));
+    }
+    if !marked(&bytes) {
+        return Ok(format!("left {shown} alone: it has no line {MARKER}. Delete it by hand"));
+    }
+    if bytes != guide_text().as_bytes() {
+        return Ok(format!(
+            "left {shown} alone: it differs from the instructions zerodb writes, so it may hold \
+             your edits. Delete it by hand"
+        ));
+    }
+    delete(&path)?;
+    Ok(format!("removed the zerodb instructions: {shown}"))
 }
 
 /// The file's bytes and mode, or `None` when it is missing. A symlink is refused, because

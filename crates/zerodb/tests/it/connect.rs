@@ -1,4 +1,4 @@
-use crate::support::{self, chmod, files, Dir, Process};
+use crate::support::{self, chmod, files, mkfifo, Dir, Process};
 use serde_json::{json, Value};
 use std::os::unix::fs::MetadataExt;
 use std::process::Stdio;
@@ -53,8 +53,9 @@ fn connect_edits_only_the_zerodb_entry() {
         let mode = || std::fs::metadata(&file).unwrap().mode() & 0o777;
         let backups =
             || files(&parent).into_keys().filter(|n| n.contains(".zerodb-backup-")).count();
-        // Copilot's hook directory sits next to its config.
-        let listed = || files(&parent).into_keys().filter(|name| name != "hooks").count();
+        // Copilot's hook and instructions directories sit next to its config.
+        let shared = ["hooks", "instructions"];
+        let listed = || files(&parent).into_keys().filter(|n| !shared.contains(&&**n)).count();
 
         let (code, out) = run(&["connect", name]);
         assert_eq!(code, Some(0), "{case}: {out}");
@@ -163,10 +164,13 @@ fn connect_edits_only_the_zerodb_entry() {
     assert!(out.contains("zerodb connect <vscode|copilot>"), "{out}");
 }
 
-/// `connect` writes 1 hook file for both harnesses, and `disconnect` removes it once neither
-/// is connected. A hook file zerodb did not write stays. The quoted path runs in `sh`. Under
-/// `ZERODB_HOME`, both entries and the hook pass it on, and a path with a `$` is refused.
-/// Both entries must pass the same home, as the hook reads 1.
+/// `connect` writes 1 hook file and 1 instructions file for both harnesses, and `disconnect`
+/// removes them once neither is connected. A hook file zerodb did not write stays, and so
+/// does an instructions file without the marker line, which connect doesn't overwrite, or an
+/// edited one. A symlinked instructions file is left alone and doesn't stop the hook. Another instructions file that
+/// mentions zerodb stops ours. The quoted path runs in `sh`. Under `ZERODB_HOME`, both
+/// entries and the hook pass it on, and a path with a `$` is refused. Both entries must pass
+/// the same home, as the hook reads 1.
 #[test]
 fn connect_writes_the_session_start_hook() {
     let dir = Dir::new();
@@ -191,6 +195,10 @@ fn connect_writes_the_session_start_hook() {
             if var == Some("COPILOT_HOME") { home.join("c") } else { home.join(".copilot") };
         let hooks = copilot.join("hooks");
         let file = hooks.join("zerodb.json");
+        let instructions = copilot.join("instructions");
+        let guide = instructions.join("zerodb.instructions.md");
+        let said_guide =
+            |said: &str| format!("\n{said} the zerodb instructions: {}\n", guide.display());
         let moved = var == Some("ZERODB_HOME");
         let env = if moved { json!({"ZERODB_HOME": home.join("c")}) } else { Value::Null };
         let mut wanted = wanted.clone();
@@ -207,7 +215,15 @@ fn connect_writes_the_session_start_hook() {
         };
         let shown = file.display();
         let out = run(&["connect", "vscode"]);
-        assert!(out.ends_with(&format!("\nadded the sessionStart hook: {shown}\n")), "{out}");
+        assert!(out.contains(&format!("\nadded the sessionStart hook: {shown}\n")), "{out}");
+        assert!(out.ends_with(&said_guide("added")), "{var:?}: {out}");
+        let text = format!(
+            "---\napplyTo: \"**\"\ndescription: \"How to use zerodb, this user's long-term \
+             memory\"\n---\n<!-- written by zerodb connect -->\n\n{}\n",
+            zerodb::mcp::INSTRUCTIONS
+        );
+        assert_eq!(std::fs::read_to_string(&guide).unwrap(), text, "{var:?}");
+        assert_eq!(std::fs::metadata(&guide).unwrap().mode() & 0o777, 0o600, "{var:?}");
         let pretty = serde_json::to_string_pretty(&wanted).unwrap() + "\n";
         assert_eq!(std::fs::read_to_string(&file).unwrap(), pretty, "{var:?}");
         assert_eq!(std::fs::metadata(&hooks).unwrap().mode() & 0o777, 0o700, "{var:?}");
@@ -216,9 +232,13 @@ fn connect_writes_the_session_start_hook() {
         assert_eq!(env_of(&vscode, "servers"), env, "{var:?}: VS Code's entry");
         let before = (files(&hooks), std::fs::metadata(&file).unwrap().modified().unwrap());
         let out = run(&["connect", "copilot"]);
-        assert!(out.ends_with(&format!("\nthe sessionStart hook is already in place ({shown})\n")));
+        assert!(out.contains(&format!("\nthe sessionStart hook is already in place ({shown})\n")));
         let after = (files(&hooks), std::fs::metadata(&file).unwrap().modified().unwrap());
         assert_eq!(after, before, "{var:?}: nothing written");
+        let in_place =
+            format!("\nthe zerodb instructions are already in place ({})\n", guide.display());
+        assert!(out.contains(&in_place), "{var:?}: {out}");
+        assert_eq!(std::fs::read_to_string(&guide).unwrap(), text, "{var:?}: kept");
         let entry = env_of(&copilot.join("mcp-config.json"), "mcpServers");
         assert_eq!(entry, env, "{var:?}: Copilot's entry");
 
@@ -226,9 +246,58 @@ fn connect_writes_the_session_start_hook() {
         let kept = format!("\nkept the sessionStart hook ({shown}): zerodb is still connected");
         assert!(out.contains(&kept), "{var:?}: {out}");
         assert_eq!(files(&hooks), before.0, "{var:?}: kept");
+        let kept = format!("\nkept the zerodb instructions ({}): zerodb is still", guide.display());
+        assert!(out.contains(&kept) && guide.exists(), "{var:?}: {out}");
         let out = run(&["disconnect", "copilot"]);
         assert!(out.ends_with(&format!("\nremoved the sessionStart hook: {shown}\n")), "{out}");
         assert_eq!(files(&hooks).len(), 0, "{var:?}: removed, no backup");
+        assert!(out.contains(&said_guide("removed")), "{var:?}: {out}");
+        assert_eq!(files(&instructions).len(), 0, "{var:?}: instructions removed, no backup");
+
+        // Without the marker line, the instructions file stays, and connect doesn't overwrite it.
+        // Another instructions file that mentions zerodb, in any case, stops connect from
+        // writing ours. Its backup doesn't.
+        std::fs::write(&guide, "mine\n").unwrap();
+        let out = run(&["disconnect", "copilot"]);
+        let alone = format!("left {} alone: it has no line <!-- written by", guide.display());
+        assert!(out.contains(&alone), "{var:?}: {out}");
+        assert_eq!(std::fs::read_to_string(&guide).unwrap(), "mine\n", "{var:?}: no marker");
+        let out = run(&["connect", "copilot"]);
+        let skipped = format!("skipped the zerodb instructions: {} has no line", guide.display());
+        assert!(out.contains(&skipped), "{var:?}: {out}");
+        assert_eq!(std::fs::read_to_string(&guide).unwrap(), "mine\n", "{var:?}: not written");
+        // A symlink is left alone, and the hook is still written.
+        std::fs::remove_file(&guide).unwrap();
+        std::os::unix::fs::symlink("mine.md", &guide).unwrap();
+        run(&["disconnect", "copilot"]);
+        assert!(!file.exists(), "{var:?}: no hook");
+        let out = run(&["connect", "copilot"]);
+        let alone = format!("\nleft {} alone: is a symlink\n", guide.display());
+        assert!(out.contains(&alone) && file.exists(), "{var:?}: {out}");
+        assert!(std::fs::symlink_metadata(&guide).unwrap().is_symlink(), "{var:?}");
+        std::fs::remove_file(&guide).unwrap();
+        let other = instructions.join("zerodb-memory.instructions.md");
+        let backup = instructions.join("zerodb-memory.instructions.md.bak-1");
+        std::fs::write(&other, "Save notes in ZeroDB.\n").unwrap();
+        std::fs::write(&backup, "zerodb").unwrap();
+        // A FIFO is not read, so it can't block connect.
+        let fifo = instructions.join("x.instructions.md");
+        mkfifo(&fifo);
+        let out = run(&["connect", "copilot"]);
+        let skipped = format!("skipped the zerodb instructions: {} already", other.display());
+        assert!(out.contains(&skipped) && !guide.exists(), "{var:?}: {out}");
+        std::fs::remove_file(&other).unwrap();
+        let out = run(&["connect", "copilot"]);
+        assert!(out.contains(&said_guide("added")), "{var:?}: the backup doesn't count: {out}");
+        // An edited file keeps the marker, but disconnect leaves it, as the edits are the user's.
+        std::fs::write(&guide, text.clone() + "my edit\n").unwrap();
+        let out = run(&["disconnect", "copilot"]);
+        let alone = format!("left {} alone: it differs from the instructions", guide.display());
+        assert!(out.contains(&alone), "{var:?}: {out}");
+        assert_eq!(std::fs::read_to_string(&guide).unwrap(), text.clone() + "my edit\n");
+        std::fs::remove_file(&guide).unwrap();
+        std::fs::remove_file(&backup).unwrap();
+        std::fs::remove_file(&fifo).unwrap();
 
         // The hook for another binary goes. A hook file with other content stays.
         let mut other = wanted.clone();
