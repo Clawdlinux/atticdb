@@ -151,16 +151,31 @@ fn check_flags(harness: Harness, data: &Path) -> Result<(), String> {
 fn split_home(harness: Harness, home: Option<&str>, force: bool) -> Result<Option<String>, String> {
     let ours = home_words(home);
     for other in Harness::ALL.into_iter().filter(|other| *other != harness) {
-        // Nothing can be connected at a path that can't be named, as with HOME unset, so
-        // there is no entry to split from.
-        let Ok(file) = other.file() else { continue };
+        let name = other.name();
+        // With HOME unset, the other config can't be located. It may still have been
+        // connected from a shell where HOME was set, so its home is unknown.
+        let file = match other.file() {
+            Ok(file) => file,
+            Err(why) if force => {
+                return Ok(Some(format!(
+                    "{name}'s config can't be located ({why}), so it may use another home than \
+                     the one the shared sessionStart hook now reads, {ours}"
+                )));
+            }
+            Err(why) => {
+                return Err(format!(
+                    "{name}'s config can't be located ({why}), so its zerodb entry may use \
+                     another home than {ours}. Both share the sessionStart hook, which reads 1 \
+                     home. Nothing changed. Set HOME, or add --force to go ahead anyway"
+                ));
+            }
+        };
         let theirs = match entry_home(other, &file) {
             Ok(None) => continue,
             Ok(Some(theirs)) if theirs.as_deref().map(Path::new) == home.map(Path::new) => continue,
             Ok(Some(theirs)) => home_words(theirs.as_deref()),
             Err(why) => format!("an unknown home, as {why}"),
         };
-        let name = other.name();
         if force {
             return Ok(Some(format!(
                 "{name} still uses {theirs}, but the shared sessionStart hook now reads {ours}. \

@@ -331,13 +331,25 @@ fn connect_writes_the_session_start_hook() {
     assert!(out.contains("uses --data-dir /old."), "flags and split: {out}");
     assert!(!out.contains("sessionStart hook"), "flags and split: {out}");
     assert_eq!(now(), before, "flags and split: no file changed");
-    // With HOME unset, VS Code's config can't be named, so it holds no entry to split from.
+    // With HOME unset, VS Code's config can't be located. It may have been connected from a
+    // shell with HOME set, so its home is unknown: refused, and --force goes ahead and warns.
     let (copilot, zh) = (dir.0.join("5/c"), dir.0.join("5/zh"));
-    let mut command = support::command(&exe);
-    command.args(["connect", "copilot"]).current_dir(&dir.0).env_remove("HOME");
-    command.env("COPILOT_HOME", &copilot).env("ZERODB_HOME", &zh);
-    let (status, out) = Process::start(command.stdin(Stdio::null())).wait();
-    assert_eq!(status.code(), Some(0), "HOME unset: {out}");
+    let unset = |force: bool| {
+        let mut command = support::command(&exe);
+        command.args(["connect", "copilot"]).current_dir(&dir.0).env_remove("HOME");
+        command.args(force.then_some("--force"));
+        command.env("COPILOT_HOME", &copilot).env("ZERODB_HOME", &zh);
+        let (status, out) = Process::start(command.stdin(Stdio::null())).wait();
+        (status.code(), out)
+    };
+    let said = "vscode's config can't be located (HOME must be set to an absolute path)";
+    let (code, out) = unset(false);
+    assert_eq!(code, Some(1), "HOME unset: {out}");
+    assert!(out.contains(said) && out.contains("Set HOME, or add --force"), "HOME unset: {out}");
+    assert!(!copilot.exists() && !zh.exists(), "HOME unset: nothing written: {out}");
+    let (code, out) = unset(true);
+    assert_eq!(code, Some(0), "HOME unset --force: {out}");
+    assert!(out.contains(&format!("zerodb: {said}")), "HOME unset --force: {out}");
     let env = json!({"ZERODB_HOME": zh});
     let hook: Value =
         serde_json::from_slice(&std::fs::read(copilot.join("hooks/zerodb.json")).unwrap()).unwrap();
