@@ -83,7 +83,7 @@ impl Redactor {
         for (name, value) in &self.known {
             let kind = format!("env:{name}");
             let with = format!("[secret:{kind}]");
-            text = scan(&text, |bytes, at| {
+            text = scan(&text, |bytes, at, _| {
                 bytes[at..].starts_with(value.as_bytes()).then(|| {
                     *counts.entry(kind.clone()).or_default() += 1;
                     (at + value.len(), with.clone())
@@ -113,13 +113,17 @@ fn word(byte: u8) -> bool {
     alnum(byte) || byte == b'_' || byte == b'-'
 }
 
-/// Copies `text`, replacing what `find` matches. `find` gets the bytes and a position, and
-/// returns where the match ends and its replacement.
-fn scan(text: &str, mut find: impl FnMut(&[u8], usize) -> Option<(usize, String)>) -> String {
+/// Copies `text`, replacing what `find` matches. `find` gets the bytes, a position and the
+/// last byte written, and returns where the match ends and its replacement. A format's
+/// boundary is checked on the byte written, so a second run sees the same boundaries.
+fn scan(
+    text: &str,
+    mut find: impl FnMut(&[u8], usize, Option<u8>) -> Option<(usize, String)>,
+) -> String {
     let bytes = text.as_bytes();
     let (mut out, mut at) = (Vec::with_capacity(bytes.len()), 0);
     while at < bytes.len() {
-        if let Some((end, with)) = find(bytes, at) {
+        if let Some((end, with)) = find(bytes, at, out.last().copied()) {
             out.extend_from_slice(with.as_bytes());
             at = end;
         } else {
@@ -131,33 +135,31 @@ fn scan(text: &str, mut find: impl FnMut(&[u8], usize) -> Option<(usize, String)
     String::from_utf8(out).unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into())
 }
 
-/// The length of the placeholder `rest` starts with: a known type, or `env:` and a name of
-/// `[A-Za-z0-9_]`.
+/// The length of the format placeholder, such as `[secret:github-token]`, that `rest` starts
+/// with. These hold no text from the input. Env placeholders do, so they don't count.
 fn placeholder(rest: &[u8]) -> Option<usize> {
     let inner = rest.strip_prefix(b"[secret:")?;
-    let close = inner.iter().position(|byte| *byte == b']')?;
-    let kind = &inner[..close];
-    let env = kind
-        .strip_prefix(b"env:")
-        .filter(|name| !name.is_empty() && name.iter().all(|byte| alnum(*byte) || *byte == b'_'));
-    let known = TYPES.iter().any(|known| known.as_bytes() == kind);
-    (known || env.is_some()).then_some(b"[secret:".len() + close + 1)
+    let kind = TYPES.iter().find(|kind| inner.starts_with(kind.as_bytes()))?;
+    (inner.get(kind.len()) == Some(&b']')).then_some(b"[secret:".len() + kind.len() + 1)
 }
 
 /// `text` with the known formats hidden.
 fn formats(text: &str, counts: &mut Counts) -> String {
-    scan(text, |bytes, at| {
-        let (end, kind, with) = format_at(bytes, at, counts)?;
+    let mut line = KeyLine::default();
+    scan(text, |bytes, at, before| {
+        let (end, kind, with) = format_at(bytes, at, before, counts, &mut line)?;
         *counts.entry(kind.into()).or_default() += 1;
         Some((end, with))
     })
 }
 
-/// The format at `at`: where it ends, its type and its replacement.
+/// The format at `at`, after the byte `before`: where it ends, its type and its replacement.
 fn format_at(
     bytes: &[u8],
     at: usize,
+    before: Option<u8>,
     counts: &mut Counts,
+    line: &mut KeyLine,
 ) -> Option<(usize, &'static str, String)> {
     let rest = &bytes[at..];
     if rest.starts_with(b"://") {
@@ -165,7 +167,7 @@ fn format_at(
             return Some((end, "url-password", with));
         }
     }
-    if at > 0 && word(bytes[at - 1]) {
+    if before.is_some_and(word) {
         return None;
     }
     let placed =
@@ -185,8 +187,8 @@ fn format_at(
     if let Some(length) = aws_key_id(rest) {
         return Some(placed(length, "aws-key-id"));
     }
-    if let Some(length) = private_key(rest) {
-        return Some(placed(length, "private-key"));
+    if let Some(end) = private_key(bytes, at, line) {
+        return Some((end, "private-key", "[secret:private-key]".into()));
     }
     let bearer = rest.get(..BEARER.len()).filter(|word| word.eq_ignore_ascii_case(BEARER))?;
     let token = |byte: &u8| alnum(*byte) || b"._~+/=-".contains(byte);
@@ -206,56 +208,64 @@ fn aws_key_id(rest: &[u8]) -> Option<usize> {
     (upper && !rest.get(20).is_some_and(|byte| alnum(*byte))).then_some(20)
 }
 
-/// A `-----BEGIN ` line holding `PRIVATE KEY-----`, through the next `-----END ` line that
-/// holds it too, or to the end. Only the first [`KEY_LINE`] bytes of those lines are read.
-fn private_key(rest: &[u8]) -> Option<usize> {
-    let after = rest.strip_prefix(BEGIN)?;
-    find(&after[..line(after)], PRIVATE_KEY)?;
-    let mut from = BEGIN.len() + find(after, b"\n").unwrap_or(after.len());
-    while let Some(found) = find(&rest[from..], END) {
-        let start = from + found;
-        if let Some(key) = find(&rest[start..start + line(&rest[start..])], PRIVATE_KEY) {
-            return Some(start + key + PRIVATE_KEY.len());
-        }
-        from = start + END.len();
-    }
-    Some(rest.len())
+/// The end of the line a `-----BEGIN ` was last seen on, and where `PRIVATE KEY-----` last
+/// starts on it. Many `-----BEGIN ` on 1 line then read it once, so the scan stays linear.
+#[derive(Default)]
+struct KeyLine {
+    end: usize,
+    key: Option<usize>,
 }
 
-/// A key's BEGIN and END lines are short. Reading at most this much of each keeps a long
-/// text full of `-----BEGIN ` linear.
-const KEY_LINE: usize = 200;
-
-/// The length of the line `text` starts with, up to [`KEY_LINE`] bytes.
-fn line(text: &[u8]) -> usize {
-    let text = &text[..text.len().min(KEY_LINE)];
-    find(text, b"\n").unwrap_or(text.len())
-}
-
-/// The userinfo that starts at `start`, after `://`, when it holds a password: `<user>:` and
-/// at least 1 byte, then `@`, with no `/`, `?`, `#` or whitespace before it. Returns where the
-/// `@` ends and the replacement from `://`. The user part is checked for formats too.
-fn url_password(bytes: &[u8], start: usize, counts: &mut Counts) -> Option<(usize, String)> {
-    let stop = |byte: &u8| b"@/?#".contains(byte) || byte.is_ascii_whitespace();
-    let length = bytes[start..].iter().position(stop)?;
-    let userinfo = &bytes[start..start + length];
-    // Already hidden. A second run would split at the `:` in `[secret:` and change the text.
-    if bytes[start + length] != b'@' || userinfo.ends_with(b":[secret:url-password]") {
+/// A `-----BEGIN ` at `at` with `PRIVATE KEY-----` after it on its line, through the next
+/// `-----END ` line that holds `PRIVATE KEY-----` after it, or to the end. Returns the end.
+fn private_key(bytes: &[u8], at: usize, line: &mut KeyLine) -> Option<usize> {
+    if !bytes[at..].starts_with(BEGIN) {
         return None;
     }
-    // The first `:` outside a placeholder.
+    if at >= line.end {
+        let end = at + find(&bytes[at..], b"\n").unwrap_or(bytes.len() - at);
+        let key = bytes[at..end].windows(PRIVATE_KEY.len()).rposition(|w| w == PRIVATE_KEY);
+        *line = KeyLine { end, key: key.map(|key| at + key) };
+    }
+    line.key.filter(|key| *key >= at + BEGIN.len())?;
+    // Line by line. Only the first `-----END ` on a line matters: a key after a later one is
+    // after the first too.
+    let mut start = line.end;
+    while start < bytes.len() {
+        let end = start + find(&bytes[start..], b"\n").unwrap_or(bytes.len() - start);
+        if let Some(found) = find(&bytes[start..end], END) {
+            let after = start + found + END.len();
+            if let Some(key) = find(&bytes[after..end], PRIVATE_KEY) {
+                return Some(after + key + PRIVATE_KEY.len());
+            }
+        }
+        start = end + 1;
+    }
+    Some(bytes.len())
+}
+
+/// The URL password after the `://` that ends at `start`, as WHATWG splits it. The authority
+/// ends at the first `/`, `?`, `#` or whitespace. The userinfo is what comes before its last
+/// `@`. The password follows the first `:` in it outside a format placeholder. Any password
+/// but `[secret:url-password]` is replaced, and the user part is checked for formats. Returns
+/// where the `@` ends and the replacement from `://`.
+fn url_password(bytes: &[u8], start: usize, counts: &mut Counts) -> Option<(usize, String)> {
+    let stop = |byte: &u8| b"/?#".contains(byte) || byte.is_ascii_whitespace();
+    let authority = bytes[start..].iter().position(stop).unwrap_or(bytes.len() - start);
+    let at = bytes[start..start + authority].iter().rposition(|byte| *byte == b'@')?;
+    let userinfo = &bytes[start..start + at];
     let mut colon = 0;
     while colon < userinfo.len() && userinfo[colon] != b':' {
         colon += placeholder(&userinfo[colon..]).unwrap_or(1);
     }
     let password = userinfo.get(colon + 1..).filter(|password| !password.is_empty())?;
-    if placeholder(password) == Some(password.len()) {
+    if password == b"[secret:url-password]" {
         return None;
     }
     // Both ends are ASCII bytes, so the user part is whole UTF-8.
     let user = String::from_utf8_lossy(&userinfo[..colon]);
     let user = formats(&user, counts);
-    Some((start + length + 1, format!("://{user}:[secret:url-password]@")))
+    Some((start + at + 1, format!("://{user}:[secret:url-password]@")))
 }
 
 /// Where `needle` first appears in `haystack`.
@@ -290,6 +300,8 @@ mod tests {
         ];
         let mut vars: Vec<(OsString, OsString)> =
             vars.iter().map(|(name, value)| (name.into(), value.into())).collect();
+        let pad = "p".repeat(64);
+        vars.push(("PAD_KEY".into(), pad.as_str().into()));
         vars.push(("BAD_TOKEN".into(), OsString::from_vec(vec![0xff; 16])));
         let redactor = Redactor::new(vars);
 
@@ -402,8 +414,39 @@ mod tests {
             (
                 "env in a url",
                 url("bob", "tok-12345678"),
-                "https://bob:[secret:env:MY_TOKEN]@host/x",
-                "env:MY_TOKEN=1",
+                "https://bob:[secret:url-password]@host/x",
+                "env:MY_TOKEN=1 url-password=1",
+            ),
+            (
+                "url, password before a placeholder",
+                format!("https://alice:{}:[secret:url-password]@host/x", "cleartext-password"),
+                "https://alice:[secret:url-password]@host/x",
+                "url-password=1",
+            ),
+            (
+                "url, @ in the password",
+                format!("postgres://admin:{}@db:5432/x", "P@ssw0rd"),
+                "postgres://admin:[secret:url-password]@db:5432/x",
+                "url-password=1",
+            ),
+            ("url, empty password", "https://user:@host".into(), "", ""),
+            (
+                "a format right after a hidden one",
+                format!("{aws}{}\nabc", key("BEGIN")),
+                "[secret:aws-key-id][secret:private-key]",
+                "aws-key-id=1 private-key=1",
+            ),
+            (
+                "private key, env value on a long BEGIN line",
+                format!("-----BEGIN {} {pad} {}-----\nMIIabc\n", "x".repeat(150), "PRIVATE KEY"),
+                "[secret:private-key]",
+                "env:PAD_KEY=1 private-key=1",
+            ),
+            (
+                "private key, token on a long BEGIN line",
+                format!("-----BEGIN {} {github} {}-----\nMIIabc", "x".repeat(150), "PRIVATE KEY"),
+                "[secret:private-key]",
+                "private-key=1",
             ),
             ("placeholders", "[secret:github-token] [secret:env:X_KEY]".into(), "", ""),
             (
@@ -427,8 +470,8 @@ mod tests {
             (
                 "token in a placeholder in a url",
                 format!("x://[secret:env:{github}]:[secret:url-password]@h"),
-                "x://[secret:env:[secret:github-token]]:[secret:url-password]@h",
-                "github-token=1",
+                "x://[secret:[secret:url-password]@h",
+                "url-password=1",
             ),
         ];
         for (case, input, expected, counted) in rows {
