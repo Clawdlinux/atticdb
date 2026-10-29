@@ -1623,6 +1623,7 @@ fn connect_codex_adds_its_parts() {
             let (code, out) = run(&home, None, &bin, &[], &[&["connect", "codex"], flags].concat());
             assert_eq!(code, Some(0), "{off}: {out}");
             assert_eq!(out.contains(&warning), warns, "{off} {flags:?}: {out}");
+            assert!(!out.contains("approve the zerodb hook"), "{off} {flags:?}: hooks are off");
         }
     }
 

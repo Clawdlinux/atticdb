@@ -129,6 +129,21 @@ pub fn ensure() -> Result<Home, String> {
     Ok(Home { dir, config, data_dir, tenant: TENANT.into() })
 }
 
+/// Checks the home and its `data/`, where they exist, as [`ensure`] does: each must be a
+/// directory owned by this user, mode 0700 or stricter. A symlink counts as existing, even a
+/// dangling one, as [`ensure`] refuses that too. It creates nothing, so a plan shows the
+/// refusal that [`ensure`] would give.
+pub fn check_existing() -> Result<(), String> {
+    let home = dir()?;
+    for dir in [home.clone(), home.join("data")] {
+        match std::fs::symlink_metadata(&dir) {
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            _ => crate::listen::check_owned(&dir, 0o077)?,
+        }
+    }
+    Ok(())
+}
+
 /// Syncs `data/`, the home and its ancestors, deepest first, so their entries survive a
 /// power loss before the first ack. It stops after syncing `stop`, else at `/`. A home
 /// inside `$HOME` stops at `$HOME`'s parent, so a `$HOME` that another call made is synced

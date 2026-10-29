@@ -10,10 +10,13 @@
 //! approval per hook in `config.toml`. zerodb never writes those.
 
 use super::claude::{
-    add_hook, drop_hooks, edit_file, find_program, hook_args, hook_command, our_group, report, run,
-    shell_line, split, Edit, Line, Part,
+    add_hook, drop_hooks, edit_file, find_program, hook_args, hook_command, our_group, run,
+    shell_line, split, Edit, Part,
 };
-use super::{absolute_env, binary, delete, moved_home, read, write, Harness, Notes};
+use super::{
+    absolute_env, add_or_update, binary, delete, moved_home, planned, read, write, Harness, Line,
+    Mode, Notes, Report, State,
+};
 use crate::home::{user_home, HOME_ENV};
 use serde_json::{json, Value};
 use std::cell::Cell;
@@ -43,7 +46,7 @@ const NO_HOOKS: &str = "{\n  \"hooks\": {}\n}\n";
 /// fits it whether Codex counts bytes or characters.
 const CONTEXT_LIMIT: u64 = 24_000;
 /// What to do after adding the hook.
-const APPROVE: &str =
+pub(crate) const APPROVE: &str =
     "Open Codex once and approve the zerodb hook; Codex runs a new hook only after that.";
 /// Why Codex may ask again for hooks after a group zerodb removed.
 const POSITION: &str = "Codex keys hook approvals by position, so it may ask you to approve \
@@ -62,7 +65,7 @@ fn check_codex_env() -> Result<(), String> {
 }
 
 /// `$CODEX_HOME` when set and absolute, else `~/.codex`.
-fn codex_home() -> Result<PathBuf, String> {
+pub(super) fn codex_home() -> Result<PathBuf, String> {
     absolute_env(CODEX_ENV).map_or_else(|| Ok(user_home()?.join(".codex")), Ok)
 }
 
@@ -76,33 +79,32 @@ fn hooks_file() -> Result<PathBuf, String> {
     Ok(codex_home()?.join("hooks.json"))
 }
 
-/// Adds the MCP block for `notes`, and the hook when `hook`. Returns the exit code: 2 for a
-/// relative `CODEX_HOME`.
-pub(super) fn connect(hook: bool, notes: Notes) -> u8 {
+/// Adds the MCP block for `notes`, and the hook when `hook`. It stops with exit code 2 for a
+/// relative `CODEX_HOME`. In Plan mode, it writes nothing and runs no `codex`.
+pub(super) fn connect(hook: bool, notes: Notes, mode: Mode) -> Report {
     if let Err(error) = check_codex_env() {
-        eprintln!("zerodb: {error}");
-        return 2;
+        return Report::stopped(2, error);
     }
     let prepared = (|| {
         let home = moved_home(Harness::Codex)?;
         let exe = binary()?;
         let config = config_file()?;
         let warnings = split(Harness::Codex, home.as_deref());
-        crate::home::ensure()?;
+        match mode {
+            Mode::Apply => drop(crate::home::ensure()?),
+            Mode::Plan => crate::home::check_existing()?,
+        }
         Ok::<_, String>((home, exe, config, warnings))
     })();
     let (home, exe, config, mut warnings) = match prepared {
         Ok(prepared) => prepared,
-        Err(error) => {
-            eprintln!("zerodb: {error}");
-            return 1;
-        }
+        Err(error) => return Report::stopped(1, error),
     };
     let home = home.as_deref();
-    let mut lines = vec![set_block(&config, &exe, home, notes)];
-    let mut next = Vec::new();
+    let mut lines = vec![set_block(&config, &exe, home, notes, mode).unwrap_or_else(|line| line)];
+    let (mut next, mut hook_state, off) = (Vec::new(), None, hook && hooks_off(&config));
     if hook {
-        if hooks_off(&config) {
+        if off {
             warnings.push(format!(
                 "{} sets hooks = false in [features], so Codex runs no hooks, zerodb's \
                  included. Remove that line to load memory at chat start",
@@ -114,14 +116,28 @@ pub(super) fn connect(hook: bool, notes: Notes) -> u8 {
         let add = |text: &str| track(text, add_hook(Harness::Codex, text, &group), &tracked);
         let by_hand = format!("Add this group to hooks.SessionStart by hand: {group}");
         let parts = [Part { name: "SessionStart hook", by_hand, edit: &add }];
-        lines.extend(edit_file(hooks.clone(), NO_HOOKS, &parts));
+        // 1 part, so 1 line.
+        let hook_lines = edit_file(hooks.clone(), NO_HOOKS, &parts, mode);
+        hook_state = hook_lines.first().map(|line| line.state);
+        lines.extend(hook_lines);
+        // In Plan mode nothing was saved, so this finds nothing. With hooks off, there is
+        // nothing to approve.
         if let Some(moved) = saved(&hooks, &tracked) {
-            next.push(APPROVE);
-            next.extend(moved.then_some(POSITION));
+            next.extend((!off).then(|| APPROVE.to_owned()));
+            next.extend(moved.then(|| POSITION.to_owned()));
         }
     }
-    let next = next.join("\n");
-    report(lines, &warnings, Some(next.as_str()).filter(|next| !next.is_empty()))
+    Report { lines, warnings, next, stopped: None, hook: hook_state, hooks_off: off }
+}
+
+/// Checks that `codex mcp get zerodb --json`, which only reads config, shows zerodb's entry
+/// for this binary and home. `Ok` without running anything when `codex` is not on `PATH`.
+pub(super) fn verify() -> Result<(), String> {
+    check_codex_env()?;
+    let home = moved_home(Harness::Codex)?;
+    let (exe, config) = (binary()?, config_file()?);
+    let Some(codex) = find_program("codex") else { return Ok(()) };
+    check(&codex, config.parent().unwrap_or(Path::new("/")), &exe, home.as_deref())
 }
 
 /// Removes zerodb's MCP block and every hook group that runs zerodb's hook. Returns the exit
@@ -145,11 +161,11 @@ pub(super) fn disconnect() -> u8 {
         hook_args(Harness::Codex)
     );
     let parts = [Part { name: "SessionStart hook", by_hand, edit: &drop }];
-    let mut lines = vec![drop_block(&config)];
-    lines.extend(edit_file(hooks.clone(), NO_HOOKS, &parts));
+    let mut lines = vec![drop_block(&config).unwrap_or_else(|line| line)];
+    lines.extend(edit_file(hooks.clone(), NO_HOOKS, &parts, Mode::Apply));
     // A removal that left another zerodb handler to do by hand still moved the groups after it.
-    let next = saved(&hooks, &tracked).filter(|moved| *moved).map(|_| POSITION);
-    report(lines, &[], next)
+    let next = saved(&hooks, &tracked).filter(|moved| *moved).map(|_| POSITION.to_owned());
+    Report { lines, next: next.into_iter().collect(), ..Report::default() }.print()
 }
 
 /// A hook edit that changed `hooks.json`: its new text, and whether it removed a zerodb group
@@ -395,10 +411,17 @@ fn hooks_off(path: &Path) -> bool {
 /// `path`, after 1 blank line. An older block's own bytes go first, and every other byte in
 /// it stays where it is. A block that is already right, with nothing else inside it, stays
 /// too. A file with CRLF line ends gets CRLF. A file without a final line end gets one, and the block says so. Then
-/// `codex mcp get zerodb --json` must show it, or the file is put back.
-fn set_block(path: &Path, exe: &str, home: Option<&str>, notes: Notes) -> Line {
+/// `codex mcp get zerodb --json` must show it, or the file is put back. In Plan mode, it
+/// writes nothing and runs no `codex`. `Err` is the line of a skipped or failed part.
+fn set_block(
+    path: &Path,
+    exe: &str,
+    home: Option<&str>,
+    notes: Notes,
+    mode: Mode,
+) -> Result<Line, Line> {
     let shown = path.display();
-    let skipped = |why: String| format!("MCP entry: skipped, {why}");
+    let skipped = |why: String| Line::new(State::Skipped, format!("MCP entry: skipped, {why}"));
     let wanted = block(exe, home, notes).map_err(skipped)?;
     let add = format!("Add this block to the end of {shown} by hand:\n{}", wanted.trim_end());
     let old = read(path).map_err(|why| skipped(format!("{shown} {why}. {add}")))?;
@@ -437,7 +460,12 @@ fn set_block(path: &Path, exe: &str, home: Option<&str>, notes: Notes) -> Line {
     };
     let (mut new, verb, by_hand) = match found {
         Some(block) if text[block.span.clone()] == ours(added_end(&text[block.span.clone()])) => {
-            return Ok(format!("MCP entry: unchanged ({shown})"));
+            return Ok(match mode {
+                Mode::Plan => planned(path, "MCP entry", State::Unchanged),
+                Mode::Apply => {
+                    Line::new(State::Unchanged, format!("MCP entry: unchanged ({shown})"))
+                }
+            });
         }
         Some(block) => {
             let by_hand = format!(
@@ -449,6 +477,10 @@ fn set_block(path: &Path, exe: &str, home: Option<&str>, notes: Notes) -> Line {
         }
         None => (text.to_owned(), "added", add),
     };
+    let state = add_or_update(verb == "updated");
+    if mode == Mode::Plan {
+        return Ok(planned(path, "MCP entry", state));
+    }
     let added = !new.is_empty() && !new.ends_with('\n');
     if !new.is_empty() {
         if added {
@@ -457,17 +489,18 @@ fn set_block(path: &Path, exe: &str, home: Option<&str>, notes: Notes) -> Line {
         new.push_str(eol);
     }
     new.push_str(&ours(added));
+    let failed = |why: String| Line::new(State::Failed, format!("MCP entry: failed, {why}"));
     let backup = write(path, old.as_ref(), new.as_bytes())
-        .map_err(|why| format!("MCP entry: failed, {why}. {by_hand}"))?;
+        .map_err(|why| failed(format!("{why}. {by_hand}")))?;
     let saved = backup.as_ref().map(|backup| format!(", backup: {}", backup.display()));
     let done = format!("MCP entry: {verb} ({shown}{})", saved.unwrap_or_default());
     let Some(codex) = find_program("codex") else {
-        return Ok(format!("{done}, not verified: codex is not on PATH"));
+        return Ok(Line::new(state, format!("{done}, not verified: codex is not on PATH")));
     };
     let dir = path.parent().unwrap_or(Path::new("/"));
-    check(&codex, dir, exe, home).map(|()| done).map_err(|why| {
+    check(&codex, dir, exe, home).map(|()| Line::new(state, done)).map_err(|why| {
         let undone = restore(path, backup.as_deref(), new.as_bytes());
-        format!("MCP entry: failed, {why}. {undone}")
+        failed(format!("{why}. {undone}"))
     })
 }
 
@@ -546,47 +579,52 @@ fn restore(path: &Path, backup: Option<&Path>, written: &[u8]) -> String {
 }
 
 /// Removes zerodb's bytes in its block from the `config.toml` at `path`, by [`without`].
-fn drop_block(path: &Path) -> Line {
+/// `Err` is the line of a skipped or failed part.
+fn drop_block(path: &Path) -> Result<Line, Line> {
     let shown = path.display();
     let by_hand = remove_ours(&shown);
-    let old = read(path).map_err(|why| format!("MCP entry: skipped, {shown} {why}. {by_hand}"))?;
-    let Some((bytes, _)) = &old else { return Ok(format!("MCP entry: not found ({shown})")) };
+    let skipped = |why: String| Line::new(State::Skipped, format!("MCP entry: skipped, {why}"));
+    let not_found = || Line::new(State::Unchanged, format!("MCP entry: not found ({shown})"));
+    let old = read(path).map_err(|why| skipped(format!("{shown} {why}. {by_hand}")))?;
+    let Some((bytes, _)) = &old else { return Ok(not_found()) };
     let text = std::str::from_utf8(bytes)
-        .map_err(|_| format!("MCP entry: skipped, {shown} is not UTF-8. {by_hand}"))?;
-    let entries = scan(text).map_err(|why| {
-        format!("MCP entry: skipped, {shown} isn't TOML zerodb can read: {why}. {by_hand}")
-    })?;
+        .map_err(|_| skipped(format!("{shown} is not UTF-8. {by_hand}")))?;
+    let entries = scan(text)
+        .map_err(|why| skipped(format!("{shown} isn't TOML zerodb can read: {why}. {by_hand}")))?;
     let block = match find_block(&entries) {
         // Removing zerodb's lines would leave the others as part of a server.
         Ok(Some(block)) if clash(&entries, Some(&block)) == Some(Clash::Server) => {
-            return Err(format!("MCP entry: skipped, {shown} {OUTSIDE}. Nothing changed. {TIDY}"));
+            return Err(skipped(format!("{shown} {OUTSIDE}. Nothing changed. {TIDY}")));
         }
         Ok(Some(block)) => block,
         Ok(None) => {
             return match clash(&entries, None) {
-                Some(Clash::Server) => Err(format!(
-                    "MCP entry: skipped, {shown} has a zerodb MCP server that zerodb didn't \
-                     write. Remove it by hand to disconnect it"
-                )),
-                Some(Clash::Inline) => Err(format!(
-                    "MCP entry: skipped, {shown} sets mcp_servers as an inline table, so zerodb \
-                     can't tell whether it holds zerodb. If it does, remove zerodb there by hand"
-                )),
-                None => Ok(format!("MCP entry: not found ({shown})")),
+                Some(Clash::Server) => Err(skipped(format!(
+                    "{shown} has a zerodb MCP server that zerodb didn't write. Remove it by hand \
+                     to disconnect it"
+                ))),
+                Some(Clash::Inline) => Err(skipped(format!(
+                    "{shown} sets mcp_servers as an inline table, so zerodb can't tell whether it \
+                     holds zerodb. If it does, remove zerodb there by hand"
+                ))),
+                None => Ok(not_found()),
             };
         }
         Err(why) => {
-            return Err(format!(
-                "MCP entry: skipped, {shown}: {why}. Nothing changed. {}",
+            return Err(skipped(format!(
+                "{shown}: {why}. Nothing changed. {}",
                 remove_ours(&shown)
-            ));
+            )));
         }
     };
     let new = without(text, &block);
     let backup = write(path, old.as_ref(), new.as_bytes())
-        .map_err(|why| format!("MCP entry: failed, {why}. {by_hand}"))?;
+        .map_err(|why| Line::new(State::Failed, format!("MCP entry: failed, {why}. {by_hand}")))?;
     let saved = backup.map(|backup| format!(", backup: {}", backup.display()));
-    Ok(format!("MCP entry: removed ({shown}{})", saved.unwrap_or_default()))
+    Ok(Line::new(
+        State::Removed,
+        format!("MCP entry: removed ({shown}{})", saved.unwrap_or_default()),
+    ))
 }
 
 #[cfg(test)]

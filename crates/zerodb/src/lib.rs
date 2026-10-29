@@ -20,6 +20,7 @@ pub mod ops;
 pub mod outcome;
 mod redact;
 pub mod serve;
+pub mod setup;
 pub mod studio;
 
 use std::io::Read;

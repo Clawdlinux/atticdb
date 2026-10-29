@@ -19,6 +19,61 @@ The config is JSON: `{"data_dir", "listen", "unix_socket", "unix_socket_group", 
 Flags override fields. It must be a regular file owned by you with no group or other bits.
 Tenant names are 1 to 255 bytes. Tokens are 32 to 1024 bytes of visible ASCII, so the `Authorization` header fits the 16 KiB request head. Duplicate names or tokens fail.
 
+## Set up
+
+```sh
+zerodb setup             # finds your apps, asks 3 questions, shows the plan, then connects them
+zerodb setup --dry-run   # prints the plan and writes nothing
+zerodb setup --help      # the flags
+```
+
+It looks for VS Code, Copilot CLI, Claude Code and Codex. Nothing runs to find them.
+An app counts as found when its program is on `PATH`, or its config exists.
+For VS Code, Claude Code and Codex, the config is their config dir.
+For Copilot CLI, it is `mcp-config.json` or `config.json` in `~/.copilot`.
+The dir alone doesn't count, as connecting VS Code writes there too.
+
+It asks which apps to connect. Empty answers take the defaults in brackets.
+For Claude Code and Codex, it also asks 2 things.
+Should memory load at the start of each chat? Should notes be saved without asking?
+Saving a rule always asks.
+VS Code and Copilot CLI always get the hook. They ask before every write until you allow the tool.
+VS Code's Copilot chat reads the hook and instructions in `~/.copilot`. So VS Code gets those too, and the plan says so.
+zerodb keeps an instructions file you wrote. It counts as in place.
+That is 1 that mentions zerodb, or has zerodb's file name without its marker line.
+
+The plan has 1 line per file and part, such as `~/.claude/settings.json: add the SessionStart hook`.
+It comes from the code that writes, run in a mode that writes nothing.
+That mode runs no `claude` or `codex` command that changes anything.
+It checks an existing home as Apply would, so a home Apply refuses shows in the plan.
+Then it asks `Apply? [y/N]`.
+It connects Copilot CLI and VS Code first, then Claude Code, then Codex.
+Each part prints 1 line, as in `zerodb connect`. An app that fails doesn't stop the others.
+A summary counts the apps connected, and those with skipped parts.
+
+Then it checks each app. A new plan must find every part in place.
+The hook must print JSON within 5 s, 1 s past its own stop. The store must answer `fact_list`.
+For Codex, `codex mcp get zerodb --json` must show the entry.
+Last, it prints what to do next.
+That can be: approve the zerodb hook in Codex once, start new chat sessions, and reload VS Code.
+If `hooks = false` turns Codex's hooks off, it says memory won't load at chat start instead.
+
+Flags replace the questions. `--harness <list>` takes a comma list of app names.
+The names are `copilot`, `vscode`, `claude-code` and `codex`.
+`--no-hook` drops the hook. `--notes ask|auto` picks how notes are saved.
+`--yes` takes every default and doesn't ask `Apply?`.
+Without a terminal on stdin, it needs `--yes` or `--dry-run`. Else it exits 2.
+The end of stdin exits 2. So do 3 answers it can't read.
+`zerodb connect <name> --dry-run` prints the plan for 1 app.
+
+| Exit code | Meaning |
+|---|---|
+| 0 | Every chosen app connected, with no skipped part, and passed its checks. Also `Apply?` answered no |
+| 1 | A part was skipped or failed, a check failed, or no app was found |
+| 2 | A usage error, no terminal without `--yes`, or no answer. Also an app that stopped with exit 2 |
+
+`--dry-run` exits with the code of an app whose plan stopped. Else it exits 1 when a part would be skipped, else 0.
+
 ## `zerodb serve`
 
 - TCP listens on `127.0.0.1:7425` by default. `--listen <addr>` picks another loopback address, port 0 included. `--listen none` binds no TCP. A non-loopback address fails startup, because zerodb has no TLS. Put a TLS proxy on loopback in front.
@@ -163,7 +218,8 @@ An auto-started server runs in its own process group and outlives the adapters. 
 
 ## `zerodb connect` and `zerodb disconnect`
 
-`zerodb connect <vscode|copilot> [--force]` creates the home, then adds a `zerodb` entry to the harness's user MCP config.
+`zerodb connect <vscode|copilot> [--force] [--dry-run]` creates the home, then adds a `zerodb` entry to the harness's user MCP config.
+With `--dry-run`, any `connect` prints 1 line per file and part saying what it would do, and creates and runs nothing. `zerodb setup` shows that plan too.
 It also writes the session-start hook file, described below.
 `zerodb disconnect <vscode|copilot>` removes that entry. Every other key and server stays.
 Claude Code and Codex have their own parts. See [Claude Code](#claude-code) and [Codex](#codex) below.
@@ -217,7 +273,7 @@ A hook file with other content is left alone, and `disconnect` says so.
 
 ### Claude Code
 
-`zerodb connect claude-code [--force] [--no-hook] [--notes ask|auto]` creates the home, then adds 3 parts.
+`zerodb connect claude-code [--force] [--no-hook] [--notes ask|auto] [--dry-run]` creates the home, then adds 3 parts.
 `zerodb disconnect claude-code` removes them.
 `--no-hook` and `--notes` work only for `claude-code` and `codex`. `--notes` defaults to `auto`.
 The config dir is `$CLAUDE_CONFIG_DIR` when set, else `~/.claude`.
@@ -268,7 +324,7 @@ Then start a new Claude Code session.
 
 ### Codex
 
-`zerodb connect codex [--force] [--no-hook] [--notes ask|auto]` creates the home, then adds 2 parts.
+`zerodb connect codex [--force] [--no-hook] [--notes ask|auto] [--dry-run]` creates the home, then adds 2 parts.
 `zerodb disconnect codex` removes them.
 `--force` changes nothing for Codex, as zerodb never edits a `zerodb` server it didn't write.
 The config dir is `$CODEX_HOME` when set, else `~/.codex`.
@@ -327,7 +383,7 @@ It's found the same way: a group whose every handler runs an absolute binary pat
 Under `ZERODB_HOME`, the hook command starts with `ZERODB_HOME='<path>' `.
 The block is at most 6,000 characters. `additionalContextLimit` is 24,000, so the block arrives whole whether Codex counts bytes or characters.
 A missing `hooks.json` starts as `{"hooks": {}}`.
-Codex runs a new hook only after you approve it once in Codex. `connect` says so after it adds or updates the hook.
+Codex runs a new hook only after you approve it once in Codex. `connect` says so after it adds or updates the hook, unless `hooks = false` turns hooks off.
 Codex keeps 1 approval per hook in `config.toml`, keyed by the hook's position. zerodb doesn't write those.
 When groups follow zerodb's, removing or replacing it moves them up, so Codex may ask to approve them again. Both verbs say so whenever that change was saved, even if a zerodb handler in a mixed group is left to remove by hand.
 `hooks = false` in `[features]` turns hooks off. `connect` warns when it finds that line.

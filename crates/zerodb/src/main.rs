@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use zerodb::config::{Config, Listen};
-use zerodb::connect::{Harness, Notes};
+use zerodb::connect::{Harness, Mode, Notes, Options};
 use zerodb::launch::Url;
 
 const USAGE: &str = "usage:
@@ -20,8 +20,9 @@ const USAGE: &str = "usage:
   zerodb verify --data-dir <dir> [--scratch <dir>]
   zerodb dump --data-dir <dir> [--scratch <dir>] [--from <lsn>] [--limit <n>]
   zerodb mcp <connect>
-  zerodb connect <vscode|copilot> [--force]
-  zerodb connect <claude-code|codex> [--force] [--no-hook] [--notes ask|auto]
+  zerodb setup [--yes] [--harness <list>] [--no-hook] [--notes ask|auto] [--dry-run]
+  zerodb connect <vscode|copilot> [--force] [--dry-run]
+  zerodb connect <claude-code|codex> [--force] [--no-hook] [--notes ask|auto] [--dry-run]
   zerodb disconnect <vscode|copilot|claude-code|codex>
   zerodb hook session-start [--harness <name>]
   zerodb studio [--url unix:///path|http://127.0.0.1:<port>] [--data-dir <dir>] [--config <path>]
@@ -42,11 +43,14 @@ const USAGE: &str = "usage:
   after the folder holding .git. A worktree takes its main repo's name.
   append, recent, search and fact print one JSON line. They exit 1 when nothing was written,
   3 when a write may or may not be saved.
-  studio serves a read-only page on 127.0.0.1 and opens it. It runs until Ctrl-C.";
+  studio serves a read-only page on 127.0.0.1 and opens it. It runs until Ctrl-C.
+  setup finds VS Code, Copilot CLI, Claude Code and Codex, asks which to connect, shows the
+  plan, then connects them and checks each. See zerodb setup --help.";
 
 /// Commands that use the home. A relative `ZERODB_HOME` fails them with exit 2, so none falls
 /// back to the default home. The hook prints `{}` for it, as for any error.
-const HOME_COMMANDS: [&str; 7] = ["mcp", "connect", "studio", "append", "recent", "search", "fact"];
+const HOME_COMMANDS: [&str; 8] =
+    ["mcp", "connect", "setup", "studio", "append", "recent", "search", "fact"];
 
 /// Flags of every command that talks to a server as a tenant. The first 5 pick the store.
 const CONNECT: [&str; 8] = [
@@ -98,9 +102,15 @@ fn main() -> ExitCode {
             "connect" => rest.split_first().and_then(|(name, rest)| {
                 connect(
                     Harness::parse(name)?,
-                    flags(rest, &["--notes"], &["--force", "--no-hook"])?,
+                    flags(rest, &["--notes"], &["--force", "--no-hook", "--dry-run"])?,
                 )
             }),
+            "setup" if rest.iter().any(|arg| arg == "--help") => {
+                println!("{}", zerodb::setup::USAGE);
+                Some(0)
+            }
+            "setup" => flags(rest, &["--harness", "--notes"], &["--yes", "--no-hook", "--dry-run"])
+                .and_then(setup),
             "disconnect" => match rest {
                 [name] => Harness::parse(name).map(zerodb::connect::disconnect),
                 _ => None,
@@ -166,22 +176,42 @@ fn tool(args: &[String], name: &str, valued: &[&str], switches: &[&str]) -> Opti
 }
 
 /// `zerodb connect`. `--no-hook` and `--notes` are for Claude Code and Codex only. Codex
-/// takes `--force`, but never edits a `zerodb` server it didn't write.
+/// takes `--force`, but never edits a `zerodb` server it didn't write. `--dry-run` prints
+/// what would change and writes nothing.
 fn connect(harness: Harness, mut flags: HashMap<String, String>) -> Option<u8> {
     let force = flags.remove("--force").is_some();
-    if ![Harness::ClaudeCode, Harness::Codex].contains(&harness) {
-        return flags.is_empty().then(|| zerodb::connect::connect(harness, force));
+    let mode = if flags.remove("--dry-run").is_some() { Mode::Plan } else { Mode::Apply };
+    if ![Harness::ClaudeCode, Harness::Codex].contains(&harness) && !flags.is_empty() {
+        return None;
     }
-    let notes = match flags.remove("--notes").as_deref() {
-        None | Some("auto") => Notes::Auto,
-        Some("ask") => Notes::Ask,
-        Some(_) => return None,
-    };
+    let notes = notes(flags.remove("--notes"))?.unwrap_or(Notes::Auto);
     let hook = flags.remove("--no-hook").is_none();
-    Some(match harness {
-        Harness::Codex => zerodb::connect::connect_codex(hook, notes),
-        _ => zerodb::connect::connect_claude_code(force, hook, notes),
-    })
+    Some(zerodb::connect::connect(harness, Options { force, hook, notes }, mode).print())
+}
+
+/// The value of `--notes`: `Some(None)` when it is not given, `None` when it is not valid.
+fn notes(value: Option<String>) -> Option<Option<Notes>> {
+    match value.as_deref() {
+        None => Some(None),
+        Some("auto") => Some(Some(Notes::Auto)),
+        Some("ask") => Some(Some(Notes::Ask)),
+        Some(_) => None,
+    }
+}
+
+/// `zerodb setup`.
+fn setup(mut flags: HashMap<String, String>) -> Option<u8> {
+    let harnesses = match flags.remove("--harness") {
+        Some(list) => Some(zerodb::setup::apps(&list)?),
+        None => None,
+    };
+    Some(zerodb::setup::run(zerodb::setup::Flags {
+        yes: flags.contains_key("--yes"),
+        harnesses,
+        no_hook: flags.contains_key("--no-hook"),
+        notes: notes(flags.remove("--notes"))?,
+        dry_run: flags.contains_key("--dry-run"),
+    }))
 }
 
 fn report<T>(result: Result<T, impl std::fmt::Display>) -> Result<T, u8> {
