@@ -2,11 +2,10 @@
 //! flags: an owner-only directory with `zerodb.json` and `data/`, created on first use.
 
 use std::ffi::OsStr;
-use std::fs::OpenOptions;
-use std::io::Read;
+use std::fs::{File, OpenOptions};
+use std::io::{ErrorKind, Read};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use zerodb_tape::{Io, StdIo};
 
 /// The tenant the home's config names.
 pub const TENANT: &str = "me";
@@ -109,35 +108,36 @@ pub fn dir() -> Result<PathBuf, String> {
 /// `zerodb.json` with tenant [`TENANT`]. Checks both directories are owner-only.
 pub fn ensure() -> Result<Home, String> {
     let dir = dir()?;
-    let data_dir = dir.join("data");
-    // Found before anything is made. Every directory this call makes is below it.
-    let existing = data_dir.ancestors().find(|path| path.exists()).unwrap_or(Path::new("/"));
     crate::listen::owned_dir(&dir, 0o077)?;
     let config = dir.join("zerodb.json");
     if !config.exists() {
         publish(&dir, &config)?;
     }
+    let data_dir = dir.join("data");
     crate::listen::owned_dir(&data_dir, 0o077)?;
-    sync_dirs(&dir, &data_dir, existing)?;
+    // Every call syncs, covering a concurrent creator that has not synced yet.
+    sync_dirs(&dir, &data_dir)?;
     Ok(Home { dir, config, data_dir, tenant: TENANT.into() })
 }
 
 /// Syncs `data/`, the home and its ancestors, deepest first, so their entries survive a
-/// power loss before the first ack. `existing` is the deepest directory that existed before
-/// any was made.
-fn sync_dirs(dir: &Path, data_dir: &Path, existing: &Path) -> Result<(), String> {
-    // Every call syncs up to $HOME, or to the home's grandparent when the home is outside
-    // $HOME, as XDG_DATA_HOME or ZERODB_HOME may put it. That covers a concurrent creator that
-    // has not synced yet. ZERODB_HOME works with no $HOME.
+/// power loss before the first ack. A home inside `$HOME` stops at `$HOME`. Any other syncs
+/// every ancestor up to `/`, since a first use may have made any of them.
+fn sync_dirs(dir: &Path, data_dir: &Path) -> Result<(), String> {
+    // With $HOME unset, as ZERODB_HOME allows, the home counts as outside it.
     let home = user_home().ok().filter(|home| dir.starts_with(home));
-    let usual = home.as_deref().unwrap_or_else(|| dir.ancestors().nth(2).unwrap_or(Path::new("/")));
-    // A call that made directories above that goes on up through `existing`, which holds the
-    // entry of the highest one it made.
-    let top = if usual.starts_with(existing) { existing } else { usual };
-    let io = StdIo::new();
     for path in data_dir.ancestors() {
-        io.sync_dir(path).map_err(|error| format!("{}: cannot sync: {error}", path.display()))?;
-        if path == top {
+        let fail = |error: std::io::Error| format!("{}: cannot sync: {error}", path.display());
+        match File::open(path) {
+            // An ancestor above the home that this user can't open existed before, as every
+            // directory zerodb makes is owner-only. EACCES and EPERM both land here.
+            Err(error)
+                if error.kind() == ErrorKind::PermissionDenied
+                    && path != dir
+                    && dir.starts_with(path) => {}
+            file => file.and_then(|file| file.sync_all()).map_err(fail)?,
+        }
+        if home.as_deref() == Some(path) {
             break;
         }
     }
