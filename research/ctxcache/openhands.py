@@ -76,6 +76,8 @@ def trajectory(row: dict, traj: str, salt: str = "ctxcache-v1", keep_text: bool 
             res = results.get(call.get("id"))
             if res is None:
                 b.stats["actions_without_output"] += 1
+                if fn.get("name") == "str_replace_editor" and isinstance(args, dict):
+                    _edit_reference(b, args)  # the edit still used its view. With no result, nothing was written.
                 continue
             content = res.get("content") or ""
             b.stats["output_tokens"] += tokens(content)
@@ -91,6 +93,18 @@ def trajectory(row: dict, traj: str, salt: str = "ctxcache-v1", keep_text: bool 
     return b.accesses, {**info, **b.stats}
 
 
+def _edit_reference(b: TraceBuilder, args: dict) -> None:
+    """str_replace names its view by old text, and insert by line. Other commands name none."""
+    cmd = args.get("command")
+    path = posixpath.normpath(args.get("path") or "")
+    if cmd == "insert":
+        line = args.get("insert_line")
+        n = int(line) if str(line or "").isdigit() else None
+        b.use(path, "line", line=n, end=n)
+    elif cmd == "str_replace":
+        b.use(path, "edit", text=args.get("old_str") if isinstance(args.get("old_str"), str) else None)
+
+
 def _editor(b: TraceBuilder, args: dict, content: str) -> None:
     cmd = args.get("command")
     path = posixpath.normpath(args.get("path") or "")
@@ -102,13 +116,7 @@ def _editor(b: TraceBuilder, args: dict, content: str) -> None:
     if cmd == "create" and content.startswith("File created successfully"):
         b.write(path)
     elif cmd in ("str_replace", "insert"):
-        line = args.get("insert_line") if cmd == "insert" else None
-        old = args.get("old_str") if isinstance(args.get("old_str"), str) else None
-        if cmd == "insert":
-            n = int(line) if str(line or "").isdigit() else None
-            b.use(path, "line", line=n, end=n)
-        else:
-            b.use(path, "edit", text=old)
+        _edit_reference(b, args)
         if "has been edited" in content.split("\n", 1)[0]:
             b.write(path)
             body, lines, plain = numbered(content)

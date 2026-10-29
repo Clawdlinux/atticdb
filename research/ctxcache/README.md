@@ -180,7 +180,7 @@ They are `system`, `user` (the task), then `assistant` messages with 1 tool call
 | `str_replace_editor view` of a file | A read. The object is the `cat -n` lines shown, from `view_range` or the whole file. |
 | `view` of a directory, or an error | An output. |
 | `create` | "File created successfully" is a write. The output only confirms it, so the new content is never shown. |
-| `str_replace`, `insert` | A reference to a view of the current version, by `old_str` or `insert_line` as above, else the newest view. On "has been edited", a write, and the snippet shown is a read of the new version. |
+| `str_replace`, `insert` | A reference to a view of the current version, by `old_str` or `insert_line` as above, else the newest view. With no tool result, still a reference, but no write. On "has been edited", a write, and the snippet shown is a read of the new version. |
 | `undo_edit` | On success, a write, and the file shown is a read. |
 | `execute_bash` | A shell command, below. `[Current working directory: <dir>]` in the output sets the directory for the next call. A pure read that exits nonzero is an output, except grep's exit 1 for no match. |
 | `think`, `task_tracker`, others | Outputs. |

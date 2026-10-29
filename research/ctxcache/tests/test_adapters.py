@@ -147,6 +147,17 @@ OH_CASES = [
         [],
         {"writes": 0},
     ),
+    (
+        "an edit with no tool result still uses its view, and writes nothing",
+        oh_row(
+            ("str_replace_editor", {"command": "view", "path": APP}, oh_cat(APP, ["x = 1"])),
+            ("str_replace_editor", {"command": "str_replace", "path": APP, "old_str": "x = 1", "new_str": "X = 1"},
+             None),
+        ),
+        ["A*:file", "Ar:file"],
+        ["edit_span"],
+        {"actions_without_output": 1, "writes": 0},
+    ),
 ]
 
 
