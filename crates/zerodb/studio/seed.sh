@@ -1,8 +1,8 @@
 #!/bin/sh
 # Seeds a throwaway zerodb home with realistic memory, for studio screenshots and manual checks.
 # Usage: crates/zerodb/studio/seed.sh <empty dir>
-# Then: HOME=<dir> zerodb studio
-# The seeded home's server keeps running. Stop it with: kill <pid from the LOCK file>.
+# Then: HOME=<dir> XDG_DATA_HOME= zerodb studio
+# The seeded home's server keeps running. The script prints its pid, to stop it with kill.
 set -eu
 
 dir=${1:?usage: seed.sh <empty dir>}
@@ -13,6 +13,15 @@ if [ -n "$(ls -A "$dir")" ]; then
   exit 2
 fi
 bin=${ZERODB_BIN:-zerodb}
+
+# The pid of the home's server, from its LOCK file on macOS or Linux. Empty before it starts.
+pid() {
+  for lock in "$dir/Library/Application Support/zerodb/data/LOCK" "$dir/.local/share/zerodb/data/LOCK"; do
+    if [ -f "$lock" ]; then sed -n 's/^pid=\([0-9]*\).*/\1/p' "$lock"; return; fi
+  done
+}
+# A failed step leaves running the server that the first step started.
+trap 'code=$?; if [ "$code" -ne 0 ] && [ -n "$(pid)" ]; then echo "seed.sh: failed. Stop the home server with: kill $(pid)" >&2; fi' EXIT
 
 # Only HOME changes, so the real home is never touched. XDG_DATA_HOME would win on Linux.
 run() { HOME="$dir" XDG_DATA_HOME= "$bin" "$@" >/dev/null; }
@@ -61,4 +70,5 @@ note copilot '../x#y?z%' 'Pasted from a web page: <script>fetch("https://example
 fact copilot 'repo/zerodb/<img src=x onerror=alert(1)>' 'A key with markup in it. It must show as text.'
 
 echo "seeded $dir"
-echo "open it with: HOME=$dir zerodb studio"
+echo "open it with: HOME=$dir XDG_DATA_HOME= zerodb studio"
+echo "its server runs as pid $(pid). Stop it with: kill $(pid)"

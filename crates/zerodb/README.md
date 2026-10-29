@@ -274,7 +274,7 @@ A 5xx answer logs 1 stderr line with the method, path, status and time. Never a 
 Exit code 1 when it cannot start, 2 for a bad flag.
 
 The page has 7 screens: Overview, Log, Sessions, Facts, Search, Chat start and Health, each at a hash route.
-`studio/seed.sh <empty dir>` seeds a throwaway home with realistic memory and hostile values. Set `ZERODB_BIN` for a build not on `PATH`, then run `HOME=<dir> zerodb studio`.
+`studio/seed.sh <empty dir>` seeds a throwaway home with realistic memory and hostile values. Set `ZERODB_BIN` for a build not on `PATH`, then run `HOME=<dir> XDG_DATA_HOME= zerodb studio`.
 
 ## Tests
 
