@@ -122,3 +122,20 @@ def test_cli_refuses_bad_input_with_exit_2(tmp_path, name, argv):
         code = e.code
     assert code == 2, name
     assert not os.path.exists(os.path.join(REPO, "rows")), "nothing is written into the repo"
+
+
+# name, path under the stand-in repo's parent, inside the repo
+GUARD = [
+    ("a dir below the repo that does not exist yet", "repo/new/rows", True),
+    ("a sibling whose name starts with the repo's", "repo2/rows", False),
+    ("the repo under another case, on a case-insensitive disk", "REPO/rows", True),
+]
+
+
+@pytest.mark.parametrize("name, rel, inside", GUARD, ids=[c[0] for c in GUARD])
+def test_repo_guard_compares_files_not_strings(tmp_path, name, rel, inside):
+    (tmp_path / "repo").mkdir()
+    (tmp_path / "repo2").mkdir()
+    if rel.startswith("REPO") and not os.path.exists(tmp_path / "REPO"):
+        pytest.skip("this filesystem is case-sensitive, so the alias does not exist")
+    assert run._inside(str(tmp_path / rel), str(tmp_path / "repo")) == inside, name

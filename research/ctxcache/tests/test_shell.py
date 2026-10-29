@@ -4,7 +4,7 @@ from research.ctxcache.bash import effects
 
 REPO = "/w/repo"
 KNOWN = {"/w/repo/src/m.py", "/w/repo/a.py", "/w/repo/reproduce.py"}
-M, A, R = "/w/repo/src/m.py", "/w/repo/a.py", "/w/repo/reproduce.py"
+M, A, R, X = "/w/repo/src/m.py", "/w/repo/a.py", "/w/repo/reproduce.py", "/w/repo/x.py"
 TWO_M = KNOWN | {"/w/repo/lib/m.py"}
 
 # name, command, cwd, known files, expected (events, pure read, URL read)
@@ -34,6 +34,14 @@ CASES = [
     ("rg on a directory is an output", "rg -n foo src/", REPO, KNOWN, ([], None, None)),
     ("rg on a file is a read", "rg -n foo src/m.py", REPO, KNOWN, ([], M, None)),
     ("curl of 1 URL is a URL read", "curl -s https://x.dev/doc", REPO, KNOWN, ([], None, "https://x.dev/doc")),
+    ("an escaped backslash before a newline joins nothing", "echo a \\\\\nrm x.py", REPO, KNOWN,
+     ([("write", X)], None, None)),
+    ("a heredoc line that ends in a backslash still ends at its delimiter",
+     "cat > t.sh << 'EOF'\necho hi \\\nEOF\nrm x.py", REPO, KNOWN, ([("write", "/w/repo/t.sh"), ("write", X)], None, None)),
+    ("a << in a comment starts no heredoc", "# cat <<EOF\nrm x.py", REPO, KNOWN, ([("write", X)], None, None)),
+    ("a << in quotes starts no heredoc", "git commit -m 'parse <<EOF'\nrm x.py", REPO, KNOWN,
+     ([("write", X)], None, None)),
+    ("a shift is not a heredoc", "echo $((1 << 16))\nrm x.py", REPO, KNOWN, ([("write", X)], None, None)),
 ]
 
 

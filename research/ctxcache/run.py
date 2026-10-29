@@ -96,8 +96,20 @@ def budget_text(budgets: list[int]) -> str:
 
 
 def _inside(path: str, root: str) -> bool:
-    path, root = os.path.realpath(path), os.path.realpath(root)
-    return os.path.commonpath([path, root]) == root
+    """True if `path` is `root` or lies below it. It compares files, not strings, so an
+    alias still counts: another case on a case-insensitive disk, a firmlink such as
+    /System/Volumes/Data/..., or a symlink. Parts that do not exist yet are skipped."""
+    p = os.path.realpath(path)
+    while True:
+        try:
+            if os.path.samefile(p, root):
+                return True
+        except OSError:
+            pass  # not created yet
+        parent = os.path.dirname(p)
+        if parent == p:
+            return False
+        p = parent
 
 
 def source(a: argparse.Namespace, skipped: Counter):

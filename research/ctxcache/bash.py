@@ -17,11 +17,11 @@ GREPS = {"grep", "egrep", "fgrep"}
 RUNNERS = {"python", "python2", "python3", "pytest", "py.test", "nosetests", "coverage", "ipython", "bash", "sh",
            "zsh", "node", "ruby", "perl", "php", "Rscript", "julia", "tox"}
 WRAPPERS = {"timeout", "time", "sudo", "env", "nohup", "nice", "stdbuf", "command", "exec"}
-REDIRECTS = {">", ">>", ">|", "&>", "&>>", ">&", "<", "<<", "<<<", "<&", "<>"}
+REDIRECTS = {">", ">>", ">|", "&>", "&>>", ">&", "<", "<<", "<<-", "<<<", "<&", "<>"}
 WRITE_REDIRECTS = {">", ">>", ">|", "&>", "&>>", ">&"}
 OPERATORS = "();<>|&\n"
 # Longest first, so "&&" wins over "&" and "2>&1" reads as 2, >&, 1.
-OPS = sorted(["&&", "||", ";;", "|&", "&>>", "&>", ">>", ">&", ">|", "<<<", "<<", "<&", "<>", ">", "<", "|", "&",
+OPS = sorted(["&&", "||", ";;", "|&", "&>>", "&>", ">>", ">&", ">|", "<<<", "<<-", "<<", "<&", "<>", ">", "<", "|", "&",
               ";", "(", ")", "\n"], key=len, reverse=True)
 # Options that take the next word as their value, per program.
 VALUED = {
@@ -44,7 +44,7 @@ PATTERN_FIRST = {
 for _p in ("egrep", "fgrep"):
     VALUED[_p], PATTERN_FIRST[_p] = VALUED["grep"], PATTERN_FIRST["grep"]
 VALUED["python3"] = VALUED["python"]
-HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_]\w*)\1")
+DELIMITER = re.compile(r"^[A-Za-z_]\w*$")  # a heredoc delimiter, after its quotes go
 PATHISH = re.compile(r"^[\w.~/+@%,:=-]+$")
 EXTENSION = re.compile(r"\.[A-Za-z0-9]{1,8}$")
 URL = re.compile(r"^https?://\S+$")
@@ -123,64 +123,88 @@ def split(command: str) -> list[tuple[str, list[str]]] | None:
 
 
 def tokens(command: str) -> list[tuple[str, str]] | None:
-    """("op", text) and ("word", text) pairs. Quotes and escapes are resolved inside
-    words, so an operator in quotes is part of its word. A backslash-newline joins
-    lines. A word that starts with # is a comment up to the newline, which stays.
-    None if a quote is not closed."""
-    s = strip_heredocs(command.replace("\\\n", ""))
-    out: list[tuple[str, str]] = []
+    """("op", text) and ("word", text) pairs, in 1 pass over the raw text.
+    Quotes and escapes resolve inside words, so an operator in quotes is part of its word.
+    A backslash-newline joins lines outside quotes and inside double quotes. An escaped
+    backslash before a newline joins nothing. A word that starts with # is a comment up
+    to the newline, which stays. Only an unquoted << or <<- starts a heredoc, and only
+    with a delimiter such as EOF or 'EOF', so a shift such as $((1 << 16)) does not.
+    Its body is skipped from the next newline through the delimiter line. None if a
+    quote is not closed."""
+    s, out, heredocs = command, [], []
     i, n = 0, len(s)
     while i < n:
         c = s[i]
         if c in " \t\r":
             i += 1
+        elif c == "\\" and s.startswith("\n", i + 1):
+            i += 2  # a line continuation between words
         elif c in OPERATORS:
             op = next(o for o in OPS if s.startswith(o, i))
             out.append(("op", op))
             i += len(op)
+            if op == "\n" and heredocs:
+                i = _skip_heredocs(s, i, heredocs)
+                heredocs = []
         elif c == "#":
             j = s.find("\n", i)
             i = n if j < 0 else j
         else:
-            word: list[str] = []
-            while i < n and s[i] not in " \t\r" and s[i] not in OPERATORS:
-                c = s[i]
-                if c == "'":
-                    j = s.find("'", i + 1)
-                    if j < 0:
-                        return None
-                    word.append(s[i + 1 : j])
-                    i = j + 1
-                elif c == '"':
-                    i += 1
-                    while i < n and s[i] != '"':
-                        if s[i] == "\\" and i + 1 < n and s[i + 1] in '"\\$`':
-                            i += 1
-                        word.append(s[i])
-                        i += 1
-                    if i >= n:
-                        return None
-                    i += 1
-                elif c == "\\" and i + 1 < n:
-                    word.append(s[i + 1])
-                    i += 2
-                else:
-                    word.append(c)
-                    i += 1
-            out.append(("word", "".join(word)))
+            word, i = _word(s, i)
+            if word is None:
+                return None
+            if out and out[-1][0] == "op" and out[-1][1] in ("<<", "<<-") and DELIMITER.match(word):
+                heredocs.append((word, out[-1][1] == "<<-"))
+            out.append(("word", word))
     return out
 
 
-def strip_heredocs(command: str) -> str:
-    lines, out, i = command.split("\n"), [], 0
-    while i < len(lines):
-        out.append(lines[i])
-        i += 1
-        for m in HEREDOC.finditer(out[-1]):
-            while i < len(lines) and lines[i].strip() != m.group(2):
-                i += 1
+def _word(s: str, i: int) -> tuple[str | None, int]:
+    """1 word from position i, with quotes and escapes resolved. None if a quote is open."""
+    word: list[str] = []
+    n = len(s)
+    while i < n and s[i] not in " \t\r" and s[i] not in OPERATORS:
+        c = s[i]
+        if c == "'":
+            j = s.find("'", i + 1)
+            if j < 0:
+                return None, n
+            word.append(s[i + 1 : j])
+            i = j + 1
+        elif c == '"':
             i += 1
-    return "\n".join(out)
+            while i < n and s[i] != '"':
+                if s[i] == "\\" and i + 1 < n and s[i + 1] == "\n":
+                    i += 2  # a line continuation inside double quotes
+                    continue
+                if s[i] == "\\" and i + 1 < n and s[i + 1] in '"\\$`':
+                    i += 1
+                word.append(s[i])
+                i += 1
+            if i >= n:
+                return None, n
+            i += 1
+        elif c == "\\" and i + 1 < n:
+            if s[i + 1] != "\n":  # a backslash-newline joins the lines
+                word.append(s[i + 1])
+            i += 2
+        else:
+            word.append(c)
+            i += 1
+    return "".join(word), i
+
+
+def _skip_heredocs(s: str, i: int, heredocs: list[tuple[str, bool]]) -> int:
+    """Skips each pending heredoc body, in order, from position i: the start of the line
+    after the << operator. Body lines are raw text: no quotes, escapes or comments."""
+    for delimiter, tabs in heredocs:
+        while i < len(s):
+            j = s.find("\n", i)
+            line = s[i:] if j < 0 else s[i:j]
+            i = len(s) if j < 0 else j + 1
+            if (line.lstrip("\t") if tabs else line) == delimiter:
+                break
+    return i
 
 
 def pathlike(word: str) -> bool:

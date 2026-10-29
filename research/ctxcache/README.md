@@ -41,6 +41,7 @@ python3 -m pytest research/ctxcache/tests
 | `--sensitivity-budgets` | `4k,8k` | budgets for the reference proxy check |
 | `--input`, `--copilot-root` | | a trace file, or another Copilot log directory |
 
+The repo check compares files, not strings, so a path to the checkout under another case or through `/System/Volumes/Data` is refused too.
 Bad flags and fetch or file errors exit with code 2. A run writes 4 files to `--out`:
 - `<dataset>.csv`: 1 row per budget and policy, pooled and macro, with intervals and leave-one-out ranges.
 - `<dataset>-sensitivity.csv`: the same policies on narrower proxies, at the sensitivity budgets.
@@ -183,10 +184,13 @@ A `cat -n` in the shell and an editor view of the same lines are 1 object.
 
 ### Shell commands: `bash.py`
 
-A small scanner splits the command on unquoted `&&`, `||`, `;`, `|`, `&` and newlines.
+A small scanner reads the command once and splits it on unquoted `&&`, `||`, `;`, `|`, `&` and newlines.
 Quotes and escapes are resolved inside words, so a quoted `|` is a word, not a pipe.
-A backslash-newline joins 2 lines. An unquoted word that starts with `#` is a comment up to the newline.
-Heredoc bodies are dropped. Leading `VAR=value` words and wrappers such as `timeout 10` are skipped. A `cd` sets the directory.
+A backslash-newline joins 2 lines, outside quotes and inside double quotes. An escaped backslash before a newline joins nothing.
+An unquoted word that starts with `#` is a comment up to the newline.
+Only an unquoted `<<` or `<<-` starts a heredoc, and only with a delimiter such as `EOF` or `'EOF'`. So a shift such as `$((1 << 16))` does not.
+A heredoc body is dropped, from the next line through the delimiter line.
+Leading `VAR=value` words and wrappers such as `timeout 10` are skipped. A `cd` sets the directory.
 - **Pure read**: 1 reader on exactly 1 file, maybe piped into filters, with no redirection. Readers are `cat`, `head`, `tail`, `nl`, `wc`, `less`, `more`, `sed` without `-i`, `grep` without `-r`, `rg` and `awk`. The output is a read of that file. `rg` searches directories, so it reads a file only when the operand is a known file or has an extension. An operand ending in `/` is never a file.
 - **Writes**: `rm`, `mv`, `touch`, `truncate`, `tee`, the last operand of `cp`, and `sed -i`, which is a reference first. Also `git checkout` or `git restore` of a known file, and `>` or `>>` into a file.
 - **References**: every other operand that resolves to a known file.
