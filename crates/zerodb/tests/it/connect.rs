@@ -720,8 +720,9 @@ fn connect_claude_code_adds_its_parts() {
     assert_eq!(calls().len(), start, "no claude ran");
     assert!(!home.join(".claude.json").exists());
 
-    // A different zerodb entry is refused before anything changes, unless --force, which
-    // removes it, then adds zerodb's. One with connection flags says how to keep its memory.
+    // An entry that isn't a zerodb mcp command is refused before anything changes, unless
+    // --force, which removes it, then adds zerodb's. One with connection flags says how to
+    // keep its memory. One from an old binary path is updated without --force.
     let home = dir.0.join("d");
     let state = home.join(".claude.json");
     let rows = [
@@ -731,9 +732,9 @@ fn connect_claude_code_adds_its_parts() {
             "uses --url unix:///old.",
         ),
         (
-            "other binary",
-            json!({"command": "/opt/zerodb", "args": ["mcp", "--agent", "claude-code"]}),
-            "Nothing changed. To replace it: ",
+            "other command",
+            json!({"command": "npx", "args": ["-y", "zerodb-mcp"]}),
+            "not a zerodb mcp command such as ",
         ),
     ];
     for (case, other, said) in rows {
@@ -756,6 +757,15 @@ fn connect_claude_code_adds_its_parts() {
     assert_eq!(calls()[start..], [remove.clone(), add(None)]);
     assert_eq!(read(&state)["mcpServers"]["zerodb"], entry(None));
     assert_eq!(read(&state)["numStartups"], 3, "the rest of Claude's state stays");
+    let old = json!({"type": "stdio", "command": "/opt/old/zerodb",
+        "args": ["mcp", "--agent", "claude-code"], "env": {}});
+    std::fs::write(&state, json!({"mcpServers": {"zerodb": old}}).to_string()).unwrap();
+    let start = calls().len();
+    let (code, out) = run(&home, None, &bin, &[], &["connect", "claude-code"]);
+    assert_eq!(code, Some(0), "old binary: {out}");
+    assert!(out.starts_with(&format!("MCP entry: updated ({})\n", state.display())), "{out}");
+    assert_eq!(calls()[start..], [remove.clone(), add(None)], "old binary");
+    assert_eq!(read(&state)["mcpServers"]["zerodb"], entry(None), "old binary");
     // disconnect leaves an entry zerodb didn't write, and removes the other parts.
     let mine = json!({"command": "npx", "args": ["-y", "zerodb-mcp"]});
     std::fs::write(&state, json!({"mcpServers": {"zerodb": mine}}).to_string()).unwrap();

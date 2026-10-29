@@ -76,12 +76,12 @@ pub(super) fn state_file() -> Result<PathBuf, String> {
 /// differs is refused before anything changes, unless `force`. Returns the exit code.
 pub(super) fn connect(force: bool, hook: bool, notes: Notes) -> u8 {
     let prepared = (|| {
-        let home = moved_home()?;
+        let home = moved_home(Harness::ClaudeCode)?;
         let exe = binary()?;
         let state = state_file()?;
         let current = current(&state);
         if let (false, Ok(Some(entry))) = (force, &current) {
-            if !same(entry, &exe, home.as_deref()) {
+            if !same(entry, &exe, home.as_deref()) && !updatable(entry) {
                 let data = crate::home::dir()?.join("data");
                 refuse_flags(Harness::ClaudeCode, &state, entry, &data)?;
                 return Err(differs(&state, entry, &exe, home.as_deref()));
@@ -214,6 +214,13 @@ fn same(entry: &Value, exe: &str, home: Option<&str>) -> bool {
         && home_of(entry).map(Path::new) == home.map(Path::new)
 }
 
+/// Whether `entry` runs any absolute path with exactly zerodb's args, so it has no
+/// connection flags. `connect` updates it without `--force`, as for VS Code and Copilot.
+fn updatable(entry: &Value) -> bool {
+    let command = entry["command"].as_str().map(Path::new);
+    command.is_some_and(Path::is_absolute) && entry["args"] == mcp_args()
+}
+
 /// Whether `entry` is what zerodb writes, for any absolute `zerodb` binary and any home.
 fn written(entry: &Value) -> bool {
     let Some(entry) = entry.as_object() else { return false };
@@ -235,8 +242,9 @@ fn differs(state: &Path, entry: &Value, exe: &str, home: Option<&str>) -> String
     let shown = state.display();
     let (command, args) = (&entry["command"], &entry["args"]);
     format!(
-        "{shown}: the zerodb entry for claude-code runs {command} {args} on {}, not {} {} on {}. \
-         Nothing changed. To replace it: zerodb connect claude-code --force",
+        "{shown}: the zerodb entry for claude-code runs {command} {args} on {}, not a zerodb \
+         mcp command such as {} {} on {}. Nothing changed. To replace it: zerodb connect \
+         claude-code --force",
         home_words(home_of(entry)),
         json!(exe),
         mcp_args(),
@@ -277,7 +285,7 @@ fn add_args(exe: &str, home: Option<&str>) -> Vec<String> {
 }
 
 /// Makes zerodb's entry run `exe` on `home`, through `claude`. `current` is the entry read
-/// before. One that differs is removed first.
+/// before. One that differs, such as one from an old binary path, is removed first.
 fn set_entry(state: &Path, current: Option<&Value>, exe: &str, home: Option<&str>) -> Line {
     let shown = state.display();
     if current.is_some_and(|current| same(current, exe, home)) {

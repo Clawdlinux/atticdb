@@ -138,7 +138,7 @@ pub fn connect(harness: Harness, force: bool) -> u8 {
     if harness == Harness::ClaudeCode {
         return connect_claude_code(force, true, Notes::Auto);
     }
-    finish(moved_home().and_then(|moved| {
+    finish(moved_home(harness).and_then(|moved| {
         if !force {
             check_flags(harness, &crate::home::dir()?.join("data"))?;
         }
@@ -254,15 +254,17 @@ fn home_words(home: Option<&str>) -> String {
 
 /// `$ZERODB_HOME` for the entry and the hook, or `None` when it is unset. A harness started
 /// from the Dock doesn't get the shell's variables, so its files must name the home.
-/// Copilot expands variables in a hook's env, so a path with a `$` is refused.
-fn moved_home() -> Result<Option<String>, String> {
+/// Copilot expands variables in a hook's env, and Claude Code in its MCP config, so a path
+/// with a `$` is refused. The message names `harness`.
+fn moved_home(harness: Harness) -> Result<Option<String>, String> {
     let Some(dir) = crate::home::env_dir()? else { return Ok(None) };
     let dir = dir.into_os_string().into_string();
     let dir = dir.map_err(|_| format!("{HOME_ENV} must be UTF-8 to go in a harness config"))?;
     if dir.contains('$') {
         return Err(format!(
-            "{HOME_ENV} {dir} holds a $. Copilot expands variables in a hook's env, so the hook \
-             would read another home. Nothing changed. Use a path without $"
+            "{HOME_ENV} {dir} holds a $. {} may expand variables in its config, so zerodb would \
+             read another home there. Nothing changed. Use a path without $",
+            harness.name()
         ));
     }
     Ok(Some(dir))

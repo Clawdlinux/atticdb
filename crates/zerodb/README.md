@@ -232,7 +232,8 @@ Claude rewrites it itself, so `connect` only reads it. It changes the entry only
 It never runs `claude mcp get`, because that starts the server to check it.
 Each `claude` command has 10 s. After it, `.claude.json` must show the entry, or the part failed.
 An entry with the same binary, args and `ZERODB_HOME` is left as it is.
-Any other `zerodb` entry is refused, and nothing changes. `--force` removes it with `claude mcp remove`, then adds zerodb's.
+An entry that runs any absolute path with exactly `mcp --agent claude-code`, such as an old binary path, is updated: `claude mcp remove`, then `claude mcp add`.
+Any other `zerodb` entry, such as one with connection flags, is refused, and nothing changes. `--force` replaces it the same way.
 `disconnect` removes the entry only if it is what zerodb writes, for any `zerodb` binary path.
 Without `claude` on `PATH`, the part is skipped and the command to run is printed.
 
