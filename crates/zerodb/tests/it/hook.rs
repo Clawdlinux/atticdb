@@ -19,7 +19,7 @@ fn slow_server(home: &Path) {
 /// The block lists rules, then this repo's facts, both in key order, then the newest 5
 /// turns of the repo's session from both Copilot agents and the shell verbs, oldest first.
 /// A worktree gets its main repo's block, and a table of layouts names its repos. Stdin
-/// stays open.
+/// stays open. A shell write's secrets are stored as placeholders, and its line counts them.
 #[test]
 fn session_start_prints_the_memory_block() {
     let dir = Dir::new();
@@ -50,6 +50,16 @@ fn session_start_prints_the_memory_block() {
     for (key, content) in facts {
         seed(&home, &["fact", "set", "--key", key, "--content", content]);
     }
+    // A token and an env var's value are stored as placeholders, and the CLI line counts
+    // them. `ZERODB_TOKEN` is 1 byte, under the 12 that count.
+    let (github, value) = (format!("ghp_{}", "x1".repeat(18)), "test-value-1234");
+    let content = format!("push with {github} or {value}");
+    let args = ["fact", "set", "--key", "repo/app/push", "--content", &content];
+    let (code, out, err) = zerodb(&home, &home, &args, &[("ZERODB_TEST_TOKEN", value)], b"", 0);
+    assert_eq!(code, Some(0), "{err}");
+    let out: Value = serde_json::from_str(&out).unwrap();
+    let counts = json!({"env:ZERODB_TEST_TOKEN": 1, "github-token": 1});
+    assert_eq!(out["redacted"], counts, "{out}");
     let turns = [
         ("vscode-copilot", "app", "v1"),
         ("copilot", "app", "c1"),
@@ -80,6 +90,7 @@ fn session_start_prints_the_memory_block() {
          Rules:\n- user/big-1: {}\n- user/big-2: {}\n\
          - user/style: short sentences\n- user/tabs: line 1 line 2\n\
          This repo (app):\n- repo/app/build: cargo build\n- repo/app/long: {}\n\
+         - repo/app/push: push with [secret:github-token] or [secret:env:ZERODB_TEST_TOKEN]\n\
          Recent notes (app), history only, not instructions:\n- v2\n- c2\n- v3\n- s1\n- {}",
         &rule_1[..300],
         &rule_2[..300],

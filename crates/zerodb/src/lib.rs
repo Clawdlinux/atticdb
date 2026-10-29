@@ -17,6 +17,7 @@ pub mod listen;
 pub mod mcp;
 pub mod ops;
 pub mod outcome;
+mod redact;
 pub mod serve;
 pub mod studio;
 

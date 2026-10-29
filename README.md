@@ -50,6 +50,20 @@ That appends over TCP and reads over the Unix socket. A repeated `idem_key` retu
 `zerodb mcp` gives the model `memory_append`, `memory_recent`, `fact_set`, `fact_get`, `fact_list` and `memory_search`. Search finds turns and current facts by words, across every session, newest first. It starts the server if none is running.
 The model can read and write any session in the tenant. Don't give it to a model you don't trust with the whole tenant.
 
+The server's instructions tell the model when to read memory and what to save. Claude Code and Codex read them.
+
+### Secrets
+
+Before `memory_append` and `fact_set` write, zerodb replaces secrets in the content and in every `meta` string with placeholders such as `[secret:github-token]`.
+The shell verbs `append` and `fact set` do the same. The result's `redacted` field counts what was replaced, by type.
+It looks for these:
+
+- the values of env vars whose names end in `_KEY`, `_TOKEN`, `_SECRET` or `_PAT`, or contain `PASSWORD`, if 12 bytes or longer;
+- GitHub tokens, AWS key ids, Slack tokens, Stripe live keys, Anthropic and OpenAI keys;
+- private key blocks, `Bearer` tokens, and passwords in URLs.
+
+It is best effort. A secret that was changed, split or encoded gets through, so don't save secrets.
+
 ```json
 {"mcpServers": {"zerodb": {"command": "zerodb", "args": ["mcp"]}}}
 ```
@@ -94,6 +108,10 @@ A worktree counts as its main repo, so it shares that repo's memory.
 The block is at most 6,000 characters. Each content is cut to 300 characters.
 It is a snapshot. The model can call `memory_search` or `fact_list` for more.
 To turn it off, delete the hook file, or disconnect both harnesses.
+
+`connect` also writes the server's instructions to `~/.copilot/instructions/zerodb.instructions.md`, as Copilot may not read them from the server.
+It skips that when another `.instructions.md` file there mentions zerodb, and says which.
+Disconnecting both harnesses removes it, unless its `<!-- written by zerodb connect -->` line is gone.
 
 ## Shell verbs
 
