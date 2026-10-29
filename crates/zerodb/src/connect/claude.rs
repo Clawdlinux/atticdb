@@ -137,13 +137,16 @@ pub(super) fn connect(force: bool, hook: bool, notes: Notes, mode: Mode) -> Repo
     }
     let by_hand = format!("Add these to permissions.allow by hand: {}", json!(rules(notes)));
     parts.push(Part { name: "allow rules", by_hand, edit: &add_allow });
+    let settings = edit_file(settings_file(), "{\n}\n", &parts, mode);
+    // The hook is the first part, when it was asked for.
+    let hook_state = settings.first().filter(|_| hook).map(|line| line.state);
     let mut lines = vec![entry];
-    lines.extend(edit_file(settings_file(), "{\n}\n", &parts, mode));
+    lines.extend(settings);
     let next = match mode {
         Mode::Apply => vec!["Start a new Claude Code session to load zerodb.".into()],
         Mode::Plan => Vec::new(),
     };
-    Report { lines, warnings, next, stopped: None }
+    Report { lines, warnings, next, hook: hook_state, ..Report::default() }
 }
 
 /// Removes the MCP entry when it is what zerodb writes, every hook group that runs zerodb's

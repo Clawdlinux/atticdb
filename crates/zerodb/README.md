@@ -360,7 +360,7 @@ It's found the same way: a group whose every handler runs an absolute binary pat
 Under `ZERODB_HOME`, the hook command starts with `ZERODB_HOME='<path>' `.
 The block is at most 6,000 characters. `additionalContextLimit` is 24,000, so the block arrives whole whether Codex counts bytes or characters.
 A missing `hooks.json` starts as `{"hooks": {}}`.
-Codex runs a new hook only after you approve it once in Codex. `connect` says so after it adds or updates the hook.
+Codex runs a new hook only after you approve it once in Codex. `connect` says so after it adds or updates the hook, unless `hooks = false` turns hooks off.
 Codex keeps 1 approval per hook in `config.toml`, keyed by the hook's position. zerodb doesn't write those.
 When groups follow zerodb's, removing or replacing it moves them up, so Codex may ask to approve them again. Both verbs say so whenever that change was saved, even if a zerodb handler in a mixed group is left to remove by hand.
 `hooks = false` in `[features]` turns hooks off. `connect` warns when it finds that line.

@@ -101,9 +101,9 @@ pub(super) fn connect(hook: bool, notes: Notes, mode: Mode) -> Report {
     };
     let home = home.as_deref();
     let mut lines = vec![set_block(&config, &exe, home, notes, mode).unwrap_or_else(|line| line)];
-    let mut next = Vec::new();
+    let (mut next, mut hook_state, off) = (Vec::new(), None, hook && hooks_off(&config));
     if hook {
-        if hooks_off(&config) {
+        if off {
             warnings.push(format!(
                 "{} sets hooks = false in [features], so Codex runs no hooks, zerodb's \
                  included. Remove that line to load memory at chat start",
@@ -115,14 +115,18 @@ pub(super) fn connect(hook: bool, notes: Notes, mode: Mode) -> Report {
         let add = |text: &str| track(text, add_hook(Harness::Codex, text, &group), &tracked);
         let by_hand = format!("Add this group to hooks.SessionStart by hand: {group}");
         let parts = [Part { name: "SessionStart hook", by_hand, edit: &add }];
-        lines.extend(edit_file(hooks.clone(), NO_HOOKS, &parts, mode));
-        // In Plan mode nothing was saved, so this finds nothing.
+        // 1 part, so 1 line.
+        let hook_lines = edit_file(hooks.clone(), NO_HOOKS, &parts, mode);
+        hook_state = hook_lines.first().map(|line| line.state);
+        lines.extend(hook_lines);
+        // In Plan mode nothing was saved, so this finds nothing. With hooks off, there is
+        // nothing to approve.
         if let Some(moved) = saved(&hooks, &tracked) {
-            next.push(APPROVE.to_owned());
+            next.extend((!off).then(|| APPROVE.to_owned()));
             next.extend(moved.then(|| POSITION.to_owned()));
         }
     }
-    Report { lines, warnings, next, stopped: None }
+    Report { lines, warnings, next, stopped: None, hook: hook_state, hooks_off: off }
 }
 
 /// Checks that `codex mcp get zerodb --json`, which only reads config, shows zerodb's entry

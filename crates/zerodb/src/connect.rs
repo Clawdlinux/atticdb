@@ -36,6 +36,12 @@ impl State {
     pub fn ok(self) -> bool {
         !matches!(self, Self::Skipped | Self::Failed)
     }
+
+    /// Whether, in [`Mode::Plan`], the part needs nothing: it is unchanged, or the user's own
+    /// file is kept.
+    pub fn in_place(self) -> bool {
+        matches!(self, Self::Unchanged | Self::Kept)
+    }
 }
 
 /// A part's line to print, with what it did.
@@ -108,6 +114,10 @@ pub struct Report {
     pub warnings: Vec<String>,
     /// What to do next, printed last. Empty in Plan mode.
     pub next: Vec<String>,
+    /// What the SessionStart hook part did, for Claude Code and Codex when it was asked for.
+    pub hook: Option<State>,
+    /// Whether the harness's config turns hooks off, so its hook never runs. Codex only.
+    pub hooks_off: bool,
 }
 
 impl Report {

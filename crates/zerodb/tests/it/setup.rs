@@ -187,7 +187,8 @@ fn setup_asks_and_stops_without_answers() {
     let needs = "zerodb setup needs a terminal, or --yes. See zerodb setup --help.";
     let own = "keep the user's instructions, which mention zerodb";
     let config_dir = [("CLAUDE_CONFIG_DIR", "rel")];
-    let rows: [Row<'_>; 9] = [
+    let codex = ["--yes", "--harness", "codex"];
+    let rows: [Row<'_>; 11] = [
         ("claude-code and codex", &[], &terminal, &path, "claude-code,codex\n\nn\ny\n", 0, ""),
         ("declined", &[], &terminal, &path, "codex\nn\n\nno\n", 0, "N] Nothing changed.\n"),
         ("not a terminal", &[], &[], &path, "claude-code\n\n\ny\n", 2, needs),
@@ -198,6 +199,9 @@ fn setup_asks_and_stops_without_answers() {
         ("VS Code only", &["--yes"], &[], &code_only, "", 0, "\n1 connected, 0 with skipped"),
         // Claude Code stops with exit 2 first. Codex then connects, and 2 stays the code.
         ("2 wins", &["--yes", "--harness", "claude-code,codex"], &config_dir, &path, "", 2, ""),
+        // The MCP entry is in place, but not the hook, so there is nothing to approve.
+        ("Codex hook skipped", &codex, &[], &path, "", 1, "\n  SessionStart hook: skipped, "),
+        ("Codex hooks off", &codex, &[], &path, "", 0, "\n  Codex: ok\n"),
     ];
     for (row, (case, args, env, path, stdin, wanted, said)) in rows.into_iter().enumerate() {
         let home = dir.0.join(format!("h{row}"));
@@ -209,6 +213,15 @@ fn setup_asks_and_stops_without_answers() {
         if case == "own guide" {
             std::fs::create_dir_all(&guides).unwrap();
             std::fs::write(guides.join("x.instructions.md"), guide).unwrap();
+        }
+        let codex_dir = home.join(".codex");
+        if case == "Codex hook skipped" {
+            std::fs::create_dir_all(&codex_dir).unwrap();
+            std::fs::write(codex_dir.join("hooks.json"), "{\n  // mine\n}\n").unwrap();
+        }
+        if case == "Codex hooks off" {
+            std::fs::create_dir_all(&codex_dir).unwrap();
+            std::fs::write(codex_dir.join("config.toml"), "[features]\nhooks = false\n").unwrap();
         }
         let (code, out, err) = setup(&home, &dir.0, path, env, args, stdin);
         assert_eq!(code, Some(wanted), "{case}: {out}{err}");
@@ -225,6 +238,17 @@ fn setup_asks_and_stops_without_answers() {
             assert!(out.contains("\n  Copilot CLI: ok\n"), "{case}: {out}");
             assert_eq!(std::fs::read_to_string(guides.join("x.instructions.md")).unwrap(), guide);
             assert!(!guides.join("zerodb.instructions.md").exists(), "{case}");
+            continue;
+        }
+        if case.starts_with("Codex hook") {
+            let (_, next) = out.split_once("\nNext:\n").unwrap();
+            assert!(!next.contains("approve"), "{case}: {out}");
+            assert!(next.contains("  Start new chat sessions to load memory.\n"), "{case}: {out}");
+            let off =
+                "  Codex: hooks are off ([features] hooks = false in config.toml), so memory \
+                       won't load at chat start. Remove that line to turn them on.\n";
+            assert_eq!(next.contains(off), case == "Codex hooks off", "{case}: {out}");
+            assert!(codex_dir.join("config.toml").is_file(), "{case}");
             continue;
         }
         if case == "2 wins" {

@@ -37,6 +37,10 @@ const TRIES: usize = 3;
 /// How long the hook may take to print its line.
 const HOOK_TIMEOUT: Duration = Duration::from_secs(4);
 
+/// Codex's next step when its config turns hooks off.
+const CODEX_HOOKS_OFF: &str = "Codex: hooks are off ([features] hooks = false in config.toml), so \
+                               memory won't load at chat start. Remove that line to turn them on.";
+
 /// How long the store may take to answer `fact_list`, a server start included.
 const STORE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -276,7 +280,6 @@ fn apply(harnesses: &[Harness], options: Options) -> u8 {
     let cwd = std::env::current_dir().map_err(|error| format!("no current dir: {error}"));
     let mut store = None;
     let mut next = Vec::new();
-    let mut codex_hook = false;
     for (harness, report) in reports.iter().filter(|(_, report)| report.stopped.is_none()) {
         let (harness, mut failed) = (*harness, Vec::new());
         // The parts are in place when a plan now finds nothing to change.
@@ -287,9 +290,16 @@ fn apply(harnesses: &[Harness], options: Options) -> u8 {
         failed.extend(plan.stopped.map(|(_, error)| error));
         if harness == Harness::Codex {
             failed.extend(connect::verify_codex().err());
-            // Codex's lines are its MCP entry, then its hook.
-            codex_hook = options.hook && plan.lines.get(1).is_some_and(in_place);
-            next.extend(report.next.iter().cloned());
+            if plan.hooks_off {
+                next.push(CODEX_HOOKS_OFF.into());
+            } else if plan.hook.is_some_and(State::in_place) {
+                // Codex's own steps name the approval, and say when others moved. A rerun
+                // has none, but the hook may still need approving.
+                next.extend(report.next.iter().cloned());
+                if report.next.is_empty() {
+                    next.push(connect::CODEX_APPROVE.into());
+                }
+            }
         }
         if options.hook || matches!(harness, Harness::Vscode | Harness::Copilot) {
             let hook = cwd.clone().and_then(|cwd| check_hook(harness, &cwd));
@@ -309,9 +319,6 @@ fn apply(harnesses: &[Harness], options: Options) -> u8 {
     }
     let connected: Vec<Harness> =
         reports.iter().filter(|(_, report)| report.stopped.is_none()).map(|(h, _)| *h).collect();
-    if codex_hook && next.is_empty() {
-        next.push(connect::CODEX_APPROVE.into());
-    }
     if !connected.is_empty() {
         next.push("Start new chat sessions to load memory.".into());
     }
@@ -327,10 +334,9 @@ fn apply(harnesses: &[Harness], options: Options) -> u8 {
     code.max(stopped)
 }
 
-/// Whether a plan line says its part needs nothing: it is unchanged, or the user's own file
-/// is kept.
+/// Whether a plan line says its part needs nothing.
 fn in_place(line: &Line) -> bool {
-    matches!(line.state, State::Unchanged | State::Kept)
+    line.state.in_place()
 }
 
 /// Runs `zerodb hook session-start --harness <harness>` with the stdin that harness gives it
