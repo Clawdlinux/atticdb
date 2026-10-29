@@ -8,6 +8,7 @@ zerodb init --config zerodb.json --tenant me     # writes a 0600 config, prints 
 zerodb serve --config zerodb.json --data-dir ./data
 zerodb mcp                                       # no flags: the per-user home
 zerodb connect vscode                            # adds zerodb to VS Code's MCP config
+zerodb connect claude-code                       # adds zerodb to Claude Code, with its hook
 zerodb studio                                    # a read-only page about the store
 zerodb verify --data-dir ./data                  # checks a stopped data dir on a copy
 zerodb recover --truncate-at <lsn> --data-dir ./data
@@ -164,6 +165,7 @@ An auto-started server runs in its own process group and outlives the adapters. 
 `zerodb connect <vscode|copilot> [--force]` creates the home, then adds a `zerodb` entry to the harness's user MCP config.
 It also writes the session-start hook file, described below.
 `zerodb disconnect <vscode|copilot>` removes that entry. Every other key and server stays.
+Claude Code has its own parts. See [Claude Code](#claude-code) below.
 
 | Name | File | Entry |
 |---|---|---|
@@ -212,18 +214,61 @@ The rules above apply: no write when it matches, a backup, a synced temp file an
 It deletes the hook zerodb writes for any absolute binary path, with or without that env. So a moved binary's hook goes too.
 A hook file with other content is left alone, and `disconnect` says so.
 
+### Claude Code
+
+`zerodb connect claude-code [--force] [--no-hook] [--notes ask|auto]` creates the home, then adds 3 parts.
+`zerodb disconnect claude-code` removes them.
+`--no-hook` and `--notes` work only for `claude-code`. `--notes` defaults to `auto`.
+The config dir is `$CLAUDE_CONFIG_DIR` when set and absolute, else `~/.claude`.
+
+| Part | Where | What |
+|---|---|---|
+| MCP entry | the user MCP servers in `.claude.json` | `claude mcp add -s user zerodb -- <binary> mcp --agent claude-code` |
+| Hook | `hooks.SessionStart` in `<config dir>/settings.json` | `{"hooks": [{"type": "command", "command": "'<binary>' hook session-start --harness claude-code", "timeout": 5}]}` |
+| Allow rules | `permissions.allow` in `<config dir>/settings.json` | `mcp__zerodb__memory_search`, `mcp__zerodb__memory_recent`, `mcp__zerodb__fact_get`, `mcp__zerodb__fact_list`, and `mcp__zerodb__memory_append` unless `--notes ask` |
+
+`.claude.json` is in `$CLAUDE_CONFIG_DIR` when set and absolute, else in `~`.
+Claude rewrites it itself, so `connect` only reads it. It changes the entry only through `claude mcp add` and `claude mcp remove`.
+It never runs `claude mcp get`, because that starts the server to check it.
+Each `claude` command has 10 s. After it, `.claude.json` must show the entry, or the part failed.
+An entry with the same binary, args and `ZERODB_HOME` is left as it is.
+Any other `zerodb` entry is refused, and nothing changes. `--force` removes it with `claude mcp remove`, then adds zerodb's.
+`disconnect` removes the entry only if it is what zerodb writes, for any `zerodb` binary path.
+Without `claude` on `PATH`, the part is skipped and the command to run is printed.
+
+The hook group has no matcher, so it also runs after compaction.
+Under `ZERODB_HOME`, the entry passes `-e ZERODB_HOME=<path>`. Claude's command hooks have no env field, so the hook command starts with `ZERODB_HOME='<path>' `.
+The hook doesn't share a file with VS Code or Copilot CLI, so its home may differ from theirs. `connect` then warns that memory splits between the homes.
+The allow rules never include `fact_set`, so saving a rule always asks. `--notes ask` also removes a `memory_append` rule.
+Claude Code reads the MCP server's instructions, so `CLAUDE.md` isn't touched.
+
+`settings.json` is edited as text, so only the added or removed bytes change. Key order, spacing and other entries stay.
+A missing file is created at mode 0600, and a missing config dir at 0700.
+Each part is found by its content: a group whose every handler runs a `zerodb` binary with `hook session-start --harness claude-code`, and the exact allow rules.
+`disconnect` removes every part it finds, including one you added by hand.
+A `SessionStart` array that ends up empty stays as `[]`.
+A change keeps a backup, as above. A rerun with nothing to change writes nothing.
+
+Each part prints 1 line: `added`, `unchanged`, `updated` or `removed`, with the backup's path after a write.
+A part that can't be applied is skipped, and its line says why and what to add by hand.
+That happens for a `settings.json` with comments, trailing commas, duplicate keys or a BOM, or one that is a symlink.
+The other parts still apply. The exit code is 1 when any part was skipped or failed.
+Then start a new Claude Code session.
+
 ## `zerodb hook session-start`
 
-The Copilot `sessionStart` hook. It reads at most 1 MiB of JSON on stdin and uses only `cwd`.
+`zerodb hook session-start [--harness <name>]` is the session-start hook. It reads at most 1 MiB of JSON on stdin and uses only `cwd`.
 Parsing stops after the first JSON object, so stdin left open after that object does not block it.
 The repo comes from `cwd` by the rule in `zerodb mcp` above, so a worktree gets its main repo's block.
 It reads the home like `zerodb mcp` with no flags, and starts the server if needed. It ignores `ZERODB_TOKEN`.
 Its reads share a 3 s budget from the hook's start. A read with under 2 s left fails at once.
 It lists facts under `user/` and under `repo/<repo>/`, 50 each, in key order.
-It reads the last 5 turns of session `<repo>` for agents `vscode-copilot`, `copilot` and `mcp`, then keeps the newest 5.
+It reads the last 5 turns of session `<repo>` for agents `vscode-copilot`, `copilot`, `claude-code` and `mcp`, then keeps the newest 5.
 `mcp` is the agent of the shell verbs, so a note from `zerodb append` shows too.
 A window cut short by its 8 MiB cap hides older turns, so then it may show fewer than 5.
 It prints 1 line, `{"additionalContext": "<block>"}`. With nothing to show, or on any error, it prints `{}`.
+With `--harness claude-code` or `--harness codex`, the line is `{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "<block>"}}`.
+`--harness vscode` or `--harness copilot` gives the first shape. Any other name prints `{}` and says why on stderr.
 At 4 s it prints `{}` and exits, whatever is blocking, stdin included. It always exits 0. Errors go to stderr.
 The stop cannot help if the harness stops reading the hook's output mid-line. That needs a stalled harness.
 

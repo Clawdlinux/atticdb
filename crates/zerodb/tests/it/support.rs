@@ -27,8 +27,15 @@ pub fn files(dir: &Path) -> BTreeMap<String, Option<Vec<u8>>> {
 /// Variables that point zerodb at a home or at harness files, the real `HOME` included. No
 /// spawn inherits them, so a developer's own exports can't lead a test to a real home. A test
 /// that needs one sets it.
-const HOME_VARS: [&str; 5] =
-    ["HOME", "ZERODB_HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "COPILOT_HOME"];
+const HOME_VARS: [&str; 7] = [
+    "HOME",
+    "ZERODB_HOME",
+    "XDG_DATA_HOME",
+    "XDG_CONFIG_HOME",
+    "COPILOT_HOME",
+    "CLAUDE_CONFIG_DIR",
+    "CODEX_HOME",
+];
 
 /// A command for `program`, the `zerodb` binary or anything that runs it, without
 /// [`HOME_VARS`]. Every spawn of zerodb in these tests starts here.
@@ -38,6 +45,57 @@ pub fn command(program: impl AsRef<OsStr>) -> Command {
         command.env_remove(var);
     }
     command
+}
+
+/// A fake `claude` in the new directory `bin`, for a `PATH` of just `bin`. It appends its
+/// args as a JSON line to `bin/argv`, which it returns. `mcp add -s user [-e K=V] <name> --
+/// <command> <args>` and `mcp remove -s user <name>` edit `.claude.json` in
+/// `$CLAUDE_CONFIG_DIR`, else in `$HOME`, as Claude Code does. `mcp get` answers from it.
+pub fn fake_claude(bin: &Path) -> PathBuf {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let python = std::env::split_paths(&path).map(|dir| dir.join("python3")).find(|p| p.is_file());
+    let python = python.unwrap_or_else(|| panic!("the fake claude needs python3 on PATH"));
+    let script = format!(
+        r#"#!{}
+import json, os, sys
+args = sys.argv[1:]
+with open(os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "argv"), "a") as log:
+    log.write(json.dumps(args) + "\n")
+path = os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.environ["HOME"], ".claude.json")
+try:
+    with open(path) as f:
+        root = json.load(f)
+except FileNotFoundError:
+    root = {{}}
+servers = root.setdefault("mcpServers", {{}})
+if args[:2] == ["mcp", "get"]:
+    print(json.dumps(servers.get(args[2])))
+    sys.exit(0 if args[2] in servers else 1)
+if args[:4] == ["mcp", "add", "-s", "user"]:
+    rest, env = args[4:], {{}}
+    while rest[0] == "-e":
+        key, value = rest[1].split("=", 1)
+        env[key] = value
+        rest = rest[2:]
+    if rest[0] in servers or rest[1] != "--":
+        sys.exit("MCP server " + rest[0] + " already exists in user config")
+    servers[rest[0]] = {{"type": "stdio", "command": rest[2], "args": rest[3:], "env": env}}
+elif args[:4] == ["mcp", "remove", "-s", "user"] and len(args) == 5:
+    if servers.pop(args[4], None) is None:
+        sys.exit("No user-scoped MCP server found with name: " + args[4])
+else:
+    sys.exit("unexpected args")
+os.makedirs(os.path.dirname(path), exist_ok=True)
+with open(path, "w") as f:
+    json.dump(root, f, indent=2)
+"#,
+        python.display()
+    );
+    std::fs::create_dir(bin).unwrap();
+    let claude = bin.join("claude");
+    std::fs::write(&claude, script).unwrap();
+    chmod(&claude, 0o755);
+    bin.join("argv")
 }
 
 pub fn chmod(path: &Path, mode: u32) {

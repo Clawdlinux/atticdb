@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use zerodb::config::{Config, Listen};
-use zerodb::connect::Harness;
+use zerodb::connect::{Harness, Notes};
 use zerodb::launch::Url;
 
 const USAGE: &str = "usage:
@@ -21,8 +21,9 @@ const USAGE: &str = "usage:
   zerodb dump --data-dir <dir> [--scratch <dir>] [--from <lsn>] [--limit <n>]
   zerodb mcp <connect>
   zerodb connect <vscode|copilot> [--force]
-  zerodb disconnect <vscode|copilot>
-  zerodb hook session-start
+  zerodb connect claude-code [--force] [--no-hook] [--notes ask|auto]
+  zerodb disconnect <vscode|copilot|claude-code>
+  zerodb hook session-start [--harness <name>]
   zerodb studio [--url unix:///path|http://127.0.0.1:<port>] [--data-dir <dir>] [--config <path>]
                 [--tenant <name>] [--token-file <path>] [--no-open]
   zerodb append <connect> --content <text> [--role user|assistant|tool]
@@ -94,19 +95,21 @@ fn main() -> ExitCode {
                 flags(rest, &["--data-dir", "--scratch", "--from", "--limit"], &[]).and_then(dump)
             }
             "mcp" => flags(rest, &CONNECT, &[]).map(zerodb::mcp::start),
-            "connect" => match rest {
-                [name, force @ ..] if force.is_empty() || force == ["--force"] => {
-                    let force = !force.is_empty();
-                    Harness::parse(name).map(|harness| zerodb::connect::connect(harness, force))
-                }
-                _ => None,
-            },
+            "connect" => rest.split_first().and_then(|(name, rest)| {
+                connect(
+                    Harness::parse(name)?,
+                    flags(rest, &["--notes"], &["--force", "--no-hook"])?,
+                )
+            }),
             "disconnect" => match rest {
                 [name] => Harness::parse(name).map(zerodb::connect::disconnect),
                 _ => None,
             },
             "hook" => match rest {
-                [event] if event == "session-start" => Some(zerodb::hook::session_start()),
+                [event] if event == "session-start" => Some(zerodb::hook::session_start(None)),
+                [event, flag, name] if event == "session-start" && flag == "--harness" => {
+                    Some(zerodb::hook::session_start(Some(name)))
+                }
                 _ => None,
             },
             "studio" => flags(rest, &CONNECT[..5], &["--no-open"]).map(zerodb::studio::start),
@@ -156,6 +159,21 @@ fn flags(args: &[String], valued: &[&str], switches: &[&str]) -> Option<HashMap<
 fn tool(args: &[String], name: &str, valued: &[&str], switches: &[&str]) -> Option<u8> {
     flags(args, &[&CONNECT[..], valued].concat(), switches)
         .map(|flags| zerodb::mcp::command(name, flags))
+}
+
+/// `zerodb connect`. `--no-hook` and `--notes` are for Claude Code only.
+fn connect(harness: Harness, mut flags: HashMap<String, String>) -> Option<u8> {
+    let force = flags.remove("--force").is_some();
+    if harness != Harness::ClaudeCode {
+        return flags.is_empty().then(|| zerodb::connect::connect(harness, force));
+    }
+    let notes = match flags.remove("--notes").as_deref() {
+        None | Some("auto") => Notes::Auto,
+        Some("ask") => Notes::Ask,
+        Some(_) => return None,
+    };
+    let hook = flags.remove("--no-hook").is_none();
+    Some(zerodb::connect::connect_claude_code(force, hook, notes))
 }
 
 fn report<T>(result: Result<T, impl std::fmt::Display>) -> Result<T, u8> {

@@ -1,6 +1,7 @@
 use crate::support::{self, chmod, files, mkfifo, Dir, Process};
 use serde_json::{json, Value};
 use std::os::unix::fs::MetadataExt;
+use std::path::Path;
 use std::process::Stdio;
 
 /// `connect` adds an owner-only file, a rerun writes nothing, and an older entry is updated.
@@ -433,4 +434,390 @@ fn connect_writes_the_session_start_hook() {
         serde_json::from_slice(&std::fs::read(copilot.join("hooks/zerodb.json")).unwrap()).unwrap();
     let entry = env_of(&copilot.join("mcp-config.json"), "mcpServers");
     assert_eq!((entry, hook["hooks"]["sessionStart"][0]["env"].clone()), (env.clone(), env));
+}
+
+/// A settings.json as people keep it: 3 SessionStart groups, 12 allow rules, other keys.
+const SETTINGS: &str = r#"{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "model": "opus",
+  "env": {
+    "DISABLE_TELEMETRY": "1"
+  },
+  "permissions": {
+    "allow": [
+      "Bash(git status)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(cargo build:*)",
+      "Bash(cargo test:*)",
+      "Bash(npm run lint)",
+      "Read(~/.zshrc)",
+      "WebFetch(domain:docs.rs)",
+      "WebSearch",
+      "mcp__github__get_issue",
+      "mcp__github__list_issues",
+      "Edit(src/**)"
+    ],
+    "deny": [
+      "Read(./.env)"
+    ],
+    "defaultMode": "acceptEdits"
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo started >> ~/.claude/log"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/bin/load-context.sh",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cat NOTES.md"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cargo fmt"
+          }
+        ]
+      }
+    ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "~/.claude/statusline.sh"
+  }
+}
+"#;
+
+/// `connect claude-code` adds the MCP entry through `claude mcp add`, and appends the
+/// SessionStart hook and the allow rules to `settings.json`, in its config dir. A rerun
+/// writes nothing. `disconnect` removes them, leaving a hand-kept file byte for byte as it
+/// was. `--notes ask` leaves out `memory_append`, and `--no-hook` the hook. A part that
+/// can't be applied is skipped with what to add by hand, the others still apply, and the
+/// exit code is 1. A different entry is refused unless `--force`. `claude mcp get` never runs.
+#[test]
+fn connect_claude_code_adds_its_parts() {
+    let dir = Dir::new();
+    let exe = std::fs::canonicalize(env!("CARGO_BIN_EXE_zerodb")).unwrap();
+    let exe = exe.to_str().unwrap().to_owned();
+    let (bin, empty) = (dir.0.join("bin"), dir.0.join("empty"));
+    let log = support::fake_claude(&bin);
+    std::fs::create_dir(&empty).unwrap();
+    let calls = || -> Vec<Vec<String>> {
+        let text = std::fs::read_to_string(&log).unwrap_or_default();
+        text.lines().map(|line| serde_json::from_str(line).unwrap()).collect()
+    };
+    let add = |home: Option<&str>| {
+        let mut args = vec!["mcp", "add", "-s", "user"];
+        let env = home.map(|home| format!("ZERODB_HOME={home}"));
+        args.extend(env.iter().flat_map(|env| ["-e", env.as_str()]));
+        args.extend(["zerodb", "--", &exe, "mcp", "--agent", "claude-code"]);
+        args.into_iter().map(String::from).collect::<Vec<_>>()
+    };
+    let remove = ["mcp", "remove", "-s", "user", "zerodb"].map(String::from).to_vec();
+    let quoted = format!("'{}'", exe.replace('\'', r"'\''"));
+    let command = format!("{quoted} hook session-start --harness claude-code");
+    let group = json!({"hooks": [{"type": "command", "command": command, "timeout": 5}]});
+    let reads =
+        ["mcp__zerodb__memory_search", "mcp__zerodb__memory_recent", "mcp__zerodb__fact_get"];
+    let reads = [&reads[..], &["mcp__zerodb__fact_list"]].concat();
+    let append = "mcp__zerodb__memory_append";
+    let run =
+        |home: &Path, config: Option<&Path>, path: &Path, env: &[(&str, &Path)], args: &[&str]| {
+            let mut command = support::command(&exe);
+            command.args(args).current_dir(&dir.0).env("HOME", home).env("PATH", path);
+            command
+                .env_remove("ZERODB_TOKEN")
+                .envs(config.map(|config| ("CLAUDE_CONFIG_DIR", config)));
+            command.envs(env.iter().copied());
+            let (status, out) = Process::start(command.stdin(Stdio::null())).wait();
+            (status.code(), out)
+        };
+    let read =
+        |path: &Path| serde_json::from_slice::<Value>(&std::fs::read(path).unwrap()).unwrap();
+    let push = |value: &mut Value, path: [&str; 2], items: &[Value]| {
+        let slot = &mut value[path[0]][path[1]];
+        if slot.is_null() {
+            *slot = json!([]);
+        }
+        slot.as_array_mut().unwrap().extend_from_slice(items);
+    };
+    let strings = |items: &[&str]| items.iter().map(|item| json!(item)).collect::<Vec<_>>();
+    let entry = |home: Option<&str>| {
+        let env = home.map_or(json!({}), |home| json!({"ZERODB_HOME": home}));
+        let args = ["mcp", "--agent", "claude-code"];
+        json!({"type": "stdio", "command": exe, "args": args, "env": env})
+    };
+    let next = "Start a new Claude Code session to load zerodb.";
+
+    let rows = [
+        ("fresh", false, None),
+        ("CLAUDE_CONFIG_DIR", true, None),
+        ("hand-kept", true, Some(SETTINGS)),
+    ];
+    for (row, (case, moved, kept)) in rows.into_iter().enumerate() {
+        let home = dir.0.join(format!("h{row}"));
+        let config_dir = if moved { home.join("c") } else { home.join(".claude") };
+        let settings = config_dir.join("settings.json");
+        let state = if moved { config_dir.join(".claude.json") } else { home.join(".claude.json") };
+        if let Some(text) = kept {
+            std::fs::create_dir_all(&config_dir).unwrap();
+            std::fs::write(&settings, text).unwrap();
+            chmod(&settings, 0o644);
+        }
+        let config = moved.then_some(config_dir.as_path());
+        let connect = |args: &[&str]| {
+            run(&home, config, &bin, &[], &[&["connect", "claude-code"], args].concat())
+        };
+        let disconnect = || run(&home, config, &bin, &[], &["disconnect", "claude-code"]);
+        let original: Value = kept.map_or(json!({}), |text| serde_json::from_str(text).unwrap());
+        let (shown, at) = (settings.display().to_string(), state.display());
+        let start = calls().len();
+
+        let (code, out) = connect(&[]);
+        assert_eq!(code, Some(0), "{case}: {out}");
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], format!("MCP entry: added ({at})"), "{case}");
+        let backup = kept.is_some().then(|| {
+            let backup = lines[1].split(", backup: ").nth(1).unwrap().trim_end_matches(')');
+            assert_eq!(std::fs::read_to_string(backup).unwrap(), SETTINGS, "{case}: backup");
+            format!(", backup: {backup}")
+        });
+        let backup = backup.unwrap_or_default();
+        assert_eq!(lines[1], format!("SessionStart hook: added ({shown}{backup})"), "{case}");
+        assert_eq!(lines[2], format!("allow rules: added ({shown}{backup})"), "{case}");
+        assert_eq!(lines[3..], [next], "{case}");
+        assert_eq!(calls()[start..], [add(None)], "{case}");
+        assert_eq!(read(&state)["mcpServers"]["zerodb"], entry(None), "{case}");
+        let mut wanted = original.clone();
+        push(&mut wanted, ["hooks", "SessionStart"], std::slice::from_ref(&group));
+        push(&mut wanted, ["permissions", "allow"], &strings(&[&reads[..], &[append]].concat()));
+        assert_eq!(read(&settings), wanted, "{case}");
+        let mode = std::fs::metadata(&settings).unwrap().mode() & 0o777;
+        assert_eq!(mode, if kept.is_some() { 0o644 } else { 0o600 }, "{case}: mode");
+        if kept.is_none() {
+            let pretty = serde_json::to_string_pretty(&wanted).unwrap() + "\n";
+            assert_eq!(std::fs::read_to_string(&settings).unwrap(), pretty, "{case}");
+            // Under CLAUDE_CONFIG_DIR, the fake claude made the dir first.
+            let dir_mode = std::fs::metadata(&config_dir).unwrap().mode() & 0o777;
+            assert!(moved || dir_mode == 0o700, "{case}: a new config dir is private");
+        }
+
+        let now = || (files(&config_dir), std::fs::read(&state).unwrap(), calls().len());
+        let before = now();
+        let (code, out) = connect(&[]);
+        let unchanged = format!(
+            "MCP entry: unchanged ({at})\nSessionStart hook: unchanged ({shown})\n\
+             allow rules: unchanged ({shown})\n{next}\n"
+        );
+        assert_eq!((code, out), (Some(0), unchanged), "{case}");
+        assert_eq!(now(), before, "{case}: nothing written, no backup, no claude");
+
+        let (code, out) = connect(&["--notes", "ask"]);
+        assert_eq!(code, Some(0), "{case}: {out}");
+        assert!(out.contains("\nSessionStart hook: unchanged ("), "{case}: {out}");
+        assert!(out.contains("\nallow rules: updated ("), "{case}: {out}");
+        let allow = read(&settings)["permissions"]["allow"].clone();
+        assert!(!allow.as_array().unwrap().contains(&json!(append)), "{case}: {allow}");
+
+        let (code, out) = disconnect();
+        assert_eq!(code, Some(0), "{case}: {out}");
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], format!("MCP entry: removed ({at})"), "{case}");
+        assert!(lines[1].starts_with(&format!("SessionStart hook: removed ({shown}, backup: ")));
+        assert!(lines[2].starts_with(&format!("allow rules: removed ({shown}, backup: ")));
+        assert_eq!(lines.len(), 3, "{case}: {out}");
+        assert_eq!(calls().last(), Some(&remove), "{case}");
+        assert_eq!(read(&state)["mcpServers"], json!({}), "{case}");
+        let emptied = json!({"hooks": {"SessionStart": []}, "permissions": {"allow": []}});
+        let check = |when: &str| match kept {
+            Some(text) => {
+                assert_eq!(std::fs::read_to_string(&settings).unwrap(), text, "{case} {when}");
+            }
+            None => assert_eq!(read(&settings), emptied, "{case} {when}"),
+        };
+        check("disconnect");
+
+        let (code, out) = connect(&["--no-hook", "--notes", "ask"]);
+        assert_eq!(code, Some(0), "{case}: {out}");
+        assert!(!out.contains("SessionStart hook"), "{case}: {out}");
+        let mut wanted = if kept.is_some() { original.clone() } else { emptied.clone() };
+        push(&mut wanted, ["permissions", "allow"], &strings(&reads));
+        assert_eq!(read(&settings), wanted, "{case}: --no-hook --notes ask");
+        assert_eq!(disconnect().0, Some(0), "{case}");
+        check("--no-hook disconnect");
+    }
+
+    // A file jsonedit refuses, or a symlink: the settings parts are skipped with what to add by
+    // hand, and the file stays. The MCP entry still goes in. Exit 1.
+    let home = dir.0.join("s");
+    let settings = home.join(".claude/settings.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    let rows = [("comment", "invalid JSON at byte 0"), ("symlink", "is a symlink")];
+    for (case, said) in rows {
+        if case == "symlink" {
+            std::fs::remove_file(&settings).unwrap();
+            std::fs::write(home.join(".claude/real.json"), "{}").unwrap();
+            std::os::unix::fs::symlink("real.json", &settings).unwrap();
+        } else {
+            std::fs::write(&settings, "// mine\n{}\n").unwrap();
+        }
+        let before = files(&home.join(".claude"));
+        let (code, out) = run(&home, None, &bin, &[], &["connect", "claude-code"]);
+        assert_eq!(code, Some(1), "{case}: {out}");
+        assert!(out.starts_with("MCP entry: "), "{case}: {out}");
+        let hook = format!("\nSessionStart hook: skipped, {}", settings.display());
+        let by_hand = format!("Add this group to hooks.SessionStart by hand: {group}\n");
+        assert!(
+            out.contains(&hook) && out.contains(said) && out.contains(&by_hand),
+            "{case}: {out}"
+        );
+        let rules = json!([&reads[..], &[append]].concat());
+        let by_hand = format!("Add these to permissions.allow by hand: {rules}\n{next}\n");
+        assert!(
+            out.contains("\nallow rules: skipped, ") && out.ends_with(&by_hand),
+            "{case}: {out}"
+        );
+        assert_eq!(files(&home.join(".claude")), before, "{case}: unchanged");
+    }
+    assert!(std::fs::symlink_metadata(&settings).unwrap().is_symlink());
+    assert_eq!(read(&home.join(".claude.json"))["mcpServers"]["zerodb"], entry(None));
+
+    // Without claude on PATH, the MCP part is skipped with the command to run, and the
+    // settings parts still go in.
+    let home = dir.0.join("m");
+    let start = calls().len();
+    let (code, out) = run(&home, None, &empty, &[], &["connect", "claude-code"]);
+    assert_eq!(code, Some(1), "{out}");
+    let skipped =
+        "MCP entry: skipped, claude is not on PATH. Run: claude mcp add -s user zerodb -- ";
+    assert!(out.starts_with(skipped), "{out}");
+    assert!(out.lines().next().unwrap().ends_with(" mcp --agent claude-code"), "{out}");
+    assert!(out.contains("\nSessionStart hook: added (") && out.contains("\nallow rules: added ("));
+    assert_eq!(calls().len(), start, "no claude ran");
+    assert!(!home.join(".claude.json").exists());
+
+    // A different zerodb entry is refused before anything changes, unless --force, which
+    // removes it, then adds zerodb's. One with connection flags says how to keep its memory.
+    let home = dir.0.join("d");
+    let state = home.join(".claude.json");
+    let rows = [
+        (
+            "flags",
+            json!({"type": "stdio", "command": exe, "args": ["mcp", "--url", "unix:///old"]}),
+            "uses --url unix:///old.",
+        ),
+        (
+            "other binary",
+            json!({"command": "/opt/zerodb", "args": ["mcp", "--agent", "claude-code"]}),
+            "Nothing changed. To replace it: ",
+        ),
+    ];
+    for (case, other, said) in rows {
+        std::fs::create_dir_all(&home).unwrap();
+        let text = json!({"mcpServers": {"zerodb": other}, "numStartups": 3}).to_string();
+        std::fs::write(&state, &text).unwrap();
+        let start = calls().len();
+        let (code, out) = run(&home, None, &bin, &[], &["connect", "claude-code"]);
+        assert_eq!(code, Some(1), "{case}: {out}");
+        assert!(out.contains(said) && out.contains("zerodb connect claude-code --force"), "{out}");
+        assert_eq!(std::fs::read_to_string(&state).unwrap(), text, "{case}: entry unchanged");
+        assert_eq!(calls().len(), start, "{case}: no claude ran");
+        assert!(!home.join(".claude").exists() && !home.join("Library").exists(), "{case}");
+        assert!(!home.join(".local").exists(), "{case}: no home made");
+    }
+    let start = calls().len();
+    let (code, out) = run(&home, None, &bin, &[], &["connect", "claude-code", "--force"]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.starts_with(&format!("MCP entry: updated ({})\n", state.display())), "{out}");
+    assert_eq!(calls()[start..], [remove.clone(), add(None)]);
+    assert_eq!(read(&state)["mcpServers"]["zerodb"], entry(None));
+    assert_eq!(read(&state)["numStartups"], 3, "the rest of Claude's state stays");
+    // disconnect leaves an entry zerodb didn't write, and removes the other parts.
+    let mine = json!({"command": "npx", "args": ["-y", "zerodb-mcp"]});
+    std::fs::write(&state, json!({"mcpServers": {"zerodb": mine}}).to_string()).unwrap();
+    let start = calls().len();
+    let (code, out) = run(&home, None, &bin, &[], &["disconnect", "claude-code"]);
+    assert_eq!(code, Some(1), "{out}");
+    let said = "MCP entry: skipped, it differs from the entry zerodb writes";
+    assert!(out.starts_with(said) && out.contains("claude mcp remove -s user zerodb\n"), "{out}");
+    assert!(
+        out.contains("\nSessionStart hook: removed (") && out.contains("\nallow rules: removed (")
+    );
+    assert_eq!((calls().len(), read(&state)["mcpServers"]["zerodb"].clone()), (start, mine));
+
+    // Under ZERODB_HOME, the entry passes it with -e and the hook command sets it, quoted,
+    // so the hook reads that home. VS Code on the default home gets a warning, not a refusal.
+    let home = dir.0.join("z");
+    let zh = home.join("it's home");
+    let _holders = support::Holders(vec![zh.join("data")]);
+    let zh_str = zh.to_str().unwrap();
+    assert_eq!(run(&home, None, &bin, &[], &["connect", "vscode"]).0, Some(0));
+    let start = calls().len();
+    let (code, out) = run(&home, None, &bin, &[("ZERODB_HOME", &zh)], &["connect", "claude-code"]);
+    assert_eq!(code, Some(0), "{out}");
+    let said = format!(
+        "zerodb: vscode uses the default home, but claude-code now uses ZERODB_HOME {zh_str}. \
+         Memory splits"
+    );
+    assert!(out.contains(&said), "{out}");
+    assert_eq!(calls()[start..], [add(Some(zh_str))]);
+    assert_eq!(read(&home.join(".claude.json"))["mcpServers"]["zerodb"], entry(Some(zh_str)));
+    let settings = read(&home.join(".claude/settings.json"));
+    let moved = &settings["hooks"]["SessionStart"][0]["hooks"][0]["command"];
+    let prefix = format!("ZERODB_HOME='{}' ", zh_str.replace('\'', r"'\''"));
+    assert_eq!(*moved, format!("{prefix}{command}"));
+    let seeded = ["fact", "set", "--key", "user/style", "--content", "short sentences"];
+    let (code, _, err) = support::zerodb(&home, &home, &seeded, &[("ZERODB_HOME", zh_str)], b"", 0);
+    assert_eq!(code, Some(0), "{err}");
+    std::fs::write(home.join("stdin"), support::cwd(&home)).unwrap();
+    let mut sh = support::command("sh");
+    sh.args(["-c", &format!("{} < stdin", moved.as_str().unwrap())]);
+    sh.current_dir(&home).env("HOME", &home).stdin(Stdio::null());
+    let (status, out) = Process::start(&mut sh).wait();
+    assert_eq!(status.code(), Some(0), "{out}");
+    let out: Value = serde_json::from_str(out.lines().next().unwrap()).unwrap();
+    assert_eq!(out["hookSpecificOutput"]["hookEventName"], "SessionStart", "{out}");
+    let block = out["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+    assert!(block.contains("\n- user/style: short sentences"), "{block}");
+    let (code, out) = run(&home, None, &bin, &[], &["disconnect", "claude-code"]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(
+        out.starts_with("MCP entry: removed (") && out.contains("\nSessionStart hook: removed (")
+    );
+
+    // --no-hook and --notes are for claude-code only.
+    let usage = [
+        &["vscode", "--no-hook"][..],
+        &["copilot", "--notes", "ask"],
+        &["claude-code", "--notes", "maybe"],
+    ];
+    for args in usage {
+        let (code, out) = run(&dir.0, None, &empty, &[], &[&["connect"], args].concat());
+        assert_eq!(code, Some(2), "{args:?}: {out}");
+    }
+    assert!(calls().iter().all(|call| call[..2] != ["mcp", "get"]), "claude mcp get never runs");
 }
