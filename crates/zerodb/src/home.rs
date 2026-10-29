@@ -109,25 +109,31 @@ pub fn dir() -> Result<PathBuf, String> {
 /// `zerodb.json` with tenant [`TENANT`]. Checks both directories are owner-only.
 pub fn ensure() -> Result<Home, String> {
     let dir = dir()?;
+    let data_dir = dir.join("data");
+    // Found before anything is made. Every directory this call makes is below it.
+    let existing = data_dir.ancestors().find(|path| path.exists()).unwrap_or(Path::new("/"));
     crate::listen::owned_dir(&dir, 0o077)?;
     let config = dir.join("zerodb.json");
     if !config.exists() {
         publish(&dir, &config)?;
     }
-    let data_dir = dir.join("data");
     crate::listen::owned_dir(&data_dir, 0o077)?;
-    // Every call syncs, covering a concurrent creator that has not synced yet.
-    sync_dirs(&dir, &data_dir)?;
+    sync_dirs(&dir, &data_dir, existing)?;
     Ok(Home { dir, config, data_dir, tenant: TENANT.into() })
 }
 
 /// Syncs `data/`, the home and its ancestors, deepest first, so their entries survive a
-/// power loss before the first ack.
-fn sync_dirs(dir: &Path, data_dir: &Path) -> Result<(), String> {
-    // Stop at $HOME, or at the home's grandparent when the home is outside $HOME. That is
-    // where XDG_DATA_HOME or ZERODB_HOME may put it. ZERODB_HOME works with no $HOME.
+/// power loss before the first ack. `existing` is the deepest directory that existed before
+/// any was made.
+fn sync_dirs(dir: &Path, data_dir: &Path, existing: &Path) -> Result<(), String> {
+    // Every call syncs up to $HOME, or to the home's grandparent when the home is outside
+    // $HOME, as XDG_DATA_HOME or ZERODB_HOME may put it. That covers a concurrent creator that
+    // has not synced yet. ZERODB_HOME works with no $HOME.
     let home = user_home().ok().filter(|home| dir.starts_with(home));
-    let top = home.as_deref().unwrap_or_else(|| dir.ancestors().nth(2).unwrap_or(Path::new("/")));
+    let usual = home.as_deref().unwrap_or_else(|| dir.ancestors().nth(2).unwrap_or(Path::new("/")));
+    // A call that made directories above that goes on up through `existing`, which holds the
+    // entry of the highest one it made.
+    let top = if usual.starts_with(existing) { existing } else { usual };
     let io = StdIo::new();
     for path in data_dir.ancestors() {
         io.sync_dir(path).map_err(|error| format!("{}: cannot sync: {error}", path.display()))?;

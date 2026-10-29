@@ -141,6 +141,7 @@ It must be an absolute path. A relative one fails `mcp`, `connect`, `studio` and
 The first use creates it with mode 0700, `zerodb.json` with tenant `me` at 0600, and `data/` at 0700.
 The home and `data/` must be yours, with no group or other bits. The shell verbs use the same home.
 Each use syncs the directory entries of `data/`, the home and its parents up to `$HOME`. For a home outside `$HOME`, the syncs stop at its grandparent.
+A use that makes directories above that stop syncs up through the deepest directory that already existed.
 A client needs only this:
 
 ```json
