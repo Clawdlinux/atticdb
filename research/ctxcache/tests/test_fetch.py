@@ -7,7 +7,7 @@ import urllib.error
 
 import pytest
 
-from research.ctxcache import hf
+from research.ctxcache import guard, hf
 
 
 def reply(offset, truncated=False, length=1):
@@ -82,3 +82,34 @@ def test_sample_is_reproducible_and_spread_over_strata(name, block, head):
         assert run == list(range(run[0], run[0] + block)), name
         assert k * total // strata <= run[0] and run[-1] < (k + 1) * total // strata, name
     assert offsets[:3] == head, "this pins the published sample"
+
+
+# name, cache dir under the stand-in repo's parent, refused. In every case cache/swe-agent
+# is a symlink to repo/rows.
+GUARD = [
+    ("a dir below the repo that does not exist yet", "repo/new", True),
+    ("a sibling whose name starts with the repo's", "repo2", False),
+    ("the repo under another case, on a case-insensitive disk", "REPO", True),
+    ("a dataset folder that is a symlink into the repo", "cache", True),
+]
+
+
+@pytest.mark.parametrize("name, rel, refused", GUARD, ids=[c[0] for c in GUARD])
+def test_cached_rows_never_land_in_the_repo(tmp_path, name, rel, refused):
+    repo = tmp_path / "repo"
+    (repo / "rows").mkdir(parents=True)
+    (tmp_path / "repo2").mkdir()
+    (tmp_path / "cache").mkdir()
+    os.symlink(repo / "rows", tmp_path / "cache" / "swe-agent")
+    if rel == "REPO" and not os.path.exists(tmp_path / "REPO"):
+        pytest.skip("this filesystem is case-sensitive, so the alias does not exist")
+    http = FakeHTTP([reply(7)])
+    f = hf.Fetcher("swe-agent", str(tmp_path / rel), urlopen=http, pause=lambda s: None, log=io.StringIO(),
+                   repo=str(repo))
+    if refused:
+        with pytest.raises(guard.InsideRepo):
+            f.row(7)
+        assert http.calls == 0, f"{name}: refused before any request"
+    else:
+        assert f.row(7)[1] == "ok", name
+    assert sorted(os.listdir(repo)) == ["rows"] and os.listdir(repo / "rows") == [], f"{name}: the repo is untouched"

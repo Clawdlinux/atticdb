@@ -19,10 +19,10 @@ if __package__ in (None, ""):  # run as a script: make `research` importable
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from research.ctxcache import copilot, hf, openhands, report, swe_agent, trace  # noqa: E402
+from research.ctxcache.guard import inside  # noqa: E402
 from research.ctxcache.stats import measure, reuse_distances  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.dirname(os.path.dirname(HERE))
 DEFAULT_BUDGETS = "1k,2k,4k,8k,16k,32k,64k,128k"
 TITLES = {
     "swe-agent": "SWE-agent trajectories (nebius)",
@@ -84,9 +84,11 @@ def parse(argv=None) -> argparse.Namespace:
         p.error("--block must not exceed --sample")
     if a.bootstrap < 0:
         p.error("--bootstrap must be 0 or more")
-    if a.export_trace and _inside(a.export_trace, REPO):
+    if a.export_trace and inside(a.export_trace):
         p.error("--export-trace must point outside the repo, so traces are never committed")
-    if _inside(a.cache_dir, REPO):
+    if a.export_trace and a.input and _same_file(a.export_trace, a.input):
+        p.error("--export-trace must not be the --input file: the export would empty it before it is read")
+    if inside(a.cache_dir):
         p.error("--cache-dir must point outside the repo, so downloaded rows are never committed")
     return a
 
@@ -95,21 +97,12 @@ def budget_text(budgets: list[int]) -> str:
     return ",".join(f"{b // 1000}k" if b % 1000 == 0 else str(b) for b in budgets)
 
 
-def _inside(path: str, root: str) -> bool:
-    """True if `path` is `root` or lies below it. It compares files, not strings, so an
-    alias still counts: another case on a case-insensitive disk, a firmlink such as
-    /System/Volumes/Data/..., or a symlink. Parts that do not exist yet are skipped."""
-    p = os.path.realpath(path)
-    while True:
-        try:
-            if os.path.samefile(p, root):
-                return True
-        except OSError:
-            pass  # not created yet
-        parent = os.path.dirname(p)
-        if parent == p:
-            return False
-        p = parent
+def _same_file(a: str, b: str) -> bool:
+    """True if both exist and are 1 file, through any symlink, hard link or case alias."""
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False  # 1 of them does not exist yet
 
 
 def source(a: argparse.Namespace, skipped: Counter):

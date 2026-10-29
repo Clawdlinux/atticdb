@@ -36,12 +36,15 @@ python3 -m pytest research/ctxcache/tests
 | `--sleep` | 1.6 | seconds between API calls |
 | `--max-requests`, `--deadline` | 2500, 5400 | caps on API calls and on seconds spent fetching |
 | `--offline` | off | use cached rows only |
-| `--export-trace` | | also write the hashed trace. Refused inside the repo |
+| `--export-trace` | | also write the hashed trace. Refused inside the repo, or over the `--input` file |
 | `--bootstrap` | 1000 | cluster bootstrap resamples. 0 turns it off |
 | `--sensitivity-budgets` | `4k,8k` | budgets for the reference proxy check |
 | `--input`, `--copilot-root` | | a trace file, or another Copilot log directory |
 
 The repo check compares files, not strings, so a path to the checkout under another case or through `/System/Volumes/Data` is refused too.
+Every file a run writes is checked that way, after symlinks resolve: each cached row, the exported trace and the sheet.
+So a symlink below the cache directory cannot pull rows into the repo.
+`--export-trace` must not be the `--input` file, under any symlink or hard link. Opening the export would empty the input.
 Bad flags and fetch or file errors exit with code 2. A run writes 4 files to `--out`:
 - `<dataset>.csv`: 1 row per budget and policy, pooled and macro, with intervals and leave-one-out ranges.
 - `<dataset>-sensitivity.csv`: the same policies on narrower proxies, at the sensitivity budgets.
@@ -260,7 +263,7 @@ We changed nothing in the data. The results are aggregate counts derived from it
 - `test_bounds.py`: the bound property on 500 random tiny traces, and on every trace up to 6 accesses over 3 objects.
 - `test_policies.py`: hand-checked results per policy, with reuse distances, peak live and dead tokens.
 - `test_adapters.py`: 1 table per adapter, on rows shaped like the real ones.
-- `test_fetch.py`: API outcomes against a fake HTTP layer, and the pinned samples.
+- `test_fetch.py`: API outcomes against a fake HTTP layer, the pinned samples, and the repo guard on cached rows.
 - `test_shell.py`: 1 table of shell commands and the reads, writes and uses they imply.
 - `test_cli.py`: the CLI on the fixture trace, on a cached public sample, and on bad input.
 - `test_label.py`: the labeling sheet.

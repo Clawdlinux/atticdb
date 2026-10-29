@@ -1,5 +1,6 @@
 import csv
 import os
+import shutil
 
 import pytest
 
@@ -102,6 +103,7 @@ def test_cli_on_a_cached_public_sample(tmp_path):
 
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+TRACE = ["--dataset", "trace", "--input", "{tmp}/in.jsonl", "--out", "{tmp}/out"]
 BAD = [
     ("a budget that is not a number", ["--dataset", "trace", "--input", FIXTURE, "--budgets", "1k,lots"]),
     ("a budget of 0", ["--dataset", "trace", "--input", FIXTURE, "--budgets", "0"]),
@@ -110,11 +112,18 @@ BAD = [
     ("a cache dir inside the repo", ["--dataset", "swe-agent", "--cache-dir", os.path.join(REPO, "rows")]),
     ("a row that is not cached, offline", ["--dataset", "swe-agent", "--sample", "2", "--offline",
                                             "--cache-dir", "{tmp}", "--out", "{tmp}/out"]),
+    # The export would empty the input before it is read.
+    ("an export over its own input", TRACE + ["--export-trace", "{tmp}/in.jsonl"]),
+    ("an export over a symlink to its input", TRACE + ["--export-trace", "{tmp}/link.jsonl"]),
+    ("an export over a hard link to its input", TRACE + ["--export-trace", "{tmp}/hard.jsonl"]),
 ]
 
 
 @pytest.mark.parametrize("name, argv", BAD, ids=[c[0] for c in BAD])
 def test_cli_refuses_bad_input_with_exit_2(tmp_path, name, argv):
+    shutil.copy(FIXTURE, tmp_path / "in.jsonl")
+    os.symlink(tmp_path / "in.jsonl", tmp_path / "link.jsonl")
+    os.link(tmp_path / "in.jsonl", tmp_path / "hard.jsonl")
     argv = [a.replace("{tmp}", str(tmp_path)) for a in argv]
     try:
         code = run.main(argv)
@@ -122,20 +131,4 @@ def test_cli_refuses_bad_input_with_exit_2(tmp_path, name, argv):
         code = e.code
     assert code == 2, name
     assert not os.path.exists(os.path.join(REPO, "rows")), "nothing is written into the repo"
-
-
-# name, path under the stand-in repo's parent, inside the repo
-GUARD = [
-    ("a dir below the repo that does not exist yet", "repo/new/rows", True),
-    ("a sibling whose name starts with the repo's", "repo2/rows", False),
-    ("the repo under another case, on a case-insensitive disk", "REPO/rows", True),
-]
-
-
-@pytest.mark.parametrize("name, rel, inside", GUARD, ids=[c[0] for c in GUARD])
-def test_repo_guard_compares_files_not_strings(tmp_path, name, rel, inside):
-    (tmp_path / "repo").mkdir()
-    (tmp_path / "repo2").mkdir()
-    if rel.startswith("REPO") and not os.path.exists(tmp_path / "REPO"):
-        pytest.skip("this filesystem is case-sensitive, so the alias does not exist")
-    assert run._inside(str(tmp_path / rel), str(tmp_path / "repo")) == inside, name
+    assert (tmp_path / "in.jsonl").read_bytes() == open(FIXTURE, "rb").read(), f"{name}: the input is intact"

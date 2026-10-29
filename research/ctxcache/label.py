@@ -18,7 +18,8 @@ import sys
 from collections import Counter
 
 from . import hf, openhands, swe_agent
-from .run import REPO, _inside, positive
+from .guard import inside, outside
+from .run import positive
 from .trace import REF_KINDS
 
 ADAPTERS = {"swe-agent": swe_agent, "openhands": openhands}
@@ -40,7 +41,7 @@ def parse(argv) -> argparse.Namespace:
     a.block = a.block or hf.DATASETS[a.dataset].block
     a.out = a.out or os.path.join(a.cache_dir, "labels", f"{a.dataset}-n{a.n}-seed{a.seed}.csv")
     for flag, path in (("--out", a.out), ("--cache-dir", a.cache_dir)):
-        if _inside(path, REPO):
+        if inside(path):
             p.error(f"{flag} must point outside the repo, so sheets and rows are never committed")
     return a
 
@@ -94,21 +95,23 @@ def main(argv=None) -> int:
     a = parse(argv)
     try:
         groups = collect(a)
+        quota = allocate(a.n, {k: len(v) for k, v in groups.items()})
+        rng = random.Random(a.seed)
+        rows = []
+        for k in REF_KINDS:
+            picked = rng.sample(groups[k], quota.get(k, 0))
+            rows += sorted(picked, key=lambda r: (r["row"], r["step"]))
+        # Again at write time, after symlinks resolve: a labels folder may link into the repo.
+        out = outside(os.path.abspath(a.out), "the sheet")
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        with open(out, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=FIELDS)
+            w.writeheader()
+            for i, r in enumerate(rows, 1):
+                w.writerow({"id": i, **r, "needed": "", "note": ""})
     except (hf.FetchError, OSError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
-    quota = allocate(a.n, {k: len(v) for k, v in groups.items()})
-    rng = random.Random(a.seed)
-    rows = []
-    for k in REF_KINDS:
-        picked = rng.sample(groups[k], quota.get(k, 0))
-        rows += sorted(picked, key=lambda r: (r["row"], r["step"]))
-    os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
-    with open(a.out, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=FIELDS)
-        w.writeheader()
-        for i, r in enumerate(rows, 1):
-            w.writerow({"id": i, **r, "needed": "", "note": ""})
     drawn = ", ".join(f"{k} {quota[k]} of {len(groups[k])}" for k in REF_KINDS if groups[k])
     print(f"wrote {len(rows)} references to {a.out}: {drawn}")
     return 0

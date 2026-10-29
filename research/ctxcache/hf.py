@@ -20,6 +20,8 @@ import urllib.request
 from collections import Counter
 from dataclasses import dataclass
 
+from . import guard
+
 API = "https://datasets-server.huggingface.co/rows"
 CACHE = os.path.expanduser("~/.cache/zerodb-ctxcache")
 HEADERS = {"User-Agent": "zerodb-ctxcache/0.1 (research; https://github.com/Clawdlinux/zerodb)"}
@@ -73,7 +75,9 @@ def sample_offsets(total: int, size: int, seed: int, block: int = 1) -> list[int
 
 
 class Fetcher:
-    """Fetches rows and caches each one, including the fact that it came back truncated."""
+    """Fetches rows and caches each one, including the fact that it came back truncated.
+    Every file it writes must resolve outside `repo`, so a symlink below the cache
+    directory cannot pull rows into the checkout."""
 
     def __init__(
         self,
@@ -88,9 +92,11 @@ class Fetcher:
         clock=time.monotonic,
         pause=time.sleep,
         log=sys.stderr,
+        repo: str = guard.REPO,
     ):
         self.ds = DATASETS[name]
         self.dir = os.path.join(cache_dir, name)
+        self.repo = repo
         self.sleep, self.retries, self.offline = sleep, retries, offline
         self.max_requests, self.deadline = max_requests, deadline
         self.urlopen, self.clock, self.pause, self.log = urlopen, clock, pause, log
@@ -107,12 +113,14 @@ class Fetcher:
         if not os.path.exists(self._path(offset)):
             if self.offline:
                 raise FetchError(f"row {offset} is not cached and --offline is set")
-            os.makedirs(self.dir, exist_ok=True)
+            # Before the request, so a refused cache costs no call.
+            os.makedirs(guard.outside(self.dir, "the row cache", self.repo), exist_ok=True)
             for cached in self._fetch(offset, length):
-                tmp = f"{self._path(cached['offset'])}.{os.getpid()}.tmp"
+                path = guard.outside(self._path(cached["offset"]), "the cached row", self.repo)
+                tmp = guard.outside(f"{path}.{os.getpid()}.tmp", "the cached row", self.repo)
                 with gzip.open(tmp, "wt", encoding="utf-8") as f:
                     json.dump(cached, f)
-                os.replace(tmp, self._path(cached["offset"]))
+                os.replace(tmp, path)
         with gzip.open(self._path(offset), "rt", encoding="utf-8") as f:
             cached = json.load(f)
         if cached["truncated"]:
