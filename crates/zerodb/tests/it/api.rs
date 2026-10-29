@@ -403,8 +403,10 @@ fn auth_and_host_rules() {
     );
     let started = std::time::Instant::now();
     let wire = tcp.raw(head.as_bytes());
-    assert!(wire.starts_with("HTTP/1.1 401 "), "{wire}");
-    assert!(wire.contains("Connection: close"), "{wire}");
+    // Exactly these bytes: the studio's browser headers never reach the store's answers.
+    let body = json!({"outcome": "not_committed", "error": "unauthorized"}).to_string();
+    let fields = format!("Content-Type: application/json\r\nContent-Length: {}", body.len());
+    assert_eq!(wire, format!("HTTP/1.1 401 \r\n{fields}\r\nConnection: close\r\n\r\n{body}"));
     assert!(started.elapsed().as_secs() < 5, "closed without waiting for the body");
     running.server.shutdown();
 
@@ -473,7 +475,9 @@ fn health_tracks_engine_state() {
         (8 << 20) + 1
     );
     let wire = unix.raw(head.as_bytes());
-    assert!(wire.starts_with("HTTP/1.1 413 ") && wire.ends_with(&too_large.to_string()), "{wire}");
+    let length = too_large.to_string().len();
+    let fields = format!("Content-Type: application/json\r\nContent-Length: {length}");
+    assert_eq!(wire, format!("HTTP/1.1 413 \r\n{fields}\r\nConnection: close\r\n\r\n{too_large}"));
     assert_eq!(health().1["status"], "ok", "a rejected batch changes nothing");
 
     // I14: below the floor, writes stop without loss and reads go on.

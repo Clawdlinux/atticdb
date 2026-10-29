@@ -111,7 +111,7 @@ impl Launch {
         let log = dir.join("serve.log");
         loop {
             if let Some(Ok(Some(status))) = self.child.as_mut().map(Child::try_wait) {
-                eprintln!("zerodb mcp: started server exited: {status}");
+                eprintln!("zerodb: started server exited: {status}");
                 self.child = None;
                 // 75 lost the lock race and 70 is a poison exit: both clear on a retry.
                 // Anything else is a start failure, such as a bad data directory.
@@ -129,7 +129,7 @@ impl Launch {
                     return Ok((Box::new(stream), "localhost".into()));
                 }
                 Err(reason) if reason != self.refused => {
-                    eprintln!("zerodb mcp: no trusted server: {reason}");
+                    eprintln!("zerodb: no trusted server: {reason}");
                     self.refused = reason;
                 }
                 Err(_) => {}
@@ -179,11 +179,23 @@ impl Launch {
             .stderr(log)
             .process_group(0)
             .spawn()?;
-        eprintln!("zerodb mcp: started server pid {}", child.id());
+        eprintln!("zerodb: started server pid {}", child.id());
         self.child = Some(child);
         self.next_spawn = Instant::now() + self.backoff;
         self.backoff = (self.backoff * 2).min(MAX_BACKOFF);
         Ok(())
+    }
+}
+
+impl Drop for Launch {
+    // A started server outlives its `Launch`. A thread waits for it, so a process that runs
+    // on, such as the studio, reaps it when it exits instead of keeping a zombie.
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = std::thread::Builder::new().name("zerodb-reap".into()).spawn(move || {
+                let _ = child.wait();
+            });
+        }
     }
 }
 

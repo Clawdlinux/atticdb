@@ -1,55 +1,8 @@
-use crate::support::{chmod, Dir, Holders, Process};
+use crate::support::{chmod, cwd, data_dir, hook, seed, slow_store, zerodb, Dir, Holders};
 use serde_json::{json, Value};
-use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::DirBuilderExt;
-use std::os::unix::net::UnixListener;
 use std::path::Path;
-use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
-
-type Output = (Option<i32>, String, String);
-
-/// Runs `zerodb` in `cwd` with `HOME` set to `home` and writes `stdin` after `delay`, keeping
-/// it open until the exit. A stray `ZERODB_TOKEN` is set, which the home's users ignore.
-/// Returns the exit code, stdout and stderr.
-fn zerodb(home: &Path, cwd: &Path, args: &[&str], stdin: &[u8], delay: u64) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_zerodb"));
-    command.args(args).current_dir(cwd).env("HOME", home).stdin(Stdio::piped());
-    for var in ["COPILOT_HOME", "XDG_DATA_HOME"] {
-        command.env_remove(var);
-    }
-    command.env("ZERODB_TOKEN", "x");
-    let mut process = Process::start(&mut command);
-    let mut input = process.child.stdin.take().unwrap();
-    std::thread::sleep(Duration::from_millis(delay));
-    // The hook reads at most 1 MiB, so a longer write fails once it exits.
-    let _ = input.write_all(stdin);
-    let (status, _) = process.wait();
-    (status.code(), process.stdout(), process.stderr())
-}
-
-/// The hook's stdout and stderr, after it exits 0 with 1 line.
-fn hook(home: &Path, stdin: &str, delay: u64) -> (String, String) {
-    let (code, out, err) = zerodb(home, home, &["hook", "session-start"], stdin.as_bytes(), delay);
-    assert_eq!(code, Some(0), "{stdin:.80}: {err}");
-    assert_eq!(out.lines().count(), 1, "{stdin:.80}: 1 line: {out}");
-    (out, err)
-}
-
-fn seed(home: &Path, args: &[&str]) {
-    let (code, _, err) = zerodb(home, home, args, b"", 0);
-    assert_eq!(code, Some(0), "{args:?}: {err}");
-}
-
-fn cwd(path: &Path) -> String {
-    json!({"cwd": path}).to_string()
-}
-
-fn data_dir(home: &Path) -> std::path::PathBuf {
-    let data =
-        if cfg!(target_os = "macos") { "Library/Application Support" } else { ".local/share" };
-    home.join(data).join("zerodb/data")
-}
 
 /// A trusted fake server in `home`'s data directory. `/healthz` answers at once, any other
 /// request after 1.5 s with no facts and no turns.
@@ -57,37 +10,10 @@ fn slow_server(home: &Path) {
     let data = data_dir(home);
     std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&data).unwrap();
     let socket = data.join("zerodb.sock");
-    let listener = UnixListener::bind(&socket).unwrap();
+    slow_store(&socket, Some(Duration::from_millis(1_500)));
     let lock =
         format!("pid={} instance=X unix={} tcp=none\n", std::process::id(), socket.display());
     std::fs::write(data.join("LOCK"), lock).unwrap();
-    std::thread::spawn(move || {
-        for mut stream in listener.incoming().map_while(Result::ok) {
-            std::thread::spawn(move || {
-                let mut reader = BufReader::new(stream.try_clone().unwrap());
-                loop {
-                    let mut head = String::new();
-                    while !head.ends_with("\r\n\r\n") {
-                        if reader.read_line(&mut head).unwrap_or(0) == 0 {
-                            return;
-                        }
-                    }
-                    let body = if head.starts_with("GET /healthz ") {
-                        r#"{"instance": "X"}"#
-                    } else {
-                        std::thread::sleep(Duration::from_millis(1_500));
-                        r#"{"facts": [], "next": null, "turns": [], "truncated": false}"#
-                    };
-                    let length = body.len();
-                    let reply =
-                        format!("HTTP/1.1 200 OK\r\nContent-Length: {length}\r\n\r\n{body}");
-                    if stream.write_all(reply.as_bytes()).is_err() {
-                        return;
-                    }
-                }
-            });
-        }
-    });
 }
 
 /// The block lists rules, then this repo's facts, both in key order, then the newest 5

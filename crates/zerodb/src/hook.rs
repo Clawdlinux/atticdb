@@ -23,7 +23,8 @@ static PRINTED: Mutex<bool> = Mutex::new(false);
 const FACTS: usize = 50;
 const TURNS: usize = 5;
 const MAX_CONTENT: usize = 300;
-const MAX_BLOCK: usize = 6_000;
+/// Longest block, in characters.
+pub(crate) const MAX_BLOCK: usize = 6_000;
 const MORE: &str = "(more in zerodb)";
 
 /// Reads the hook's JSON on stdin and prints `{"additionalContext": "<block>"}`, or `{}`
@@ -73,8 +74,13 @@ fn block(input: impl Read, deadline: Instant) -> Result<Option<String>, String> 
     let input = first.ok_or("stdin is empty")?;
     let input = input.map_err(|error| format!("stdin is not JSON of at most 1 MiB: {error}"))?;
     let cwd = input["cwd"].as_str().ok_or("stdin has no cwd string")?;
-    let repo = repo(Path::new(cwd))?;
-    let mut home = HomeReader::new(&repo, deadline)?;
+    block_for(&repo(Path::new(cwd))?, deadline)
+}
+
+/// The block for `repo`, or `None` when memory has nothing for it. Reads the home, as the
+/// hook does, and ends by `deadline`.
+pub(crate) fn block_for(repo: &str, deadline: Instant) -> Result<Option<String>, String> {
+    let mut home = HomeReader::new(repo, deadline)?;
     // A page may stop short of 50 at its byte or scan budget, so follow `next`. Every read
     // shares the deadline, which ends the paging too.
     let mut facts = |prefix: String| {

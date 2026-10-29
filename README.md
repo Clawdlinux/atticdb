@@ -107,6 +107,22 @@ zerodb search $Z --query "retry rule"                # {"hits":[...],"next":null
 Each write picks 1 random `idem_key` and retries with it until `--retry-deadline` (default 30 s). Exit 0 means done. Exit 1 means nothing was written, or a read failed. Exit 2 is a usage error.
 Exit 3 means the write may have landed. Running the command again uses a new key, so it can write a duplicate.
 
+## Studio
+
+`zerodb studio` serves a read-only web page about your memory, on loopback, and opens it in your browser.
+
+```sh
+zerodb studio             # the home, opens your browser
+zerodb studio --no-open   # only prints the link
+```
+
+It takes `zerodb mcp`'s connection flags. With none, it uses the home and starts its server if needed.
+Each run listens on `127.0.0.1` on a new random port, and prints a link with a secret. Stop it with Ctrl-C.
+Snap browsers, the default on Ubuntu, cannot open the page from the hidden home folder, so they show an error.
+Then open the printed link by hand, or pass `--no-open`.
+The page needs that secret to read anything. The tenant token never leaves the studio process.
+It never writes to the store. Details: [zerodb studio](crates/zerodb/README.md#zerodb-studio).
+
 ## Numbers
 
 Durable appends, `fsync` before every ack, Azure L8s v3. Medians of 7 interleaved reps, 1 client for every server. Full tables: [bench/H2H.md](bench/H2H.md).
@@ -171,7 +187,7 @@ ZERODB_SIM_SEEDS=2000 cargo test -p zerodb-core --release --features sim --test 
 
 ## Docs
 
-- [zerodb](crates/zerodb/README.md): server, HTTP API, MCP, `stats`, `load`, `verify`, `dump` and `recover`.
+- [zerodb](crates/zerodb/README.md): server, HTTP API, MCP, studio, `stats`, `load`, `verify`, `dump` and `recover`.
 - [zerodb-core](crates/zerodb-core/README.md) and [zerodb-tape](crates/zerodb-tape/README.md): engine, formats, recovery and limits. [Python client](clients/python/README.md), [TESTING.md](TESTING.md), [macOS engine runs](bench/RESULTS.md), [0001 (historical)](docs/design/0001-architecture.md).
 
 License: MIT OR Apache-2.0.

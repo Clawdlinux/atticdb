@@ -8,7 +8,7 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsE
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use zerodb::auth::Auth;
@@ -160,9 +160,10 @@ impl Via {
     /// Writes raw bytes and reads until the server closes the connection.
     pub fn raw(&self, bytes: &[u8]) -> String {
         let mut stream = self.connect();
-        // macOS fails `setsockopt` with EINVAL once the peer has closed, as after a busy
-        // answer. The read below then returns buffered data or EOF at once.
-        if let Err(error) = stream.set_read_timeout(Some(Duration::from_secs(10))) {
+        // Longer than the studio's 10 s store deadline, so a 504 arrives before this. macOS
+        // fails `setsockopt` with EINVAL once the peer has closed, as after a busy answer. The
+        // read below then returns buffered data or EOF at once.
+        if let Err(error) = stream.set_read_timeout(Some(Duration::from_secs(30))) {
             assert_eq!(error.raw_os_error(), Some(rustix::io::Errno::INVAL.raw_os_error()));
         }
         stream.write_all(bytes).unwrap();
@@ -503,4 +504,94 @@ pub fn private_file(dir: &Dir, name: &str, content: &str) -> String {
     let mut file = File::options().write(true).create_new(true).mode(0o600).open(&path).unwrap();
     file.write_all(content.as_bytes()).unwrap();
     path.to_str().unwrap().to_owned()
+}
+
+/// The exit code, stdout and stderr of a finished `zerodb`.
+pub type Output = (Option<i32>, String, String);
+
+/// Runs `zerodb` in `cwd` with `HOME` set to `home` and writes `stdin` after `delay`, keeping
+/// it open until the exit. A stray `ZERODB_TOKEN` is set, which the home's users ignore.
+pub fn zerodb(home: &Path, cwd: &Path, args: &[&str], stdin: &[u8], delay: u64) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_zerodb"));
+    command.args(args).current_dir(cwd).env("HOME", home).stdin(Stdio::piped());
+    for var in ["COPILOT_HOME", "XDG_DATA_HOME"] {
+        command.env_remove(var);
+    }
+    command.env("ZERODB_TOKEN", "x");
+    let mut process = Process::start(&mut command);
+    let mut input = process.child.stdin.take().unwrap();
+    std::thread::sleep(Duration::from_millis(delay));
+    // The hook reads at most 1 MiB, so a longer write fails once it exits.
+    let _ = input.write_all(stdin);
+    let (status, _) = process.wait();
+    (status.code(), process.stdout(), process.stderr())
+}
+
+/// The hook's stdout and stderr, after it exits 0 with 1 line.
+pub fn hook(home: &Path, stdin: &str, delay: u64) -> (String, String) {
+    let (code, out, err) = zerodb(home, home, &["hook", "session-start"], stdin.as_bytes(), delay);
+    assert_eq!(code, Some(0), "{stdin:.80}: {err}");
+    assert_eq!(out.lines().count(), 1, "{stdin:.80}: 1 line: {out}");
+    (out, err)
+}
+
+/// Runs a verb on the home, which must succeed.
+pub fn seed(home: &Path, args: &[&str]) {
+    let (code, _, err) = zerodb(home, home, args, b"", 0);
+    assert_eq!(code, Some(0), "{args:?}: {err}");
+}
+
+/// The hook's stdin for a chat in `path`.
+pub fn cwd(path: &Path) -> String {
+    json!({"cwd": path}).to_string()
+}
+
+/// The home's data directory when `HOME` is `home`.
+pub fn data_dir(home: &Path) -> PathBuf {
+    let data =
+        if cfg!(target_os = "macos") { "Library/Application Support" } else { ".local/share" };
+    home.join(data).join("zerodb/data")
+}
+
+/// A fake store on `socket`. `/healthz` answers at once with instance `X`. Any other request
+/// gets an empty read page after `delay`. With no `delay` it is never answered, and its
+/// connection stays open until the client closes it. Returns a count of those requests.
+pub fn slow_store(socket: &Path, delay: Option<Duration>) -> Arc<AtomicUsize> {
+    let listener = UnixListener::bind(socket).unwrap();
+    let reads = Arc::new(AtomicUsize::new(0));
+    let counted = reads.clone();
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().map_while(Result::ok) {
+            let counted = counted.clone();
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                loop {
+                    let mut head = String::new();
+                    while !head.ends_with("\r\n\r\n") {
+                        if reader.read_line(&mut head).unwrap_or(0) == 0 {
+                            return;
+                        }
+                    }
+                    let body = if head.starts_with("GET /healthz ") {
+                        r#"{"instance": "X"}"#
+                    } else {
+                        counted.fetch_add(1, Ordering::SeqCst);
+                        let Some(delay) = delay else {
+                            let _ = std::io::copy(&mut reader, &mut std::io::sink());
+                            return;
+                        };
+                        std::thread::sleep(delay);
+                        r#"{"facts": [], "next": null, "turns": [], "truncated": false}"#
+                    };
+                    let length = body.len();
+                    let reply =
+                        format!("HTTP/1.1 200 OK\r\nContent-Length: {length}\r\n\r\n{body}");
+                    if stream.write_all(reply.as_bytes()).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    reads
 }

@@ -1,0 +1,11 @@
+body {
+  margin: 2rem;
+  background: #f2f4f7;
+  color: #111;
+  font-family: system-ui, sans-serif;
+}
+
+pre {
+  font-family: ui-monospace, Menlo, monospace;
+  white-space: pre-wrap;
+}

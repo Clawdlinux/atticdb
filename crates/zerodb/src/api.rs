@@ -732,7 +732,7 @@ fn parse_window(tenant: &str, target: &str) -> Result<(Scope, WindowQuery, usize
 }
 
 /// The percent-decoded query parameters. A repeated name is an error.
-fn params(target: &str) -> Result<BTreeMap<String, String>, String> {
+pub(crate) fn params(target: &str) -> Result<BTreeMap<String, String>, String> {
     let mut params = BTreeMap::new();
     let query = target.split_once('?').map_or("", |(_, query)| query);
     for pair in query.split('&').filter(|pair| !pair.is_empty()) {

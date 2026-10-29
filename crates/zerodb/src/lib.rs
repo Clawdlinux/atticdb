@@ -1,4 +1,4 @@
-//! The zerodb server, its HTTP client half, and the MCP adapter.
+//! The zerodb server, its HTTP client half, the MCP adapter and the studio bridge.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -18,6 +18,7 @@ pub mod mcp;
 pub mod ops;
 pub mod outcome;
 pub mod serve;
+pub mod studio;
 
 use std::io::Read;
 

@@ -8,6 +8,7 @@ zerodb init --config zerodb.json --tenant me     # writes a 0600 config, prints 
 zerodb serve --config zerodb.json --data-dir ./data
 zerodb mcp                                       # no flags: the per-user home
 zerodb connect vscode                            # adds zerodb to VS Code's MCP config
+zerodb studio                                    # a read-only page about the store
 zerodb verify --data-dir ./data                  # checks a stopped data dir on a copy
 zerodb recover --truncate-at <lsn> --data-dir ./data
 ```
@@ -222,6 +223,55 @@ Turns are listed oldest first. A section with no entries is left out.
 Each content is cut to 300 characters, and its newlines become spaces.
 Past 6,000 characters the block stops at a whole line and ends with `(more in zerodb)`.
 The block depends only on the repo and memory, so the prompt prefix stays the same until memory changes.
+
+## `zerodb studio`
+
+`zerodb studio [<flags>] [--no-open]` serves a read-only web page about the store, on loopback.
+It takes `--url`, `--data-dir`, `--config`, `--tenant` and `--token-file`, as `zerodb mcp` does.
+With none, it uses the home and starts its server if needed.
+It sends `GET /healthz` once, without the token. Unless the store answers 200, it exits 1 with the error.
+Then it listens on `127.0.0.1` on a random port, makes a secret of 32 hex characters, and prints:
+
+```text
+zerodb studio: http://127.0.0.1:<port>/#k=<secret>
+Press Ctrl-C to stop.
+```
+
+Unless `--no-open`, it writes a redirect page with that link to `studio.html` in the home directory, at mode 0600.
+It creates that directory if missing, with no config. Then it runs `open` on macOS or `xdg-open` on Linux on that file.
+So the secret is never in a process argument, where `ps` shows it to other users. Jupyter does the same.
+If no browser opens, it prints a note and keeps serving. It serves until it is killed.
+Snap browsers, the default on Ubuntu, cannot read hidden folders such as `~/.local/share`. They show an error while `xdg-open` exits 0.
+So on Linux it always prints a hint to open the link by hand. `--no-open` skips the browser.
+
+The page reads the secret from the link's fragment, which a browser never sends to a server.
+It sends the secret back in the `X-Zerodb-Studio` header. The tenant token stays in the studio, and no response carries it.
+Every request goes through these checks, in order:
+
+- `Host` must be exactly `127.0.0.1:<port>`, else 403 `forbidden`. This blocks DNS rebinding.
+- An `Origin` header, when sent, must be `http://127.0.0.1:<port>`, else 403 `forbidden`.
+- Only `GET`, else 405 `method_not_allowed`. Request bodies are refused.
+- Routes under `/api/` need the secret, else 401 `unauthorized`. It is compared in constant time.
+  A page on another origin cannot send that header, because the studio gives no CORS answer.
+
+| Route | Answer |
+|---|---|
+| `GET /`, `/app.js`, `/app.css` | The page. No secret needed. It holds no data |
+| `GET /api/v1/sessions`, `records`, `window`, `search`, `facts/list`, `facts/get`, `facts/history` | The store's `GET /v1/...` with the same query, sent with the token. Its status and body come back unchanged |
+| `GET /api/v1/stats`, `GET /api/metrics` | The store's `/v1/stats` and `/metrics`. A TCP store refuses them, and that answer comes back |
+| `GET /api/block?repo=<name>` | `{"repo", "block": <text> or null, "chars", "max": 6000}`: the session-start hook's block for that repo, built by the hook's code. Only on the home, else 404 `not_home`. `repo` is 1 to 255 bytes and the only parameter, else 400 `invalid_input`. A failed read is 502 `store_unreachable` |
+| `GET /api/info` | `{"version", "tenant", "store": "home", "data_dir" or "url", "home": <path> or null}`. `tenant` is null when the token came from a token file or `ZERODB_TOKEN` |
+
+Anything else is 404 `not_found`. No route writes to the store.
+A store read has 10 s, connect included. Past that it answers 504 `store_timeout`.
+A store it cannot reach answers 502 `store_unreachable`, with a `message`.
+A store 401 is the exception to unchanged answers: it becomes 502 `store_unauthorized`, so a 401 always means a wrong secret.
+Each connection serves 1 request and says `Connection: close`. The head must arrive within 5 s.
+At most 16 connections are open. Past that, a new one gets 503 `busy`.
+Every response carries `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; worker-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`.
+Also `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store` and `Cross-Origin-Resource-Policy: same-origin`.
+A 5xx answer logs 1 stderr line with the method, path, status and time. Never a query string, a header value or the secret.
+Exit code 1 when it cannot start, 2 for a bad flag.
 
 ## Tests
 

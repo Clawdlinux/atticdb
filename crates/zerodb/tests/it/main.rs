@@ -6,4 +6,5 @@ mod durability;
 mod hook;
 mod listen;
 mod mcp;
+mod studio;
 mod support;

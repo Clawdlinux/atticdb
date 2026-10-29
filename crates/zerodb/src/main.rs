@@ -23,6 +23,8 @@ const USAGE: &str = "usage:
   zerodb connect <vscode|copilot> [--force]
   zerodb disconnect <vscode|copilot>
   zerodb hook session-start
+  zerodb studio [--url unix:///path|http://127.0.0.1:<port>] [--data-dir <dir>] [--config <path>]
+                [--tenant <name>] [--token-file <path>] [--no-open]
   zerodb append <connect> --content <text> [--role user|assistant|tool]
   zerodb recent <connect> [--n <n>] [--max-bytes <n>]
   zerodb search <connect> --query <words> [--limit <n>] [--before <lsn>] [--max-bytes <n>]
@@ -36,9 +38,10 @@ const USAGE: &str = "usage:
   With no --url, --data-dir, --config, --tenant or --token-file, the home is used and
   ZERODB_TOKEN is ignored.
   append, recent, search and fact print one JSON line. They exit 1 when nothing was written,
-  3 when a write may or may not be saved.";
+  3 when a write may or may not be saved.
+  studio serves a read-only page on 127.0.0.1 and opens it. It runs until Ctrl-C.";
 
-/// Flags of every command that talks to a server as a tenant.
+/// Flags of every command that talks to a server as a tenant. The first 5 pick the store.
 const CONNECT: [&str; 8] = [
     "--url",
     "--data-dir",
@@ -95,6 +98,7 @@ fn main() -> ExitCode {
                 [event] if event == "session-start" => Some(zerodb::hook::session_start()),
                 _ => None,
             },
+            "studio" => flags(rest, &CONNECT[..5], &["--no-open"]).map(zerodb::studio::start),
             "append" => tool(rest, "memory_append", &["--content", "--role"], &[]),
             "recent" => tool(rest, "memory_recent", &["--n", "--max-bytes"], &[]),
             "search" => {
