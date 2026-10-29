@@ -774,17 +774,26 @@ fn connect_claude_code_adds_its_parts() {
         assert_eq!(calls()[start..], [remove.clone(), add(None)], "{case}");
         assert_eq!(read(&state)["mcpServers"]["zerodb"], entry(None), "{case}");
     }
-    // claude removed the old entry, but its add failed: the line shows the old entry, and
-    // says to re-run connect, which then adds zerodb's.
-    std::fs::write(&state, json!({"mcpServers": {"zerodb": old}}).to_string()).unwrap();
+    // claude removed the old entry, but its add failed: the line names the file that keeps
+    // the old entry, shows its env names but no values, and says to re-run connect, which
+    // then adds zerodb's.
+    let mut secret = old.clone();
+    secret["env"] = json!({"API_KEY": "sk-secret-0123456789"});
+    std::fs::write(&state, json!({"mcpServers": {"zerodb": secret}}).to_string()).unwrap();
     let start = calls().len();
     let fails = [("FAKE_CLAUDE", Path::new("add-fails"))];
     let (code, out) = run(&home, None, &bin, &fails, &["connect", "claude-code"]);
     assert_eq!(code, Some(1), "{out}");
-    let said =
-        format!("The old entry was removed. It was: {old}. Re-run zerodb connect claude-code");
-    assert!(out.starts_with("MCP entry: failed, claude mcp add ") && out.contains(&said), "{out}");
-    assert!(!out.contains("claude mcp remove"), "no remove to run by hand: {out}");
+    let said = "The old entry was removed. It ran \"/opt/old/zerodb\" \
+                [\"mcp\",\"--agent\",\"claude-code\"] with env names [\"API_KEY\"]. The whole \
+                entry is saved in ";
+    assert!(out.starts_with("MCP entry: failed, claude mcp add ") && out.contains(said), "{out}");
+    assert!(out.contains("Re-run zerodb connect claude-code"), "{out}");
+    assert!(!out.contains("sk-secret") && !out.contains("claude mcp remove"), "{out}");
+    let kept = out.split(said).nth(1).unwrap().split(". Re-run").next().unwrap();
+    assert!(kept.starts_with(&format!("{}/zerodb-mcp-entry.json.", home.join(".claude").display())));
+    assert_eq!(read(Path::new(kept)), secret, "the whole entry is kept");
+    assert_eq!(std::fs::metadata(kept).unwrap().mode() & 0o777, 0o600);
     assert_eq!(calls()[start..], [remove.clone(), add(None)]);
     assert_eq!(read(&state)["mcpServers"], json!({}));
     let (code, out) = run(&home, None, &bin, &[], &["connect", "claude-code"]);
@@ -864,6 +873,19 @@ fn connect_claude_code_adds_its_parts() {
     assert!(out.starts_with("MCP entry: removed (") && out.contains(said), "{out}");
     assert!(out.contains("\nallow rules: removed ("), "{out}");
     assert_eq!(read(&settings)["hooks"], shared["hooks"], "the group stays");
+    // An older zerodb handler there is skipped, with advice for that group.
+    let mut older = shared.clone();
+    older["hooks"]["SessionStart"][0]["hooks"][1]["command"] =
+        json!("'/opt/old/zerodb' hook session-start --harness claude-code");
+    std::fs::write(&settings, serde_json::to_string_pretty(&older).unwrap()).unwrap();
+    let (code, out) = run(&home, None, &bin, &[], &["connect", "claude-code"]);
+    assert_eq!(code, Some(1), "{out}");
+    let said = format!(
+        "an older zerodb hook is inside a group with other hooks. Update the zerodb handler \
+         inside that group by hand, to run: {command}\n"
+    );
+    assert!(out.contains(&said) && !out.contains("Add this group"), "{out}");
+    assert_eq!(read(&settings)["hooks"], older["hooks"], "nothing added");
 
     // A binary path with a $, a backtick and a space. A symlink would not do: connect
     // writes the binary's real path. Connect then disconnect round-trip, and the hook command

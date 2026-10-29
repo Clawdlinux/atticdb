@@ -12,15 +12,15 @@
 //! identical part added by hand.
 
 use super::{
-    absolute_env, binary, entry_home, home_words, moved_home, read, refuse_flags, write, Harness,
-    COPILOT_SHARED,
+    absolute_env, binary, entry_home, home_words, moved_home, read, refuse_flags, save, write,
+    Harness, COPILOT_SHARED,
 };
 use crate::home::{user_home, HOME_ENV};
 use crate::jsonedit;
 use serde_json::{json, Value};
 use std::fs::OpenOptions;
 use std::io::{ErrorKind, Read};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -338,8 +338,9 @@ fn set_entry(state: &Path, current: Option<&Value>, exe: &str, home: Option<&str
         run_claude(&claude, &remove).map_err(failed)?;
         if let Err(why) = run_claude(&claude, &add) {
             return Err(format!(
-                "MCP entry: failed, {why}. The old entry was removed. It was: {old}. Re-run \
-                 zerodb connect claude-code, which adds zerodb's now that no entry is there"
+                "MCP entry: failed, {why}. The old entry was removed. {}. Re-run zerodb connect \
+                 claude-code, which adds zerodb's now that no entry is there",
+                keep_old(old)
             ));
         }
     } else {
@@ -353,6 +354,29 @@ fn set_entry(state: &Path, current: Option<&Value>, exe: &str, home: Option<&str
             "MCP entry: failed, {shown} does not show the entry after claude ran. {again}"
         )),
         Err(why) => Err(format!("MCP entry: failed, {shown} {why} after claude ran. {again}")),
+    }
+}
+
+/// Saves `old`, an entry `claude` removed, to a new owner-only file in the config dir, as
+/// its env may hold secrets. Returns what to print: the file's path, and the entry's command,
+/// args and env names, never env values.
+fn keep_old(old: &Value) -> String {
+    let names: Vec<&str> = old["env"]
+        .as_object()
+        .map_or_else(Vec::new, |env| env.keys().map(String::as_str).collect());
+    let shown =
+        format!("It ran {} {} with env names {}", old["command"], old["args"], json!(names));
+    let saved = config_dir().and_then(|dir| {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir)
+            .map_err(|error| format!("{}: cannot create: {error}", dir.display()))?;
+        save(&dir.join("zerodb-mcp-entry.json"), old.to_string().as_bytes(), 0o600)
+    });
+    match saved {
+        Ok(path) => format!("{shown}. The whole entry is saved in {}", path.display()),
+        Err(why) => format!("{shown}. It could not be saved: {why}"),
     }
 }
 
@@ -566,7 +590,22 @@ struct Done {
 }
 
 /// An edit to `settings.json`'s text. `Err` says why it was refused.
-type Edit = Result<Done, String>;
+type Edit = Result<Done, Refused>;
+
+/// Why an edit to `settings.json` was refused, and what to do by hand when the part's usual
+/// advice doesn't fit.
+struct Refused {
+    /// Why it was refused.
+    why: String,
+    /// The advice to give instead of the part's.
+    by_hand: Option<String>,
+}
+
+impl From<jsonedit::Error> for Refused {
+    fn from(error: jsonedit::Error) -> Self {
+        Self { why: error.to_string(), by_hand: None }
+    }
+}
 
 /// A `Done` for `text` that says `said`.
 fn done(text: String, said: &str) -> Edit {
@@ -593,13 +632,16 @@ fn mixed(text: &str) -> Vec<String> {
 /// one there is refused, as it can't be updated without touching the other hooks.
 fn add_hook(text: &str, group: &Value) -> Edit {
     let stale = |old: &Value| our_group(old) && old != group;
-    let (text, stale) = jsonedit::remove(text, &HOOKS, stale).map_err(|e| e.to_string())?;
+    let (text, stale) = jsonedit::remove(text, &HOOKS, stale)?;
     let command = group["hooks"][0]["command"].as_str().unwrap_or_default();
     let mixed = mixed(&text);
     if mixed.iter().any(|other| other != command) {
-        return Err("an older zerodb hook is inside a group with other hooks. Update it by \
-                    hand there"
-            .into());
+        return Err(Refused {
+            why: "an older zerodb hook is inside a group with other hooks".into(),
+            by_hand: Some(format!(
+                "Update the zerodb handler inside that group by hand, to run: {command}"
+            )),
+        });
     }
     let root: Value = serde_json::from_str(&text).unwrap_or_default();
     let groups = root["hooks"]["SessionStart"].as_array();
@@ -609,7 +651,7 @@ fn add_hook(text: &str, group: &Value) -> Edit {
     if !mixed.is_empty() {
         return done(text, "found inside a group with other hooks, so not added again");
     }
-    let text = jsonedit::append(&text, &HOOKS, group).map_err(|e| e.to_string())?;
+    let text = jsonedit::append(&text, &HOOKS, group)?;
     done(text, if stale == 0 { "added" } else { "updated" })
 }
 
@@ -617,12 +659,12 @@ fn add_hook(text: &str, group: &Value) -> Edit {
 fn add_rules(text: &str, notes: Notes) -> Edit {
     let ask = notes == Notes::Ask;
     let drop = |rule: &Value| ask && *rule == APPEND;
-    let (mut text, dropped) = jsonedit::remove(text, &ALLOW, drop).map_err(|e| e.to_string())?;
+    let (mut text, dropped) = jsonedit::remove(text, &ALLOW, drop)?;
     let root: Value = serde_json::from_str(&text).unwrap_or_default();
     let have = root["permissions"]["allow"].as_array().cloned().unwrap_or_default();
     let mut added = 0;
     for rule in rules(notes).into_iter().filter(|rule| !have.contains(&json!(rule))) {
-        text = jsonedit::append(&text, &ALLOW, &json!(rule)).map_err(|e| e.to_string())?;
+        text = jsonedit::append(&text, &ALLOW, &json!(rule))?;
         added += 1;
     }
     let said = match (dropped, added) {
@@ -636,7 +678,7 @@ fn add_rules(text: &str, notes: Notes) -> Edit {
 /// `text` without the SessionStart groups that run zerodb's hook. A zerodb handler in a
 /// group with other hooks stays, and is left to do by hand.
 fn drop_hooks(text: &str) -> Edit {
-    let (text, removed) = jsonedit::remove(text, &HOOKS, our_group).map_err(|e| e.to_string())?;
+    let (text, removed) = jsonedit::remove(text, &HOOKS, our_group)?;
     let by_hand = !mixed(&text).is_empty();
     let said = match (removed, by_hand) {
         (0, false) => "not found",
@@ -654,7 +696,7 @@ fn drop_hooks(text: &str) -> Edit {
 fn drop_rules(text: &str) -> Edit {
     let ours =
         |rule: &Value| rule.as_str().is_some_and(|rule| READS.contains(&rule) || rule == APPEND);
-    let (text, removed) = jsonedit::remove(text, &ALLOW, ours).map_err(|e| e.to_string())?;
+    let (text, removed) = jsonedit::remove(text, &ALLOW, ours)?;
     done(text, if removed == 0 { "not found" } else { "removed" })
 }
 
@@ -701,7 +743,7 @@ fn edit_settings(parts: &[Part<'_>]) -> Vec<Line> {
                 text = edit.text;
                 Ok((edit.said, edit.by_hand, changed))
             }
-            Err(error) => Err(format!("{shown}: {error}")),
+            Err(refused) => Err((format!("{shown}: {}", refused.why), refused.by_hand)),
         });
     }
     let mut backup = None;
@@ -711,12 +753,13 @@ fn edit_settings(parts: &[Part<'_>]) -> Vec<Line> {
             Ok(saved) => backup = saved,
             Err(why) => {
                 for done in done.iter_mut().filter(|done| matches!(done, Ok((_, _, true)))) {
-                    *done = Err(why.clone());
+                    *done = Err((why.clone(), None));
                 }
             }
         }
     }
-    let line = |(part, done): (&Part<'_>, Result<(String, bool, bool), String>)| match done {
+    type Outcome = Result<(String, bool, bool), (String, Option<String>)>;
+    let line = |(part, done): (&Part<'_>, Outcome)| match done {
         Ok((said, by_hand, changed)) => {
             let line = match (&backup, changed) {
                 (Some(saved), true) => {
@@ -730,7 +773,10 @@ fn edit_settings(parts: &[Part<'_>]) -> Vec<Line> {
                 Ok(line)
             }
         }
-        Err(why) => Err(format!("{}: skipped, {why}. {}", part.name, part.by_hand)),
+        Err((why, by_hand)) => {
+            let by_hand = by_hand.as_deref().unwrap_or(&part.by_hand);
+            Err(format!("{}: skipped, {why}. {by_hand}", part.name))
+        }
     };
     parts.iter().zip(done).map(line).collect()
 }

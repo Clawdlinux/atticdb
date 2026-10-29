@@ -237,7 +237,8 @@ After it, `.claude.json` must show the entry, or the part failed. It is read up 
 An entry with the same binary, args and `ZERODB_HOME`, and no other env, is left as it is.
 An entry that runs any absolute path with exactly `mcp --agent claude-code`, such as an old binary path, is updated: `claude mcp remove`, then `claude mcp add`.
 So is one with another env variable, such as `HOME` or `XDG_DATA_HOME`, which could pick another home than the hook's.
-If the remove worked but the add failed, the line says so and shows the old entry, to restore it. Run `connect` again to add zerodb's.
+If the remove worked but the add failed, the line says so. The old entry is saved to `zerodb-mcp-entry.json.zerodb-backup-<unix seconds>` in the config dir, at mode 0600, as its env may hold secrets.
+The line shows that path, and the entry's command, args and env names, never env values. Run `connect` again to add zerodb's.
 Any other `zerodb` entry, such as one with connection flags, is refused, and nothing changes. `--force` replaces it the same way.
 `disconnect` removes the entry only if it is what zerodb writes, for any absolute binary path and no env but `ZERODB_HOME`.
 The binary's file name doesn't matter, so a binary named `zerodb-0.1.0` counts too.
@@ -254,6 +255,7 @@ A missing file is created at mode 0600, and a missing config dir at 0700.
 Each part is found by its content: a group whose every handler runs an absolute binary path with `hook session-start --harness claude-code`, and the exact allow rules.
 `disconnect` removes every part it finds, including one you added by hand.
 zerodb's handler inside a group with other hooks is left alone. `connect` adds no second group then, and `disconnect` says to remove it by hand there, which counts as skipped.
+An older zerodb handler in such a group is skipped by `connect`, which says to update that handler by hand.
 A `SessionStart` array that ends up empty stays as `[]`.
 A change keeps a backup, as above. A rerun with nothing to change writes nothing.
 
