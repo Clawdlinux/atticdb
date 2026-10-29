@@ -36,7 +36,7 @@ Dropping `GIT_*` keeps an inherited `GIT_DIR`, `GIT_WORK_TREE` or `GIT_INDEX_FIL
 It also drops the credential and provider vars, so runs use the logins in the eval dirs and nothing else:
 
 - credentials: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`, `CODEX_API_KEY`;
-- provider and endpoint switches: `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `OPENAI_ORG_ID`.
+- provider and endpoint switches: `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`, every `ANTHROPIC_FOUNDRY_*` var, `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `OPENAI_ORG_ID`.
 
 `--keep-api-keys` passes them all on.
 The harness refuses to start any child whose `ZERODB_HOME` is not under its run root, after both resolve, so a link that points out is refused.
@@ -134,10 +134,12 @@ claude -p <prompt> --output-format stream-json --verbose --permission-mode accep
 Codex:
 
 ```sh
-codex exec --json --dangerously-bypass-hook-trust -c 'mcp_servers.zerodb.tools.fact_set.approval_mode="approve"' --skip-git-repo-check <prompt>
+codex exec --json --dangerously-bypass-hook-trust -c 'mcp_servers.zerodb.tools.fact_set.approval_mode="approve"' --sandbox workspace-write --skip-git-repo-check <prompt>
 ```
 
-Codex keeps its default `workspace-write` sandbox.
+Codex runs in the `workspace-write` sandbox, named explicitly.
+A fresh Codex config has no trust entry for the fixture, so Codex 0.147 would otherwise pick read-only, and S4 could not edit `calc.py`.
+This keeps the plan's intent: the default `workspace-write` sandbox, which still tests that the MCP server reaches the home socket.
 Each agent runs in its own process group. On timeout the group is killed.
 
 Eval-only overrides, which the results must list:
@@ -145,6 +147,7 @@ Eval-only overrides, which the results must list:
 - Claude Code: `--allowedTools=mcp__zerodb__fact_set`, as nobody can answer a prompt.
 - Claude Code: `--permission-mode acceptEdits`, so S4 tests memory, not the permission prompt for the edit.
 - Codex: `--dangerously-bypass-hook-trust`, and `-c` to approve `fact_set`.
+- Codex: `--sandbox workspace-write`, as a fresh config without a trust entry would get read-only. It is the plan's default sandbox, named explicitly.
 - Both: no credential or provider vars in the env, unless `--keep-api-keys`.
 
 ## Parsing

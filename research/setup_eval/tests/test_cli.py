@@ -29,9 +29,13 @@ def test_codex_argv():
     prompt = SCENARIOS["S3"].prompt
     assert agents.agent_argv("codex", prompt) == [
         "codex", "exec", "--json", "--dangerously-bypass-hook-trust", "-c",
-        'mcp_servers.zerodb.tools.fact_set.approval_mode="approve"', "--skip-git-repo-check", prompt]
-    assert not any(a in ("-s", "--sandbox") or "danger-full-access" in a
-                   for a in agents.agent_argv("codex", prompt)), "the default sandbox is kept"
+        'mcp_servers.zerodb.tools.fact_set.approval_mode="approve"', "--sandbox", "workspace-write",
+        "--skip-git-repo-check", prompt]
+    argv = agents.agent_argv("codex", prompt)
+    # Explicit, as a fresh config without a trust entry would get read-only. Never a wider one.
+    assert argv[argv.index("--sandbox") + 1] == "workspace-write"
+    assert not any(a == "-s" or "danger-full-access" in a or "bypass-approvals-and-sandbox" in a for a in argv)
+    assert argv[-1] == prompt
 
 
 def test_setup_names_1_harness_only():
@@ -53,15 +57,17 @@ def test_child_env_drops_the_users_zerodb_and_config_vars():
 
 
 def test_credential_and_provider_vars_are_stripped_unless_kept():
-    named = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK",
-             "CLAUDE_CODE_USE_VERTEX", "ANTHROPIC_BASE_URL", "OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL",
-             "OPENAI_ORG_ID"]
-    assert sorted(agents.ACCOUNT_ENV) == sorted(named)
-    base = {"PATH": "/bin", "OTHER": "e", **{k: "v" for k in named}}
+    exact = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK",
+             "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "ANTHROPIC_BASE_URL", "OPENAI_API_KEY",
+             "CODEX_API_KEY", "OPENAI_BASE_URL", "OPENAI_ORG_ID"]
+    assert sorted(agents.ACCOUNT_ENV) == sorted(exact)
+    assert agents.ACCOUNT_PREFIXES == ("ANTHROPIC_FOUNDRY_",)
+    named = exact + ["ANTHROPIC_FOUNDRY_API_KEY", "ANTHROPIC_FOUNDRY_RESOURCE", "ANTHROPIC_FOUNDRY_BASE_URL"]
+    base = {"PATH": "/bin", "OTHER": "e", "ANTHROPIC_FOUNDRYX": "not the prefix", **{k: "v" for k in named}}
     kw = dict(home="/h", zerodb_home="/r/zh", claude_dir="/e/claude", codex_dir="/e/codex")
     env = agents.child_env(base, **kw)
-    assert not any(k in env for k in named) and env["OTHER"] == "e"
-    assert sorted(agents.stripped_keys(base)) == sorted(named)
+    assert not any(k in env for k in named) and env["OTHER"] == "e" and env["ANTHROPIC_FOUNDRYX"]
+    assert agents.stripped_keys(base) == sorted(named)
     kept = agents.child_env(base, keep_api_keys=True, **kw)
     assert all(kept[k] == "v" for k in named)
     assert agents.stripped_keys(base, keep_api_keys=True) == []
@@ -71,11 +77,14 @@ def test_dry_run_names_stripped_keys_never_values(monkeypatch, tmp_path, capsys)
     fake_home(monkeypatch, tmp_path)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-value-1")
     monkeypatch.setenv("CODEX_API_KEY", "codex-value-2")
+    monkeypatch.setenv("ANTHROPIC_FOUNDRY_API_KEY", "foundry-value-3")
     base = ["run", "--zerodb", "/z", "--out", str(tmp_path / "o.csv"), "--dry-run"]
     assert cli.main(base) == 0
     text = capsys.readouterr().out
-    assert "Credential and provider vars stripped from every child: ANTHROPIC_API_KEY, CODEX_API_KEY." in text
-    assert "sk-ant-value-1" not in text and "codex-value-2" not in text
+    assert ("Credential and provider vars stripped from every child: ANTHROPIC_API_KEY, ANTHROPIC_FOUNDRY_API_KEY, "
+            "CODEX_API_KEY.") in text
+    assert "CLAUDE_CODE_USE_FOUNDRY, ANTHROPIC_FOUNDRY_*." in text, "the checked names, prefixes as NAME_*"
+    assert "sk-ant-value-1" not in text and "codex-value-2" not in text and "foundry-value-3" not in text
     assert cli.main(base + ["--keep-api-keys"]) == 0
     text = capsys.readouterr().out
     assert "Credential and provider vars: kept (--keep-api-keys)" in text and "sk-ant-value-1" not in text
@@ -83,7 +92,7 @@ def test_dry_run_names_stripped_keys_never_values(monkeypatch, tmp_path, capsys)
 
 def test_children_get_no_api_keys(monkeypatch, tmp_path):
     paths = fake_home(monkeypatch, tmp_path)
-    for name in agents.ACCOUNT_ENV:
+    for name in agents.ACCOUNT_ENV + ("ANTHROPIC_FOUNDRY_API_KEY",):
         monkeypatch.setenv(name, "v")
     assert cli.main(["check"]) == 0
     assert all(c["api_keys"] == [] for c in stub_calls(paths["log"]))

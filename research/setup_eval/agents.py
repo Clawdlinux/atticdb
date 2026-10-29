@@ -15,7 +15,9 @@ OVERRIDES = {
                     "not the permission prompt"],
     "codex": ["--dangerously-bypass-hook-trust: the zerodb hook runs without a stored approval",
               f"-c '{CODEX_APPROVE}': fact_set runs without asking",
-              "the default workspace-write sandbox is kept"],
+              "--sandbox workspace-write: a fresh Codex config has no trust entry for the fixture, so "
+              "Codex 0.147 would pick read-only. This keeps the plan's default workspace-write sandbox, which "
+              "still tests that the MCP server reaches the home socket"],
 }
 
 AGENT_TIMEOUT = 300.0
@@ -34,7 +36,9 @@ DROPPED = {"CLAUDE_CONFIG_DIR", "CODEX_HOME"}
 # --keep-api-keys, so runs use the logins in the eval dirs and nothing else.
 ACCOUNT_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL",
                "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "OPENAI_API_KEY", "CODEX_API_KEY",
-               "OPENAI_BASE_URL", "OPENAI_ORG_ID")
+               "OPENAI_BASE_URL", "OPENAI_ORG_ID", "CLAUDE_CODE_USE_FOUNDRY")
+# Every var with these prefixes too, such as ANTHROPIC_FOUNDRY_API_KEY or _RESOURCE.
+ACCOUNT_PREFIXES = ("ANTHROPIC_FOUNDRY_",)
 
 
 def agent_argv(harness: str, prompt: str) -> list[str]:
@@ -46,7 +50,7 @@ def agent_argv(harness: str, prompt: str) -> list[str]:
                 "--permission-mode", "acceptEdits", f"--allowedTools={CLAUDE_ALLOWED}"]
     if harness == "codex":
         return ["codex", "exec", "--json", "--dangerously-bypass-hook-trust", "-c", CODEX_APPROVE,
-                "--skip-git-repo-check", prompt]
+                "--sandbox", "workspace-write", "--skip-git-repo-check", prompt]
     raise ValueError(f"unknown harness {harness!r}")
 
 
@@ -79,7 +83,14 @@ def hook_argv(zerodb: str, harness: str) -> list[str]:
 
 def stripped_keys(base: dict, keep_api_keys: bool = False) -> list[str]:
     """The names of the credential and provider vars in `base` that the children won't get."""
-    return [] if keep_api_keys else [k for k in ACCOUNT_ENV if k in base]
+    if keep_api_keys:
+        return []
+    return sorted(k for k in base if k in ACCOUNT_ENV or k.startswith(ACCOUNT_PREFIXES))
+
+
+def account_names() -> str:
+    """The stripped names as text, prefixes as `NAME_*`."""
+    return ", ".join(list(ACCOUNT_ENV) + [f"{p}*" for p in ACCOUNT_PREFIXES])
 
 
 def child_env(base: dict, *, home: str, zerodb_home: str, claude_dir: str, codex_dir: str,

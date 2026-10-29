@@ -17,7 +17,7 @@ Fill this in after a real batch. The method is in [../README.md](../README.md).
 - Claude Code: `--allowedTools=mcp__zerodb__fact_set`, as nobody can answer a prompt.
 - Claude Code: `--permission-mode acceptEdits`, so S4 tests memory, not the permission prompt for the edit.
 - Codex: `--dangerously-bypass-hook-trust`, and `-c 'mcp_servers.zerodb.tools.fact_set.approval_mode="approve"'` to approve `fact_set`.
-- Codex keeps the default `workspace-write` sandbox.
+- Codex: `--sandbox workspace-write`, named explicitly. A fresh config has no trust entry for the fixture, so Codex 0.147 would pick read-only. It is the plan's default sandbox, which still tests that the MCP server reaches the home socket.
 - Credential and provider vars stripped from the env: `<yes, or --keep-api-keys>`.
 - `<any other change from the plan>`
 

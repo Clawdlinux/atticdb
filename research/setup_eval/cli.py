@@ -63,7 +63,7 @@ def parse(argv) -> argparse.Namespace:
                    help="the CSV rows are appended to")
     r.add_argument("--dry-run", action="store_true", help="print every command and env name, run nothing")
     r.add_argument("--keep-api-keys", action="store_true",
-                   help=f"pass {', '.join(agents.ACCOUNT_ENV)} on to the children, so they may use "
+                   help=f"pass {agents.account_names()} on to the children, so they may use "
                         "another account, provider or endpoint than the eval logins")
     r.add_argument("--max-runs", type=positive, default=DEFAULT_MAX_RUNS,
                    help=f"refuse a batch larger than this. At most {BUDGET_CAP}")
@@ -135,7 +135,7 @@ def dry_run(a: argparse.Namespace, cfg: Config, out=print) -> int:
     else:
         stripped = agents.stripped_keys(cfg.base_env)
         out(f"Credential and provider vars stripped from every child: "
-            f"{', '.join(stripped) if stripped else 'none were set'}. Checked: {', '.join(agents.ACCOUNT_ENV)}.")
+            f"{', '.join(stripped) if stripped else 'none were set'}. Checked: {agents.account_names()}.")
     for n in range(1, a.runs + 1):
         for harness in a.harnesses:
             for sid in a.scenarios:

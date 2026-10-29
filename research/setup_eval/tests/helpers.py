@@ -43,10 +43,12 @@ def fake_home(monkeypatch, tmp_path, make_eval_dirs: bool = True) -> dict:
         monkeypatch.setenv(name, str(home / rel))
     for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL",
                  "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "OPENAI_API_KEY", "CODEX_API_KEY",
-                 "OPENAI_BASE_URL", "OPENAI_ORG_ID", "ZERODB_HOME", "ZERODB_TOKEN", "CLAUDE_CONFIG_DIR",
-                 "CODEX_HOME", "STUB_REPLAY",
+                 "OPENAI_BASE_URL", "OPENAI_ORG_ID", "CLAUDE_CODE_USE_FOUNDRY", "ZERODB_HOME", "ZERODB_TOKEN",
+                 "CLAUDE_CONFIG_DIR", "CODEX_HOME", "STUB_REPLAY",
                  "STUB_SLEEP", "STUB_LOGGED_OUT", "STUB_EXIT", "STUB_STDERR", "STUB_EXIT_AFTER"):
         monkeypatch.delenv(name, raising=False)
+    for name in [k for k in os.environ if k.startswith("ANTHROPIC_FOUNDRY_")]:
+        monkeypatch.delenv(name)
     claude_dir = home / ".cache" / "zerodb-setup-eval" / "claude"
     codex_dir = home / ".cache" / "zerodb-setup-eval" / "codex"
     if make_eval_dirs:

@@ -173,7 +173,8 @@ def stop_server(cfg: Config, runner: Runner, root: str) -> str | None:
     if not m or not _alive(int(m.group(1))):
         return None
     pid = int(m.group(1))
-    step = Step("teardown", ["ps", "-o", "command=", "-p", str(pid)], "/", 10.0)
+    # -ww: no width limit, so an inherited COLUMNS can't cut the line before --data-dir.
+    step = Step("teardown", ["ps", "-ww", "-o", "command=", "-p", str(pid)], "/", 10.0)
     r = runner.run(step.argv, env=env_for(cfg, root, step), root=root, cwd=root, timeout=step.timeout)
     command = r.stdout.decode("utf-8", "replace")
     if " serve " not in f" {command} " or f"--data-dir {data}" not in command:

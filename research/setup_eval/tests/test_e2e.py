@@ -10,7 +10,8 @@ import tempfile
 
 import pytest
 
-from research.setup_eval import cli
+from research.setup_eval import cli, harness
+from research.setup_eval.proc import Runner
 
 from .helpers import FIXTURES, ZERODB, fake_home, stub_calls
 
@@ -27,7 +28,7 @@ def short_tmp(monkeypatch):
 
 
 def servers_under(path: str) -> list[str]:
-    ps = subprocess.run(["ps", "-A", "-o", "command="], capture_output=True, text=True, timeout=10).stdout
+    ps = subprocess.run(["ps", "-A", "-ww", "-o", "command="], capture_output=True, text=True, timeout=10).stdout
     return [line for line in ps.splitlines() if " serve " in line and path in line]
 
 
@@ -157,3 +158,28 @@ def test_a_right_answer_without_a_clean_finish_fails(monkeypatch, tmp_path, shor
     assert "nextest" in first["notes"] and "agent_exit=1" in first["notes"] and first["pass"] == "0"
     assert "nextest" in second["notes"] and "no final reply" in second["notes"] and second["pass"] == "0"
     assert "the agent reported an error" in second["notes"]
+
+
+def test_server_stop_ignores_an_inherited_columns(monkeypatch, tmp_path, short_tmp):
+    """With COLUMNS=40, a ps without -ww cuts the command line before --data-dir on Linux, and
+    the server would be left running."""
+    fake_home(monkeypatch, tmp_path)
+    monkeypatch.setenv("COLUMNS", "40")
+    cfg = cli.config(ZERODB)
+    assert cfg.base_env["COLUMNS"] == "40"
+    root = harness.make_root(cfg)
+    zh, repo = harness.paths(root)
+    os.makedirs(repo)
+    env = dict(cfg.base_env, ZERODB_HOME=zh)
+    seeded = subprocess.run([ZERODB, "fact", "set", "--key", "k", "--content", "v"], cwd=repo, env=env,
+                            capture_output=True, timeout=30)
+    assert seeded.returncode == 0, seeded.stderr
+    assert servers_under(root), "the shell verb started a server"
+    runner = Runner()
+    argvs = []
+    real_run = runner.run
+    monkeypatch.setattr(runner, "run", lambda argv, **kw: argvs.append(argv) or real_run(argv, **kw))
+    assert harness.stop_server(cfg, runner, root) is None
+    assert argvs and argvs[0][:2] == ["ps", "-ww"]
+    assert servers_under(root) == []
+    shutil.rmtree(root)
