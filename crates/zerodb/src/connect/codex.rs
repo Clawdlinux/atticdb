@@ -215,10 +215,10 @@ fn block(exe: &str, home: Option<&str>, notes: Notes) -> Result<String, String> 
 struct Block {
     /// From the start of the begin line to after the end line.
     span: Range<usize>,
-    /// zerodb's bytes in the span, in order: the 2 marker lines, and each table section under
-    /// `mcp_servers.zerodb`, from its header to the next header or marker line. Codex inserts
-    /// tables it adds before a comment at the end of the file, so other tables can sit inside
-    /// the markers. They, and any other line there, aren't zerodb's.
+    /// zerodb's bytes in the span, in order: the 2 marker lines, each `mcp_servers.zerodb`
+    /// header and the key lines of its table, and the blank lines between 2 of those. Codex
+    /// inserts tables it adds before a comment at the end of the file, so other tables can sit
+    /// inside the markers. They, comments, and the blank lines around them aren't zerodb's.
     ours: Vec<Range<usize>>,
 }
 
@@ -258,17 +258,29 @@ fn find_block(entries: &[Entry]) -> Result<Option<Block>, String> {
             ))
         }
     };
-    let mut ours = vec![entries[begin].span.clone()];
-    let inside = &entries[begin + 1..end];
-    for (at, entry) in inside.iter().enumerate() {
-        let Item::Table(path) = &entry.item else { continue };
-        if zerodb_path(path) {
-            let next = inside[at + 1..].iter().find(|entry| matches!(entry.item, Item::Table(_)));
-            let stop = next.unwrap_or(&entries[end]).span.start;
-            ours.push(entry.span.start..stop);
+    // The markers, each zerodb header and the keys of its table are zerodb's. A comment never
+    // is, and a key goes with the table it sits in.
+    let all = &entries[begin..=end];
+    let mut section = false;
+    let mine: Vec<bool> = (all.iter().enumerate())
+        .map(|(at, entry)| match &entry.item {
+            _ if at == 0 || at == all.len() - 1 => true,
+            Item::Table(path) => {
+                section = zerodb_path(path);
+                section
+            }
+            Item::Key(..) => section,
+            Item::Comment(_) => false,
+        })
+        .collect();
+    // Runs of zerodb's lines, with the blank lines between them.
+    let mut ours: Vec<Range<usize>> = Vec::new();
+    for (at, entry) in all.iter().enumerate().filter(|(at, _)| mine[*at]) {
+        match ours.last_mut() {
+            Some(last) if mine[at - 1] => last.end = entry.span.end,
+            _ => ours.push(entry.span.clone()),
         }
     }
-    ours.push(entries[end].span.clone());
     Ok(Some(Block { span: entries[begin].span.start..entries[end].span.end, ours }))
 }
 
@@ -285,10 +297,9 @@ fn without(text: &str, block: &Block) -> String {
         at = ours.end;
     }
     let tail = &text[block.span.end..];
-    let begin = &text[block.ours[0].clone()];
+    let begin = text[block.span.start..].split('\n').next().unwrap_or_default();
     if added_end(begin) && kept.is_empty() && tail.is_empty() {
-        head =
-            head.strip_suffix(if begin.ends_with("\r\n") { "\r\n" } else { "\n" }).unwrap_or(head);
+        head = head.strip_suffix(if begin.ends_with('\r') { "\r\n" } else { "\n" }).unwrap_or(head);
     }
     format!("{head}{kept}{tail}")
 }
@@ -575,22 +586,24 @@ mod tests {
     fn only_zerodb_bytes_in_the_block_go() {
         let begin = "# zerodb:begin v1. zerodb disconnect codex removes this block.";
         // As toml_edit writes a table it adds: after the last table, before the end comment.
+        // Comments, and the blank lines around them, aren't zerodb's, even inside its table.
         let text = format!(
-            "a = 1\n\n{begin}\nx.y = 2\n[mcp_servers.zerodb]\ncommand = \"z\"\n\n\
-             [mcp_servers.zerodb.tools.t]\nk = 1\n\n[projects.\"/r\"]\ntrust_level = \"trusted\"\n\n\
-             [mcp_servers.zerodb.env]\nA = \"b\"\n# zerodb:end\n[after]\n"
+            "a = 1\n\n{begin}\nx.y = 2\n[mcp_servers.zerodb]\ncommand = \"z\"\n# mine\nargs = []\n\n\
+             [mcp_servers.zerodb.tools.t]\nk = 1\n# keep me too\n\n[projects.\"/r\"]\n\
+             trust_level = \"trusted\"\n\n[mcp_servers.zerodb.env]\nA = \"b\"\n# zerodb:end\n\
+             [after]\n"
         );
         let block = find_block(&scan(&text).unwrap()).unwrap().unwrap();
         let ours: Vec<&str> = block.ours.iter().map(|ours| &text[ours.clone()]).collect();
         let wanted = [
             &format!("{begin}\n")[..],
-            "[mcp_servers.zerodb]\ncommand = \"z\"\n\n",
-            "[mcp_servers.zerodb.tools.t]\nk = 1\n\n",
-            "[mcp_servers.zerodb.env]\nA = \"b\"\n",
-            "# zerodb:end\n",
+            "[mcp_servers.zerodb]\ncommand = \"z\"\n",
+            "args = []\n\n[mcp_servers.zerodb.tools.t]\nk = 1\n",
+            "[mcp_servers.zerodb.env]\nA = \"b\"\n# zerodb:end\n",
         ];
         assert_eq!(ours, wanted);
-        let kept = "a = 1\nx.y = 2\n[projects.\"/r\"]\ntrust_level = \"trusted\"\n\n[after]\n";
+        let kept = "a = 1\nx.y = 2\n# mine\n# keep me too\n\n[projects.\"/r\"]\n\
+                    trust_level = \"trusted\"\n\n[after]\n";
         assert_eq!(without(&text, &block), kept);
         // The line end connect added before the block goes only when nothing follows it.
         let added = "# zerodb:begin v1. zerodb disconnect codex removes this block and the line \

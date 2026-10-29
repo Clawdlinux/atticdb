@@ -301,7 +301,7 @@ A file without a final line end gets one, and the begin line then ends `removes 
 So `disconnect` gives back the file byte for byte.
 A missing file is created at mode 0600, and a missing config dir at 0700.
 Codex writes `config.toml` with `toml_edit`, which keeps a comment at the end of the file after every table. So a table Codex adds, such as a project's trust, lands inside zerodb's markers.
-zerodb's bytes are only the 2 marker lines and each `mcp_servers.zerodb` table, up to the next header or marker line. Every other byte inside the markers stays.
+zerodb's bytes are only the 2 marker lines, each `mcp_servers.zerodb` header and the key lines of its table, and the blank lines between 2 of those. Every other byte inside the markers stays: other tables, comments, and the blank lines around them.
 A block that matches, with nothing else inside, writes nothing.
 Otherwise, such as for an old binary path or a table Codex added, zerodb's bytes go and a fresh block goes at the end of the file, with a backup.
 zerodb reads `config.toml` with a small scanner. It tracks strings, multi-line strings, arrays and inline tables, so text inside them never counts. It decodes keys, so `"zero\u0064b"` is `zerodb`, and `"zerodb.proxy"` is 1 key.
