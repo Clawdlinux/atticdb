@@ -240,15 +240,24 @@ fn moved_home() -> Result<Option<String>, String> {
 }
 
 /// Removes zerodb's entry from `harness`'s config, and the instructions file and the hook
-/// once no harness has one. Returns the exit code.
+/// once no harness has one. Both removals are tried, and every error is reported. Returns the
+/// exit code.
 pub fn disconnect(harness: Harness) -> u8 {
     finish(edit(harness, None, None).and_then(|message| {
         println!("{message}");
-        let guide = remove_guide()?;
-        if !guide.is_empty() {
-            println!("{guide}");
+        let mut errors = Vec::new();
+        for removed in [remove_guide(), remove_hook()] {
+            match removed {
+                Ok(message) if !message.is_empty() => println!("{message}"),
+                Ok(_) => {}
+                Err(error) => errors.push(error),
+            }
         }
-        remove_hook()
+        if errors.is_empty() {
+            Ok(String::new())
+        } else {
+            Err(errors.join("\nzerodb: "))
+        }
     }))
 }
 
@@ -503,8 +512,13 @@ fn find(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|window| window == needle)
 }
 
-/// Writes the instructions file, unless another file there mentions zerodb. Returns the
-/// message to print.
+/// Whether `bytes` hold the [`MARKER`] line, so zerodb wrote them.
+fn marked(bytes: &[u8]) -> bool {
+    String::from_utf8_lossy(bytes).lines().any(|line| line.trim_end() == MARKER)
+}
+
+/// Writes the instructions file, unless another file there mentions zerodb, or a file of the
+/// same name has no [`MARKER`] line. Returns the message to print.
 fn set_guide() -> Result<String, String> {
     let dir = guide_dir()?;
     if let Some(other) = other_guide(&dir) {
@@ -517,6 +531,9 @@ fn set_guide() -> Result<String, String> {
         read(&path).map_err(|why| format!("{shown}: {why}. The instructions were not written"))?;
     if old.as_ref().is_some_and(|(bytes, _)| *bytes == text.as_bytes()) {
         return Ok(format!("the zerodb instructions are already in place ({shown})"));
+    }
+    if old.as_ref().is_some_and(|(bytes, _)| !marked(bytes)) {
+        return Ok(format!("skipped the zerodb instructions: {shown} has no line {MARKER}"));
     }
     Ok(match write(&path, old.as_ref(), text.as_bytes())? {
         Some(backup) => {
@@ -539,8 +556,7 @@ fn remove_guide() -> Result<String, String> {
     if let Some(why) = still_used() {
         return Ok(format!("kept the zerodb instructions ({shown}): {why}"));
     }
-    let text = String::from_utf8_lossy(&bytes);
-    if !text.lines().any(|line| line.trim_end() == MARKER) {
+    if !marked(&bytes) {
         return Ok(format!("left {shown} alone: it has no line {MARKER}. Delete it by hand"));
     }
     delete(&path)?;

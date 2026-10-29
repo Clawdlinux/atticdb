@@ -166,7 +166,7 @@ fn connect_edits_only_the_zerodb_entry() {
 
 /// `connect` writes 1 hook file and 1 instructions file for both harnesses, and `disconnect`
 /// removes them once neither is connected. A hook file zerodb did not write stays, and so
-/// does an instructions file without the marker line. Another instructions file that
+/// does an instructions file without the marker line, which connect doesn't overwrite. Another instructions file that
 /// mentions zerodb stops ours. The quoted path runs in `sh`. Under `ZERODB_HOME`, both
 /// entries and the hook pass it on, and a path with a `$` is refused. Both entries must pass
 /// the same home, as the hook reads 1.
@@ -253,13 +253,18 @@ fn connect_writes_the_session_start_hook() {
         assert!(out.contains(&said_guide("removed")), "{var:?}: {out}");
         assert_eq!(files(&instructions).len(), 0, "{var:?}: instructions removed, no backup");
 
-        // Without the marker line, the instructions file stays. Another instructions file that
-        // mentions zerodb, in any case, stops connect from writing ours. Its backup doesn't.
+        // Without the marker line, the instructions file stays, and connect doesn't overwrite it.
+        // Another instructions file that mentions zerodb, in any case, stops connect from
+        // writing ours. Its backup doesn't.
         std::fs::write(&guide, "mine\n").unwrap();
         let out = run(&["disconnect", "copilot"]);
         let alone = format!("left {} alone: it has no line <!-- written by", guide.display());
         assert!(out.contains(&alone), "{var:?}: {out}");
         assert_eq!(std::fs::read_to_string(&guide).unwrap(), "mine\n", "{var:?}: no marker");
+        let out = run(&["connect", "copilot"]);
+        let skipped = format!("skipped the zerodb instructions: {} has no line", guide.display());
+        assert!(out.contains(&skipped), "{var:?}: {out}");
+        assert_eq!(std::fs::read_to_string(&guide).unwrap(), "mine\n", "{var:?}: not written");
         std::fs::remove_file(&guide).unwrap();
         let other = instructions.join("zerodb-memory.instructions.md");
         let backup = instructions.join("zerodb-memory.instructions.md.bak-1");

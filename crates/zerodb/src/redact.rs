@@ -2,7 +2,8 @@
 //!
 //! First come the values of env vars named like secrets, longest first. Then come known token
 //! formats, matched by hand. Each secret becomes a `[secret:<type>]` placeholder, which never
-//! matches again. It is best effort: a secret that was changed, split or encoded gets through.
+//! matches again. Text shaped like a placeholder is scanned like any other, so it can't hide a
+//! secret. It is best effort: a secret that was changed, split or encoded gets through.
 
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -113,15 +114,12 @@ fn word(byte: u8) -> bool {
 }
 
 /// Copies `text`, replacing what `find` matches. `find` gets the bytes and a position, and
-/// returns where the match ends and its replacement. Placeholders are copied as they are.
+/// returns where the match ends and its replacement.
 fn scan(text: &str, mut find: impl FnMut(&[u8], usize) -> Option<(usize, String)>) -> String {
     let bytes = text.as_bytes();
     let (mut out, mut at) = (Vec::with_capacity(bytes.len()), 0);
     while at < bytes.len() {
-        if let Some(length) = placeholder(&bytes[at..]) {
-            out.extend_from_slice(&bytes[at..at + length]);
-            at += length;
-        } else if let Some((end, with)) = find(bytes, at) {
+        if let Some((end, with)) = find(bytes, at) {
             out.extend_from_slice(with.as_bytes());
             at = end;
         } else {
@@ -241,7 +239,8 @@ fn url_password(bytes: &[u8], start: usize, counts: &mut Counts) -> Option<(usiz
     let stop = |byte: &u8| b"@/?#".contains(byte) || byte.is_ascii_whitespace();
     let length = bytes[start..].iter().position(stop)?;
     let userinfo = &bytes[start..start + length];
-    if bytes[start + length] != b'@' {
+    // Already hidden. A second run would split at the `:` in `[secret:` and change the text.
+    if bytes[start + length] != b'@' || userinfo.ends_with(b":[secret:url-password]") {
         return None;
     }
     // The first `:` outside a placeholder.
@@ -277,7 +276,8 @@ mod tests {
         pairs.map(|(kind, n)| (kind.to_owned(), n.parse().unwrap_or(0))).collect()
     }
 
-    /// Every format with its near misses, env values, and placeholders, which stay. Tokens are
+    /// Every format with its near misses, env values, and placeholders, which stay unless they
+    /// hold a secret. Tokens are
     /// built here, as a token-shaped literal would trip push protection.
     #[test]
     fn redact_hides_known_secrets_once() {
@@ -406,6 +406,30 @@ mod tests {
                 "env:MY_TOKEN=1",
             ),
             ("placeholders", "[secret:github-token] [secret:env:X_KEY]".into(), "", ""),
+            (
+                "token in a placeholder",
+                format!("[secret:env:{github}]"),
+                "[secret:env:[secret:github-token]]",
+                "github-token=1",
+            ),
+            (
+                "aws in a placeholder",
+                format!("[secret:env:{aws}]"),
+                "[secret:env:[secret:aws-key-id]]",
+                "aws-key-id=1",
+            ),
+            (
+                "env in a placeholder",
+                format!("[secret:env:{}]", "tok-12345678"),
+                "[secret:env:[secret:env:MY_TOKEN]]",
+                "env:MY_TOKEN=1",
+            ),
+            (
+                "token in a placeholder in a url",
+                format!("x://[secret:env:{github}]:[secret:url-password]@h"),
+                "x://[secret:env:[secret:github-token]]:[secret:url-password]@h",
+                "github-token=1",
+            ),
         ];
         for (case, input, expected, counted) in rows {
             let expected = if expected.is_empty() { input.as_str() } else { expected };
