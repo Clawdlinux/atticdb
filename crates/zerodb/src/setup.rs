@@ -2,7 +2,7 @@
 //! connects them, then checks each one. The plan is [`connect::connect`] in [`Mode::Plan`], the same
 //! code that writes, so the preview and `--dry-run` show what Apply does.
 
-use crate::connect::{self, Harness, Line, Mode, Notes, Options, Report};
+use crate::connect::{self, Harness, Line, Mode, Notes, Options, Report, State};
 use serde_json::{json, Value};
 use std::io::{BufRead, IsTerminal, Read, Write};
 use std::os::unix::process::CommandExt;
@@ -215,17 +215,11 @@ fn choose(
     Ok(Some((harnesses, Options { force: false, hook, notes })))
 }
 
-/// The text of a line.
-fn text(line: &Line) -> &str {
-    let (Ok(text) | Err(text)) = line;
-    text
-}
-
 /// Prints `report`'s lines under its app, then its error and warnings. Lines in `shown` are
 /// left out, and the printed ones are added.
 fn show(harness: Harness, report: &Report, shown: &mut Vec<String>, stopped: &str) {
     println!("{}:", title(harness));
-    for line in report.lines.iter().map(text) {
+    for line in report.lines.iter().map(|line| &line.text) {
         if !shown.iter().any(|seen| seen == line) {
             println!("  {line}");
             shown.push(line.to_owned());
@@ -285,12 +279,13 @@ fn apply(harnesses: &[Harness], options: Options) -> u8 {
         // The parts are in place when a plan now finds nothing to change.
         let plan = connect::connect(harness, options, Mode::Plan);
         for line in plan.lines.iter().filter(|line| !in_place(line)) {
-            failed.push(format!("not in place: {}", text(line)));
+            failed.push(format!("not in place: {}", line.text));
         }
         failed.extend(plan.stopped.map(|(_, error)| error));
         if harness == Harness::Codex {
             failed.extend(connect::verify_codex().err());
-            codex_hook = options.hook && plan.lines.iter().any(hook_in_place);
+            // Codex's lines are its MCP entry, then its hook.
+            codex_hook = options.hook && plan.lines.get(1).is_some_and(in_place);
             next.extend(report.next.iter().cloned());
         }
         if options.hook || matches!(harness, Harness::Vscode | Harness::Copilot) {
@@ -329,14 +324,10 @@ fn apply(harnesses: &[Harness], options: Options) -> u8 {
     code
 }
 
-/// Whether a plan line says its part is unchanged, as [`connect::connect`] words it in Plan mode.
+/// Whether a plan line says its part needs nothing: it is unchanged, or the user's own file
+/// is kept.
 fn in_place(line: &Line) -> bool {
-    line.as_ref().is_ok_and(|line| line.ends_with(" unchanged"))
-}
-
-/// Whether a plan line says Codex's SessionStart hook is unchanged.
-fn hook_in_place(line: &Line) -> bool {
-    in_place(line) && text(line).ends_with(" SessionStart hook unchanged")
+    matches!(line.state, State::Unchanged | State::Kept)
 }
 
 /// Runs `zerodb hook session-start --harness <harness>` with the stdin that harness gives it

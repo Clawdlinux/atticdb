@@ -27,6 +27,7 @@ It asks which apps to connect, whether to load memory at the start of each chat,
 The last 2 questions are for Claude Code and Codex, so they are asked only when you pick 1 of those. Saving a rule always asks.
 VS Code and Copilot CLI always get the hook. They ask before every write until you allow the tool there.
 VS Code's Copilot chat reads the Copilot hook and instructions in `~/.copilot`, so connecting VS Code writes those too, and the plan says so.
+An instructions file you wrote, 1 that mentions zerodb or has zerodb's file name without its marker line, is kept. It counts as in place, so it doesn't fail the checks.
 
 The plan has 1 line per file and part, such as `~/.claude/settings.json: add the SessionStart hook`.
 It comes from the same code that writes, run in a mode that writes nothing and runs no `claude` or `codex` command that changes anything.

@@ -12,9 +12,47 @@ pub use claude::Notes;
 /// What to do after Codex's hook is added.
 pub(crate) use codex::APPROVE as CODEX_APPROVE;
 
-/// What a part did, or in [`Mode::Plan`] would do, as the line to print. `Err` when it was
-/// skipped or failed.
-pub type Line = Result<String, String>;
+/// What a part did, or in [`Mode::Plan`] would do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum State {
+    /// It was added, or would be.
+    Added,
+    /// It was updated, or would be.
+    Updated,
+    /// It was already in place, or there was nothing to do.
+    Unchanged,
+    /// The user's own file does its job, so zerodb's was not written.
+    Kept,
+    /// It was removed.
+    Removed,
+    /// It could not be applied, and the line says what to do by hand.
+    Skipped,
+    /// Applying it failed.
+    Failed,
+}
+
+impl State {
+    /// Whether the part is as it should be: not skipped and not failed.
+    pub fn ok(self) -> bool {
+        !matches!(self, Self::Skipped | Self::Failed)
+    }
+}
+
+/// A part's line to print, with what it did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Line {
+    /// What it did, or would do.
+    pub state: State,
+    /// The line, as printed.
+    pub text: String,
+}
+
+impl Line {
+    /// A line that says `text`.
+    pub(crate) fn new(state: State, text: impl Into<String>) -> Self {
+        Self { state, text: text.into() }
+    }
+}
 
 /// Whether connecting writes its parts, or only says what it would write.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,22 +64,24 @@ pub enum Mode {
     Plan,
 }
 
-/// What a part would do in [`Mode::Plan`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Change {
-    Add,
-    Update,
-    Unchanged,
+/// A part's line in [`Mode::Plan`]: `<file>: add the <part>` for [`State::Added`],
+/// `<file>: update the <part>` for [`State::Updated`], else `<file>: <part> unchanged`.
+fn planned(file: &Path, part: &str, state: State) -> Line {
+    let file = file.display();
+    let text = match state {
+        State::Added => format!("{file}: add the {part}"),
+        State::Updated => format!("{file}: update the {part}"),
+        _ => format!("{file}: {part} unchanged"),
+    };
+    Line::new(state, text)
 }
 
-/// A part's line in [`Mode::Plan`]: `<file>: add the <part>`, `<file>: update the <part>`, or
-/// `<file>: <part> unchanged`.
-fn planned(file: &Path, part: &str, change: Change) -> String {
-    let file = file.display();
-    match change {
-        Change::Add => format!("{file}: add the {part}"),
-        Change::Update => format!("{file}: update the {part}"),
-        Change::Unchanged => format!("{file}: {part} unchanged"),
+/// [`State::Added`] when nothing was there, else [`State::Updated`].
+fn add_or_update(existed: bool) -> State {
+    if existed {
+        State::Updated
+    } else {
+        State::Added
     }
 }
 
@@ -80,8 +120,7 @@ impl Report {
     /// next. Returns the exit code: the error's, else 1 when a part was skipped or failed.
     pub fn print(&self) -> u8 {
         for line in &self.lines {
-            let (Ok(line) | Err(line)) = line;
-            println!("{line}");
+            println!("{}", line.text);
         }
         if let Some((code, error)) = &self.stopped {
             eprintln!("zerodb: {error}");
@@ -98,7 +137,7 @@ impl Report {
 
     /// Whether it stopped, or a part was skipped or failed.
     pub fn skipped(&self) -> bool {
-        self.stopped.is_some() || self.lines.iter().any(Result::is_err)
+        self.stopped.is_some() || self.lines.iter().any(|line| !line.state.ok())
     }
 }
 
@@ -288,9 +327,9 @@ fn connect_shared(harness: Harness, force: bool, mode: Mode) -> Report {
         let exe = binary()?;
         let guard = (!force).then_some(data.as_path());
         let entry = harness.entry(&exe, moved.as_deref());
-        lines.push(Ok(edit(harness, Some(entry), guard, mode)?));
-        lines.push(Ok(set_hook(&exe, moved.as_deref(), mode)?));
-        lines.push(Ok(set_guide(mode)?));
+        lines.push(edit(harness, Some(entry), guard, mode)?);
+        lines.push(set_hook(&exe, moved.as_deref(), mode)?);
+        lines.push(set_guide(mode)?);
         Ok::<_, String>(split)
     })();
     let mut report = match result {
@@ -423,8 +462,8 @@ pub fn disconnect(harness: Harness) -> u8 {
     if harness == Harness::Codex {
         return codex::disconnect();
     }
-    finish(edit(harness, None, None, Mode::Apply).and_then(|message| {
-        println!("{message}");
+    finish(edit(harness, None, None, Mode::Apply).and_then(|line| {
+        println!("{}", line.text);
         let mut errors = Vec::new();
         for removed in [remove_guide(), remove_hook()] {
             match removed {
@@ -457,14 +496,14 @@ fn finish(result: Result<String, String>) -> u8 {
 }
 
 /// Sets zerodb's entry to `wanted`, or removes it for `None`. With `guard`, the home's data
-/// directory, an entry with connection flags is refused. Returns the message to print. In
-/// Plan mode, it writes nothing.
+/// directory, an entry with connection flags is refused. Returns the line to print. In Plan
+/// mode, it writes nothing.
 fn edit(
     harness: Harness,
     wanted: Option<Value>,
     guard: Option<&Path>,
     mode: Mode,
-) -> Result<String, String> {
+) -> Result<Line, String> {
     let (name, path) = (harness.name(), harness.file()?);
     let section = harness.section();
     let shown = path.display();
@@ -479,44 +518,49 @@ fn edit(
         _ => return Err(unusable(format!("\"{section}\" is not an object"))),
     };
     let current = servers.get("zerodb").cloned();
-    let verb = match (&wanted, &current) {
+    let (verb, state) = match (&wanted, &current) {
         (Some(entry), Some(current)) if entry == current => {
             return Ok(match mode {
-                Mode::Plan => planned(&path, "MCP entry", Change::Unchanged),
-                Mode::Apply => format!("zerodb is already connected to {name} ({shown})"),
+                Mode::Plan => planned(&path, "MCP entry", State::Unchanged),
+                Mode::Apply => Line::new(
+                    State::Unchanged,
+                    format!("zerodb is already connected to {name} ({shown})"),
+                ),
             });
         }
-        (None, None) => return Ok(format!("zerodb is not connected to {name}")),
+        (None, None) => {
+            return Ok(Line::new(State::Unchanged, format!("zerodb is not connected to {name}")))
+        }
         (Some(entry), current) => {
             if let (Some(current), Some(data)) = (current, guard) {
                 refuse_flags(harness, &path, current, data)?;
             }
             servers.insert("zerodb".into(), entry.clone());
             if current.is_some() {
-                "updated zerodb in"
+                ("updated zerodb in", State::Updated)
             } else {
-                "connected zerodb to"
+                ("connected zerodb to", State::Added)
             }
         }
         (None, Some(_)) => {
             servers.remove("zerodb");
-            "disconnected zerodb from"
+            ("disconnected zerodb from", State::Removed)
         }
     };
     if mode == Mode::Plan {
-        let change = if current.is_some() { Change::Update } else { Change::Add };
-        return Ok(planned(&path, "MCP entry", change));
+        return Ok(planned(&path, "MCP entry", add_or_update(current.is_some())));
     }
     let mut text = serde_json::to_string_pretty(&root)
         .map_err(|error| format!("{shown}: cannot encode: {error}"))?;
     text.push('\n');
     let backup = write(&path, old.as_ref(), text.as_bytes())?;
-    Ok(match backup {
+    let text = match backup {
         Some(backup) => {
             format!("{verb} {name}: {shown} (backup: {}, keys are now sorted)", backup.display())
         }
         None => format!("{verb} {name}: {shown}"),
-    })
+    };
+    Ok(Line::new(state, text))
 }
 
 /// Flags that point an entry at a store other than the home.
@@ -585,27 +629,31 @@ fn hook_text(exe: &str, home: Option<&str>) -> Result<String, String> {
     Ok(text.map_err(|error| format!("cannot encode the hook: {error}"))? + "\n")
 }
 
-/// Writes the hook file for `exe` and `home`. Returns the message to print. In Plan mode, it
+/// Writes the hook file for `exe` and `home`. Returns the line to print. In Plan mode, it
 /// writes nothing.
-fn set_hook(exe: &str, home: Option<&str>, mode: Mode) -> Result<String, String> {
+fn set_hook(exe: &str, home: Option<&str>, mode: Mode) -> Result<Line, String> {
     let (path, text) = (hook_file()?, hook_text(exe, home)?);
     let shown = path.display();
     let old = read(&path).map_err(|why| format!("{shown}: {why}. The hook was not written"))?;
     let part = "sessionStart hook";
     if old.as_ref().is_some_and(|(bytes, _)| *bytes == text.as_bytes()) {
         return Ok(match mode {
-            Mode::Plan => planned(&path, part, Change::Unchanged),
-            Mode::Apply => format!("the sessionStart hook is already in place ({shown})"),
+            Mode::Plan => planned(&path, part, State::Unchanged),
+            Mode::Apply => Line::new(
+                State::Unchanged,
+                format!("the sessionStart hook is already in place ({shown})"),
+            ),
         });
     }
     if mode == Mode::Plan {
-        return Ok(planned(&path, part, if old.is_some() { Change::Update } else { Change::Add }));
+        return Ok(planned(&path, part, add_or_update(old.is_some())));
     }
     Ok(match write(&path, old.as_ref(), text.as_bytes())? {
-        Some(backup) => {
-            format!("updated the sessionStart hook: {shown} (backup: {})", backup.display())
-        }
-        None => format!("added the sessionStart hook: {shown}"),
+        Some(backup) => Line::new(
+            State::Updated,
+            format!("updated the sessionStart hook: {shown} (backup: {})", backup.display()),
+        ),
+        None => Line::new(State::Added, format!("added the sessionStart hook: {shown}")),
     })
 }
 
@@ -731,38 +779,57 @@ fn marked(bytes: &[u8]) -> bool {
 }
 
 /// Writes the instructions file, unless another file there mentions zerodb, or a file of the
-/// same name has no [`MARKER`] line, or can't be read, such as a symlink. Returns the message
-/// to print. In Plan mode, it writes nothing.
-fn set_guide(mode: Mode) -> Result<String, String> {
+/// same name has no [`MARKER`] line, or can't be read, such as a symlink. Those are the user's
+/// own, so they are kept. Returns the line to print. In Plan mode, it writes nothing.
+fn set_guide(mode: Mode) -> Result<Line, String> {
+    // The user's file is kept: Plan mode says so, and Apply says it skipped zerodb's.
+    let kept = |plan: String, apply: String| {
+        Line::new(State::Kept, if mode == Mode::Plan { plan } else { apply })
+    };
     let dir = guide_dir()?;
     if let Some(other) = other_guide(&dir) {
         let other = other.display();
-        return Ok(format!("skipped the zerodb instructions: {other} already mentions zerodb"));
+        return Ok(kept(
+            format!("{other}: keep the user's instructions, which mention zerodb"),
+            format!("skipped the zerodb instructions: {other} already mentions zerodb"),
+        ));
     }
     let (path, text) = (dir.join(GUIDE), guide_text());
     let shown = path.display();
     let old = match read(&path) {
         Ok(old) => old,
-        Err(why) => return Ok(format!("left {shown} alone: {why}")),
+        Err(why) => {
+            return Ok(kept(
+                format!("{shown}: keep the user's file, which zerodb doesn't edit: {why}"),
+                format!("left {shown} alone: {why}"),
+            ))
+        }
     };
     let part = "zerodb instructions";
     if old.as_ref().is_some_and(|(bytes, _)| *bytes == text.as_bytes()) {
         return Ok(match mode {
-            Mode::Plan => planned(&path, part, Change::Unchanged),
-            Mode::Apply => format!("the zerodb instructions are already in place ({shown})"),
+            Mode::Plan => planned(&path, part, State::Unchanged),
+            Mode::Apply => Line::new(
+                State::Unchanged,
+                format!("the zerodb instructions are already in place ({shown})"),
+            ),
         });
     }
     if old.as_ref().is_some_and(|(bytes, _)| !marked(bytes)) {
-        return Ok(format!("skipped the zerodb instructions: {shown} has no line {MARKER}"));
+        return Ok(kept(
+            format!("{shown}: keep the user's instructions, which have no line {MARKER}"),
+            format!("skipped the zerodb instructions: {shown} has no line {MARKER}"),
+        ));
     }
     if mode == Mode::Plan {
-        return Ok(planned(&path, part, if old.is_some() { Change::Update } else { Change::Add }));
+        return Ok(planned(&path, part, add_or_update(old.is_some())));
     }
     Ok(match write(&path, old.as_ref(), text.as_bytes())? {
-        Some(backup) => {
-            format!("updated the zerodb instructions: {shown} (backup: {})", backup.display())
-        }
-        None => format!("added the zerodb instructions: {shown}"),
+        Some(backup) => Line::new(
+            State::Updated,
+            format!("updated the zerodb instructions: {shown} (backup: {})", backup.display()),
+        ),
+        None => Line::new(State::Added, format!("added the zerodb instructions: {shown}")),
     })
 }
 

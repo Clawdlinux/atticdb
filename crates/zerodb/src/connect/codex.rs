@@ -14,8 +14,8 @@ use super::claude::{
     shell_line, split, Edit, Part,
 };
 use super::{
-    absolute_env, binary, delete, moved_home, planned, read, write, Change, Harness, Line, Mode,
-    Notes, Report,
+    absolute_env, add_or_update, binary, delete, moved_home, planned, read, write, Harness, Line,
+    Mode, Notes, Report, State,
 };
 use crate::home::{user_home, HOME_ENV};
 use serde_json::{json, Value};
@@ -100,7 +100,7 @@ pub(super) fn connect(hook: bool, notes: Notes, mode: Mode) -> Report {
         Err(error) => return Report::stopped(1, error),
     };
     let home = home.as_deref();
-    let mut lines = vec![set_block(&config, &exe, home, notes, mode)];
+    let mut lines = vec![set_block(&config, &exe, home, notes, mode).unwrap_or_else(|line| line)];
     let mut next = Vec::new();
     if hook {
         if hooks_off(&config) {
@@ -156,7 +156,7 @@ pub(super) fn disconnect() -> u8 {
         hook_args(Harness::Codex)
     );
     let parts = [Part { name: "SessionStart hook", by_hand, edit: &drop }];
-    let mut lines = vec![drop_block(&config)];
+    let mut lines = vec![drop_block(&config).unwrap_or_else(|line| line)];
     lines.extend(edit_file(hooks.clone(), NO_HOOKS, &parts, Mode::Apply));
     // A removal that left another zerodb handler to do by hand still moved the groups after it.
     let next = saved(&hooks, &tracked).filter(|moved| *moved).map(|_| POSITION.to_owned());
@@ -407,10 +407,16 @@ fn hooks_off(path: &Path) -> bool {
 /// it stays where it is. A block that is already right, with nothing else inside it, stays
 /// too. A file with CRLF line ends gets CRLF. A file without a final line end gets one, and the block says so. Then
 /// `codex mcp get zerodb --json` must show it, or the file is put back. In Plan mode, it
-/// writes nothing and runs no `codex`.
-fn set_block(path: &Path, exe: &str, home: Option<&str>, notes: Notes, mode: Mode) -> Line {
+/// writes nothing and runs no `codex`. `Err` is the line of a skipped or failed part.
+fn set_block(
+    path: &Path,
+    exe: &str,
+    home: Option<&str>,
+    notes: Notes,
+    mode: Mode,
+) -> Result<Line, Line> {
     let shown = path.display();
-    let skipped = |why: String| format!("MCP entry: skipped, {why}");
+    let skipped = |why: String| Line::new(State::Skipped, format!("MCP entry: skipped, {why}"));
     let wanted = block(exe, home, notes).map_err(skipped)?;
     let add = format!("Add this block to the end of {shown} by hand:\n{}", wanted.trim_end());
     let old = read(path).map_err(|why| skipped(format!("{shown} {why}. {add}")))?;
@@ -450,8 +456,10 @@ fn set_block(path: &Path, exe: &str, home: Option<&str>, notes: Notes, mode: Mod
     let (mut new, verb, by_hand) = match found {
         Some(block) if text[block.span.clone()] == ours(added_end(&text[block.span.clone()])) => {
             return Ok(match mode {
-                Mode::Plan => planned(path, "MCP entry", Change::Unchanged),
-                Mode::Apply => format!("MCP entry: unchanged ({shown})"),
+                Mode::Plan => planned(path, "MCP entry", State::Unchanged),
+                Mode::Apply => {
+                    Line::new(State::Unchanged, format!("MCP entry: unchanged ({shown})"))
+                }
             });
         }
         Some(block) => {
@@ -464,9 +472,9 @@ fn set_block(path: &Path, exe: &str, home: Option<&str>, notes: Notes, mode: Mod
         }
         None => (text.to_owned(), "added", add),
     };
+    let state = add_or_update(verb == "updated");
     if mode == Mode::Plan {
-        let change = if verb == "added" { Change::Add } else { Change::Update };
-        return Ok(planned(path, "MCP entry", change));
+        return Ok(planned(path, "MCP entry", state));
     }
     let added = !new.is_empty() && !new.ends_with('\n');
     if !new.is_empty() {
@@ -476,17 +484,18 @@ fn set_block(path: &Path, exe: &str, home: Option<&str>, notes: Notes, mode: Mod
         new.push_str(eol);
     }
     new.push_str(&ours(added));
+    let failed = |why: String| Line::new(State::Failed, format!("MCP entry: failed, {why}"));
     let backup = write(path, old.as_ref(), new.as_bytes())
-        .map_err(|why| format!("MCP entry: failed, {why}. {by_hand}"))?;
+        .map_err(|why| failed(format!("{why}. {by_hand}")))?;
     let saved = backup.as_ref().map(|backup| format!(", backup: {}", backup.display()));
     let done = format!("MCP entry: {verb} ({shown}{})", saved.unwrap_or_default());
     let Some(codex) = find_program("codex") else {
-        return Ok(format!("{done}, not verified: codex is not on PATH"));
+        return Ok(Line::new(state, format!("{done}, not verified: codex is not on PATH")));
     };
     let dir = path.parent().unwrap_or(Path::new("/"));
-    check(&codex, dir, exe, home).map(|()| done).map_err(|why| {
+    check(&codex, dir, exe, home).map(|()| Line::new(state, done)).map_err(|why| {
         let undone = restore(path, backup.as_deref(), new.as_bytes());
-        format!("MCP entry: failed, {why}. {undone}")
+        failed(format!("{why}. {undone}"))
     })
 }
 
@@ -565,47 +574,52 @@ fn restore(path: &Path, backup: Option<&Path>, written: &[u8]) -> String {
 }
 
 /// Removes zerodb's bytes in its block from the `config.toml` at `path`, by [`without`].
-fn drop_block(path: &Path) -> Line {
+/// `Err` is the line of a skipped or failed part.
+fn drop_block(path: &Path) -> Result<Line, Line> {
     let shown = path.display();
     let by_hand = remove_ours(&shown);
-    let old = read(path).map_err(|why| format!("MCP entry: skipped, {shown} {why}. {by_hand}"))?;
-    let Some((bytes, _)) = &old else { return Ok(format!("MCP entry: not found ({shown})")) };
+    let skipped = |why: String| Line::new(State::Skipped, format!("MCP entry: skipped, {why}"));
+    let not_found = || Line::new(State::Unchanged, format!("MCP entry: not found ({shown})"));
+    let old = read(path).map_err(|why| skipped(format!("{shown} {why}. {by_hand}")))?;
+    let Some((bytes, _)) = &old else { return Ok(not_found()) };
     let text = std::str::from_utf8(bytes)
-        .map_err(|_| format!("MCP entry: skipped, {shown} is not UTF-8. {by_hand}"))?;
-    let entries = scan(text).map_err(|why| {
-        format!("MCP entry: skipped, {shown} isn't TOML zerodb can read: {why}. {by_hand}")
-    })?;
+        .map_err(|_| skipped(format!("{shown} is not UTF-8. {by_hand}")))?;
+    let entries = scan(text)
+        .map_err(|why| skipped(format!("{shown} isn't TOML zerodb can read: {why}. {by_hand}")))?;
     let block = match find_block(&entries) {
         // Removing zerodb's lines would leave the others as part of a server.
         Ok(Some(block)) if clash(&entries, Some(&block)) == Some(Clash::Server) => {
-            return Err(format!("MCP entry: skipped, {shown} {OUTSIDE}. Nothing changed. {TIDY}"));
+            return Err(skipped(format!("{shown} {OUTSIDE}. Nothing changed. {TIDY}")));
         }
         Ok(Some(block)) => block,
         Ok(None) => {
             return match clash(&entries, None) {
-                Some(Clash::Server) => Err(format!(
-                    "MCP entry: skipped, {shown} has a zerodb MCP server that zerodb didn't \
-                     write. Remove it by hand to disconnect it"
-                )),
-                Some(Clash::Inline) => Err(format!(
-                    "MCP entry: skipped, {shown} sets mcp_servers as an inline table, so zerodb \
-                     can't tell whether it holds zerodb. If it does, remove zerodb there by hand"
-                )),
-                None => Ok(format!("MCP entry: not found ({shown})")),
+                Some(Clash::Server) => Err(skipped(format!(
+                    "{shown} has a zerodb MCP server that zerodb didn't write. Remove it by hand \
+                     to disconnect it"
+                ))),
+                Some(Clash::Inline) => Err(skipped(format!(
+                    "{shown} sets mcp_servers as an inline table, so zerodb can't tell whether it \
+                     holds zerodb. If it does, remove zerodb there by hand"
+                ))),
+                None => Ok(not_found()),
             };
         }
         Err(why) => {
-            return Err(format!(
-                "MCP entry: skipped, {shown}: {why}. Nothing changed. {}",
+            return Err(skipped(format!(
+                "{shown}: {why}. Nothing changed. {}",
                 remove_ours(&shown)
-            ));
+            )));
         }
     };
     let new = without(text, &block);
     let backup = write(path, old.as_ref(), new.as_bytes())
-        .map_err(|why| format!("MCP entry: failed, {why}. {by_hand}"))?;
+        .map_err(|why| Line::new(State::Failed, format!("MCP entry: failed, {why}. {by_hand}")))?;
     let saved = backup.map(|backup| format!(", backup: {}", backup.display()));
-    Ok(format!("MCP entry: removed ({shown}{})", saved.unwrap_or_default()))
+    Ok(Line::new(
+        State::Removed,
+        format!("MCP entry: removed ({shown}{})", saved.unwrap_or_default()),
+    ))
 }
 
 #[cfg(test)]

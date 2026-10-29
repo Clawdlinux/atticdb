@@ -12,8 +12,8 @@
 //! identical part added by hand.
 
 use super::{
-    absolute_env, binary, entry_home, home_words, moved_home, planned, read, refuse_flags, save,
-    write, Change, Harness, Line, Mode, Report, COPILOT_SHARED,
+    absolute_env, add_or_update, binary, entry_home, home_words, moved_home, planned, read,
+    refuse_flags, save, write, Harness, Line, Mode, Report, State, COPILOT_SHARED,
 };
 use crate::home::{user_home, HOME_ENV};
 use crate::jsonedit;
@@ -118,11 +118,14 @@ pub(super) fn connect(force: bool, hook: bool, notes: Notes, mode: Mode) -> Repo
     let home = home.as_deref();
     let entry = match current {
         Ok(current) => set_entry(&state, current.as_ref(), &exe, home, mode),
-        Err(why) => Err(format!(
-            "MCP entry: skipped, {}: {why}. Run by hand: {}",
-            state.display(),
-            shell_line("claude", &add_args(&exe, home))
-        )),
+        Err(why) => Line::new(
+            State::Skipped,
+            format!(
+                "MCP entry: skipped, {}: {why}. Run by hand: {}",
+                state.display(),
+                shell_line("claude", &add_args(&exe, home))
+            ),
+        ),
     };
     let group = hook_group(&exe, home);
     let add_group = |text: &str| add_hook(Harness::ClaudeCode, text, &group);
@@ -310,44 +313,59 @@ fn set_entry(
 ) -> Line {
     let shown = state.display();
     if current.is_some_and(|current| same(current, exe, home)) {
-        return Ok(match mode {
-            Mode::Plan => planned(state, "MCP entry", Change::Unchanged),
-            Mode::Apply => format!("MCP entry: unchanged ({shown})"),
-        });
+        return match mode {
+            Mode::Plan => planned(state, "MCP entry", State::Unchanged),
+            Mode::Apply => Line::new(State::Unchanged, format!("MCP entry: unchanged ({shown})")),
+        };
     }
     let (add, remove) = (add_args(exe, home), REMOVE.map(String::from).to_vec());
     let by_hand = match current {
         Some(_) => format!("{} && {}", shell_line("claude", &remove), shell_line("claude", &add)),
         None => shell_line("claude", &add),
     };
-    let claude = find_program("claude")
-        .ok_or_else(|| format!("MCP entry: skipped, claude is not on PATH. Run: {by_hand}"))?;
+    let Some(claude) = find_program("claude") else {
+        let why = format!("MCP entry: skipped, claude is not on PATH. Run: {by_hand}");
+        return Line::new(State::Skipped, why);
+    };
     if mode == Mode::Plan {
-        let change = if current.is_some() { Change::Update } else { Change::Add };
-        return Ok(planned(state, "MCP entry", change));
+        return planned(state, "MCP entry", add_or_update(current.is_some()));
     }
-    let failed = |why: String| format!("MCP entry: failed, {why}. Run by hand: {by_hand}");
+    let failed = |why: String| {
+        Line::new(State::Failed, format!("MCP entry: failed, {why}. Run by hand: {by_hand}"))
+    };
     if let Some(old) = current {
-        run_claude(&claude, &remove).map_err(failed)?;
+        if let Err(why) = run_claude(&claude, &remove) {
+            return failed(why);
+        }
         if let Err(why) = run_claude(&claude, &add) {
-            return Err(format!(
+            let why = format!(
                 "MCP entry: failed, {why}. The old entry was removed. {}. Re-run zerodb connect \
                  claude-code, which adds zerodb's now that no entry is there",
                 keep_old(old)
-            ));
+            );
+            return Line::new(State::Failed, why);
         }
-    } else {
-        run_claude(&claude, &add).map_err(failed)?;
+    } else if let Err(why) = run_claude(&claude, &add) {
+        return failed(why);
     }
-    let verb = if current.is_some() { "updated" } else { "added" };
+    let (verb, done) = match current {
+        Some(_) => ("updated", State::Updated),
+        None => ("added", State::Added),
+    };
     let again = "Re-run zerodb connect claude-code";
-    match read_back(state, |entry| entry.is_some_and(|entry| same(entry, exe, home))) {
-        Ok(Some(entry)) if same(&entry, exe, home) => Ok(format!("MCP entry: {verb} ({shown})")),
-        Ok(_) => Err(format!(
-            "MCP entry: failed, {shown} does not show the entry after claude ran. {again}"
-        )),
-        Err(why) => Err(format!("MCP entry: failed, {shown} {why} after claude ran. {again}")),
-    }
+    let (state, text) = match read_back(state, |entry| entry.is_some_and(|e| same(e, exe, home))) {
+        Ok(Some(entry)) if same(&entry, exe, home) => {
+            (done, format!("MCP entry: {verb} ({shown})"))
+        }
+        Ok(_) => (
+            State::Failed,
+            format!("MCP entry: failed, {shown} does not show the entry after claude ran. {again}"),
+        ),
+        Err(why) => {
+            (State::Failed, format!("MCP entry: failed, {shown} {why} after claude ran. {again}"))
+        }
+    };
+    Line::new(state, text)
 }
 
 /// Saves `old`, an entry `claude` removed, to a new owner-only file in the config dir, as
@@ -391,27 +409,41 @@ fn read_back(state: &Path, done: impl Fn(Option<&Value>) -> bool) -> Result<Opti
 fn drop_entry(state: &Path) -> Line {
     let shown = state.display();
     let by_hand = shell_line("claude", &REMOVE.map(String::from));
-    let entry = current(state)
-        .map_err(|why| format!("MCP entry: skipped, {shown} {why}. Run by hand: {by_hand}"))?;
-    let Some(entry) = entry else { return Ok(format!("MCP entry: not found ({shown})")) };
+    let skipped = |why: String| Line::new(State::Skipped, why);
+    let entry = match current(state) {
+        Ok(entry) => entry,
+        Err(why) => {
+            return skipped(format!("MCP entry: skipped, {shown} {why}. Run by hand: {by_hand}"))
+        }
+    };
+    let Some(entry) = entry else {
+        return Line::new(State::Unchanged, format!("MCP entry: not found ({shown})"));
+    };
     if !written(&entry) {
-        return Err(format!(
+        return skipped(format!(
             "MCP entry: skipped, it differs from the entry zerodb writes ({shown}). To remove it \
              anyway, run: {by_hand}"
         ));
     }
-    let claude = find_program("claude")
-        .ok_or_else(|| format!("MCP entry: skipped, claude is not on PATH. Run: {by_hand}"))?;
-    let failed = |why: String| format!("MCP entry: failed, {why}. Run by hand: {by_hand}");
-    run_claude(&claude, &REMOVE.map(String::from)).map_err(failed)?;
-    let again = "Re-run zerodb disconnect claude-code";
-    match read_back(state, |entry| entry.is_none()) {
-        Ok(None) => Ok(format!("MCP entry: removed ({shown})")),
-        Ok(Some(_)) => Err(format!(
-            "MCP entry: failed, {shown} still shows the entry after claude ran. {again}"
-        )),
-        Err(why) => Err(format!("MCP entry: failed, {shown} {why} after claude ran. {again}")),
+    let Some(claude) = find_program("claude") else {
+        return skipped(format!("MCP entry: skipped, claude is not on PATH. Run: {by_hand}"));
+    };
+    if let Err(why) = run_claude(&claude, &REMOVE.map(String::from)) {
+        let why = format!("MCP entry: failed, {why}. Run by hand: {by_hand}");
+        return Line::new(State::Failed, why);
     }
+    let again = "Re-run zerodb disconnect claude-code";
+    let (state, text) = match read_back(state, |entry| entry.is_none()) {
+        Ok(None) => (State::Removed, format!("MCP entry: removed ({shown})")),
+        Ok(Some(_)) => (
+            State::Failed,
+            format!("MCP entry: failed, {shown} still shows the entry after claude ran. {again}"),
+        ),
+        Err(why) => {
+            (State::Failed, format!("MCP entry: failed, {shown} {why} after claude ran. {again}"))
+        }
+    };
+    Line::new(state, text)
 }
 
 /// The first `name` on `PATH` that is an executable regular file. Relative `PATH` entries
@@ -605,6 +637,8 @@ pub(super) struct Done {
     pub(super) text: String,
     /// What it did, in words.
     said: String,
+    /// What it did.
+    state: State,
     /// Whether it left something to do by hand, which counts as skipped.
     by_hand: bool,
 }
@@ -627,9 +661,9 @@ impl From<jsonedit::Error> for Refused {
     }
 }
 
-/// A `Done` for `text` that says `said`.
-fn done(text: String, said: &str) -> Edit {
-    Ok(Done { text, said: said.into(), by_hand: false })
+/// A `Done` for `text` that did `state` and says `said`.
+fn done(text: String, state: State, said: &str) -> Edit {
+    Ok(Done { text, said: said.into(), state, by_hand: false })
 }
 
 /// `harness`'s zerodb hook commands in SessionStart groups that also run other hooks. `text`
@@ -665,14 +699,16 @@ pub(super) fn add_hook(harness: Harness, text: &str, group: &Value) -> Edit {
     }
     let root: Value = serde_json::from_str(&text).unwrap_or_default();
     let groups = root["hooks"]["SessionStart"].as_array();
+    let state = if stale == 0 { State::Unchanged } else { State::Updated };
     if groups.is_some_and(|groups| groups.contains(group)) {
-        return done(text, if stale == 0 { "unchanged" } else { "updated" });
+        return done(text, state, if stale == 0 { "unchanged" } else { "updated" });
     }
     if !mixed.is_empty() {
-        return done(text, "found inside a group with other hooks, so not added again");
+        return done(text, state, "found inside a group with other hooks, so not added again");
     }
     let text = jsonedit::append(&text, &HOOKS, group)?;
-    done(text, if stale == 0 { "added" } else { "updated" })
+    let state = if stale == 0 { State::Added } else { State::Updated };
+    done(text, state, if stale == 0 { "added" } else { "updated" })
 }
 
 /// `text` with the allow rules for `notes`. With [`Notes::Ask`], the `memory_append` rule goes.
@@ -687,12 +723,12 @@ fn add_rules(text: &str, notes: Notes) -> Edit {
         text = jsonedit::append(&text, &ALLOW, &json!(rule))?;
         added += 1;
     }
-    let said = match (dropped, added) {
-        (0, 0) => "unchanged",
-        (0, _) => "added",
-        _ => "updated",
+    let (state, said) = match (dropped, added) {
+        (0, 0) => (State::Unchanged, "unchanged"),
+        (0, _) => (State::Added, "added"),
+        _ => (State::Updated, "updated"),
     };
-    done(text, said)
+    done(text, state, said)
 }
 
 /// `text` without the SessionStart groups that run `harness`'s zerodb hook. A zerodb handler
@@ -710,7 +746,8 @@ pub(super) fn drop_hooks(harness: Harness, text: &str) -> Edit {
                       by hand there"
         }
     };
-    Ok(Done { text, said: said.into(), by_hand })
+    let state = if removed == 0 { State::Unchanged } else { State::Removed };
+    Ok(Done { text, said: said.into(), state, by_hand })
 }
 
 /// `text` without zerodb's allow rules.
@@ -718,7 +755,10 @@ fn drop_rules(text: &str) -> Edit {
     let ours =
         |rule: &Value| rule.as_str().is_some_and(|rule| READS.contains(&rule) || rule == APPEND);
     let (text, removed) = jsonedit::remove(text, &ALLOW, ours)?;
-    done(text, if removed == 0 { "not found" } else { "removed" })
+    match removed {
+        0 => done(text, State::Unchanged, "not found"),
+        _ => done(text, State::Removed, "removed"),
+    }
 }
 
 /// A part that lives in a JSON file, such as `settings.json`.
@@ -747,8 +787,9 @@ pub(super) fn edit_file(
     mode: Mode,
 ) -> Vec<Line> {
     let skip_all = |why: &str| {
-        let skip =
-            |part: &Part<'_>| Err(format!("{}: skipped, {why}. {}", part.name, part.by_hand));
+        let skip = |part: &Part<'_>| {
+            Line::new(State::Skipped, format!("{}: skipped, {why}. {}", part.name, part.by_hand))
+        };
         parts.iter().map(skip).collect()
     };
     let path = match path {
@@ -766,16 +807,19 @@ pub(super) fn edit_file(
     };
     let start = original.as_ref().map_or(empty, |(text, _)| text.as_str());
     let mut text = start.to_owned();
-    // Per part: what it did, and whether it changed the text.
+    // Per part: what it did, and whether it changed the text. Or why it was skipped or
+    // failed, and what to do by hand when the part's advice doesn't fit.
     let mut done = Vec::new();
     for part in parts {
         done.push(match (part.edit)(&text) {
             Ok(edit) => {
                 let changed = edit.text != text;
                 text = edit.text;
-                Ok((edit.said, edit.by_hand, changed))
+                Ok((edit.said, edit.state, edit.by_hand, changed))
             }
-            Err(refused) => Err((format!("{shown}: {}", refused.why), refused.by_hand)),
+            Err(refused) => {
+                Err((State::Skipped, format!("{shown}: {}", refused.why), refused.by_hand))
+            }
         });
     }
     let mut backup = None;
@@ -784,38 +828,27 @@ pub(super) fn edit_file(
         match write(&path, old.as_ref(), text.as_bytes()) {
             Ok(saved) => backup = saved,
             Err(why) => {
-                for done in done.iter_mut().filter(|done| matches!(done, Ok((_, _, true)))) {
-                    *done = Err((why.clone(), None));
+                for done in done.iter_mut().filter(|done| matches!(done, Ok((.., true)))) {
+                    *done = Err((State::Failed, why.clone(), None));
                 }
             }
         }
     }
-    type Outcome = Result<(String, bool, bool), (String, Option<String>)>;
+    type Outcome = Result<(String, State, bool, bool), (State, String, Option<String>)>;
     let line = |(part, done): (&Part<'_>, Outcome)| match done {
-        Ok((said, false, changed)) if mode == Mode::Plan => {
-            let change = match (changed, said.as_str()) {
-                (false, _) => Change::Unchanged,
-                (true, "added") => Change::Add,
-                (true, _) => Change::Update,
-            };
-            Ok(planned(&path, part.name, change))
-        }
-        Ok((said, by_hand, changed)) => {
+        Ok((_, state, false, _)) if mode == Mode::Plan => planned(&path, part.name, state),
+        Ok((said, state, by_hand, changed)) => {
             let line = match (&backup, changed) {
                 (Some(saved), true) => {
                     format!("{}: {said} ({shown}, backup: {})", part.name, saved.display())
                 }
                 _ => format!("{}: {said} ({shown})", part.name),
             };
-            if by_hand {
-                Err(line)
-            } else {
-                Ok(line)
-            }
+            Line::new(if by_hand { State::Skipped } else { state }, line)
         }
-        Err((why, by_hand)) => {
+        Err((state, why, by_hand)) => {
             let by_hand = by_hand.as_deref().unwrap_or(&part.by_hand);
-            Err(format!("{}: skipped, {why}. {by_hand}", part.name))
+            Line::new(state, format!("{}: skipped, {why}. {by_hand}", part.name))
         }
     };
     parts.iter().zip(done).map(line).collect()

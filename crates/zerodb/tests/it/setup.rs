@@ -145,6 +145,7 @@ fn setup_plans_then_connects_every_app_it_finds() {
         assert!(!changed.iter().any(|word| line.contains(word)), "{line}");
     }
     assert!(out.contains("\n4 connected, 0 with skipped parts.\n"), "{out}");
+    assert!(out.ends_with(next), "the hook is in place, so Codex still needs approving: {out}");
     assert_eq!((files.map(|file| std::fs::read(file).unwrap()), tree(&copilot)), before);
     assert_eq!(calls(&claude_log).len(), 1, "claude ran only for the first add");
 
@@ -179,21 +180,44 @@ fn setup_asks_and_stops_without_answers() {
     let exe = exe.to_str().unwrap().to_owned();
     let terminal = [("ZERODB_SETUP_INTERACTIVE", "1")];
     let needs = "zerodb setup needs a terminal, or --yes. See zerodb setup --help.";
-    let rows: [Row<'_>; 6] = [
+    let own = "keep the user's instructions, which mention zerodb";
+    let rows: [Row<'_>; 7] = [
         ("claude-code and codex", &[], &terminal, &path, "claude-code,codex\n\nn\ny\n", 0, ""),
         ("declined", &[], &terminal, &path, "codex\nn\n\nno\n", 0, "N] Nothing changed.\n"),
         ("not a terminal", &[], &[], &path, "claude-code\n\n\ny\n", 2, needs),
         ("end of stdin", &[], &terminal, &path, "claude-code\n", 2, "no answer on stdin"),
         ("3 unknown apps", &[], &terminal, &path, "claude\nvs code\ncodex,\n", 2, "after 3 tries"),
         ("no apps", &["--yes"], &[], &empty, "", 1, "zerodb found no apps"),
+        ("own guide", &["--yes", "--harness", "copilot"], &[], &path, "", 0, own),
     ];
     for (row, (case, args, env, path, stdin, wanted, said)) in rows.into_iter().enumerate() {
         let home = dir.0.join(format!("h{row}"));
         std::fs::create_dir(&home).unwrap();
         let _holders = Holders(vec![data_dir(&home)]);
+        // The user wrote their own guide, so zerodb's isn't needed.
+        let guides = home.join(".copilot/instructions");
+        let guide = "Save what you learn with zerodb's memory_append.\n";
+        if case == "own guide" {
+            std::fs::create_dir_all(&guides).unwrap();
+            std::fs::write(guides.join("x.instructions.md"), guide).unwrap();
+        }
         let (code, out, err) = setup(&home, &dir.0, path, env, args, stdin);
         assert_eq!(code, Some(wanted), "{case}: {out}{err}");
         assert!(out.contains(said) || err.contains(said), "{case}: {out}{err}");
+        if case == "own guide" {
+            let (plan, applying) = out.split_once("Applying:\n").unwrap();
+            let user = guides.join("x.instructions.md");
+            let user = user.display();
+            assert!(plan.contains(&format!("\n  {user}: {own}\n")), "{case}: {out}");
+            let kept =
+                format!("\n  skipped the zerodb instructions: {user} already mentions zerodb\n");
+            assert!(applying.contains(&kept), "{case}: {out}");
+            assert!(out.contains("\n1 connected, 0 with skipped parts.\n"), "{case}: {out}");
+            assert!(out.contains("\n  Copilot CLI: ok\n"), "{case}: {out}");
+            assert_eq!(std::fs::read_to_string(guides.join("x.instructions.md")).unwrap(), guide);
+            assert!(!guides.join("zerodb.instructions.md").exists(), "{case}");
+            continue;
+        }
         if row > 0 {
             assert!(tree(&home).is_empty(), "{case}: nothing written");
             continue;
