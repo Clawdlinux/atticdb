@@ -300,8 +300,10 @@ The block goes after 1 blank line. A file with CRLF line ends gets CRLF.
 A file without a final line end gets one, and the begin line then ends `removes this block and the line end it added above.`
 So `disconnect` gives back the file byte for byte.
 A missing file is created at mode 0600, and a missing config dir at 0700.
-A block that matches writes nothing. Another one, such as one from an old binary path, is replaced in place, with a backup.
-The lines between the markers are zerodb's. Don't add your own there, as `disconnect` removes them.
+Codex writes `config.toml` with `toml_edit`, which keeps a comment at the end of the file after every table. So a table Codex adds, such as a project's trust, lands inside zerodb's markers.
+zerodb's bytes are only the 2 marker lines and each `mcp_servers.zerodb` table, up to the next header or marker line. Every other byte inside the markers stays.
+A block that matches, with nothing else inside, writes nothing.
+Otherwise, such as for an old binary path or a table Codex added, zerodb's bytes go and a fresh block goes at the end of the file, with a backup.
 zerodb reads `config.toml` with a small scanner. It tracks strings, multi-line strings, arrays and inline tables, so text inside them never counts. It decodes keys, so `"zero\u0064b"` is `zerodb`, and `"zerodb.proxy"` is 1 key.
 A file it can't read, such as one with a string that isn't closed, skips the part.
 A marker is a comment line that is exactly the begin line zerodb writes, or `# zerodb:end`. `# zerodb:beginner` is not one.
@@ -315,7 +317,7 @@ It runs in the config dir, so a project's `.codex/config.toml` can't answer. It 
 If it shows something else, fails or prints no JSON, the file is put back: the backup is renamed over it, or a file zerodb made is deleted. The part fails.
 Its output is never shown, as its env and its errors may hold secrets. A failure says `codex mcp get zerodb --json failed (exit <n>); run it yourself to see why`.
 Without `codex` on `PATH`, the block is written but not checked. The line says so, and the exit code stays 0.
-`disconnect` removes the block and the blank line before it, with a backup. A `zerodb` server outside the block stays, which counts as skipped. So does a root `mcp_servers = { ... }` when there is no block, as it may hold `zerodb`.
+`disconnect` removes zerodb's bytes and the blank line before the block, with a backup. The tables Codex put inside stay, byte for byte. A `zerodb` server outside the block stays, which counts as skipped. So does a root `mcp_servers = { ... }` when there is no block, as it may hold `zerodb`.
 
 The hook group is appended last, with no matcher, through the same JSON editor as Claude Code's `settings.json`.
 It's found the same way: a group whose every handler runs an absolute binary path with `hook session-start --harness codex`.

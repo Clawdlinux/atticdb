@@ -1357,8 +1357,8 @@ fn connect_codex_adds_its_parts() {
         assert_eq!(text(&config), *kept, "{kept}: the string stays");
     }
 
-    // zerodb's block from an old binary path is updated in place, with a backup, and the
-    // tables after it stay.
+    // zerodb's block from an old binary path is updated, with a backup: its own bytes go, and
+    // a fresh block goes at the end, after the tables that followed it.
     let home = dir.0.join("o");
     let config = home.join(".codex/config.toml");
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();
@@ -1372,7 +1372,63 @@ fn connect_codex_adds_its_parts() {
     let prefix = format!("MCP entry: updated ({}, backup: ", config.display());
     assert!(first.starts_with(&prefix), "{out}");
     assert_eq!(text(Path::new(first[prefix.len()..].trim_end_matches(')'))), kept);
-    assert_eq!(text(&config), format!("{CODEX_CONFIG}\n{}{after}", block(None, true)));
+    assert_eq!(text(&config), format!("{CODEX_CONFIG}{after}\n{}", block(None, true)));
+
+    // Codex writes config.toml with toml_edit, which keeps a comment at the end of the file
+    // after every table. So a table Codex adds lands inside zerodb's markers, after zerodb's
+    // tables, with a blank line before it. Those bytes aren't zerodb's: disconnect keeps them,
+    // and connect moves its block after them. Every result still parses as TOML.
+    let valid = |path: &Path| {
+        let mut python = support::command("python3");
+        let load = "import sys, tomllib; tomllib.load(open(sys.argv[1], 'rb'))";
+        python.args(["-c", load]).arg(path).stdin(Stdio::null());
+        let (status, out) = Process::start(&mut python).wait();
+        assert_eq!(status.code(), Some(0), "{}: {out}", path.display());
+    };
+    // The fixture's own github server is renamed, so Codex's github table is the only one.
+    let base = CODEX_CONFIG.replace("[mcp_servers.github]", "[mcp_servers.linear]");
+    let home = dir.0.join("t");
+    let config = home.join(".codex/config.toml");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    let projects = "[projects.\"/home/u/repo\"]\ntrust_level = \"trusted\"\n";
+    let github = "[mcp_servers.github]\ncommand = \"npx\"\nargs = [\"-y\", \"server-github\"]\n";
+    let inside = |foreign: &str, approve: bool| {
+        let ours = block(None, approve);
+        let (body, end) = ours.split_at(ours.len() - "# zerodb:end\n".len());
+        format!("{base}\n{body}\n{foreign}{end}")
+    };
+    let connect = |args: &[&str]| {
+        run(&home, None, &bin, &[], &[&["connect", "codex", "--no-hook"], args].concat())
+    };
+    // disconnect keeps the projects table byte for byte. zerodb's tables and markers go.
+    std::fs::write(&config, inside(projects, true)).unwrap();
+    valid(&config);
+    let (code, out) = run(&home, None, &bin, &[], &["disconnect", "codex"]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.starts_with("MCP entry: removed ("), "{out}");
+    assert_eq!(text(&config), format!("{base}{projects}"));
+    valid(&config);
+    // connect --notes ask keeps the github server, and puts its new block at the end.
+    std::fs::write(&config, inside(github, true)).unwrap();
+    let (code, out) = connect(&["--notes", "ask"]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.starts_with("MCP entry: updated ("), "{out}");
+    assert_eq!(text(&config), format!("{base}{github}\n{}", block(None, false)));
+    valid(&config);
+    // A rerun with a table inside the markers moves the block to the end, and then nothing.
+    std::fs::write(&config, inside(projects, true)).unwrap();
+    let (code, out) = connect(&[]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.starts_with("MCP entry: updated ("), "{out}");
+    let moved = format!("{base}{projects}\n{}", block(None, true));
+    assert_eq!(text(&config), moved);
+    let (code, out) = connect(&[]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.starts_with("MCP entry: unchanged ("), "{out}");
+    assert_eq!(text(&config), moved);
+    assert_eq!(run(&home, None, &bin, &[], &["disconnect", "codex"]).0, Some(0));
+    assert_eq!(text(&config), format!("{base}{projects}"));
+    valid(&config);
 
     // Without codex on PATH, the block goes in, unverified, and that is not an error.
     let home = dir.0.join("m");

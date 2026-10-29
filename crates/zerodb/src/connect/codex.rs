@@ -209,29 +209,88 @@ fn block(exe: &str, home: Option<&str>, notes: Notes) -> Result<String, String> 
     Ok(lines.iter().map(|line| format!("{line}\n")).collect())
 }
 
-/// The bytes of zerodb's block in a file scanned as `entries`, from the start of its begin
-/// line to the end of its end line. Markers are comment lines that are exactly a begin line
-/// zerodb writes, or [`END`]. An error says how they don't pair up.
-fn find_block(entries: &[Entry]) -> Result<Option<Range<usize>>, String> {
+/// zerodb's block in a file: the bytes from the start of its begin line to the end of its end
+/// line, and which of them are zerodb's.
+#[derive(Debug, PartialEq, Eq)]
+struct Block {
+    /// From the start of the begin line to after the end line.
+    span: Range<usize>,
+    /// zerodb's bytes in the span, in order: the 2 marker lines, and each table section under
+    /// `mcp_servers.zerodb`, from its header to the next header or marker line. Codex inserts
+    /// tables it adds before a comment at the end of the file, so other tables can sit inside
+    /// the markers. They, and any other line there, aren't zerodb's.
+    ours: Vec<Range<usize>>,
+}
+
+impl Block {
+    /// Whether `entry` lies in zerodb's bytes.
+    fn holds(&self, entry: &Entry) -> bool {
+        self.ours.iter().any(|ours| ours.contains(&entry.span.start))
+    }
+}
+
+/// Whether `path` is zerodb's server table, or a table under it.
+fn zerodb_path(path: &[String]) -> bool {
+    matches!(path, [servers, zerodb, ..] if servers == "mcp_servers" && zerodb == "zerodb")
+}
+
+/// zerodb's block in a file scanned as `entries`. Markers are comment lines that are exactly
+/// a begin line zerodb writes, or [`END`]. An error says how they don't pair up.
+fn find_block(entries: &[Entry]) -> Result<Option<Block>, String> {
     let (mut begins, mut ends) = (Vec::new(), Vec::new());
-    for entry in entries {
+    for (at, entry) in entries.iter().enumerate() {
         let Item::Comment(comment) = &entry.item else { continue };
         match comment.trim() {
-            BEGIN_LINE | BEGIN_ADDED => begins.push(entry.span.start),
-            END => ends.push(entry.span.end),
+            BEGIN_LINE | BEGIN_ADDED => begins.push(at),
+            END => ends.push(at),
             _ => {}
         }
     }
-    match (begins.as_slice(), ends.as_slice()) {
-        ([], []) => Ok(None),
-        ([begin], [end]) if begin < end => Ok(Some(*begin..*end)),
-        ([], _) => Err(format!("it has a line {END} without a zerodb begin line")),
-        ([_], []) => Err(format!("it has a zerodb begin line without a line {END}")),
-        _ => Err(format!(
-            "its zerodb begin lines and lines {END} don't pair up: each must come once, in \
-             that order"
-        )),
+    let (begin, end) = match (begins.as_slice(), ends.as_slice()) {
+        ([], []) => return Ok(None),
+        ([begin], [end]) if begin < end => (*begin, *end),
+        ([], _) => return Err(format!("it has a line {END} without a zerodb begin line")),
+        ([_], []) => return Err(format!("it has a zerodb begin line without a line {END}")),
+        _ => {
+            return Err(format!(
+                "its zerodb begin lines and lines {END} don't pair up: each must come once, in \
+                 that order"
+            ))
+        }
+    };
+    let mut ours = vec![entries[begin].span.clone()];
+    let inside = &entries[begin + 1..end];
+    for (at, entry) in inside.iter().enumerate() {
+        let Item::Table(path) = &entry.item else { continue };
+        if zerodb_path(path) {
+            let next = inside[at + 1..].iter().find(|entry| matches!(entry.item, Item::Table(_)));
+            let stop = next.unwrap_or(&entries[end]).span.start;
+            ours.push(entry.span.start..stop);
+        }
     }
+    ours.push(entries[end].span.clone());
+    Ok(Some(Block { span: entries[begin].span.start..entries[end].span.end, ours }))
+}
+
+/// `text` without zerodb's bytes in `block`, and without the blank line `connect` put before
+/// the block. When nothing is left after the block, the line end `connect` added before it
+/// goes too, so the file is back as it was. Every other byte stays.
+fn without(text: &str, block: &Block) -> String {
+    let head = &text[..block.span.start];
+    let blank = ["\r\n\r\n", "\n\n"].into_iter().find(|blank| head.ends_with(blank));
+    let mut head = blank.map_or(head, |blank| &head[..head.len() - blank.len() / 2]);
+    let (mut kept, mut at) = (String::new(), block.span.start);
+    for ours in &block.ours {
+        kept.push_str(&text[at..ours.start]);
+        at = ours.end;
+    }
+    let tail = &text[block.span.end..];
+    let begin = &text[block.ours[0].clone()];
+    if added_end(begin) && kept.is_empty() && tail.is_empty() {
+        head =
+            head.strip_suffix(if begin.ends_with("\r\n") { "\r\n" } else { "\n" }).unwrap_or(head);
+    }
+    format!("{head}{kept}{tail}")
 }
 
 /// What outside zerodb's block keeps zerodb from adding it.
@@ -260,19 +319,16 @@ impl Clash {
     }
 }
 
-/// What in a file scanned as `entries`, outside `ours`, zerodb's block, clashes with it. A
-/// `zerodb` server counts as a table, as a key under `[mcp_servers]`, or as a dotted key, by
-/// the decoded key path.
-fn clash(entries: &[Entry], ours: Option<&Range<usize>>) -> Option<Clash> {
-    let outside =
-        entries.iter().filter(|entry| ours.is_none_or(|ours| !ours.contains(&entry.span.start)));
+/// What in a file scanned as `entries`, outside zerodb's bytes in `ours`, clashes with
+/// zerodb's block. A `zerodb` server counts as a table, as a key under `[mcp_servers]`, or as
+/// a dotted key, by the decoded key path.
+fn clash(entries: &[Entry], ours: Option<&Block>) -> Option<Clash> {
+    let outside = entries.iter().filter(|entry| ours.is_none_or(|ours| !ours.holds(entry)));
     let mut found = None;
     for entry in outside {
         let (Item::Table(path) | Item::Key(path, _)) = &entry.item else { continue };
         match path.as_slice() {
-            [servers, zerodb, ..] if servers == "mcp_servers" && zerodb == "zerodb" => {
-                return Some(Clash::Server);
-            }
+            path if zerodb_path(path) => return Some(Clash::Server),
             [servers] if servers == "mcp_servers" && matches!(entry.item, Item::Key(..)) => {
                 found = Some(Clash::Inline);
             }
@@ -282,7 +338,7 @@ fn clash(entries: &[Entry], ours: Option<&Range<usize>>) -> Option<Clash> {
     found
 }
 
-/// Whether `block`, zerodb's block in a file, starts with [`BEGIN_ADDED`].
+/// Whether `block`, zerodb's block or its begin line, starts with [`BEGIN_ADDED`].
 fn added_end(block: &str) -> bool {
     block.lines().next().is_some_and(|line| line.trim() == BEGIN_ADDED)
 }
@@ -297,9 +353,10 @@ fn hooks_off(path: &Path) -> bool {
     })
 }
 
-/// Puts zerodb's block for `exe`, `home` and `notes` in the `config.toml` at `path`: in place
-/// of an older one, else at the end, after 1 blank line. A file with CRLF line ends gets
-/// CRLF. A file without a final line end gets one, and the block says so. Then
+/// Puts zerodb's block for `exe`, `home` and `notes` at the end of the `config.toml` at
+/// `path`, after 1 blank line. An older block's own bytes go first, and every other byte in
+/// it stays where it is. A block that is already right, with nothing else inside it, stays
+/// too. A file with CRLF line ends gets CRLF. A file without a final line end gets one, and the block says so. Then
 /// `codex mcp get zerodb --json` must show it, or the file is put back.
 fn set_block(path: &Path, exe: &str, home: Option<&str>, notes: Notes) -> Line {
     let shown = path.display();
@@ -332,34 +389,33 @@ fn set_block(path: &Path, exe: &str, home: Option<&str>, notes: Notes) -> Line {
         Some(at) if text[..at].ends_with('\r') => "\r\n",
         _ => "\n",
     };
-    // A block written after an added line end keeps saying so when it is replaced.
-    let added = match &found {
-        Some(range) => added_end(&text[range.clone()]),
-        None => !text.is_empty() && !text.ends_with('\n'),
+    // The block says whether `connect` added the line end before it.
+    let ours = |added: bool| {
+        let begin = if added { BEGIN_ADDED } else { BEGIN_LINE };
+        wanted.replacen(BEGIN_LINE, begin, 1).replace('\n', eol)
     };
-    let begin = if added { BEGIN_ADDED } else { BEGIN_LINE };
-    let ours = wanted.replacen(BEGIN_LINE, begin, 1).replace('\n', eol);
-    let (new, verb, by_hand) = match found {
-        Some(range) if text[range.clone()] == ours => {
+    let (mut new, verb, by_hand) = match found {
+        Some(block) if text[block.span.clone()] == ours(added_end(&text[block.span.clone()])) => {
             return Ok(format!("MCP entry: unchanged ({shown})"));
         }
-        Some(range) => {
-            let new = format!("{}{ours}{}", &text[..range.start], &text[range.end..]);
-            let by_hand =
-                format!("Replace zerodb's block in {shown} by hand with:\n{}", wanted.trim_end());
-            (new, "updated", by_hand)
+        Some(block) => {
+            let by_hand = format!(
+                "Remove zerodb's marker lines and mcp_servers.zerodb tables from {shown} by \
+                 hand, then add this block at its end:\n{}",
+                wanted.trim_end()
+            );
+            (without(text, &block), "updated", by_hand)
         }
-        None => {
-            let mut new = text.to_owned();
-            if !new.is_empty() {
-                if !new.ends_with('\n') {
-                    new.push_str(eol);
-                }
-                new.push_str(eol);
-            }
-            (new + &ours, "added", add)
-        }
+        None => (text.to_owned(), "added", add),
     };
+    let added = !new.is_empty() && !new.ends_with('\n');
+    if !new.is_empty() {
+        if added {
+            new.push_str(eol);
+        }
+        new.push_str(eol);
+    }
+    new.push_str(&ours(added));
     let backup = write(path, old.as_ref(), new.as_bytes())
         .map_err(|why| format!("MCP entry: failed, {why}. {by_hand}"))?;
     let saved = backup.as_ref().map(|backup| format!(", backup: {}", backup.display()));
@@ -432,8 +488,7 @@ fn restore(path: &Path, backup: Option<&Path>) -> String {
     }
 }
 
-/// Removes zerodb's block from the `config.toml` at `path`, with the blank line `connect`
-/// put before it, and the line end it added.
+/// Removes zerodb's bytes in its block from the `config.toml` at `path`, by [`without`].
 fn drop_block(path: &Path) -> Line {
     let shown = path.display();
     let by_hand = format!("Remove zerodb's block, through its line {END}, from {shown} by hand");
@@ -444,8 +499,8 @@ fn drop_block(path: &Path) -> Line {
     let entries = scan(text).map_err(|why| {
         format!("MCP entry: skipped, {shown} isn't TOML zerodb can read: {why}. {by_hand}")
     })?;
-    let range = match find_block(&entries) {
-        Ok(Some(range)) => range,
+    let block = match find_block(&entries) {
+        Ok(Some(block)) => block,
         Ok(None) => {
             return match clash(&entries, None) {
                 Some(Clash::Server) => Err(format!(
@@ -466,17 +521,7 @@ fn drop_block(path: &Path) -> Line {
             ));
         }
     };
-    let before = &text[..range.start];
-    // The blank line `connect` put before the block goes too, so its line end stays. So does
-    // that line end when `connect` added it.
-    let blank = ["\r\n\r\n", "\n\n"].into_iter().find(|blank| before.ends_with(blank));
-    let mut before = blank.map_or(before, |blank| &before[..before.len() - blank.len() / 2]);
-    let block = &text[range.clone()];
-    if added_end(block) {
-        let crlf = block.split('\n').next().is_some_and(|line| line.ends_with('\r'));
-        before = before.strip_suffix(if crlf { "\r\n" } else { "\n" }).unwrap_or(before);
-    }
-    let new = format!("{before}{}", &text[range.end..]);
+    let new = without(text, &block);
     let backup = write(path, old.as_ref(), new.as_bytes())
         .map_err(|why| format!("MCP entry: failed, {why}. {by_hand}"))?;
     let saved = backup.map(|backup| format!(", backup: {}", backup.display()));
@@ -486,7 +531,7 @@ fn drop_block(path: &Path) -> Line {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
-    use super::{clash, find_block, scan, toml_string, Clash};
+    use super::{clash, find_block, scan, toml_string, without, Clash};
 
     #[test]
     fn toml_strings_escape_and_refuse_control_characters() {
@@ -520,9 +565,42 @@ mod tests {
         let text = format!("a = 1\n {begin} \n[mcp_servers.zerodb]\n# zerodb:end\n");
         let entries = scan(&text).unwrap();
         let ours = find_block(&entries).unwrap().unwrap();
-        assert_eq!(&text[ours.clone()], &text[6..]);
+        assert_eq!(&text[ours.span.clone()], &text[6..]);
         assert!(clash(&entries, Some(&ours)).is_none() && clash(&entries, None) == server);
         let not_markers = format!("# zerodb:beginner\n# zerodb:end.\ns = '''\n{begin}\n'''\n");
         assert_eq!(find_block(&scan(&not_markers).unwrap()), Ok(None));
+    }
+
+    #[test]
+    fn only_zerodb_bytes_in_the_block_go() {
+        let begin = "# zerodb:begin v1. zerodb disconnect codex removes this block.";
+        // As toml_edit writes a table it adds: after the last table, before the end comment.
+        let text = format!(
+            "a = 1\n\n{begin}\nx.y = 2\n[mcp_servers.zerodb]\ncommand = \"z\"\n\n\
+             [mcp_servers.zerodb.tools.t]\nk = 1\n\n[projects.\"/r\"]\ntrust_level = \"trusted\"\n\n\
+             [mcp_servers.zerodb.env]\nA = \"b\"\n# zerodb:end\n[after]\n"
+        );
+        let block = find_block(&scan(&text).unwrap()).unwrap().unwrap();
+        let ours: Vec<&str> = block.ours.iter().map(|ours| &text[ours.clone()]).collect();
+        let wanted = [
+            &format!("{begin}\n")[..],
+            "[mcp_servers.zerodb]\ncommand = \"z\"\n\n",
+            "[mcp_servers.zerodb.tools.t]\nk = 1\n\n",
+            "[mcp_servers.zerodb.env]\nA = \"b\"\n",
+            "# zerodb:end\n",
+        ];
+        assert_eq!(ours, wanted);
+        let kept = "a = 1\nx.y = 2\n[projects.\"/r\"]\ntrust_level = \"trusted\"\n\n[after]\n";
+        assert_eq!(without(&text, &block), kept);
+        // The line end connect added before the block goes only when nothing follows it.
+        let added = "# zerodb:begin v1. zerodb disconnect codex removes this block and the line \
+                     end it added above.";
+        let text = format!("a = 1\n\n{added}\n[mcp_servers.zerodb]\n# zerodb:end\n");
+        assert_eq!(without(&text, &find_block(&scan(&text).unwrap()).unwrap().unwrap()), "a = 1");
+        let text = format!("a = 1\n\n{added}\n[mcp_servers.zerodb]\n[p]\n# zerodb:end\n");
+        assert_eq!(
+            without(&text, &find_block(&scan(&text).unwrap()).unwrap().unwrap()),
+            "a = 1\n[p]\n"
+        );
     }
 }
