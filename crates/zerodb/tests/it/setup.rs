@@ -1,9 +1,12 @@
 use crate::support::{self, data_dir, fake_program, tree, Dir, Holders, Process};
 use serde_json::{json, Value};
 use std::ffi::OsString;
+use std::fs::File;
 use std::io::Write;
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::{Duration, Instant};
 
 /// VS Code's `mcp.json` when `HOME` is `home`.
 fn vscode_file(home: &Path) -> PathBuf {
@@ -347,4 +350,37 @@ fn setup_asks_and_stops_without_answers() {
     let adds = calls(&claude_log).into_iter().filter(|args| args[1] != "get").count();
     assert_eq!(adds, 1, "claude ran only to add the first row's entry");
     assert!(calls(&codex_log).iter().all(|args| args[..2] == ["mcp", "get"]), "codex only read");
+}
+
+/// A server that holds the data lock but answers only after 8 s, as a slow cold start does,
+/// still passes the store check: setup waits for it instead of failing with no trusted
+/// server in time.
+#[test]
+fn setup_store_check_waits_for_a_starting_server() {
+    let dir = Dir::new();
+    let (path, _, _) = fakes(&dir.0);
+    let home = dir.0.join("h");
+    let data = data_dir(&home);
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&data).unwrap();
+    // This process is the starting server: it holds the lock, so every spawned server exits
+    // 75. Its pid is this test's, so the lock is released here, not by `Holders`.
+    let mut lock = File::create(data.join("LOCK")).unwrap();
+    lock.try_lock().unwrap();
+    let socket = data.join("zerodb.sock");
+    let holder =
+        format!("pid={} instance=X unix={} tcp=none\n", std::process::id(), socket.display());
+    lock.write_all(holder.as_bytes()).unwrap();
+    let late = socket.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(8));
+        support::slow_store(&late, Some(Duration::ZERO));
+    });
+    let started = Instant::now();
+    let (code, out, err) = setup(&home, &dir.0, &path, &[], &["--yes", "--harness", "codex"], "");
+    let took = started.elapsed();
+    drop(lock);
+    support::kill_holder(&data);
+    assert_eq!(code, Some(0), "{out}{err}");
+    assert!(out.contains("\n  Codex: ok\n"), "{out}");
+    assert!(took >= Duration::from_secs(8), "answered only by the late server: {took:?}");
 }
