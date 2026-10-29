@@ -406,7 +406,7 @@ impl Adapter {
         let (params, tools) = (&message["params"], ["memory_append", "memory_recent"]);
         message["method"] == "tools/call"
             && tools.iter().any(|tool| params["name"] == *tool)
-            && params["arguments"]["session"].is_null()
+            && matches!(session_arg(&params["arguments"]), Ok(None))
     }
 
     /// The time left to wait for the latest `roots/list` answer, if any.
@@ -457,7 +457,7 @@ impl Adapter {
                 meta @ Value::Object(_) => turn["meta"] = meta.clone(),
                 _ => return Err("meta must be an object".to_owned()),
             }
-            Ok((string(args, "session")?, turn))
+            Ok((session_arg(args)?, turn))
         })();
         let (session, turn) = match turn {
             Ok(turn) => turn,
@@ -547,7 +547,7 @@ impl Adapter {
 
     fn recent(&mut self, args: &Value) -> Value {
         let query = (|| {
-            let session = string(args, "session")?.unwrap_or_else(|| self.session.clone());
+            let session = session_arg(args)?.unwrap_or_else(|| self.session.clone());
             let max_bytes = number(args, "max_bytes", 64 << 10)?;
             Ok::<_, String>((number(args, "n", 20)?.min(200), session, max_bytes))
         })();
@@ -812,6 +812,12 @@ fn string(args: &Value, name: &str) -> Result<Option<String>, String> {
         Value::String(text) => Ok(Some(text.clone())),
         _ => Err(format!("{name} must be a string")),
     }
+}
+
+/// The `session` argument. A model may fill an optional field with "", so an empty one is
+/// absent too: a note in session "" would never reach the session-start block.
+fn session_arg(args: &Value) -> Result<Option<String>, String> {
+    Ok(string(args, "session")?.filter(|session| !session.is_empty()))
 }
 
 /// Adds a reason once and returns every reason so far, in order. The last alone would
