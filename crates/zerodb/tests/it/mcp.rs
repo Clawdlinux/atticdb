@@ -355,12 +355,14 @@ fn tool_calls_over_stdio() {
     assert_eq!(rooted.close().0.code(), Some(0));
 
     // A client that never answers roots: only the first default-session call waits 2 s.
+    // An append alone can take hundreds of ms on a CI runner's disk. So the windows only
+    // prove 1 wait for the first call, as 2 would pass 3.9 s, and none for the second.
     let mut silent = Mcp::start(&dir.0, &args, None);
     let params = json!({"protocolVersion": "2025-11-25", "capabilities": {"roots": {}}});
     assert!(silent.request("initialize", params)["result"].is_object());
     silent.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
     assert_eq!(silent.asked()["method"], "roots/list");
-    for (content, waits) in [("slow", 1_900..2_500), ("fast", 0..500)] {
+    for (content, waits) in [("slow", 1_900..3_900), ("fast", 0..1_900)] {
         let started = std::time::Instant::now();
         appended(&silent.call("memory_append", json!({"content": content})), content);
         let elapsed = started.elapsed().as_millis() as u64;
