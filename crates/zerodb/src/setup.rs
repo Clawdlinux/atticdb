@@ -58,8 +58,9 @@ const HOOK_TIMEOUT: Duration = Duration::from_secs(crate::hook::HARD_STOP.as_sec
 const CODEX_HOOKS_OFF: &str = "Codex: hooks are off ([features] hooks = false in config.toml), so \
                                memory won't load at chat start. Remove that line to turn them on.";
 
-/// How long the store may take to answer `fact_list`, a server start included.
-const STORE_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long the store may take to answer `fact_list`. 2 s are kept for the read, so a
+/// server that is still starting, such as the one the hook check started, gets 13 s.
+const STORE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The order apps are listed and connected in: the Copilot ones, then Claude Code and Codex.
 const ORDER: [Harness; 4] =
