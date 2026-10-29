@@ -329,12 +329,17 @@ impl Studio {
     }
 
     /// Forwards `GET <target without /api>` with the token. The store's status and body come
-    /// back unchanged. 504 when the deadline passed, else 502 when the store failed.
+    /// back unchanged, but a 401 becomes 502 `store_unauthorized`. So a 401 from the studio
+    /// always means a wrong secret. 504 when the deadline passed, else 502 when the store failed.
     fn read(&self, path: &str, target: &str) -> Response {
         let Some(target) = target.strip_prefix("/api") else { return error(404, "not_found") };
         let content_type =
             if path == "/api/metrics" { "text/plain; version=0.0.4" } else { "application/json" };
         match get(&self.launch, target, Some(&self.token), Instant::now() + DEADLINE) {
+            Ok(reply) if reply.status == 401 => {
+                let message = "the store refused the studio's token";
+                json(502, &json!({"error": "store_unauthorized", "message": message}))
+            }
             Ok(reply) => answer(reply.status, content_type, reply.body),
             Err(failure) if failure.kind() == io::ErrorKind::TimedOut => {
                 error(504, "store_timeout")

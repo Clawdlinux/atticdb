@@ -1,6 +1,6 @@
 use crate::support::{
     chmod, cwd, data_dir, files, hook, private_file, seed, slow_store, wait_for, Dir, Holders,
-    Process, Via, TOKEN_A,
+    Process, Via, TOKEN_A, TOKEN_B,
 };
 use serde_json::{json, Value};
 use std::ffi::OsStr;
@@ -239,6 +239,21 @@ fn studio_forwards_reads_and_refuses_the_rest() {
     assert_eq!(by_dir.get("/api/info", true).json(), info);
     assert_eq!(by_dir.get("/api/v1/sessions", true).json(), sessions);
 
+    // A token file the store refuses. Reads get 502, so the page never takes the store's 401
+    // for its own wrong secret. /api/info needs no store and still answers.
+    let wrong = private_file(&dir, "wrong", TOKEN_B);
+    let refused = store.call(Some("localhost"), Some(TOKEN_B), "GET", "/v1/records", None);
+    assert_eq!(refused.0, 401, "the store refuses that token: {}", refused.1);
+    let flags = ["--no-open", "--data-dir", data_flag, "--token-file", &wrong];
+    let bad = Studio::start(&home, &flags, &[]);
+    let reply = bad.get("/api/v1/records", true);
+    let message = "the store refused the studio's token";
+    let unauthorized = json!({"error": "store_unauthorized", "message": message});
+    assert_eq!((reply.status, reply.json()), (502, unauthorized));
+    let info = json!({"version": version, "tenant": null, "store": "data_dir", "home": null});
+    let reply = bad.get("/api/info", true);
+    assert_eq!((reply.status, reply.json()), (200, info));
+
     // On a --url with a token file, in a new home. ZERODB_TOKEN holds the token too, but the
     // file wins. A fake opener records the token it got and its arguments, then fails. The
     // studio says so and keeps serving.
@@ -320,7 +335,7 @@ fn studio_forwards_reads_and_refuses_the_rest() {
     drop(idle);
 
     // The token stays in the studio. The secret is only in the link on stdout.
-    for studio in [&studio, &by_dir, &by_url] {
+    for studio in [&studio, &by_dir, &bad, &by_url] {
         for wire in studio.wires.lock().unwrap().iter() {
             assert!(!wire.contains(&token), "the token reached the page: {wire}");
         }

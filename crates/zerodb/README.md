@@ -265,6 +265,7 @@ Every request goes through these checks, in order:
 Anything else is 404 `not_found`. No route writes to the store.
 A store read has 10 s, connect included. Past that it answers 504 `store_timeout`.
 A store it cannot reach answers 502 `store_unreachable`, with a `message`.
+A store 401 is the exception to unchanged answers: it becomes 502 `store_unauthorized`, so a 401 always means a wrong secret.
 Each connection serves 1 request and says `Connection: close`. The head must arrive within 5 s.
 At most 16 connections are open. Past that, a new one gets 503 `busy`.
 Every response carries `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; worker-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`.
