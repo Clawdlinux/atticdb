@@ -5,6 +5,8 @@ This directory models the context window as a cache over a durable log.
 The log is the agent's trajectory: anything that left the window can be read again, at the cost of its tokens.
 We replay real trajectories through eviction policies.
 Then we bracket the offline optimum between a lower and an upper bound.
+The result is offline cache headroom on observed traces: what a policy could save on these exact traces.
+It is not what an agent would do under that policy, because the agent's actions depend on its context.
 Issue #87 has the motivation. First results are in [results/](results/README.md).
 
 Python 3, standard library only. Tests use pytest.
@@ -120,7 +122,11 @@ Each policy returns misses and missed tokens over proxy accesses, the non-first 
 | PFOO-L | offline, lower bound | Berger, Beckmann, Harchol-Balter, SIGMETRICS 2018, arXiv 1711.03709. The capacity must hold only on average over the n - 1 gaps between accesses. A hit needs its reuse interval held, at a cost of size x length. For misses, keep the cheapest intervals. For missed tokens, solve a fractional knapsack, shortest intervals first. Intervals of objects larger than `B` never count. Every feasible schedule fits this relaxation, so the optimum is at least this. |
 | OPT | exact, tiny traces | `policies.opt` searches every hold and evict choice, for at most 16 accesses. It finds the fewest misses and the fewest missed tokens separately. |
 
-`test_bounds.py` replays 500 random traces of at most 12 accesses, with seed 87. It asserts PFOO-L <= OPT <= Belady-Size for misses and for missed tokens. It also asserts that OPT is at most every causal policy, and that PFOO-L is at most Clearing (oracle N).
+The bounds rest on the arguments in the table: Belady-Size is feasible, and every feasible schedule fits PFOO-L's relaxation. The tests check the code against them.
+`test_bounds.py` replays 500 random traces of at most 12 accesses, with seed 87. That is regression evidence, not confirmation.
+It also enumerates every trace up to 6 accesses over 3 objects: 38,250 cases.
+Those cover sizes 1 to 3 per object, budgets 1 to 5, and 2 reference patterns.
+On each it asserts PFOO-L <= OPT <= Belady-Size for misses and for missed tokens. It also asserts that OPT is at most every causal policy, and that PFOO-L is at most Clearing (oracle N).
 An earlier draft took PFOO-L's missed tokens from the count-optimal intervals. That is not a bound: on random tiny traces it exceeded the true optimum in 5 of 5,000.
 
 ## Measures
@@ -224,6 +230,8 @@ So OpenHands takes 10 consecutive rows from each of 100 strata. The bootstrap re
 
 ## Threats to validity
 
+- **Replay is not causal.** The agent's actions depend on the context policy that produced the trajectory. Another policy would change what the agent reads and does next. So every number here is offline cache headroom on observed traces, not the outcome of running an agent under each policy.
+- **The proxy can drive the headline.** Where references outnumber re-reads, as on OpenHands, the inferred references set the ratios. The proxy check reruns every policy on narrower proxies, and `label-sample` writes a sheet so a human can judge references.
 - **A stored trajectory may not be what the model saw.** Issue #87 notes 2 cases. OpenHands 0.54 defaults to a conversation-window condenser, so some late steps may already be condensed in stored data. We flag rows with signs of it. SWE-agent 0.7 drops old observations from each call (`LastNObservations`) without changing the saved history. The dataset card does not say which setting these runs used. If they did, a stored trajectory overstates the context. Some re-reads then happen because the model no longer saw an old output. We treat each trajectory as the reference stream. The scaffold's own policy is 1 more baseline, not ground truth.
 - **References are a proxy.** An action that names a file may not need its content, as when it runs a script. And the agent uses outputs it never names: a search result, an error message, a failing test. So we both overcount and undercount real dependencies. Identifiers and error text that appear later are not references here. `--drop-refs` reruns everything on the agent's own re-reads alone, which need no proxy.
 - **Versions are coarse.** A write kills every view of the old version, even of lines it did not touch. This undercounts references to unchanged parts of edited files.
@@ -245,7 +253,7 @@ We changed nothing in the data. The results are aggregate counts derived from it
 ## Tests
 
 `python3 -m pytest research/ctxcache/tests` runs in under 1 s, with no network and synthetic fixtures only.
-- `test_bounds.py`: the bound property on 500 random tiny traces.
+- `test_bounds.py`: the bound property on 500 random tiny traces, and on every trace up to 6 accesses over 3 objects.
 - `test_policies.py`: hand-checked results per policy, with reuse distances, peak live and dead tokens.
 - `test_adapters.py`: 1 table per adapter, on rows shaped like the real ones.
 - `test_fetch.py`: API outcomes against a fake HTTP layer, and the pinned samples.

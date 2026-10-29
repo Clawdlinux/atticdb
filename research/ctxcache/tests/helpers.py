@@ -32,6 +32,19 @@ def random_trace(rng: random.Random) -> tuple[list[Access], int]:
     return acc, rng.randint(1, 18)
 
 
+def every_trace(max_len: int, objects: int):
+    """Every access sequence up to max_len over at most `objects` objects, up to relabeling:
+    each new object takes the next unused label."""
+    def grow(prefix, used):
+        yield prefix
+        if len(prefix) < max_len:
+            for o in range(min(used + 1, objects)):
+                yield from grow(prefix + [o], max(used, o + 1))
+    for seq in grow([], 0):
+        if seq:
+            yield seq
+
+
 def shape(acc: list[Access]) -> list[str]:
     """Each access as letter + "*" if first + "r" if a reference + ":" + kind, in first-seen order."""
     letters: dict[str, str] = {}
