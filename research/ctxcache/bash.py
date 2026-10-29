@@ -13,27 +13,59 @@ from dataclasses import dataclass, field
 READERS = {"cat", "head", "tail", "nl", "wc", "less", "more", "sed", "grep", "egrep", "fgrep", "rg", "awk"}
 FILTERS = {"head", "tail", "grep", "egrep", "fgrep", "rg", "sed", "awk", "cut", "sort", "uniq", "wc", "nl", "tr", "cat"}
 GREPS = {"grep", "egrep", "fgrep"}
+RECURSIVE = {"-r", "-R", "--recursive", "--dereference-recursive"}
 # Programs whose file operands are scripts or tests to run.
 RUNNERS = {"python", "python2", "python3", "pytest", "py.test", "nosetests", "coverage", "ipython", "bash", "sh",
            "zsh", "node", "ruby", "perl", "php", "Rscript", "julia", "tox"}
-WRAPPERS = {"timeout", "time", "sudo", "env", "nohup", "nice", "stdbuf", "command", "exec"}
+# Every operand of these is a file they change.
+WRITERS = {"rm", "unlink", "mv", "touch", "truncate", "tee"}
+# These read or link their sources and write their target.
+COPIERS = {"cp", "install", "ln"}
+# A wrapper runs the command after its own options. Per wrapper: the options that take
+# a value, and the operands before the command, such as timeout's duration.
+WRAPPERS = {
+    "timeout": ({"-s", "-k", "--signal", "--kill-after"}, 1),
+    "time": ({"-f", "-o", "--format", "--output"}, 0),
+    "sudo": ({"-C", "-D", "-g", "-p", "-r", "-t", "-T", "-u", "-U", "--close-from", "--chdir", "--group", "--prompt",
+              "--role", "--type", "--command-timeout", "--user", "--other-user"}, 0),
+    "env": ({"-u", "-C", "-S", "--unset", "--chdir", "--split-string"}, 0),
+    "nice": ({"-n", "--adjustment"}, 0),
+    "stdbuf": ({"-i", "-o", "-e", "--input", "--output", "--error"}, 0),
+    "nohup": (set(), 0),
+    "command": (set(), 0),
+    "exec": ({"-a"}, 0),
+}
 REDIRECTS = {">", ">>", ">|", "&>", "&>>", ">&", "<", "<<", "<<-", "<<<", "<&", "<>"}
 WRITE_REDIRECTS = {">", ">>", ">|", "&>", "&>>", ">&"}
+READ_REDIRECTS = {"<", "<>"}  # the others take a heredoc delimiter, a string or a descriptor
 OPERATORS = "();<>|&\n"
 # Longest first, so "&&" wins over "&" and "2>&1" reads as 2, >&, 1.
 OPS = sorted(["&&", "||", ";;", "|&", "&>>", "&>", ">>", ">&", ">|", "<<<", "<<-", "<<", "<&", "<>", ">", "<", "|", "&",
               ";", "(", ")", "\n"], key=len, reverse=True)
-# Options that take the next word as their value, per program.
+# Options that take a value, per program. A short one takes the rest of its word, or
+# else the next word, so -nA 3 is -n, then -A with 3. A long one takes =value or the next word.
 VALUED = {
-    "grep": {"-e", "-f", "-m", "-A", "-B", "-C", "-d", "-D", "--regexp", "--file", "--max-count"},
-    "rg": {"-e", "-f", "-g", "-t", "-T", "-m", "-A", "-B", "-C", "-M", "-j", "--type", "--glob", "--regexp"},
-    "sed": {"-e", "-f", "-l", "--expression", "--file"},
+    "grep": {"-e", "-f", "-m", "-A", "-B", "-C", "-d", "-D", "--regexp", "--file", "--max-count", "--after-context",
+             "--before-context", "--context", "--include", "--exclude", "--exclude-dir"},
+    "rg": {"-e", "-f", "-g", "-t", "-T", "-m", "-A", "-B", "-C", "-M", "-j", "-r", "-E", "-d", "--type", "--type-not",
+           "--glob", "--iglob", "--regexp", "--replace", "--max-count", "--max-depth", "--context", "--after-context",
+           "--before-context"},
+    "sed": {"-e", "-f", "-l", "--expression", "--file", "--line-length"},
     "awk": {"-f", "-F", "-v"},
     "head": {"-n", "-c", "--lines", "--bytes"},
-    "tail": {"-n", "-c", "--lines", "--bytes"},
+    "tail": {"-n", "-c", "-s", "--lines", "--bytes", "--sleep-interval", "--pid"},
+    "nl": {"-b", "-d", "-f", "-h", "-i", "-l", "-n", "-s", "-v", "-w"},
     "python": {"-m", "-c", "-W", "-X"},
     "git": {"-C", "-c"},
+    "cp": {"-t", "-S", "--target-directory", "--suffix"},
+    "install": {"-t", "-S", "-m", "-o", "-g", "--target-directory", "--suffix", "--mode", "--owner", "--group"},
+    "touch": {"-d", "-r", "-t", "--date", "--reference"},
+    "truncate": {"-r", "-s", "--reference", "--size"},
 }
+# Options whose value can only be attached, such as sed -i.bak.
+ATTACHED = {"sed": {"-i"}}
+# Programs that take +N or +cmd options.
+PLUS_OPTIONS = {"tail", "less", "more"}
 # The first operand of these is a pattern or a script, unless an option gives it.
 PATTERN_FIRST = {
     "grep": {"-e", "-f", "--regexp", "--file"},
@@ -44,6 +76,8 @@ PATTERN_FIRST = {
 for _p in ("egrep", "fgrep"):
     VALUED[_p], PATTERN_FIRST[_p] = VALUED["grep"], PATTERN_FIRST["grep"]
 VALUED["python3"] = VALUED["python"]
+VALUED["mv"] = VALUED["ln"] = VALUED["cp"]
+ASSIGNMENT = re.compile(r"^[A-Za-z_]\w*=")
 DELIMITER = re.compile(r"^[A-Za-z_]\w*$")  # a heredoc delimiter, after its quotes go
 PATHISH = re.compile(r"^[\w.~/+@%,:=-]+$")
 EXTENSION = re.compile(r"\.[A-Za-z0-9]{1,8}$")
@@ -77,16 +111,18 @@ def effects(command: str, cwd: str | None, known: set[str]) -> Effects:
         return eff
     stages: list[Stage] = []
     for sep, words in parts:
-        words = _unwrap(words)
-        if not words:
+        # Redirects first: they can come anywhere, even with no command, as in `> Makefile`.
+        args, redirects = _redirects(words)
+        args = _unwrap(args)
+        if not args and not redirects:
             continue
-        prog = posixpath.basename(words[0])
-        args, redirects = _redirects(words[1:])
+        word = args[0] if args else ""
+        prog = posixpath.basename(word)
         if prog == "cd":
-            eff.cwd = _cd(eff.cwd, args)
+            eff.cwd = _cd(eff.cwd, args[1:])
             if not stages:
                 continue  # leading cd commands do not stop a pure read
-        stages.append(Stage(sep, prog, args, redirects, eff.cwd, words[0]))
+        stages.append(Stage(sep, prog, args[1:], redirects, eff.cwd, word))
         _classify(stages[-1], eff, known)
 
     pure = _pure_read(stages, known)
@@ -207,10 +243,17 @@ def _skip_heredocs(s: str, i: int, heredocs: list[tuple[str, bool]]) -> int:
     return i
 
 
-def pathlike(word: str) -> bool:
-    if not word or word[0] in "-+" or "://" in word or word in (".", "..", "/") or not PATHISH.match(word):
+def literal(word: str) -> bool:
+    """A word that names 1 file as written: no glob, variable, option or URL."""
+    if not word or word[0] in "-+" or "://" in word or word in (".", "..", "/", "~"):
         return False
-    return "/" in word or EXTENSION.search(word) is not None
+    return PATHISH.match(word) is not None
+
+
+def pathlike(word: str) -> bool:
+    """A literal word with a slash or an extension. Only where operand roles are unknown,
+    so `make test` names no file."""
+    return literal(word) and ("/" in word or EXTENSION.search(word) is not None)
 
 
 def resolve(word: str, cwd: str | None, known: set[str]) -> str:
@@ -233,17 +276,23 @@ def _cd(cwd: str | None, args: list[str]) -> str | None:
 
 
 def _unwrap(words: list[str]) -> list[str]:
-    """Drops leading VAR=value words and wrappers such as `timeout 10`."""
+    """Drops leading VAR=value words, and wrappers with their options and operands,
+    as in `timeout -s KILL 30` or `sudo -u dev env -u X`."""
     i = 0
     while i < len(words):
-        if re.match(r"^[A-Za-z_]\w*=", words[i]):
+        if ASSIGNMENT.match(words[i]):
             i += 1
-        elif words[i] in WRAPPERS:
-            i += 1
-            while i < len(words) and (words[i].startswith("-") or re.match(r"^\d+(\.\d+)?[smhd]?$", words[i])):
-                i += 1
-        else:
+            continue
+        if words[i] not in WRAPPERS:
             break
+        valued, operands = WRAPPERS[words[i]]
+        i += 1
+        while i < len(words) and words[i].startswith("-"):
+            if words[i] == "--":
+                i += 1
+                break
+            i += 2 if _option(words[i], valued)[2] else 1
+        i += operands
     return words[i:]
 
 
@@ -264,46 +313,110 @@ def _redirects(words: list[str]) -> tuple[list[str], list[tuple[str, str]]]:
     return args, redirects
 
 
-def _files(prog: str, args: list[str]) -> tuple[list[str], set[str]]:
-    """Path-like operands, and the options seen."""
-    valued, ops, flags, i = VALUED.get(prog, set()), [], set(), 0
+def _option(word: str, valued: set[str], attached: set[str] = frozenset()) -> tuple[list[str], str | None, bool]:
+    """The option names in 1 word, the value it carries, and whether its value is the
+    next word. -nA is -n then -A. A short option that takes a value takes the rest of
+    its word, so -sKILL carries KILL. An attached-only option, such as sed -i, never
+    takes the next word."""
+    if word.startswith("--"):
+        name, eq, value = word.partition("=")
+        return [name], (value if eq else None), name in valued and not eq
+    names = []
+    for k in range(1, len(word)):
+        name = "-" + word[k]
+        names.append(name)
+        if name in valued or name in attached:
+            rest = word[k + 1 :]
+            return names, (rest or None), name in valued and not rest
+    return names, None, False
+
+
+def _operands(prog: str, args: list[str]) -> tuple[list[str], dict[str, str | None]]:
+    """The operands in order, and each option seen with its value. Options can come
+    anywhere before a --. For tail, less and more, a word that starts with + is an
+    option, as in tail +5. Elsewhere it is an operand, such as grep's pattern +00:59."""
+    valued, attached = VALUED.get(prog, set()), ATTACHED.get(prog, set())
+    ops: list[str] = []
+    opts: dict[str, str | None] = {}
+    i = 0
     while i < len(args):
         a = args[i]
-        if a == "--":
-            ops += args[i + 1 :]
-            break
-        if a.startswith("-") and len(a) > 1:
-            flags.add(a)
-            i += 2 if a in valued else 1
-            continue
-        ops.append(a)
         i += 1
-    if prog in PATTERN_FIRST and ops and not flags & PATTERN_FIRST[prog]:
-        ops = ops[1:]
-    return [o for o in ops if pathlike(o)], flags
+        if a == "--":
+            ops += args[i:]
+            break
+        if len(a) > 1 and a[0] == "+" and prog in PLUS_OPTIONS:
+            opts[a] = None
+        elif len(a) > 1 and a[0] == "-":
+            names, value, next_word = _option(a, valued, attached)
+            if next_word and i < len(args):
+                value, i = args[i], i + 1
+            opts.update(dict.fromkeys(names))
+            opts[names[-1]] = value
+        else:
+            ops.append(a)
+    return ops, opts
 
 
-def _in_place(prog: str, flags: set[str]) -> bool:
-    return prog == "sed" and any(f.startswith(("-i", "--in-place")) for f in flags)
+def _reader_files(prog: str, ops: list[str], opts: dict) -> list[str]:
+    """A reader's file operands: all but the pattern or script, unless an option gives it."""
+    if prog in PATTERN_FIRST and ops and not opts.keys() & PATTERN_FIRST[prog]:
+        return ops[1:]
+    return ops
+
+
+def _in_place(prog: str, opts: dict) -> bool:
+    return prog == "sed" and ("-i" in opts or "--in-place" in opts)
+
+
+def _copy(ops: list[str], opts: dict) -> tuple[list[str], list[str]]:
+    """The sources of cp, mv, install or ln, and the paths written. Positions come before
+    any filtering, so a target such as $DEST never turns a source into a write. With -t,
+    more than 1 source, or a target ending in /, each source lands inside the target.
+    A source whose name is unknown, such as *.py, writes the target directory itself."""
+    target = opts.get("-t") or opts.get("--target-directory")
+    if target is None:
+        if len(ops) < 2:
+            return ops, []
+        *ops, target = ops
+        if len(ops) == 1 and not target.endswith("/"):
+            return ops, [target]
+    names = [posixpath.basename(s.rstrip("/")) for s in ops]
+    return ops, list(dict.fromkeys(posixpath.join(target, n) if literal(n) else target for n in names))
+
+
+def _roles(prog: str, ops: list[str], opts: dict) -> tuple[list[str], list[str]] | None:
+    """The operand words a command uses and writes, by role. None where roles are unknown."""
+    if prog == "mv":
+        sources, targets = _copy(ops, opts)
+        return [], sources + targets
+    if prog in WRITERS:
+        return [], ops
+    if prog in COPIERS:
+        return _copy(ops, opts)
+    if prog in READERS:
+        files = _reader_files(prog, ops, opts)
+        return files, (files if _in_place(prog, opts) else [])
+    return None
 
 
 def _classify(stage: Stage, eff: Effects, known: set[str]) -> None:
-    files, flags = _files(stage.prog, stage.args)
-    paths = [resolve(f, stage.cwd, known) for f in files]
-    uses, writes = paths, []
+    ops, opts = _operands(stage.prog, stage.args)
+    where = lambda words: [resolve(w, stage.cwd, known) for w in words if literal(w)]  # noqa: E731
+    roles = _roles(stage.prog, ops, opts)
+    if roles is not None:  # the operands' roles are known, so any literal word is a file
+        uses, writes = where(roles[0]), where(roles[1])
+    elif stage.prog == "git" and ops[:1] in (["checkout"], ["restore"]):
+        uses, writes = [], [p for p in where(ops[1:]) if p in known]
+    else:  # roles unknown: only a word with a slash or an extension may be a path
+        uses, writes = [resolve(w, stage.cwd, known) for w in ops if pathlike(w)], []
     why = "run" if stage.prog in RUNNERS else ("git" if stage.prog in ("git", "diff") else "path")
+    if _in_place(stage.prog, opts):
+        why = "edit"
     if pathlike(stage.word) and resolve(stage.word, stage.cwd, known) in known:
-        uses, why = [resolve(stage.word, stage.cwd, known), *paths], "run"  # ./run.sh runs the file
-    if stage.prog in ("rm", "unlink", "mv", "touch", "truncate", "tee"):
-        uses, writes = [], paths
-    elif stage.prog in ("cp", "install", "ln"):
-        uses, writes = paths[:-1], paths[-1:]
-    elif _in_place(stage.prog, flags):
-        writes, why = paths, "edit"
-    elif stage.prog == "git" and stage.args[:1] in (["checkout"], ["restore"]):
-        uses, writes = [], [p for p in paths if p in known]
+        uses, why = [resolve(stage.word, stage.cwd, known), *uses], "run"  # ./run.sh runs the file
     for op, target in stage.redirects:
-        if pathlike(target) and not target.startswith("/dev/"):
+        if op in WRITE_REDIRECTS | READ_REDIRECTS and literal(target) and not target.startswith("/dev/"):
             (writes if op in WRITE_REDIRECTS else uses).append(resolve(target, stage.cwd, known))
     for p in uses:
         if p in known:
@@ -315,21 +428,31 @@ def _classify(stage: Stage, eff: Effects, known: set[str]) -> None:
 
 def _pure_read(stages: list[Stage], known: set[str]) -> str | None:
     """The file a command shows when it is 1 reader on 1 file, maybe piped into filters.
-    rg searches directories, so it reads a file only when the operand is a known file
-    or has an extension. A trailing slash is never a file."""
+    The 1 operand must be a literal word. rg searches directories, so it reads a file
+    only when the operand is a known file or has an extension. A trailing slash is never
+    a file."""
     if not stages or any(s.redirects for s in stages) or any(s.sep != "|" for s in stages[1:]):
         return None
     first = stages[0]
     if first.prog not in READERS:
         return None
-    files, flags = _files(first.prog, first.args)
-    if len(files) != 1 or _in_place(first.prog, flags) or files[0].endswith("/"):
+    ops, opts = _operands(first.prog, first.args)
+    files = _reader_files(first.prog, ops, opts)
+    if len(files) != 1 or not literal(files[0]) or files[0].endswith("/") or _in_place(first.prog, opts):
         return None
-    if first.prog in GREPS and ("--recursive" in flags or any("r" in f or "R" in f for f in flags if f[1] != "-")):
+    if first.prog in GREPS and opts.keys() & RECURSIVE:
         return None
     path = resolve(files[0], first.cwd, known)
     if first.prog == "rg" and path not in known and not EXTENSION.search(posixpath.basename(path)):
         return None
-    if any(s.prog not in FILTERS or _files(s.prog, s.args)[0] for s in stages[1:]):
+    if any(s.prog not in FILTERS or _reads_own_file(s) for s in stages[1:]):
         return None
     return path
+
+
+def _reads_own_file(stage: Stage) -> bool:
+    """True if a filter after a pipe names a file to read, not only the pipe."""
+    ops, opts = _operands(stage.prog, stage.args)
+    if stage.prog in READERS:
+        return any(f != "-" for f in _reader_files(stage.prog, ops, opts))
+    return any(pathlike(o) for o in ops)

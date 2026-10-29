@@ -193,10 +193,15 @@ A backslash-newline joins 2 lines, outside quotes and inside double quotes. An e
 An unquoted word that starts with `#` is a comment up to the newline.
 Only an unquoted `<<` or `<<-` starts a heredoc, and only with a delimiter such as `EOF` or `'EOF'`. So a shift such as `$((1 << 16))` does not.
 A heredoc body is dropped, from the next line through the delimiter line.
-Leading `VAR=value` words and wrappers such as `timeout 10` are skipped. A `cd` sets the directory.
-- **Pure read**: 1 reader on exactly 1 file, maybe piped into filters, with no redirection. Readers are `cat`, `head`, `tail`, `nl`, `wc`, `less`, `more`, `sed` without `-i`, `grep` without `-r`, `rg` and `awk`. The output is a read of that file. `rg` searches directories, so it reads a file only when the operand is a known file or has an extension. An operand ending in `/` is never a file.
-- **Writes**: `rm`, `mv`, `touch`, `truncate`, `tee`, the last operand of `cp`, and `sed -i`, which is a reference first. Also `git checkout` or `git restore` of a known file, and `>` or `>>` into a file.
-- **References**: every other operand that resolves to a known file.
+Leading `VAR=value` words are skipped. So are wrappers with their options and values, as in `timeout -s KILL 30` or `sudo -u dev`.
+The wrappers are `timeout`, `time`, `sudo`, `env`, `nice`, `stdbuf`, `nohup`, `command` and `exec`.
+Short options combine, as in `grep -nA 3`. `bash.py` lists the options that take a value, per program. A `cd` sets the directory.
+Operand roles decide what is a file. Readers' file operands, the operands of file commands and redirect targets are files when they are literal words.
+A literal word has no glob, variable or space. So `Makefile` counts.
+Where roles are unknown, as for `echo`, a path needs a slash or an extension.
+- **Pure read**: 1 reader with exactly 1 file operand, a literal word, maybe piped into filters, with no redirection. Readers are `cat`, `head`, `tail`, `nl`, `wc`, `less`, `more`, `sed` without `-i`, `grep` without `-r`, `rg` and `awk`. The output is a read of that file. `rg` searches directories, so it reads a file only when the operand is a known file or has an extension. An operand ending in `/` is never a file.
+- **Writes**: `rm`, `unlink`, `touch`, `truncate`, `tee`, both sides of `mv`, and the target of `cp`, `install` or `ln`. `sed -i` is a reference, then a write. Positions count before any word is dropped, so `cp a.py $DEST` never writes `a.py`. A target directory (`-t`, a trailing `/` or several sources) takes each source by name. A source with an unknown name, such as `*.py`, writes the directory. Also `git checkout` or `git restore` of a known file. Also a redirect such as `>` or `>>` into a file, even with no command.
+- **References**: every other operand that resolves to a known file, and the target of `<`.
 - **URLs**: `curl` or `wget` of exactly 1 URL, with no output file, is a URL read. Another command that names a known URL references it.
 
 A relative path resolves against the working directory. With no directory, as in our logs, it matches the 1 known path that ends with it.
@@ -243,7 +248,7 @@ So OpenHands takes 10 consecutive rows from each of 100 strata. The bootstrap re
 - **References are a proxy.** An action that names a file may not need its content, as when it runs a script. And the agent uses outputs it never names: a search result, an error message, a failing test. So we both overcount and undercount real dependencies. Identifiers and error text that appear later are not references here. The proxy check reruns every policy on the agent's own re-reads alone, which need no proxy, and on narrower proxies.
 - **Versions are coarse.** A write kills every view of the old version, even of lines it did not touch. This undercounts references to unchanged parts of edited files.
 - **Content the agent wrote itself** is in its own messages, outside the model. A later use of a file it created references nothing. We count these uses.
-- **Unseen writes.** Scripts, `git stash`, `git apply` and installs can change files without a write we detect. A later view with different text is still a new object, but a reference can go to a stale view.
+- **Unseen writes.** Scripts, `git stash`, `git apply` and installs can change files without a write we detect. So can a write to a glob or a variable, such as `rm *.pyc`. It names no file we can track. A later view with different text is still a new object, but a reference can go to a stale view.
 - **Tokens are characters / 4.** Real tokenizers give about 3 to 4 characters per token on code. All policies use the same unit, so comparisons hold. Absolute budgets are approximate.
 - **Messages are outside the budget.** A real window also holds the task, the agent's messages and fixed overhead.
 - **Objects are whole outputs.** Overlapping windows are separate objects. A finer unit, such as lines, would lower the optimum.
@@ -264,6 +269,6 @@ We changed nothing in the data. The results are aggregate counts derived from it
 - `test_policies.py`: hand-checked results per policy, with reuse distances, peak live and dead tokens.
 - `test_adapters.py`: 1 table per adapter, on rows shaped like the real ones.
 - `test_fetch.py`: API outcomes against a fake HTTP layer, the pinned samples, and the repo guard on cached rows.
-- `test_shell.py`: 1 table of shell commands and the reads, writes and uses they imply.
+- `test_shell.py`: 1 table of shell commands and the reads, writes and uses they imply, with each use's subtype.
 - `test_cli.py`: the CLI on the fixture trace, on a cached public sample, and on bad input.
 - `test_label.py`: the labeling sheet.
