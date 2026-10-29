@@ -232,16 +232,19 @@ A relative `CLAUDE_CONFIG_DIR` fails both verbs with exit 2 before any change. `
 Claude rewrites it itself, so `connect` only reads it. It changes the entry only through `claude mcp add` and `claude mcp remove`.
 It never runs `claude mcp get`, because that starts the server to check it.
 Each `claude` command has 10 s. It runs in its own process group, and a timeout kills the whole group.
-After it, `.claude.json` must show the entry, or the part failed.
-An entry with the same binary, args and `ZERODB_HOME` is left as it is.
+Its stderr is read to the end, and its last line goes in an error.
+After it, `.claude.json` must show the entry, or the part failed. It is read up to 5 times, 50 ms apart, as a running Claude Code may be rewriting it.
+An entry with the same binary, args and `ZERODB_HOME`, and no other env, is left as it is.
 An entry that runs any absolute path with exactly `mcp --agent claude-code`, such as an old binary path, is updated: `claude mcp remove`, then `claude mcp add`.
+So is one with another env variable, such as `HOME` or `XDG_DATA_HOME`, which could pick another home than the hook's.
+If the remove worked but the add failed, the line says so and shows the old entry, to restore it. Run `connect` again to add zerodb's.
 Any other `zerodb` entry, such as one with connection flags, is refused, and nothing changes. `--force` replaces it the same way.
-`disconnect` removes the entry only if it is what zerodb writes, for any absolute binary path.
+`disconnect` removes the entry only if it is what zerodb writes, for any absolute binary path and no env but `ZERODB_HOME`.
 The binary's file name doesn't matter, so a binary named `zerodb-0.1.0` counts too.
 Without `claude` on `PATH`, the part is skipped and the command to run is printed.
 
 The hook group has no matcher, so it also runs after compaction.
-Under `ZERODB_HOME`, the entry passes `-e ZERODB_HOME=<path>`. Claude's command hooks have no env field, so the hook command starts with `ZERODB_HOME='<path>' `.
+Under `ZERODB_HOME`, the entry passes `-e ZERODB_HOME=<path>`, after the name, since `-e` takes a list: `claude mcp add -s user zerodb -e ZERODB_HOME=<path> -- <binary> mcp --agent claude-code`. Claude's command hooks have no env field, so the hook command starts with `ZERODB_HOME='<path>' `.
 The hook doesn't share a file with VS Code or Copilot CLI, so its home may differ from theirs. `connect` then warns that memory splits between the homes.
 The allow rules never include `fact_set`, so saving a rule always asks. `--notes ask` also removes a `memory_append` rule.
 Claude Code reads the MCP server's instructions, so `CLAUDE.md` isn't touched.
@@ -250,6 +253,7 @@ Claude Code reads the MCP server's instructions, so `CLAUDE.md` isn't touched.
 A missing file is created at mode 0600, and a missing config dir at 0700.
 Each part is found by its content: a group whose every handler runs an absolute binary path with `hook session-start --harness claude-code`, and the exact allow rules.
 `disconnect` removes every part it finds, including one you added by hand.
+zerodb's handler inside a group with other hooks is left alone. `connect` adds no second group then, and `disconnect` says to remove it by hand there, which counts as skipped.
 A `SessionStart` array that ends up empty stays as `[]`.
 A change keeps a backup, as above. A rerun with nothing to change writes nothing.
 

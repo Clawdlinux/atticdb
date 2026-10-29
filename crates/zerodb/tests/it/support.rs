@@ -48,19 +48,27 @@ pub fn command(program: impl AsRef<OsStr>) -> Command {
 }
 
 /// A fake `claude` in the new directory `bin`, for a `PATH` of just `bin`. It appends its
-/// args as a JSON line to `bin/argv`, which it returns. `mcp add -s user [-e K=V] <name> --
-/// <command> <args>` and `mcp remove -s user <name>` edit `.claude.json` in
-/// `$CLAUDE_CONFIG_DIR`, else in `$HOME`, as Claude Code does. `mcp get` answers from it.
+/// args as a JSON line to `bin/argv`, which it returns. `mcp add` and `mcp remove -s user
+/// <name>` edit `.claude.json` in `$CLAUDE_CONFIG_DIR`, else in `$HOME`, as Claude Code does.
+/// `mcp add` parses as the real CLI does: `-e` takes `K=V` values until `--` or the next
+/// option, so `-e K=V <name>` fails. `mcp get` answers from the file. With
+/// `FAKE_CLAUDE=slow`, it starts a shell that touches `$FAKE_CLAUDE_MARKER` after 12 s, then
+/// sleeps 60 s. With `FAKE_CLAUDE=add-fails`, `mcp add` exits 1.
 pub fn fake_claude(bin: &Path) -> PathBuf {
     let path = std::env::var_os("PATH").unwrap_or_default();
     let python = std::env::split_paths(&path).map(|dir| dir.join("python3")).find(|p| p.is_file());
     let python = python.unwrap_or_else(|| panic!("the fake claude needs python3 on PATH"));
     let script = format!(
         r#"#!{}
-import json, os, sys
+import json, os, subprocess, sys, time
 args = sys.argv[1:]
 with open(os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "argv"), "a") as log:
     log.write(json.dumps(args) + "\n")
+mode = os.environ.get("FAKE_CLAUDE", "")
+if mode == "slow":
+    marker = os.environ["FAKE_CLAUDE_MARKER"]
+    subprocess.Popen(["/bin/sh", "-c", "sleep 12 && touch \"$0\"", marker])
+    time.sleep(60)
 path = os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.environ["HOME"], ".claude.json")
 try:
     with open(path) as f:
@@ -71,15 +79,33 @@ servers = root.setdefault("mcpServers", {{}})
 if args[:2] == ["mcp", "get"]:
     print(json.dumps(servers.get(args[2])))
     sys.exit(0 if args[2] in servers else 1)
-if args[:4] == ["mcp", "add", "-s", "user"]:
-    rest, env = args[4:], {{}}
-    while rest[0] == "-e":
-        key, value = rest[1].split("=", 1)
-        env[key] = value
-        rest = rest[2:]
-    if rest[0] in servers or rest[1] != "--":
-        sys.exit("MCP server " + rest[0] + " already exists in user config")
-    servers[rest[0]] = {{"type": "stdio", "command": rest[2], "args": rest[3:], "env": env}}
+if args[:2] == ["mcp", "add"]:
+    if mode == "add-fails":
+        sys.exit("add failed")
+    rest, env, scope, words = args[2:], {{}}, None, []
+    while rest:
+        arg = rest.pop(0)
+        if arg == "--":
+            words += rest
+            break
+        if arg in ("-s", "--scope"):
+            scope = rest.pop(0)
+        elif arg in ("-e", "--env"):
+            while rest and not rest[0].startswith("-"):
+                value = rest.pop(0)
+                if "=" not in value:
+                    sys.exit("Invalid environment variable format: " + value)
+                key, value = value.split("=", 1)
+                env[key] = value
+        elif arg.startswith("-"):
+            sys.exit("unknown option " + arg)
+        else:
+            words.append(arg)
+    if scope != "user" or len(words) < 2:
+        sys.exit("usage: claude mcp add [options] <name> <commandOrUrl> [args...]")
+    if words[0] in servers:
+        sys.exit("MCP server " + words[0] + " already exists in user config")
+    servers[words[0]] = {{"type": "stdio", "command": words[1], "args": words[2:], "env": env}}
 elif args[:4] == ["mcp", "remove", "-s", "user"] and len(args) == 5:
     if servers.pop(args[4], None) is None:
         sys.exit("No user-scoped MCP server found with name: " + args[4])

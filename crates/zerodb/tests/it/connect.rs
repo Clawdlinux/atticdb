@@ -531,10 +531,11 @@ fn connect_claude_code_adds_its_parts() {
         text.lines().map(|line| serde_json::from_str(line).unwrap()).collect()
     };
     let add = |home: Option<&str>| {
-        let mut args = vec!["mcp", "add", "-s", "user"];
+        // -e takes a list, so it goes after the name. The fake fails it before the name.
+        let mut args = vec!["mcp", "add", "-s", "user", "zerodb"];
         let env = home.map(|home| format!("ZERODB_HOME={home}"));
         args.extend(env.iter().flat_map(|env| ["-e", env.as_str()]));
-        args.extend(["zerodb", "--", &exe, "mcp", "--agent", "claude-code"]);
+        args.extend(["--", &exe, "mcp", "--agent", "claude-code"]);
         args.into_iter().map(String::from).collect::<Vec<_>>()
     };
     let remove = ["mcp", "remove", "-s", "user", "zerodb"].map(String::from).to_vec();
@@ -757,15 +758,38 @@ fn connect_claude_code_adds_its_parts() {
     assert_eq!(calls()[start..], [remove.clone(), add(None)]);
     assert_eq!(read(&state)["mcpServers"]["zerodb"], entry(None));
     assert_eq!(read(&state)["numStartups"], 3, "the rest of Claude's state stays");
+    // An entry from an old binary path, or one whose env could pick another home than the
+    // hook's, is zerodb's by its shape, so it is updated without --force.
     let old = json!({"type": "stdio", "command": "/opt/old/zerodb",
         "args": ["mcp", "--agent", "claude-code"], "env": {}});
+    let mut other_env = entry(None);
+    other_env["env"] = json!({"XDG_DATA_HOME": "/x"});
+    for (case, other) in [("old binary", &old), ("XDG_DATA_HOME", &other_env)] {
+        std::fs::write(&state, json!({"mcpServers": {"zerodb": other}}).to_string()).unwrap();
+        let start = calls().len();
+        let (code, out) = run(&home, None, &bin, &[], &["connect", "claude-code"]);
+        assert_eq!(code, Some(0), "{case}: {out}");
+        let said = format!("MCP entry: updated ({})\n", state.display());
+        assert!(out.starts_with(&said), "{case}: {out}");
+        assert_eq!(calls()[start..], [remove.clone(), add(None)], "{case}");
+        assert_eq!(read(&state)["mcpServers"]["zerodb"], entry(None), "{case}");
+    }
+    // claude removed the old entry, but its add failed: the line shows the old entry, and
+    // says to re-run connect, which then adds zerodb's.
     std::fs::write(&state, json!({"mcpServers": {"zerodb": old}}).to_string()).unwrap();
     let start = calls().len();
+    let fails = [("FAKE_CLAUDE", Path::new("add-fails"))];
+    let (code, out) = run(&home, None, &bin, &fails, &["connect", "claude-code"]);
+    assert_eq!(code, Some(1), "{out}");
+    let said =
+        format!("The old entry was removed. It was: {old}. Re-run zerodb connect claude-code");
+    assert!(out.starts_with("MCP entry: failed, claude mcp add ") && out.contains(&said), "{out}");
+    assert!(!out.contains("claude mcp remove"), "no remove to run by hand: {out}");
+    assert_eq!(calls()[start..], [remove.clone(), add(None)]);
+    assert_eq!(read(&state)["mcpServers"], json!({}));
     let (code, out) = run(&home, None, &bin, &[], &["connect", "claude-code"]);
-    assert_eq!(code, Some(0), "old binary: {out}");
-    assert!(out.starts_with(&format!("MCP entry: updated ({})\n", state.display())), "{out}");
-    assert_eq!(calls()[start..], [remove.clone(), add(None)], "old binary");
-    assert_eq!(read(&state)["mcpServers"]["zerodb"], entry(None), "old binary");
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.starts_with("MCP entry: added ("), "{out}");
     // disconnect leaves an entry zerodb didn't write, and removes the other parts.
     let mine = json!({"command": "npx", "args": ["-y", "zerodb-mcp"]});
     std::fs::write(&state, json!({"mcpServers": {"zerodb": mine}}).to_string()).unwrap();
@@ -819,6 +843,59 @@ fn connect_claude_code_adds_its_parts() {
         out.starts_with("MCP entry: removed (") && out.contains("\nSessionStart hook: removed (")
     );
 
+    // zerodb's handler in a group with other hooks: connect adds no second group, and
+    // disconnect leaves it, says to remove it by hand there, and exits 1.
+    let home = dir.0.join("x");
+    let settings = home.join(".claude/settings.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    let shared = json!({"hooks": {"SessionStart": [{"hooks": [
+        {"type": "command", "command": "echo hi"},
+        {"type": "command", "command": command, "timeout": 5}]}]}});
+    std::fs::write(&settings, serde_json::to_string_pretty(&shared).unwrap()).unwrap();
+    let (code, out) = run(&home, None, &bin, &[], &["connect", "claude-code"]);
+    assert_eq!(code, Some(0), "{out}");
+    let said = "\nSessionStart hook: found inside a group with other hooks, so not added again (";
+    assert!(out.contains(said), "{out}");
+    assert_eq!(read(&settings)["hooks"], shared["hooks"], "no second group");
+    let (code, out) = run(&home, None, &bin, &[], &["disconnect", "claude-code"]);
+    assert_eq!(code, Some(1), "{out}");
+    let said =
+        "\nSessionStart hook: found inside a group with other hooks; remove it by hand there (";
+    assert!(out.starts_with("MCP entry: removed (") && out.contains(said), "{out}");
+    assert!(out.contains("\nallow rules: removed ("), "{out}");
+    assert_eq!(read(&settings)["hooks"], shared["hooks"], "the group stays");
+
+    // A binary path with a $, a backtick and a space. A symlink would not do: connect
+    // writes the binary's real path. Connect then disconnect round-trip, and the hook command
+    // runs in sh.
+    let home = dir.0.join("q");
+    let _holders = support::Holders(vec![support::data_dir(&home)]);
+    let hostile = home.join("a $b`c d");
+    std::fs::create_dir_all(&hostile).unwrap();
+    let hostile = hostile.join("zerodb");
+    std::fs::copy(&exe, &hostile).unwrap();
+    let mut command = support::command(&hostile);
+    command.args(["connect", "claude-code"]).current_dir(&dir.0).env("HOME", &home);
+    command.env("PATH", &bin).env_remove("ZERODB_TOKEN").stdin(Stdio::null());
+    let (status, out) = Process::start(&mut command).wait();
+    assert_eq!(status.code(), Some(0), "{out}");
+    let settings = home.join(".claude/settings.json");
+    let hook = &read(&settings)["hooks"]["SessionStart"][0]["hooks"][0]["command"];
+    let path = hostile.to_str().unwrap();
+    assert_eq!(*hook, format!("'{path}' hook session-start --harness claude-code"));
+    assert_eq!(read(&home.join(".claude.json"))["mcpServers"]["zerodb"]["command"], path);
+    std::fs::write(home.join("stdin"), support::cwd(&home)).unwrap();
+    let mut sh = support::command("sh");
+    sh.args(["-c", &format!("{} < stdin", hook.as_str().unwrap())]);
+    sh.current_dir(&home).env("HOME", &home).stdin(Stdio::null());
+    let (status, out) = Process::start(&mut sh).wait();
+    assert_eq!((status.code(), out.lines().next()), (Some(0), Some("{}")), "{out}");
+    let (code, out) = run(&home, None, &bin, &[], &["disconnect", "claude-code"]);
+    assert_eq!(code, Some(0), "{out}");
+    let emptied = json!({"hooks": {"SessionStart": []}, "permissions": {"allow": []}});
+    assert_eq!(read(&settings), emptied, "{out}");
+    assert_eq!(read(&home.join(".claude.json"))["mcpServers"], json!({}));
+
     // A binary with another file name, as an install may give it, still writes parts that
     // disconnect finds, run from any binary.
     let home = dir.0.join("v");
@@ -862,4 +939,36 @@ fn connect_claude_code_adds_its_parts() {
         assert_eq!(code, Some(2), "{args:?}: {out}");
     }
     assert!(calls().iter().all(|call| call[..2] != ["mcp", "get"]), "claude mcp get never runs");
+}
+
+/// A `claude` that runs past the 10 s timeout is killed with everything it started, and the
+/// MCP part fails while the others still apply.
+#[test]
+#[ignore = "waits out the 10 s claude timeout"]
+fn connect_claude_code_kills_a_slow_claude() {
+    let dir = Dir::new();
+    let (bin, home) = (dir.0.join("bin"), dir.0.join("h"));
+    support::fake_claude(&bin);
+    let marker = dir.0.join("marker");
+    let mut command = support::command(env!("CARGO_BIN_EXE_zerodb"));
+    command.args(["connect", "claude-code"]).current_dir(&dir.0).env("HOME", &home);
+    command.env("PATH", &bin).env("FAKE_CLAUDE", "slow").env("FAKE_CLAUDE_MARKER", &marker);
+    let started = std::time::Instant::now();
+    let (status, out) =
+        Process::start(command.env_remove("ZERODB_TOKEN").stdin(Stdio::null())).wait();
+    let took = started.elapsed();
+    assert_eq!(status.code(), Some(1), "{out}");
+    assert!(took >= std::time::Duration::from_secs(10), "{took:?}");
+    assert!(
+        out.starts_with("MCP entry: failed, claude mcp add ")
+            && out.contains("did not finish in 10 s"),
+        "{out}"
+    );
+    assert!(
+        out.contains("\nSessionStart hook: added (") && out.contains("\nallow rules: added ("),
+        "{out}"
+    );
+    // The fake's own child would touch the marker at 12 s, unless its group was killed.
+    std::thread::sleep(std::time::Duration::from_secs(14).saturating_sub(started.elapsed()));
+    assert!(!marker.exists(), "a child of claude outlived the timeout");
 }

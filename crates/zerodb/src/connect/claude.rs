@@ -54,6 +54,8 @@ const HOOK_ARGS: &str = " hook session-start --harness claude-code";
 const REMOVE: [&str; 5] = ["mcp", "remove", "-s", "user", "zerodb"];
 /// The most of `.claude.json` read. It holds all of Claude's state, so it can be large.
 const MAX_STATE: u64 = 64 << 20;
+/// The most of `claude`'s stderr kept, from its end.
+const KEPT_STDERR: usize = 64 << 10;
 /// How long a `claude` command may run.
 const CLAUDE_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -233,11 +235,19 @@ fn home_of(entry: &Value) -> Option<&str> {
     entry["env"][HOME_ENV].as_str().filter(|home| !home.is_empty())
 }
 
-/// Whether `entry` runs `exe` with zerodb's args on `home`.
+/// Whether `entry` sets no env but `ZERODB_HOME`. Another variable, such as `HOME` or
+/// `XDG_DATA_HOME`, could pick another home than the hook reads.
+fn only_home_env(entry: &Value) -> bool {
+    let env = entry.get("env");
+    env.is_none_or(|env| env.as_object().is_some_and(|env| env.keys().all(|key| key == HOME_ENV)))
+}
+
+/// Whether `entry` runs `exe` with zerodb's args on `home`, and sets nothing else in its env.
 fn same(entry: &Value, exe: &str, home: Option<&str>) -> bool {
     entry["command"] == exe
         && entry["args"] == mcp_args()
         && home_of(entry).map(Path::new) == home.map(Path::new)
+        && only_home_env(entry)
 }
 
 /// Whether `entry` runs any absolute path with exactly zerodb's args, so it has no
@@ -255,9 +265,7 @@ fn written(entry: &Value) -> bool {
     let zerodb = command.is_some_and(Path::is_absolute);
     let known = entry.keys().all(|key| ["type", "command", "args", "env"].contains(&key.as_str()));
     let stdio = entry.get("type").is_none_or(|kind| kind == "stdio");
-    let env = entry
-        .get("env")
-        .is_none_or(|env| env.as_object().is_some_and(|env| env.keys().all(|key| key == HOME_ENV)));
+    let env = only_home_env(&Value::Object(entry.clone()));
     zerodb && known && stdio && env && entry.get("args") == Some(&mcp_args())
 }
 
@@ -298,42 +306,68 @@ fn current(path: &Path) -> Result<Option<Value>, String> {
     Ok(root.get("mcpServers").and_then(|servers| servers.get("zerodb")).cloned())
 }
 
-/// The `claude` args that add zerodb's entry for `exe`, passing `home` when set.
+/// The `claude` args that add zerodb's entry for `exe`, passing `home` when set. `-e` takes
+/// a list of values, up to `--` or the next option, so it goes after the name.
 fn add_args(exe: &str, home: Option<&str>) -> Vec<String> {
-    let mut args: Vec<String> = ["mcp", "add", "-s", "user"].map(String::from).to_vec();
+    let mut args: Vec<String> = ["mcp", "add", "-s", "user", "zerodb"].map(String::from).to_vec();
     if let Some(home) = home {
         args.extend(["-e".into(), format!("{HOME_ENV}={home}")]);
     }
     let agent = Harness::ClaudeCode.agent();
-    args.extend(["zerodb", "--", exe, "mcp", "--agent", agent].map(String::from));
+    args.extend(["--", exe, "mcp", "--agent", agent].map(String::from));
     args
 }
 
 /// Makes zerodb's entry run `exe` on `home`, through `claude`. `current` is the entry read
-/// before. One that differs, such as one from an old binary path, is removed first.
+/// before. One that differs, such as one from an old binary path, is removed first. When
+/// that removal worked but the add failed, the line shows the old entry, to restore it.
 fn set_entry(state: &Path, current: Option<&Value>, exe: &str, home: Option<&str>) -> Line {
     let shown = state.display();
     if current.is_some_and(|current| same(current, exe, home)) {
         return Ok(format!("MCP entry: unchanged ({shown})"));
     }
-    let mut steps = Vec::new();
-    if current.is_some() {
-        steps.push(REMOVE.map(String::from).to_vec());
-    }
-    steps.push(add_args(exe, home));
-    let by_hand = steps.iter().map(|step| shell_line(step)).collect::<Vec<_>>().join(" && ");
+    let (add, remove) = (add_args(exe, home), REMOVE.map(String::from).to_vec());
+    let by_hand = match current {
+        Some(_) => format!("{} && {}", shell_line(&remove), shell_line(&add)),
+        None => shell_line(&add),
+    };
     let claude = find_claude()
         .ok_or_else(|| format!("MCP entry: skipped, claude is not on PATH. Run: {by_hand}"))?;
     let failed = |why: String| format!("MCP entry: failed, {why}. Run by hand: {by_hand}");
-    for step in &steps {
-        run_claude(&claude, step).map_err(failed)?;
+    if let Some(old) = current {
+        run_claude(&claude, &remove).map_err(failed)?;
+        if let Err(why) = run_claude(&claude, &add) {
+            return Err(format!(
+                "MCP entry: failed, {why}. The old entry was removed. It was: {old}. Re-run \
+                 zerodb connect claude-code, which adds zerodb's now that no entry is there"
+            ));
+        }
+    } else {
+        run_claude(&claude, &add).map_err(failed)?;
     }
     let verb = if current.is_some() { "updated" } else { "added" };
-    match self::current(state) {
+    let again = "Re-run zerodb connect claude-code";
+    match read_back(state, |entry| entry.is_some_and(|entry| same(entry, exe, home))) {
         Ok(Some(entry)) if same(&entry, exe, home) => Ok(format!("MCP entry: {verb} ({shown})")),
-        Ok(_) => Err(failed(format!("{shown} does not show the entry after claude ran"))),
-        Err(why) => Err(failed(format!("{shown} {why}"))),
+        Ok(_) => Err(format!(
+            "MCP entry: failed, {shown} does not show the entry after claude ran. {again}"
+        )),
+        Err(why) => Err(format!("MCP entry: failed, {shown} {why} after claude ran. {again}")),
     }
+}
+
+/// zerodb's entry, read again after `claude` ran, until `done` holds for it: up to 5 reads,
+/// 50 ms apart. A running Claude Code may be rewriting the file.
+fn read_back(state: &Path, done: impl Fn(Option<&Value>) -> bool) -> Result<Option<Value>, String> {
+    let mut entry = current(state);
+    for _ in 1..5 {
+        if entry.as_ref().is_ok_and(|entry| done(entry.as_ref())) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+        entry = current(state);
+    }
+    entry
 }
 
 /// Removes zerodb's entry through `claude` when it is what zerodb writes.
@@ -353,10 +387,13 @@ fn drop_entry(state: &Path) -> Line {
         .ok_or_else(|| format!("MCP entry: skipped, claude is not on PATH. Run: {by_hand}"))?;
     let failed = |why: String| format!("MCP entry: failed, {why}. Run by hand: {by_hand}");
     run_claude(&claude, &REMOVE.map(String::from)).map_err(failed)?;
-    match current(state) {
+    let again = "Re-run zerodb disconnect claude-code";
+    match read_back(state, |entry| entry.is_none()) {
         Ok(None) => Ok(format!("MCP entry: removed ({shown})")),
-        Ok(Some(_)) => Err(failed(format!("{shown} still shows the entry after claude ran"))),
-        Err(why) => Err(failed(format!("{shown} {why}"))),
+        Ok(Some(_)) => Err(format!(
+            "MCP entry: failed, {shown} still shows the entry after claude ran. {again}"
+        )),
+        Err(why) => Err(format!("MCP entry: failed, {shown} {why} after claude ran. {again}")),
     }
 }
 
@@ -386,13 +423,24 @@ fn run_claude(claude: &Path, args: &[String]) -> Result<(), String> {
     // Retries take at most 200 ms of the 10 s budget.
     let mut child =
         crate::spawn(&mut command).map_err(|error| format!("{line} could not start: {error}"))?;
-    // Read on a thread, so a full pipe can't stall `claude` past the timeout.
+    // Drain stderr to its end on a thread, so a full pipe or a closed one can't stall or
+    // break a chatty `claude`. Only the last 64 KiB are kept, for the last line.
     let (sender, receiver) = std::sync::mpsc::channel();
-    if let Some(stderr) = child.stderr.take() {
+    if let Some(mut stderr) = child.stderr.take() {
         std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            let _ = stderr.take(64 << 10).read_to_end(&mut bytes);
-            let _ = sender.send(bytes);
+            let (mut kept, mut chunk) = (Vec::new(), [0; 8192]);
+            loop {
+                match stderr.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        kept.extend_from_slice(&chunk[..n]);
+                        kept.drain(..kept.len().saturating_sub(KEPT_STDERR));
+                    }
+                    Err(error) if error.kind() == ErrorKind::Interrupted => {}
+                    Err(_) => break,
+                }
+            }
+            let _ = sender.send(kept);
         });
     }
     let deadline = Instant::now() + CLAUDE_TIMEOUT;
@@ -507,56 +555,107 @@ fn rules(notes: Notes) -> Vec<&'static str> {
     rules
 }
 
-/// An edit to `settings.json`'s text: the new text, and what it did.
-type Edit = Result<(String, &'static str), jsonedit::Error>;
+/// What an edit to `settings.json` did.
+struct Done {
+    /// The new text.
+    text: String,
+    /// What it did, in words.
+    said: String,
+    /// Whether it left something to do by hand, which counts as skipped.
+    by_hand: bool,
+}
 
-/// `text` with `group` in `hooks.SessionStart`, and without zerodb's other groups.
+/// An edit to `settings.json`'s text. `Err` says why it was refused.
+type Edit = Result<Done, String>;
+
+/// A `Done` for `text` that says `said`.
+fn done(text: String, said: &str) -> Edit {
+    Ok(Done { text, said: said.into(), by_hand: false })
+}
+
+/// The zerodb hook commands in SessionStart groups that also run other hooks. `text` must be
+/// strict JSON.
+fn mixed(text: &str) -> Vec<String> {
+    let root: Value = serde_json::from_str(text).unwrap_or_default();
+    let groups = root["hooks"]["SessionStart"].as_array().cloned().unwrap_or_default();
+    let handlers = groups.iter().filter(|group| !our_group(group));
+    let handlers =
+        handlers.flat_map(|group| group["hooks"].as_array().cloned().unwrap_or_default());
+    let ours = |handler: Value| {
+        let command = handler["command"].as_str().filter(|command| our_command(command));
+        command.filter(|_| handler["type"] == "command").map(str::to_owned)
+    };
+    handlers.filter_map(ours).collect()
+}
+
+/// `text` with `group` in `hooks.SessionStart`, and without zerodb's other groups. When
+/// zerodb's handler already sits in a group with other hooks, no group is added. An older
+/// one there is refused, as it can't be updated without touching the other hooks.
 fn add_hook(text: &str, group: &Value) -> Edit {
-    let (text, stale) = jsonedit::remove(text, &HOOKS, |old| our_group(old) && old != group)?;
+    let stale = |old: &Value| our_group(old) && old != group;
+    let (text, stale) = jsonedit::remove(text, &HOOKS, stale).map_err(|e| e.to_string())?;
+    let command = group["hooks"][0]["command"].as_str().unwrap_or_default();
+    let mixed = mixed(&text);
+    if mixed.iter().any(|other| other != command) {
+        return Err("an older zerodb hook is inside a group with other hooks. Update it by \
+                    hand there"
+            .into());
+    }
     let root: Value = serde_json::from_str(&text).unwrap_or_default();
     let groups = root["hooks"]["SessionStart"].as_array();
     if groups.is_some_and(|groups| groups.contains(group)) {
-        return Ok((text, if stale == 0 { "unchanged" } else { "updated" }));
+        return done(text, if stale == 0 { "unchanged" } else { "updated" });
     }
-    let text = jsonedit::append(&text, &HOOKS, group)?;
-    Ok((text, if stale == 0 { "added" } else { "updated" }))
+    if !mixed.is_empty() {
+        return done(text, "found inside a group with other hooks, so not added again");
+    }
+    let text = jsonedit::append(&text, &HOOKS, group).map_err(|e| e.to_string())?;
+    done(text, if stale == 0 { "added" } else { "updated" })
 }
 
 /// `text` with the allow rules for `notes`. With [`Notes::Ask`], the `memory_append` rule goes.
 fn add_rules(text: &str, notes: Notes) -> Edit {
     let ask = notes == Notes::Ask;
-    let (mut text, dropped) = jsonedit::remove(text, &ALLOW, |rule| ask && *rule == APPEND)?;
+    let drop = |rule: &Value| ask && *rule == APPEND;
+    let (mut text, dropped) = jsonedit::remove(text, &ALLOW, drop).map_err(|e| e.to_string())?;
     let root: Value = serde_json::from_str(&text).unwrap_or_default();
     let have = root["permissions"]["allow"].as_array().cloned().unwrap_or_default();
     let mut added = 0;
     for rule in rules(notes).into_iter().filter(|rule| !have.contains(&json!(rule))) {
-        text = jsonedit::append(&text, &ALLOW, &json!(rule))?;
+        text = jsonedit::append(&text, &ALLOW, &json!(rule)).map_err(|e| e.to_string())?;
         added += 1;
     }
-    Ok((
-        text,
-        if dropped > 0 {
-            "updated"
-        } else if added > 0 {
-            "added"
-        } else {
-            "unchanged"
-        },
-    ))
+    let said = match (dropped, added) {
+        (0, 0) => "unchanged",
+        (0, _) => "added",
+        _ => "updated",
+    };
+    done(text, said)
 }
 
-/// `text` without the SessionStart groups that run zerodb's hook.
+/// `text` without the SessionStart groups that run zerodb's hook. A zerodb handler in a
+/// group with other hooks stays, and is left to do by hand.
 fn drop_hooks(text: &str) -> Edit {
-    let (text, removed) = jsonedit::remove(text, &HOOKS, our_group)?;
-    Ok((text, if removed == 0 { "not found" } else { "removed" }))
+    let (text, removed) = jsonedit::remove(text, &HOOKS, our_group).map_err(|e| e.to_string())?;
+    let by_hand = !mixed(&text).is_empty();
+    let said = match (removed, by_hand) {
+        (0, false) => "not found",
+        (_, false) => "removed",
+        (0, true) => "found inside a group with other hooks; remove it by hand there",
+        (_, true) => {
+            "removed, but found another inside a group with other hooks; remove that \
+                      by hand there"
+        }
+    };
+    Ok(Done { text, said: said.into(), by_hand })
 }
 
 /// `text` without zerodb's allow rules.
 fn drop_rules(text: &str) -> Edit {
     let ours =
         |rule: &Value| rule.as_str().is_some_and(|rule| READS.contains(&rule) || rule == APPEND);
-    let (text, removed) = jsonedit::remove(text, &ALLOW, ours)?;
-    Ok((text, if removed == 0 { "not found" } else { "removed" }))
+    let (text, removed) = jsonedit::remove(text, &ALLOW, ours).map_err(|e| e.to_string())?;
+    done(text, if removed == 0 { "not found" } else { "removed" })
 }
 
 /// A part that lives in `settings.json`.
@@ -593,12 +692,14 @@ fn edit_settings(parts: &[Part<'_>]) -> Vec<Line> {
     };
     let start = original.as_ref().map_or("{\n}\n", |(text, _)| text.as_str());
     let mut text = start.to_owned();
+    // Per part: what it did, and whether it changed the text.
     let mut done = Vec::new();
     for part in parts {
         done.push(match (part.edit)(&text) {
-            Ok((edited, verb)) => {
-                text = edited;
-                Ok(verb)
+            Ok(edit) => {
+                let changed = edit.text != text;
+                text = edit.text;
+                Ok((edit.said, edit.by_hand, changed))
             }
             Err(error) => Err(format!("{shown}: {error}")),
         });
@@ -609,21 +710,26 @@ fn edit_settings(parts: &[Part<'_>]) -> Vec<Line> {
         match write(&path, old.as_ref(), text.as_bytes()) {
             Ok(saved) => backup = saved,
             Err(why) => {
-                let changed = |done: &Result<&str, String>| {
-                    done.as_ref().is_ok_and(|verb| !["unchanged", "not found"].contains(verb))
-                };
-                for done in done.iter_mut().filter(|done| changed(done)) {
+                for done in done.iter_mut().filter(|done| matches!(done, Ok((_, _, true)))) {
                     *done = Err(why.clone());
                 }
             }
         }
     }
-    let line = |(part, done): (&Part<'_>, Result<&str, String>)| match done {
-        Ok(verb @ ("unchanged" | "not found")) => Ok(format!("{}: {verb} ({shown})", part.name)),
-        Ok(verb) => Ok(match &backup {
-            Some(saved) => format!("{}: {verb} ({shown}, backup: {})", part.name, saved.display()),
-            None => format!("{}: {verb} ({shown})", part.name),
-        }),
+    let line = |(part, done): (&Part<'_>, Result<(String, bool, bool), String>)| match done {
+        Ok((said, by_hand, changed)) => {
+            let line = match (&backup, changed) {
+                (Some(saved), true) => {
+                    format!("{}: {said} ({shown}, backup: {})", part.name, saved.display())
+                }
+                _ => format!("{}: {said} ({shown})", part.name),
+            };
+            if by_hand {
+                Err(line)
+            } else {
+                Ok(line)
+            }
+        }
         Err(why) => Err(format!("{}: skipped, {why}. {}", part.name, part.by_hand)),
     };
     parts.iter().zip(done).map(line).collect()
