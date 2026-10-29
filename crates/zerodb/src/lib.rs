@@ -12,6 +12,7 @@ pub mod fault;
 pub mod home;
 pub mod hook;
 pub mod http;
+pub mod jsonedit;
 pub mod launch;
 pub mod listen;
 pub mod mcp;
