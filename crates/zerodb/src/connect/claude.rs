@@ -383,7 +383,9 @@ fn run_claude(claude: &Path, args: &[String]) -> Result<(), String> {
     if std::env::var_os(CONFIG_ENV).is_some_and(|dir| dir.is_empty()) {
         command.env_remove(CONFIG_ENV);
     }
-    let mut child = command.spawn().map_err(|error| format!("{line} could not start: {error}"))?;
+    // Retries take at most 200 ms of the 10 s budget.
+    let mut child =
+        crate::spawn(&mut command).map_err(|error| format!("{line} could not start: {error}"))?;
     // Read on a thread, so a full pipe can't stall `claude` past the timeout.
     let (sender, receiver) = std::sync::mpsc::channel();
     if let Some(stderr) = child.stderr.take() {

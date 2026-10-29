@@ -24,6 +24,21 @@ pub mod studio;
 
 use std::io::Read;
 
+/// Spawns `command`, retrying up to 10 times, 20 ms apart, while Linux says the program is
+/// busy (ETXTBSY). That happens while the file is open for writing, for example while it is
+/// being updated, or in tests that just wrote a fake program while another thread forked.
+pub(crate) fn spawn(command: &mut std::process::Command) -> std::io::Result<std::process::Child> {
+    for _ in 1..10 {
+        match command.spawn() {
+            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            spawned => return spawned,
+        }
+    }
+    command.spawn()
+}
+
 /// Reads `bytes` random bytes from `/dev/urandom` and returns them as lowercase hex.
 pub fn random_hex(bytes: usize) -> std::io::Result<String> {
     let mut buf = vec![0; bytes];
