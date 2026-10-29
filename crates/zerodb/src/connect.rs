@@ -336,7 +336,10 @@ fn connect_shared(harness: Harness, force: bool, mode: Mode) -> Report {
         // Plan mode must not create the home, so it names the data dir without making it.
         let data = match mode {
             Mode::Apply => crate::home::ensure()?.data_dir,
-            Mode::Plan => crate::home::dir()?.join("data"),
+            Mode::Plan => {
+                crate::home::check_existing()?;
+                crate::home::dir()?.join("data")
+            }
         };
         let exe = binary()?;
         let guard = (!force).then_some(data.as_path());

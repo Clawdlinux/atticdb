@@ -106,8 +106,9 @@ pub(super) fn connect(force: bool, hook: bool, notes: Notes, mode: Mode) -> Repo
             }
         }
         let warnings = split(Harness::ClaudeCode, home.as_deref());
-        if mode == Mode::Apply {
-            crate::home::ensure()?;
+        match mode {
+            Mode::Apply => drop(crate::home::ensure()?),
+            Mode::Plan => crate::home::check_existing()?,
         }
         Ok((home, exe, state, current, warnings))
     })();

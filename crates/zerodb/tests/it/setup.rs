@@ -188,7 +188,13 @@ fn setup_asks_and_stops_without_answers() {
     let own = "keep the user's instructions, which mention zerodb";
     let config_dir = [("CLAUDE_CONFIG_DIR", "rel")];
     let codex = ["--yes", "--harness", "codex"];
-    let rows: [Row<'_>; 12] = [
+    let dry = ["--dry-run", "--yes", "--harness"];
+    let (dry_claude, dry_codex) =
+        ([&dry[..], &["claude-code"]].concat(), [&dry[..], &["codex"]].concat());
+    let dry_both = [&dry[..], &["claude-code,codex"]].concat();
+    let codex_home = [("CODEX_HOME", "rel")];
+    let skipped = "\n  SessionStart hook: skipped, ";
+    let rows: [Row<'_>; 15] = [
         ("claude-code and codex", &[], &terminal, &path, "claude-code,codex\n\nn\ny\n", 0, ""),
         ("declined", &[], &terminal, &path, "codex\nn\n\nno\n", 0, "N] Nothing changed.\n"),
         ("not a terminal", &[], &[], &path, "claude-code\n\n\ny\n", 2, needs),
@@ -203,6 +209,10 @@ fn setup_asks_and_stops_without_answers() {
         ("Codex hook skipped", &codex, &[], &path, "", 1, "\n  SessionStart hook: skipped, "),
         ("Codex hooks off", &codex, &[], &path, "", 0, "\n  Codex: ok\n"),
         ("help", &["--yes", "--help"], &[], &path, "", 0, "\n  --dry-run         print the plan"),
+        // A dry run exits as its plan would: 1 for a skipped part, else an app's stopped code.
+        ("dry run skips", &dry_claude, &[], &path, "", 1, skipped),
+        ("dry run stops", &dry_both, &codex_home, &path, "", 2, "  stopped: CODEX_HOME rel must"),
+        ("home 0755", &dry_codex, &[], &path, "", 1, "must be a directory owned by uid"),
     ];
     for (row, (case, args, env, path, stdin, wanted, said)) in rows.into_iter().enumerate() {
         let home = dir.0.join(format!("h{row}"));
@@ -224,6 +234,17 @@ fn setup_asks_and_stops_without_answers() {
             std::fs::create_dir_all(&codex_dir).unwrap();
             std::fs::write(codex_dir.join("config.toml"), "[features]\nhooks = false\n").unwrap();
         }
+        if case == "dry run skips" {
+            std::fs::create_dir_all(home.join(".claude")).unwrap();
+            std::fs::write(home.join(".claude/settings.json"), "{\n  // mine\n}\n").unwrap();
+        }
+        // A home that Apply refuses. The plan shows the same refusal.
+        let zerodb_home = data_dir(&home).parent().unwrap().to_owned();
+        if case == "home 0755" {
+            std::fs::create_dir_all(&zerodb_home).unwrap();
+            support::chmod(&zerodb_home, 0o755);
+        }
+        let before = tree(&home);
         let (code, out, err) = setup(&home, &dir.0, path, env, args, stdin);
         assert_eq!(code, Some(wanted), "{case}: {out}{err}");
         assert!(out.contains(said) || err.contains(said), "{case}: {out}{err}");
@@ -275,8 +296,20 @@ fn setup_asks_and_stops_without_answers() {
             assert!(out.starts_with("usage: zerodb setup [--yes] [--harness <list>]"), "{out}");
             assert!(err.is_empty(), "{case}: {err}");
         }
+        if case == "home 0755" {
+            let uid = rustix::process::geteuid().as_raw();
+            let refused = format!(
+                "{} must be a directory owned by uid {uid}, mode 0700 or stricter, found mode 0755 \
+                 owned by uid {uid}\n",
+                zerodb_home.display()
+            );
+            assert!(out.contains(&format!("\n  stopped: {refused}")), "{case}: {out}");
+            let (code, out, err) = setup(&home, &dir.0, path, env, &codex[..], stdin);
+            assert_eq!(code, Some(1), "{case}: applied: {out}{err}");
+            assert!(out.contains(&format!("\n  failed: {refused}")), "{case}: {out}");
+        }
         if row > 0 {
-            assert!(tree(&home).is_empty(), "{case}: nothing written");
+            assert_eq!(tree(&home), before, "{case}: nothing written");
             continue;
         }
         let asked = "Which apps? [copilot,vscode,claude-code,codex] Load memory at the start of \

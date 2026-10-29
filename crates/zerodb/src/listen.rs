@@ -55,6 +55,12 @@ pub fn owned_dir(dir: &Path, mask: u32) -> Result<(), String> {
     if mask == 0o077 {
         DirBuilder::new().recursive(true).mode(0o700).create(dir).map_err(fail)?;
     }
+    check_owned(dir, mask)
+}
+
+/// The check of [`owned_dir`], on an existing `dir`. It creates nothing.
+pub fn check_owned(dir: &Path, mask: u32) -> Result<(), String> {
+    let fail = |error: std::io::Error| format!("{}: {error}", dir.display());
     let meta = fs::metadata(dir).map_err(fail)?;
     let euid = rustix::process::geteuid().as_raw();
     if !meta.is_dir() || meta.uid() != euid || meta.mode() & mask != 0 {

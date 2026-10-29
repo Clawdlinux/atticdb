@@ -17,7 +17,7 @@ const MAX_INPUT: u64 = 1 << 20;
 /// 2 s left to start, so the first one has at most 1 s to connect or start the server.
 const BUDGET: Duration = Duration::from_secs(3);
 /// Past this, whatever blocks, the hook prints `{}` and exits, under Copilot's 5 s timeout.
-const HARD_STOP: Duration = Duration::from_secs(4);
+pub(crate) const HARD_STOP: Duration = Duration::from_secs(4);
 /// Set once a line is printed, so exactly one ever is.
 static PRINTED: Mutex<bool> = Mutex::new(false);
 const FACTS: usize = 50;

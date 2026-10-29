@@ -90,8 +90,9 @@ pub(super) fn connect(hook: bool, notes: Notes, mode: Mode) -> Report {
         let exe = binary()?;
         let config = config_file()?;
         let warnings = split(Harness::Codex, home.as_deref());
-        if mode == Mode::Apply {
-            crate::home::ensure()?;
+        match mode {
+            Mode::Apply => drop(crate::home::ensure()?),
+            Mode::Plan => crate::home::check_existing()?,
         }
         Ok::<_, String>((home, exe, config, warnings))
     })();

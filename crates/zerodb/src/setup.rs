@@ -50,8 +50,9 @@ const INTERACTIVE_ENV: &str = "ZERODB_SETUP_INTERACTIVE";
 /// How many answers a question takes before setup gives up.
 const TRIES: usize = 3;
 
-/// How long the hook may take to print its line.
-const HOOK_TIMEOUT: Duration = Duration::from_secs(4);
+/// How long the hook may take to print its line: 1 s past its own stop, as harnesses give it
+/// 5 s.
+const HOOK_TIMEOUT: Duration = Duration::from_secs(crate::hook::HARD_STOP.as_secs() + 1);
 
 /// Codex's next step when its config turns hooks off.
 const CODEX_HOOKS_OFF: &str = "Codex: hooks are off ([features] hooks = false in config.toml), so \
@@ -85,7 +86,8 @@ fn title(harness: Harness) -> &'static str {
 }
 
 /// Runs `zerodb setup`. Returns the exit code: 0 when every chosen app connected with no
-/// skipped part and passed its checks, 1 when not, 2 for a usage error or no answer.
+/// skipped part and passed its checks, 1 when not, 2 for a usage error or no answer. An app
+/// that stopped gives its own code when that is higher. `--dry-run` exits as the plan would.
 pub fn run(flags: Flags) -> u8 {
     let terminal = std::io::stdin().is_terminal()
         || std::env::var_os(INTERACTIVE_ENV).is_some_and(|value| value == "1");
@@ -106,10 +108,10 @@ pub fn run(flags: Flags) -> u8 {
         }
     };
     let (harnesses, options) = chosen;
-    show_plan(&harnesses, options);
+    let planned = show_plan(&harnesses, options);
     if flags.dry_run {
         println!("Dry run: nothing was written.");
-        return 0;
+        return planned;
     }
     if ask {
         match asker.line("Apply? [y/N] ") {
@@ -255,12 +257,14 @@ fn show(harness: Harness, report: &Report, shown: &mut Vec<String>, stopped: &st
 
 /// Prints the plan: 1 line per file and part, for each app. VS Code and Copilot CLI share 2
 /// files, so their lines show once.
-fn show_plan(harnesses: &[Harness], options: Options) {
+/// Returns the exit code the plan gives, by [`code`].
+fn show_plan(harnesses: &[Harness], options: Options) -> u8 {
     println!("Plan:");
-    let mut shown = Vec::new();
+    let (mut shown, mut reports) = (Vec::new(), Vec::new());
     for &harness in harnesses {
         let report = connect::connect(harness, options, Mode::Plan);
         show(harness, &report, &mut shown, "stopped");
+        reports.push(report);
         if harness == Harness::Vscode {
             let dir = connect::copilot_home().map(|dir| dir.display().to_string());
             let dir = dir.unwrap_or_else(|_| "~/.copilot".into());
@@ -274,6 +278,14 @@ fn show_plan(harnesses: &[Harness], options: Options) {
     if !options.hook && shared {
         println!("VS Code and Copilot CLI always get the sessionStart hook.");
     }
+    code(&reports)
+}
+
+/// The highest code an app stopped with, else 1 when a part was skipped or failed, else 0.
+fn code(reports: &[Report]) -> u8 {
+    let stopped = reports.iter().filter_map(|report| report.stopped.as_ref());
+    let stopped = stopped.map(|(code, _)| *code).max();
+    stopped.unwrap_or_else(|| u8::from(reports.iter().any(Report::skipped)))
 }
 
 /// Connects each app in turn, past any that fails, then checks each one and prints what to
@@ -289,9 +301,7 @@ fn apply(harnesses: &[Harness], options: Options) -> u8 {
     }
     let skipped = reports.iter().filter(|(_, report)| report.skipped()).count();
     println!("{} connected, {skipped} with skipped parts.", reports.len() - skipped);
-    let stopped = reports.iter().filter_map(|(_, report)| report.stopped.as_ref());
-    let stopped = stopped.map(|(code, _)| *code).max().unwrap_or(0);
-    let mut code = u8::from(skipped > 0);
+    let mut failed_check = false;
     println!("Checks:");
     let cwd = std::env::current_dir().map_err(|error| format!("no current dir: {error}"));
     let mut store = None;
@@ -330,7 +340,7 @@ fn apply(harnesses: &[Harness], options: Options) -> u8 {
             for failed in failed {
                 println!("    {failed}");
             }
-            code = 1;
+            failed_check = true;
         }
     }
     let connected: Vec<Harness> =
@@ -347,7 +357,8 @@ fn apply(harnesses: &[Harness], options: Options) -> u8 {
             println!("  {step}");
         }
     }
-    code.max(stopped)
+    let applied: Vec<Report> = reports.into_iter().map(|(_, report)| report).collect();
+    code(&applied).max(u8::from(failed_check))
 }
 
 /// Whether a plan line says its part needs nothing.
@@ -396,7 +407,7 @@ fn check_hook(harness: Harness, cwd: &Path) -> Result<(), String> {
                 let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err("no answer in 4 s".into());
+                return Err(format!("no answer in {} s", HOOK_TIMEOUT.as_secs()));
             }
             Err(error) => return Err(error.to_string()),
         }

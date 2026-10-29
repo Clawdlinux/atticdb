@@ -45,13 +45,14 @@ That is 1 that mentions zerodb, or has zerodb's file name without its marker lin
 The plan has 1 line per file and part, such as `~/.claude/settings.json: add the SessionStart hook`.
 It comes from the code that writes, run in a mode that writes nothing.
 That mode runs no `claude` or `codex` command that changes anything.
+It checks an existing home as Apply would, so a home Apply refuses shows in the plan.
 Then it asks `Apply? [y/N]`.
 It connects Copilot CLI and VS Code first, then Claude Code, then Codex.
 Each part prints 1 line, as in `zerodb connect`. An app that fails doesn't stop the others.
 A summary counts the apps connected, and those with skipped parts.
 
 Then it checks each app. A new plan must find every part in place.
-The hook must print JSON within 4 s. The store must answer `fact_list`.
+The hook must print JSON within 5 s, 1 s past its own stop. The store must answer `fact_list`.
 For Codex, `codex mcp get zerodb --json` must show the entry.
 Last, it prints what to do next.
 That can be: approve the zerodb hook in Codex once, start new chat sessions, and reload VS Code.
@@ -67,9 +68,11 @@ The end of stdin exits 2. So do 3 answers it can't read.
 
 | Exit code | Meaning |
 |---|---|
-| 0 | Every chosen app connected, with no skipped part, and passed its checks. Also `--dry-run`, and `Apply?` answered no |
+| 0 | Every chosen app connected, with no skipped part, and passed its checks. Also `Apply?` answered no |
 | 1 | A part was skipped or failed, a check failed, or no app was found |
 | 2 | A usage error, no terminal without `--yes`, or no answer. Also an app that stopped with exit 2 |
+
+`--dry-run` exits with the code of an app whose plan stopped. Else it exits 1 when a part would be skipped, else 0.
 
 ## `zerodb serve`
 
