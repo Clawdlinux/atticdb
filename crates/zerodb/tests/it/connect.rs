@@ -312,14 +312,23 @@ fn connect_writes_the_session_start_hook() {
     assert_eq!(code, Some(0), "matching: {out}");
     assert!(!out.contains("still uses"), "matching: {out}");
     assert_eq!((env_of(&vscode, "servers"), hook_env()), (env.clone(), env), "matching");
-    // A hand-made VS Code entry in a file with comments passes no ZERODB_HOME, so it is on the
-    // default home, as Copilot is about to be.
-    std::fs::write(&vscode, "// mine\n{\"servers\": {\"zerodb\": {\"command\": \"zerodb\"}}}\n")
-        .unwrap();
-    let (code, out) = connect(&["connect", "copilot"], false);
-    assert_eq!(code, Some(0), "comments: {out}");
-    assert!(!out.contains("still uses"), "comments: {out}");
-    assert_eq!((env_of(&entry, "mcpServers"), hook_env()), (Value::Null, Value::Null), "comments");
+    // A hand-made VS Code entry in a file with comments passes no ZERODB_HOME, and an empty
+    // one counts as unset. Both are on the default home, as Copilot is about to be.
+    let rows = [
+        ("comments", "// mine\n{\"servers\": {\"zerodb\": {\"command\": \"zerodb\"}}}\n"),
+        ("empty", "{\"servers\": {\"zerodb\": {\"command\": \"zerodb\", \"env\": {\"ZERODB_HOME\": \"\"}}}}"),
+    ];
+    for (case, text) in rows {
+        std::fs::write(&vscode, text).unwrap();
+        let (code, out) = connect(&["connect", "copilot"], false);
+        assert_eq!(code, Some(0), "{case}: {out}");
+        assert!(!out.contains("still uses"), "{case}: {out}");
+        assert_eq!(
+            (env_of(&entry, "mcpServers"), hook_env()),
+            (Value::Null, Value::Null),
+            "{case}"
+        );
+    }
     // Copilot's own entry with --data-dir, under a home that also splits from VS Code's. The
     // flags refusal shows first, so --force is never advised past a warning not yet shown.
     let mut flagged: Value = serde_json::from_slice(&std::fs::read(&entry).unwrap()).unwrap();

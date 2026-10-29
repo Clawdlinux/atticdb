@@ -143,6 +143,7 @@ The home and `data/` must be yours, with no group or other bits. The shell verbs
 Each use syncs the directory entries of `data/`, the home and its parents up to the parent of `$HOME`.
 A use that finds `$HOME` missing makes it, then syncs every parent up to `/`.
 A home outside `$HOME`, or with `HOME` unset, syncs every parent up to `/`. A parent above the home that you can't open is skipped.
+If the use made a directory in that parent, it fails instead, as the new entry can't be synced.
 A client needs only this:
 
 ```json

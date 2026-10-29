@@ -113,15 +113,19 @@ pub fn ensure() -> Result<Home, String> {
     // A $HOME missing now is made below, and nothing above it is known to be synced.
     let made_home = home.as_deref().is_some_and(|home| home.symlink_metadata().is_err());
     let stop = home.as_deref().filter(|_| !made_home).and_then(Path::parent);
+    // The parent of the highest directory this call makes holds that directory's new entry,
+    // so it must be synced even when this user can't read it.
+    let data_dir = dir.join("data");
+    let made = data_dir.ancestors().take_while(|path| path.symlink_metadata().is_err()).last();
+    let holder = made.and_then(Path::parent).map(Path::to_owned);
     crate::listen::owned_dir(&dir, 0o077)?;
     let config = dir.join("zerodb.json");
     if !config.exists() {
         publish(&dir, &config)?;
     }
-    let data_dir = dir.join("data");
     crate::listen::owned_dir(&data_dir, 0o077)?;
     // Every call syncs, covering a concurrent creator that has not synced yet.
-    sync_dirs(&dir, &data_dir, stop)?;
+    sync_dirs(&dir, &data_dir, stop, holder.as_deref())?;
     Ok(Home { dir, config, data_dir, tenant: TENANT.into() })
 }
 
@@ -129,13 +133,27 @@ pub fn ensure() -> Result<Home, String> {
 /// power loss before the first ack. It stops after syncing `stop`, else at `/`. A home
 /// inside `$HOME` stops at `$HOME`'s parent, so a `$HOME` that another call made is synced
 /// too. Any other home, or a `$HOME` this call made, syncs every ancestor up to `/`, since
-/// a first use may have made any of them.
-fn sync_dirs(dir: &Path, data_dir: &Path, stop: Option<&Path>) -> Result<(), String> {
+/// a first use may have made any of them. `holder` holds the entry of the highest directory
+/// this call made, so it is never skipped.
+fn sync_dirs(
+    dir: &Path,
+    data_dir: &Path,
+    stop: Option<&Path>,
+    holder: Option<&Path>,
+) -> Result<(), String> {
     for path in data_dir.ancestors() {
         let fail = |error: std::io::Error| format!("{}: cannot sync: {error}", path.display());
         match File::open(path) {
+            Err(error) if holder == Some(path) => {
+                return Err(format!(
+                    "{}: cannot sync the entry for the directory made in it: {error}. Make it \
+                     readable, or create the home by hand",
+                    path.display()
+                ));
+            }
             // An ancestor above the home that this user can't open existed before, as every
-            // directory zerodb makes is owner-only. EACCES and EPERM both land here.
+            // directory zerodb makes is owner-only. Its entries were already there. EACCES and
+            // EPERM both land here.
             Err(error)
                 if error.kind() == ErrorKind::PermissionDenied
                     && path != dir

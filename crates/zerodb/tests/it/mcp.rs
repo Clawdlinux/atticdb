@@ -772,20 +772,36 @@ fn no_flags_use_the_home() {
     }
     // No home is made where it can't be used. Any connection flag keeps the old rule, so no
     // token is an error. A relative ZERODB_HOME is a usage error, with no fallback to HOME.
-    let rows: [(&[&str], &str, i32, &str); 3] = [
-        (&["--url", "unix:///nowhere.sock"], "", 1, "set ZERODB_TOKEN"),
-        (&["--data-dir", "d"], "", 1, "set ZERODB_TOKEN"),
-        (&[], "r", 2, "zerodb: ZERODB_HOME must be an absolute path\n"),
+    // A home made in a parent that can't be read fails, as its new entry can't be synced.
+    let mut rows: Vec<(&[&str], String, i32, String)> = vec![
+        (&["--url", "unix:///nowhere.sock"], "".into(), 1, "set ZERODB_TOKEN".into()),
+        (&["--data-dir", "d"], "".into(), 1, "set ZERODB_TOKEN".into()),
+        (&[], "r".into(), 2, "zerodb: ZERODB_HOME must be an absolute path\n".into()),
     ];
+    let unreadable = dir.0.join("p");
+    // Root reads any directory, so the row needs a normal user.
+    if !rustix::process::geteuid().is_root() {
+        std::fs::create_dir(&unreadable).unwrap();
+        chmod(&unreadable, 0o300);
+        let says = format!(
+            "zerodb: {}: cannot sync the entry for the directory made in it",
+            unreadable.display()
+        );
+        rows.push((&[], unreadable.join("new").display().to_string(), 1, says));
+    }
     for (flags, zerodb_home, code, says) in rows {
         let (case, home_env) = (format!("{flags:?} ZERODB_HOME={zerodb_home:?}"), dir.0.join("u"));
         let mut command = support::command(env!("CARGO_BIN_EXE_zerodb"));
         command.arg("recent").args(flags).current_dir(&dir.0).env("HOME", &home_env);
-        command.env_remove("ZERODB_TOKEN").env("ZERODB_HOME", zerodb_home);
+        command.env_remove("ZERODB_TOKEN").env("ZERODB_HOME", &zerodb_home);
         let (status, out) = Process::start(command.stdin(std::process::Stdio::null())).wait();
         assert_eq!(status.code(), Some(code), "{case}: {out}");
-        assert!(out.contains(says), "{case}: {out}");
+        assert!(out.contains(&says), "{case}: {out}");
         assert!(!home_env.exists(), "{case}: no home");
+    }
+    // Dir can then remove it.
+    if unreadable.exists() {
+        chmod(&unreadable, 0o700);
     }
 }
 

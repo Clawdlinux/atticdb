@@ -192,7 +192,8 @@ fn split_home(harness: Harness, home: Option<&str>, force: bool) -> Result<Optio
 }
 
 /// The home that `harness`'s zerodb entry in `path` passes in its `env`, `Some(None)` for
-/// the default home. `None` when it has no entry. In a file that isn't plain JSON, an entry
+/// the default home. `None` when it has no entry. An empty `ZERODB_HOME` is the default home,
+/// as [`crate::home::env_dir`] reads it. In a file that isn't plain JSON, an entry
 /// counts as on the default home unless the file holds the text `ZERODB_HOME`. Then its home
 /// is unknown, and the error says why.
 fn entry_home(harness: Harness, path: &Path) -> Result<Option<Option<String>>, String> {
@@ -207,7 +208,8 @@ fn entry_home(harness: Harness, path: &Path) -> Result<Option<Option<String>>, S
         Ok(root) => Ok(root
             .get(harness.section())
             .and_then(|servers| servers.get("zerodb"))
-            .map(|entry| entry["env"][HOME_ENV].as_str().map(str::to_owned))),
+            .map(|entry| entry["env"][HOME_ENV].as_str().filter(|home| !home.is_empty()))
+            .map(|home| home.map(str::to_owned))),
         Err(_) if !holds(b"\"zerodb\"") => Ok(None),
         Err(_) if !holds(HOME_ENV.as_bytes()) => Ok(Some(None)),
         Err(_) => Err(format!("{} is not plain JSON", path.display())),
