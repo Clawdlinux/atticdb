@@ -30,8 +30,12 @@ It names 1 harness at a time, so `connect vscode` and `connect copilot` never ru
 After the agent, it runs `zerodb disconnect <h>`, stops the zerodb server the run started, and deletes the root.
 
 Every child gets the inherited env without `ZERODB_*`, `CLAUDE_CONFIG_DIR` and `CODEX_HOME`, then the run's own values.
-It also drops `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY` and `CODEX_API_KEY`, so the agents bill the logins in the eval dirs.
-`--keep-api-keys` passes them on.
+It also drops the credential and provider vars, so runs use the logins in the eval dirs and nothing else:
+
+- credentials: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`, `CODEX_API_KEY`;
+- provider and endpoint switches: `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `OPENAI_ORG_ID`.
+
+`--keep-api-keys` passes them all on.
 The harness refuses to start any child whose `ZERODB_HOME` is not under its run root.
 The harness's own git calls skip the user's git config.
 
@@ -66,7 +70,7 @@ It prints only whether each is logged in, never their output.
 It is the only command that may start the real binaries without a run.
 
 `--dry-run` prints every command of every run, with its cwd, timeout and env names.
-It also names the API keys it strips. It starts nothing and writes nothing. Env values are not shown.
+It also names the credential and provider vars it strips. It starts nothing and writes nothing. Env values are not shown.
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -76,7 +80,7 @@ It also names the API keys it strips. It starts nothing and writes nothing. Env 
 | `--zerodb` | | the zerodb binary to set up and seed with |
 | `--out` | `research/setup_eval/results/<date>.csv` | rows are appended |
 | `--dry-run` | off | print the plan, run nothing |
-| `--keep-api-keys` | off | pass the 4 API keys on, so the agents may bill them |
+| `--keep-api-keys` | off | pass the credential and provider vars on, so runs may use another account or endpoint |
 | `--max-runs` | 12 | refuse a larger batch. At most 36, the plan's whole budget |
 
 Exit codes: 0 when the batch ran, 1 when a run hit a harness error, 2 for a refusal or a bad flag.
@@ -134,7 +138,7 @@ Eval-only overrides, which the results must list:
 - Claude Code: `--allowedTools=mcp__zerodb__fact_set`, as nobody can answer a prompt.
 - Claude Code: `--permission-mode acceptEdits`, so S4 tests memory, not the permission prompt for the edit.
 - Codex: `--dangerously-bypass-hook-trust`, and `-c` to approve `fact_set`.
-- Both: no API keys in the env, unless `--keep-api-keys`.
+- Both: no credential or provider vars in the env, unless `--keep-api-keys`.
 
 ## Parsing
 

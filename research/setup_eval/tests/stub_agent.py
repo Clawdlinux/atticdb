@@ -19,6 +19,9 @@ import time
 import tomllib
 
 PROG = os.path.basename(sys.argv[0])
+ACCOUNT_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL",
+               "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "OPENAI_API_KEY", "CODEX_API_KEY",
+               "OPENAI_BASE_URL", "OPENAI_ORG_ID")
 ARGS = sys.argv[1:]
 
 
@@ -28,9 +31,7 @@ def log():
         with open(path, "a") as f:
             f.write(json.dumps({"prog": PROG, "argv": ARGS, "cwd": os.getcwd(),
                                 "zerodb_home": bool(os.environ.get("ZERODB_HOME")),
-                                "api_keys": sorted(k for k in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
-                                                               "OPENAI_API_KEY", "CODEX_API_KEY")
-                                                   if k in os.environ)}) + "\n")
+                                "api_keys": sorted(k for k in ACCOUNT_ENV if k in os.environ)}) + "\n")
 
 
 def read_json(path, default):

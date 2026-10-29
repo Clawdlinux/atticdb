@@ -38,7 +38,9 @@ def fake_home(monkeypatch, tmp_path, make_eval_dirs: bool = True) -> dict:
     monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
     monkeypatch.setenv("STUB_LOG", str(log))
     monkeypatch.delenv("XDG_DATA_HOME", raising=False)
-    for name in ("ZERODB_HOME", "ZERODB_TOKEN", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "STUB_REPLAY",
+    for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL",
+                 "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "OPENAI_API_KEY", "CODEX_API_KEY",
+                 "OPENAI_BASE_URL", "OPENAI_ORG_ID", "ZERODB_HOME", "ZERODB_TOKEN", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "STUB_REPLAY",
                  "STUB_SLEEP", "STUB_LOGGED_OUT", "STUB_EXIT", "STUB_STDERR", "STUB_EXIT_AFTER"):
         monkeypatch.delenv(name, raising=False)
     claude_dir = home / ".cache" / "zerodb-setup-eval" / "claude"

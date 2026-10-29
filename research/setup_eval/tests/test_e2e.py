@@ -38,8 +38,9 @@ def rows(path) -> list[dict]:
 
 def test_full_batch_with_stub_agents(monkeypatch, tmp_path, short_tmp, capsys):
     paths = fake_home(monkeypatch, tmp_path)
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "v")
-    monkeypatch.setenv("OPENAI_API_KEY", "v")
+    for name in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "OPENAI_API_KEY",
+                 "OPENAI_BASE_URL"):
+        monkeypatch.setenv(name, "v")
     out = tmp_path / "results" / "batch.csv"
     code = cli.main(["run", "--harness", "both", "--scenarios", "S1,S2,S3,S4,B1,B2", "--runs", "1",
                      "--zerodb", ZERODB, "--out", str(out)])
