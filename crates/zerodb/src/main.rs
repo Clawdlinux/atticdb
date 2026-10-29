@@ -21,8 +21,8 @@ const USAGE: &str = "usage:
   zerodb dump --data-dir <dir> [--scratch <dir>] [--from <lsn>] [--limit <n>]
   zerodb mcp <connect>
   zerodb connect <vscode|copilot> [--force]
-  zerodb connect claude-code [--force] [--no-hook] [--notes ask|auto]
-  zerodb disconnect <vscode|copilot|claude-code>
+  zerodb connect <claude-code|codex> [--force] [--no-hook] [--notes ask|auto]
+  zerodb disconnect <vscode|copilot|claude-code|codex>
   zerodb hook session-start [--harness <name>]
   zerodb studio [--url unix:///path|http://127.0.0.1:<port>] [--data-dir <dir>] [--config <path>]
                 [--tenant <name>] [--token-file <path>] [--no-open]
@@ -165,10 +165,11 @@ fn tool(args: &[String], name: &str, valued: &[&str], switches: &[&str]) -> Opti
         .map(|flags| zerodb::mcp::command(name, flags))
 }
 
-/// `zerodb connect`. `--no-hook` and `--notes` are for Claude Code only.
+/// `zerodb connect`. `--no-hook` and `--notes` are for Claude Code and Codex only. Codex
+/// takes `--force`, but never edits a `zerodb` server it didn't write.
 fn connect(harness: Harness, mut flags: HashMap<String, String>) -> Option<u8> {
     let force = flags.remove("--force").is_some();
-    if harness != Harness::ClaudeCode {
+    if ![Harness::ClaudeCode, Harness::Codex].contains(&harness) {
         return flags.is_empty().then(|| zerodb::connect::connect(harness, force));
     }
     let notes = match flags.remove("--notes").as_deref() {
@@ -177,7 +178,10 @@ fn connect(harness: Harness, mut flags: HashMap<String, String>) -> Option<u8> {
         Some(_) => return None,
     };
     let hook = flags.remove("--no-hook").is_none();
-    Some(zerodb::connect::connect_claude_code(force, hook, notes))
+    Some(match harness {
+        Harness::Codex => zerodb::connect::connect_codex(hook, notes),
+        _ => zerodb::connect::connect_claude_code(force, hook, notes),
+    })
 }
 
 fn report<T>(result: Result<T, impl std::fmt::Display>) -> Result<T, u8> {
