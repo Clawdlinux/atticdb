@@ -12,9 +12,12 @@
 //! - A new item copies the indentation of its previous sibling. With no sibling, it goes 1
 //!   unit deeper than the line holding its parent's opening bracket.
 //! - The unit is the leading whitespace of the first indented line, else 2 spaces.
-//! - A container whose last item sits on the line of its opening bracket gets the new item
-//!   inline, after `, `.
-//! - An empty container always opens up: `[]` becomes `[`, the new item on its own line, `]`.
+//! - A container that sits on 1 line, from its opening bracket to its closing one, gets the
+//!   new item inline. It copies the gap between the last 2 items, else uses `, `.
+//! - Any other container gets the new item on its own line, pretty-printed and indented like
+//!   the first line of its previous sibling.
+//! - An empty container stays inline only when the whole file is 1 line, so `{"a":[]}`
+//!   becomes `{"a":["x"]}`. Otherwise it opens up: `[`, the new item on its own line, `]`.
 //! - A new object member goes last. Values on their own lines are pretty-printed, with keys
 //!   in sorted order, as [`Value`] keeps them.
 //! - Removing every element of an array leaves `[]`.
@@ -58,8 +61,14 @@ pub enum Error {
         /// The type the file holds.
         found: &'static str,
     },
-    /// The edited text would not hold the expected value, so the edit was dropped.
-    Check(&'static str),
+    /// The edit was refused because its result did not verify: the edited text was not
+    /// strict JSON, or did not hold the same edit applied to serde_json's [`Value`].
+    Check {
+        /// The path the edit was for.
+        path: Vec<String>,
+        /// Why the result failed. It never shows more than 40 bytes of the file.
+        why: String,
+    },
 }
 
 impl fmt::Display for Error {
@@ -71,7 +80,9 @@ impl fmt::Display for Error {
             Self::WrongType { path, want, found } => {
                 write!(f, "{path:?} should be {want} but is {found}")
             }
-            Self::Check(what) => write!(f, "the edit failed its check: {what}"),
+            Self::Check { path, why } => {
+                write!(f, "refused the edit at {path:?}, as the result did not verify: {why}")
+            }
         }
     }
 }
@@ -82,7 +93,7 @@ impl std::error::Error for Error {}
 /// and the array itself are created.
 pub fn append(text: &str, path: &[&str], value: &Value) -> Result<String, Error> {
     let root = parse(text)?;
-    let mut want = original(text)?;
+    let mut want = original(text, path)?;
     let (node, found) = walk(&root, path)?;
     let edited = match path.get(found) {
         Some(key) => {
@@ -96,7 +107,7 @@ pub fn append(text: &str, path: &[&str], value: &Value) -> Result<String, Error>
         None => return Err(wrong_type(path, "an array", node)),
     };
     push(&mut want, path, value)?;
-    check(&edited, &want)?;
+    check(&edited, &want, path)?;
     Ok(edited)
 }
 
@@ -108,7 +119,7 @@ pub fn remove(
     pred: impl Fn(&Value) -> bool,
 ) -> Result<(String, usize), Error> {
     let root = parse(text)?;
-    let mut want = original(text)?;
+    let mut want = original(text, path)?;
     let (node, found) = walk(&root, path)?;
     if found < path.len() {
         return Ok((text.to_owned(), 0));
@@ -118,11 +129,11 @@ pub fn remove(
     };
     let mut at = &mut want;
     for key in path {
-        at = at.get_mut(*key).ok_or(Error::Check("the path differs in serde_json"))?;
+        at = at.get_mut(*key).ok_or_else(|| refused(path, "the path differs in serde_json"))?;
     }
     let values = match at {
         Value::Array(values) if values.len() == items.len() => values,
-        _ => return Err(Error::Check("the array differs in serde_json")),
+        _ => return Err(refused(path, "the array differs in serde_json")),
     };
     let hits: Vec<bool> = values.iter().map(pred).collect();
     let removed = hits.iter().filter(|hit| **hit).count();
@@ -132,24 +143,32 @@ pub fn remove(
     let kept = std::mem::take(values).into_iter().zip(&hits).filter(|(_, hit)| !**hit);
     *values = kept.map(|(value, _)| value).collect();
     let edited = cut(text, node, items, &hits);
-    check(&edited, &want)?;
+    check(&edited, &want, path)?;
     Ok((edited, removed))
 }
 
 /// The original text as serde_json reads it.
-fn original(text: &str) -> Result<Value, Error> {
-    serde_json::from_str(text).map_err(|_| Error::Check("serde_json rejects the original text"))
+fn original(text: &str, path: &[&str]) -> Result<Value, Error> {
+    serde_json::from_str(text)
+        .map_err(|err| refused(path, format!("serde_json rejects the original text: {err}")))
 }
 
-/// Refuses `edited` unless it is strict JSON that serde_json reads as `want`.
-fn check(edited: &str, want: &Value) -> Result<(), Error> {
-    parse(edited).map_err(|_| Error::Check("the edited text is not strict JSON"))?;
+/// Refuses `edited` unless it is strict JSON that serde_json reads as `want`. The reasons
+/// come from the strict parser and serde_json, which name places but show no file content
+/// beyond a duplicate key's first 40 bytes.
+fn check(edited: &str, want: &Value, path: &[&str]) -> Result<(), Error> {
+    parse(edited)
+        .map_err(|err| refused(path, format!("the edited text is not strict JSON: {err}")))?;
     let got: Value = serde_json::from_str(edited)
-        .map_err(|_| Error::Check("serde_json rejects the edited text"))?;
+        .map_err(|err| refused(path, format!("serde_json rejects the edited text: {err}")))?;
     if got != *want {
-        return Err(Error::Check("the edited text holds a different value"));
+        return Err(refused(path, "the edited text holds a different value"));
     }
     Ok(())
+}
+
+fn refused(path: &[&str], why: impl Into<String>) -> Error {
+    Error::Check { path: path.iter().map(|key| (*key).to_owned()).collect(), why: why.into() }
 }
 
 /// The edit [`append`] makes, applied to a [`Value`].
@@ -157,7 +176,7 @@ fn push(root: &mut Value, path: &[&str], value: &Value) -> Result<(), Error> {
     let mut at = root;
     for (i, key) in path.iter().enumerate() {
         let Value::Object(map) = at else {
-            return Err(Error::Check("the path differs in serde_json"));
+            return Err(refused(path, "the path differs in serde_json"));
         };
         let fresh =
             if i + 1 == path.len() { Value::Array(Vec::new()) } else { Value::Object(Map::new()) };
@@ -168,7 +187,7 @@ fn push(root: &mut Value, path: &[&str], value: &Value) -> Result<(), Error> {
             items.push(value.clone());
             Ok(())
         }
-        _ => Err(Error::Check("the path differs in serde_json")),
+        _ => Err(refused(path, "the path differs in serde_json")),
     }
 }
 
@@ -207,18 +226,21 @@ fn insert(text: &str, container: &Node, key: Option<&str>, value: &Value) -> Str
         }
     }
     let label = key.map(|key| format!("{}{colon}", Value::from(key))).unwrap_or_default();
+    let one_line = !text[container.start..container.end].contains('\n');
     let (from, to, new) = match spans.last() {
-        Some(&(start, end)) if !text[container.start..start].contains('\n') => {
+        Some(&(_, end)) if one_line => {
             let gap = match spans.as_slice() {
                 [.., (_, prev_end), (last_start, _)] => &text[*prev_end..*last_start],
                 _ => ", ",
             };
-            let gap = if gap.contains('\n') { ", " } else { gap };
             (end, end, format!("{gap}{label}{value}"))
         }
         Some(&(start, end)) => {
             let indent = line_indent(text, start);
             (end, end, format!(",{nl}{indent}{label}{}", render(value, indent, unit, nl)))
+        }
+        None if !text.trim_end().contains('\n') => {
+            (container.start + 1, container.end - 1, format!("{label}{value}"))
         }
         None => {
             let outer = line_indent(text, container.start);
@@ -642,10 +664,40 @@ mod tests {
 
     const CASES: &[Case] = &[
         (
-            "empty object, nested path created",
+            "empty object in a 1-line file, nested path created",
             "{}",
             Append(&["hooks", "SessionStart"], r#"{"matcher": "startup"}"#),
-            Ok("{\n  \"hooks\": {\n    \"SessionStart\": [\n      {\n        \"matcher\": \"startup\"\n      }\n    ]\n  }\n}"),
+            Ok(r#"{"hooks": {"SessionStart":[{"matcher":"startup"}]}}"#),
+        ),
+        (
+            "empty array in a 1-line file",
+            r#"{"a":[]}"#,
+            Append(&["a"], r#""x""#),
+            Ok(r#"{"a":["x"]}"#),
+        ),
+        (
+            "multi-line object in an array that opens and closes on its lines",
+            "{\n  \"h\": [{\n    \"a\": 1\n  }]\n}\n",
+            Append(&["h"], r#"{"b": 2}"#),
+            Ok("{\n  \"h\": [{\n    \"a\": 1\n  },\n  {\n    \"b\": 2\n  }]\n}\n"),
+        ),
+        (
+            "remove what was appended after a multi-line object",
+            "{\n  \"h\": [{\n    \"a\": 1\n  },\n  {\n    \"b\": 2\n  }]\n}\n",
+            Remove(&["h"], &[r#"{"b": 2}"#], 1),
+            Ok("{\n  \"h\": [{\n    \"a\": 1\n  }]\n}\n"),
+        ),
+        (
+            "remove the first of 2 multi-line objects",
+            "{\n  \"h\": [{\n    \"a\": 1\n  }, {\n    \"b\": 2\n  }]\n}\n",
+            Remove(&["h"], &[r#"{"a": 1}"#], 1),
+            Ok("{\n  \"h\": [{\n    \"b\": 2\n  }]\n}\n"),
+        ),
+        (
+            "remove the last of 2 multi-line objects",
+            "{\n  \"h\": [{\n    \"a\": 1\n  }, {\n    \"b\": 2\n  }]\n}\n",
+            Remove(&["h"], &[r#"{"b": 2}"#], 1),
+            Ok("{\n  \"h\": [{\n    \"a\": 1\n  }]\n}\n"),
         ),
         (
             "missing array where its object exists",
@@ -673,7 +725,7 @@ mod tests {
         ),
         (
             "empty root array, object value",
-            "[]\n",
+            "[\n]\n",
             Append(&[], r#"{"b": [1, 2], "a": {}}"#),
             Ok("[\n  {\n    \"a\": {},\n    \"b\": [\n      1,\n      2\n    ]\n  }\n]\n"),
         ),
@@ -932,6 +984,15 @@ mod tests {
                 (got, _) => panic!("{name}: got {got:?}, want {want:?}"),
             }
         }
+
+        let mut deep = json!(1);
+        for _ in 0..130 {
+            deep = json!([deep]);
+        }
+        let err = append(r#"{"a":[]}"#, &["a"], &deep).unwrap_err().to_string();
+        let want = "refused the edit at [\"a\"], as the result did not verify: the edited text \
+                    is not strict JSON: invalid JSON at byte 131: nesting is too deep";
+        assert_eq!(err, want, "too deep: error");
     }
 
     /// Shaped like a Claude Code `settings.json`, with 16 top-level keys and 10 hook events.
