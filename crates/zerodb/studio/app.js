@@ -452,10 +452,18 @@ async function allSessions(after) {
   return { rows, total, next: after };
 }
 // A cursor past the keys under `prefix`: keys sort by their bytes, and U+10FFFF is the largest character. Null
-// when the cursor would pass the store's 1024 bytes, so the caller reads on from where it was.
-function pastGroup(prefix) {
+// when the cursor would pass the store's 1024 bytes, or would not move past `from`, so the caller reads on from
+// `from`. A key with U+10FFFF right after the prefix sorts past the skip, and a skip must never go backward.
+function pastGroup(prefix, from) {
+  const enc = new TextEncoder();
   const after = prefix + '\u{10FFFF}';
-  return new TextEncoder().encode(after).length <= 1024 ? after : null;
+  const bytes = enc.encode(after);
+  return bytes.length <= 1024 && byteOrder(bytes, enc.encode(from)) > 0 ? after : null;
+}
+// The store's key order: byte by byte in UTF-8. JS string order is UTF-16 and differs past U+FFFF.
+function byteOrder(a, b) {
+  for (let i = 0; i < Math.min(a.length, b.length); i++) if (a[i] !== b[i]) return a[i] - b[i];
+  return a.length - b.length;
 }
 // The repos with a fact under repo/<repo>/, in at most 50 pages like the lists above. A page that ends inside a
 // repo goes on past it, so a repo's facts, however many or large, cost no more reads once it is known.
@@ -469,7 +477,7 @@ async function factRepos() {
     if (page.next === null) return { names, next: null };
     // `next` can be a deleted key that opens a repo with no live key read yet, so skip only a known repo.
     const m = /^repo\/([^/]+)\//.exec(page.next);
-    after = (m && names.has(m[1]) && pastGroup(m[0])) || page.next;
+    after = (m && names.has(m[1]) && pastGroup(m[0], page.next)) || page.next;
   }
   return { names, next: after };
 }
@@ -1010,7 +1018,7 @@ async function siblings(near, key, group) {
       ended = page.next === null;
       after = page.next;
       const slash = group || ended ? -1 : after.indexOf('/');
-      if (slash > 0) after = pastGroup(after.slice(0, slash + 1)) || after;
+      if (slash > 0) after = pastGroup(after.slice(0, slash + 1), after) || after;
     }
     const all = h('a', { class: 'link', href: href('facts') }, 'See them all');
     if (!others.length) { empty(near.body, ended ? ['No other fact shares this prefix.'] : ['None turned up in the keys read so far. ', all, '.']); return; }
