@@ -170,6 +170,9 @@ def agent(prompt):
     events = claude_events if PROG == "claude" else codex_events
     for ev in events(calls, reply):
         print(json.dumps(ev))
+    sys.stdout.flush()
+    if os.environ.get("STUB_EXIT_AFTER"):  # a full stream, then a failing exit
+        sys.exit(int(os.environ["STUB_EXIT_AFTER"]))
 
 
 def main():

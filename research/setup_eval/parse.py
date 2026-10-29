@@ -1,7 +1,7 @@
 """Defensive parsers for the 2 agents' JSONL streams.
 
-A line that is not a JSON object, or a known event whose fields have the wrong shape,
-counts as unparsed. An event of a type the parser doesn't know counts as unknown. Neither
+A line that is not a JSON object, an event whose `type` is not a string, or a known event
+whose fields have the wrong shape, counts as unparsed. An event of a type the parser doesn't know counts as unknown. Neither
 stops the parse. `parse_ok` holds when the final reply was found and no line was unparsed.
 
 Tool calls keep the bare tool name of the zerodb server: `mcp__zerodb__fact_set` in
@@ -97,6 +97,9 @@ def parse_claude(stream: bytes | str) -> Outcome:
             out.unparsed += 1
             continue
         kind = ev.get("type")
+        if kind is not None and not isinstance(kind, str):
+            out.unparsed += 1
+            continue
         if kind == "assistant":
             msg = ev.get("message")
             content = msg.get("content") if isinstance(msg, dict) else None
@@ -206,6 +209,9 @@ def parse_codex(stream: bytes | str) -> Outcome:
             out.unparsed += 1
             continue
         kind = ev.get("type")
+        if kind is not None and not isinstance(kind, str):
+            out.unparsed += 1
+            continue
         if kind in CODEX_ITEM_EVENTS:
             item_kind, item = _codex_item(ev.get("item"))
             if item_kind is None:
@@ -232,7 +238,9 @@ def parse_codex(stream: bytes | str) -> Outcome:
         elif kind is None and isinstance(ev.get("msg"), dict):
             msg = ev["msg"]
             mkind = msg.get("type")
-            if mkind == "agent_message" and isinstance(msg.get("message"), str):
+            if not isinstance(mkind, str):
+                out.unparsed += 1
+            elif mkind == "agent_message" and isinstance(msg.get("message"), str):
                 out.reply, out.final = msg["message"], True
             elif mkind == "task_complete":
                 if isinstance(msg.get("last_agent_message"), str):

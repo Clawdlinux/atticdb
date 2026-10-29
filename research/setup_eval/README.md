@@ -100,11 +100,13 @@ Every text match ignores case and is a plain substring match:
 - S1: `nextest` in the reply.
 - S2: `round trip`, `round-trip`, `roundtrip` or `p99` in the reply.
 - S3: a block line `- <key>: ...` holds `22`, for a key the agent set under `repo/evalrepo/`.
-- S4: an added line of `git diff <first commit> -- calc.py` holds `def add(a, b)`. The first 60 characters of the note, with whitespace collapsed, appear in the block.
+- S4: an added line of `git diff <first commit> -- calc.py` holds `def add(a, b)`. The `memory_append` has no `session`, or an empty or null one, as zerodb reads those as none. The first 60 characters of the note, with whitespace collapsed, appear in the block.
 
 For S3 and S4, the next block is what `zerodb hook session-start --harness <h>` prints after the agent.
 It gets `{"cwd": "<fixture>", "hook_event_name": "SessionStart"}` on stdin and the run's `ZERODB_HOME`.
 
+A pass also needs the agent to finish cleanly: exit 0 within the timeout, a final reply, and no error it reported.
+Unparsed lines that don't stop the final reply from being found count only toward `parse_ok`.
 If setup exits other than 0, the agent does not run, and the run fails. The notes say why.
 
 ## Agent commands
@@ -137,7 +139,7 @@ Eval-only overrides, which the results must list:
 ## Parsing
 
 Both streams are JSONL, parsed line by line.
-A line that is not a JSON object, or a known event with fields of the wrong shape, counts as unparsed.
+A line that is not a JSON object, an event whose `type` is not a string, or a known event with fields of the wrong shape, counts as unparsed.
 An event of an unknown type counts as unknown. Neither stops the parse.
 `parse_ok` holds when the final reply was found and no line was unparsed.
 

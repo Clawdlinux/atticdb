@@ -78,3 +78,12 @@ def test_seeds_and_fixture_hold_no_hint_of_the_answers():
     fixture = (sc.CALC_PY + sc.README_MD).lower()
     for hint in ("nextest", "cargo", "redis", "node", "round trip", "p99", "add("):
         assert hint not in fixture
+
+
+def test_summary_reads_an_empty_or_null_session_as_none():
+    content = "Added add(a, b) to calc.py; it returns a + b."
+    for session in ("", None):
+        note = Call("memory_append", {"content": content, "session": session})
+        assert sc.check_summary(out("", note), BLOCK, DIFF).passed, session
+    named = Call("memory_append", {"content": content, "session": "evalrepo"})
+    assert not sc.check_summary(out("", named), BLOCK, DIFF).passed

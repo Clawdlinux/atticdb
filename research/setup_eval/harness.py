@@ -129,6 +129,13 @@ def _required(cfg: Config, runner: Runner, root: str, step: Step) -> Result:
     return r
 
 
+def agent_finished(r: Result, out: Outcome) -> bool:
+    """Whether the agent ended cleanly: exit 0, no timeout, a final reply, and no error it
+    reported. A pass needs this as well as the scenario rule. Unparsed lines that don't stop
+    the final reply from being found count only toward `parse_ok`."""
+    return r.code == 0 and not r.timed_out and not r.missing and out.final and not out.is_error
+
+
 def _why(r: Result, words: tuple[str, ...], paths: dict[str, str], stream: str = "both",
          last: bool = False) -> list[str]:
     """Up to 2 output lines that hold 1 of `words`, the first or the `last` ones, redacted and
@@ -266,8 +273,11 @@ def run_one(cfg: Config, runner: Runner, harness: str, scenario: Scenario, index
             else:
                 block = hook_block(c.stdout)
         verdict = judge(scenario, res.outcome, block, diff)
-        res.passed = verdict.passed
+        clean = agent_finished(r, res.outcome)
+        res.passed = verdict.passed and clean
         res.notes.extend(verdict.reasons)
+        if not res.outcome.final:
+            res.notes.append("no final reply")
         if res.outcome.unparsed:
             res.notes.append(f"unparsed={res.outcome.unparsed}")
         if res.outcome.unknown:

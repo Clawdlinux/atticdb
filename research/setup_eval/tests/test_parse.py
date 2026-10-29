@@ -85,3 +85,17 @@ def test_codex_legacy_events():
     assert out.counts() == {"fact_set": 1}
     assert (out.input_tokens, out.cache_read_tokens, out.output_tokens) == (9, 4, 3), "the last running total"
     assert out.reply == "done" and out.parse_ok and out.turns == 1
+
+
+def test_non_string_types_are_unparsed_not_raised():
+    for kind in ("[1]", "{}", "3", "true"):
+        line = '{"type": %s}' % kind
+        for parser in (parse.parse_claude, parse.parse_codex):
+            out = parser(line + "\n" + line)
+            assert out.unparsed == 2 and out.unknown == 0, (parser.__name__, kind)
+        out = parse.parse_codex('{"msg": {"type": %s}}' % kind)
+        assert out.unparsed == 1, kind
+    # A bad line beside a good stream costs parse_ok only.
+    good = '{"type":"result","subtype":"success","is_error":false,"result":"hi","num_turns":1}'
+    out = parse.parse_claude('{"type": ["x"]}\n' + good)
+    assert out.final and out.reply == "hi" and out.unparsed == 1 and not out.parse_ok

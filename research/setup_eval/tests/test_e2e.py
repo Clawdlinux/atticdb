@@ -129,3 +129,21 @@ def test_agent_failure_notes_are_redacted(monkeypatch, tmp_path, short_tmp):
     assert r["pass"] == "0" and r["parse_ok"] == "0" and "agent_exit=1" in r["notes"]
     assert "why=Error: login expired for [redacted] in <claude-dir>" in r["notes"]
     assert secret not in r["notes"] and paths["home"] not in r["notes"]
+
+
+def test_a_right_answer_without_a_clean_finish_fails(monkeypatch, tmp_path, short_tmp):
+    fake_home(monkeypatch, tmp_path)
+    out = tmp_path / "o.csv"
+    a = cli.parse(["run", "--harness", "claude-code", "--scenarios", "S1", "--zerodb", ZERODB, "--out", str(out)])
+    monkeypatch.setenv("STUB_EXIT_AFTER", "1")
+    assert cli.batch(a, cli.config(a.zerodb), out=lambda *_: None) == 0
+    monkeypatch.delenv("STUB_EXIT_AFTER")
+    errored = tmp_path / "error.jsonl"
+    errored.write_text('{"type":"assistant","message":{"content":[{"type":"text","text":"cargo nextest run"}]}}\n'
+                       '{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":2}\n')
+    monkeypatch.setenv("STUB_REPLAY", str(errored))
+    assert cli.batch(a, cli.config(a.zerodb), out=lambda *_: None) == 0
+    first, second = rows(out)
+    assert "nextest" in first["notes"] and "agent_exit=1" in first["notes"] and first["pass"] == "0"
+    assert "nextest" in second["notes"] and "no final reply" in second["notes"] and second["pass"] == "0"
+    assert "the agent reported an error" in second["notes"]

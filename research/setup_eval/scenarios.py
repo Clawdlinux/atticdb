@@ -115,11 +115,12 @@ def added_lines(diff: str) -> list[str]:
 
 
 def check_summary(out: Outcome, block: str, diff: str) -> Verdict:
-    """`calc.py` gained `def add(a, b)`, a `memory_append` had no `session` argument, and the
-    next block shows the start of that note."""
+    """`calc.py` gained `def add(a, b)`, a `memory_append` had no session, and the next block
+    shows the start of that note. zerodb reads a `session` of "" or null as none, and models
+    fill optional fields with "", so those count as no session."""
     changed = any(_has(line, ADD_LINE) for line in added_lines(diff))
     notes = [c.args["content"] for c in out.calls
-             if c.name == "memory_append" and c.args is not None and "session" not in c.args
+             if c.name == "memory_append" and c.args is not None and not c.args.get("session")
              and isinstance(c.args.get("content"), str)]
     flat = " ".join(re.sub(r"[\r\n]", " ", block or "").split()).lower()
     shown = any(" ".join(n.replace("\r", " ").replace("\n", " ").split())[:NOTE_PREFIX_CHARS].lower() in flat
