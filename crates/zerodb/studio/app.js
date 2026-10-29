@@ -34,12 +34,14 @@ async function api(route, params) {
   if (secret) headers['X-Zerodb-Studio'] = secret;
   const qs = query.toString();
   let res;
+  let text;
   try {
     res = await fetch('/api/' + route + (qs ? '?' + qs : ''), { headers, cache: 'no-store', credentials: 'omit', redirect: 'error', referrerPolicy: 'no-referrer' });
+    // a body cut off in transfer fails here too
+    text = await res.text();
   } catch (e) {
     throw new ApiError(0, 'offline');
   }
-  const text = await res.text();
   if (res.status === 401) {
     try { sessionStorage.removeItem(SECRET_KEY); } catch (e) { /* nothing to clear */ }
     throw new ApiError(401, 'unauthorized');
@@ -81,8 +83,25 @@ const fig = (t, cls) => h('span', { class: cls ? 'fig ' + cls : 'fig' }, t);
 const byId = (id) => document.getElementById(id);
 // A turn can hold 4 MiB with no space, and the browser takes over 30 s to wrap 2 MiB of that. A row shows 2 lines,
 // so it gets the first 1,000 characters. A full view of text past 10,000 characters gets a break point every 32
-// characters of a run longer than 64. Shorter text renders as written.
+// characters of a run longer than 64, at a grapheme boundary. Shorter text renders as written.
 const preview = (t) => (t.length > 1000 ? t.slice(0, 1000) : t);
+const graphemes = Intl.Segmenter ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }) : null;
+// The end of a chunk of run from i, a grapheme boundary: the first boundary at or past i + 32, so a letter keeps its
+// marks and an emoji sequence stays whole. Below U+0300 on both sides there always is one, and the segmenter only
+// reads a window from i, never the whole run.
+function chunkEnd(run, i) {
+  const j = i + 32;
+  if (j >= run.length) return run.length;
+  if (run.charCodeAt(j - 1) < 0x300 && run.charCodeAt(j) < 0x300) return j;
+  if (!graphemes) return /[\uDC00-\uDFFF]/.test(run[j]) ? j + 1 : j;
+  for (let size = 64; ; size *= 2) {
+    const win = run.slice(i, i + size);
+    const s = graphemes.segment(win).containing(32);
+    const end = s.index === 32 ? 32 : s.index + s.segment.length;
+    // a grapheme that reaches the window's end may go on past it
+    if (end < win.length || i + size >= run.length) return i + end;
+  }
+}
 function breakable(t) {
   if (t.length <= 10000) return t;
   const out = [];
@@ -91,9 +110,9 @@ function breakable(t) {
     if (m.index > from) out.push(t.slice(from, m.index));
     const run = m[0];
     for (let i = 0; i < run.length;) {
-      let j = Math.min(i + 32, run.length);
-      if (j < run.length && /[\uDC00-\uDFFF]/.test(run[j])) j++; // keep a surrogate pair whole
-      out.push(h('wbr'), run.slice(i, j));
+      const j = chunkEnd(run, i);
+      if (i) out.push(h('wbr'));
+      out.push(run.slice(i, j));
       i = j;
     }
     from = m.index + run.length;
@@ -166,6 +185,7 @@ function empty(el, ...lines) {
 function errorText(err) {
   if (err.status === 401) return ['This link is out of date. Open the link ', code('zerodb studio'), ' printed.'];
   if (err.code === 'store_unreachable') return [`Couldn't reach the store${err.detail ? ': ' + err.detail : ''}. Start it with `, code('zerodb serve'), ', then retry.'];
+  if (err.code === 'store_unauthorized') return [`The store refused the studio's token${err.detail ? ': ' + err.detail : ''}. Run `, code('zerodb studio'), ' again with a token it takes.'];
   if (err.code === 'store_timeout') return ['The store took more than 10 s to answer. Check it with ', code('zerodb serve'), ', then retry.'];
   if (err.code === 'offline') return ['The studio stopped answering. Run ', code('zerodb studio'), ' again and open the link it prints.'];
   if (err.code === 'invalid_input') return [`The store refused the request${err.detail ? ': ' + err.detail : ''}.`];
@@ -176,6 +196,7 @@ const STATS_REFUSED = 'This store does not share its stats over its URL. A home 
 function errorShort(err) {
   if (err.status === 401) return errorText(err);
   if (err.code === 'store_unreachable') return ["Couldn't reach the store. Start it with ", code('zerodb serve'), '.'];
+  if (err.code === 'store_unauthorized') return ["The store refused the studio's token."];
   if (err.code === 'store_timeout') return ['The store is not answering in time.'];
   if (err.code === 'offline') return ['The studio stopped answering.'];
   return ["Couldn't load this screen."];
@@ -183,7 +204,7 @@ function errorShort(err) {
 function failed(el, err) {
   if (!(err instanceof ApiError)) throw err;
   put(done(el), h('div', { class: 'state error', role: 'alert' }, h('p', null, errorText(err)),
-    err.status === 401 ? null : h('button', { class: 'text-btn', type: 'button', on: { click: () => render(false) } }, 'Retry')));
+    err.status === 401 ? null : h('button', { class: 'text-btn', type: 'button', on: { click: redraw } }, 'Retry')));
 }
 const nothingSaved = () => ['Nothing saved yet. Connect an agent with ', code('zerodb connect vscode'), ' or ', code('zerodb connect copilot'), ', then ask it to remember something.'];
 
@@ -206,6 +227,8 @@ function setMenu(open) {
   app.classList.toggle('menu-open', open);
   document.documentElement.classList.toggle('lock', open);
   menuOpen.setAttribute('aria-expanded', String(open));
+  // the open menu covers the page, so focus stays in it
+  for (const el of [byId('main'), document.querySelector('.topbar')]) el.inert = open;
   if (open) byId('menu-close').focus(); else menuOpen.focus({ preventScroll: true });
 }
 menuOpen.addEventListener('click', () => setMenu(true));
@@ -223,7 +246,7 @@ function titleRow(main, title, crumbs) {
       heading, finding),
     h('div', { class: 'title-side' },
       h('span', { class: 'stamp' }, 'Loaded ' + TIME.format(new Date())),
-      h('button', { class: 'btn', type: 'button', on: { click: () => render(false) } }, 'Refresh'))));
+      h('button', { class: 'btn', type: 'button', on: { click: redraw } }, 'Refresh'))));
   document.title = `${title} · zerodb studio`;
   byId('topbar-screen').textContent = title;
   return finding;
@@ -300,6 +323,35 @@ function listHead() {
   return h('div', { class: 'list-head', 'aria-hidden': 'true' }, h('span', null, 'LSN'), h('span', null, 'Record'), h('span', null, 'Agent'), h('span', null, 'Time'));
 }
 
+// The foot of a list that pages back: a status line and a button, built once so the button keeps its focus. While
+// a page loads the button is aria-disabled, as disabling it would drop the focus. An error takes the status line's
+// place and leaves the button for a retry. Once nothing older remains the button goes and the status takes focus.
+function pagerFoot(foot, label, load, end) {
+  const status = h('span', { class: 'muted', tabindex: '-1', 'aria-live': 'polite' });
+  const button = h('button', { class: 'btn', type: 'button' }, label);
+  button.addEventListener('click', async () => {
+    if (button.getAttribute('aria-disabled') === 'true') return;
+    button.setAttribute('aria-disabled', 'true');
+    try { await load(); } finally { button.removeAttribute('aria-disabled'); }
+  });
+  put(foot, status, button);
+  return {
+    show(text, more) {
+      status.className = 'muted';
+      status.textContent = text;
+      if (more || !button.isConnected) return;
+      const focused = document.activeElement === button;
+      button.replaceWith(...(end ? [h('span', { class: 'muted' }, end)] : []));
+      if (focused) status.focus({ preventScroll: true });
+    },
+    error(err) {
+      if (!(err instanceof ApiError)) throw err;
+      status.className = '';
+      put(status, errorText(err));
+    },
+  };
+}
+
 // Newest-first paging with an exclusive cursor. An empty page with a cursor means the store hit its
 // visit cap, so ask again from that cursor before showing anything.
 function pager({ list, foot, get, row, noun, onFirst, emptyLines }) {
@@ -307,14 +359,12 @@ function pager({ list, foot, get, row, noun, onFirst, emptyLines }) {
   let shown = 0;
   let total = null;
   let started = false;
-  const older = h('button', { class: 'btn', type: 'button' }, 'Older');
-  const status = h('span', { class: 'muted' });
+  let ui = null;
   const paint = () => {
-    status.textContent = total !== null && total >= shown ? `Showing ${n(shown)} of ${count(total, noun)}.` : `Showing ${count(shown, noun)}.`;
-    put(foot, status, cursor !== null ? older : h('span', { class: 'muted' }, 'Nothing older.'));
+    ui = ui || pagerFoot(foot, 'Older', next, 'Nothing older.');
+    ui.show(total !== null && total >= shown ? `Showing ${n(shown)} of ${count(total, noun)}.` : `Showing ${count(shown, noun)}.`, cursor !== null);
   };
   async function next() {
-    older.disabled = true;
     try {
       let page;
       let tries = 0;
@@ -327,11 +377,9 @@ function pager({ list, foot, get, row, noun, onFirst, emptyLines }) {
       if (!shown && cursor === null) { empty(list, ...emptyLines); foot.hidden = true; return; }
       paint();
     } catch (err) {
-      if (!started) { failed(list, err); foot.hidden = true; } else put(foot, h('p', null, errorText(err)));
+      if (!started) { failed(list, err); foot.hidden = true; } else if (ui) ui.error(err); else throw err;
     }
-    older.disabled = false;
   }
-  older.addEventListener('click', next);
   busy(list, 6);
   next();
   return { setTotal(t) { total = t; if (started && !foot.hidden) paint(); } };
@@ -389,12 +437,14 @@ function meter(chars, max) {
     h('span', null, 'cap ', h('b', null, n(max))),
     h('div', { class: 'meter-track', role: 'meter', 'aria-label': 'Block size', 'aria-valuemin': '0', 'aria-valuemax': String(max), 'aria-valuenow': String(chars) }, fill));
 }
+// A section title line of the hook's block, as hook.rs writes it.
+const SECTION = /^(Rules|This repo \(.*\)|Recent notes \(.*\)):$/;
 function blockText(text) {
   const pre = h('pre', { class: 'block', tabindex: '0', 'aria-label': 'Chat-start block' });
   text.split('\n').forEach((line, i) => {
     let cls = 'bl';
     if (line.startsWith('- ')) cls += ' item';
-    else if (i > 0 && /^(Rules:|This repo \(.*\):|Recent notes \(.*\):)$/.test(line)) cls += ' sect';
+    else if (i > 0 && SECTION.test(line)) cls += ' sect';
     else if (line === '(more in zerodb)') cls += ' more';
     pre.append(h('span', { class: cls }, line));
   });
@@ -408,7 +458,7 @@ function blockSkeleton(body) {
 function sections(text) {
   const out = [];
   for (const line of text.split('\n')) {
-    const m = /^(Rules|This repo \(.*\)|Recent notes \(.*\)):$/.exec(line);
+    const m = SECTION.exec(line);
     if (m) out.push({ name: m[1], items: 0 });
     else if (out.length && line.startsWith('- ')) out[out.length - 1].items++;
   }
@@ -552,7 +602,7 @@ async function searchScreen(main, p) {
     e.preventDefault();
     const v = input.value.trim();
     const to = href('search', v ? { q: v } : null);
-    if (location.hash === to) render(false); else location.hash = to;
+    if (location.hash === to) redraw(); else location.hash = to;
   });
   main.append(form);
   if (!q) {
@@ -652,10 +702,11 @@ async function sessionScreen(main, p) {
   const id = renderId;
   let low = 0;
   let total = 0;
-  const olderBtn = h('button', { class: 'btn', type: 'button' }, 'Older turns');
+  let ui = null;
   const paint = () => {
     const shown = total - low + 1;
-    put(foot, h('span', { class: 'muted' }, low > 1 ? `Showing ${n(shown)} of ${count(total, 'turn')}.` : `Showing all ${count(total, 'turn')}.`), low > 1 ? olderBtn : null);
+    ui = ui || pagerFoot(foot, 'Older turns', async () => { try { await older(); paint(); } catch (err) { ui.error(err); } }, null);
+    ui.show(low > 1 ? `Showing ${n(shown)} of ${count(total, 'turn')}.` : `Showing all ${count(total, 'turn')}.`, low > 1);
   };
   async function older() {
     const since = Math.max(1, low - 50);
@@ -670,11 +721,6 @@ async function sessionScreen(main, p) {
     list.append(...got.slice().reverse().map((t) => turnItem(t, want)));
     low = got[0].seq;
   }
-  olderBtn.addEventListener('click', async () => {
-    olderBtn.disabled = true;
-    try { await older(); paint(); } catch (err) { if (!(err instanceof ApiError)) throw err; put(foot, h('p', null, errorText(err))); }
-    olderBtn.disabled = false;
-  });
   try {
     // a window whose newest turn alone passes max_bytes holds no turns, and a turn can pass the 1 MiB default
     const w = await api('v1/window', { agent, session: name, last: 50, max_bytes: EIGHT_MIB });
@@ -997,19 +1043,29 @@ function render(toTop = true) {
     if (a.dataset.route === nav) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
   }
   setMenu(false);
-  renderId++;
+  const id = ++renderId;
   const main = byId('main');
   put(main);
   if (toTop) scrollTo(0, 0);
   (known ? SCREENS.get(name) : overview)(main, new URLSearchParams(qi < 0 ? '' : raw.slice(qi + 1))).catch((err) => {
     console.error(err);
-    main.append(h('div', { class: 'state error', role: 'alert' }, h('p', null, 'This screen failed to draw. Reload the page.')));
+    // a screen the user has left fails into elements that are gone, not into the one on screen now
+    if (id === renderId) main.append(h('div', { class: 'state error', role: 'alert' }, h('p', null, 'This screen failed to draw. Reload the page.')));
   });
+}
+// Focuses the screen's title, unless the screen put focus in its own content, as Search does with its box.
+function focusTitle() {
+  const main = byId('main');
+  if (!main.contains(document.activeElement)) main.querySelector('h1')?.focus({ preventScroll: true });
+}
+// Draws the screen again in place. The button that asked is gone with the old screen, so the title takes focus.
+function redraw() {
+  render(false);
+  focusTitle();
 }
 addEventListener('hashchange', () => {
   takeSecret();
   render();
-  const title = document.querySelector('h1');
-  if (title) title.focus({ preventScroll: true });
+  focusTitle();
 });
 render();

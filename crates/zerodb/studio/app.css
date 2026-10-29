@@ -100,7 +100,7 @@ h1:focus { outline: none; }
 .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: var(--control-height); padding: 0 14px; border: 1px solid var(--control); border-radius: var(--radius-control); background: var(--surface); font-weight: 500; cursor: pointer; transition: background-color 150ms ease, border-color 150ms ease; }
 .btn:hover { background: var(--well); border-color: #bdbdbd; }
 .btn:active { transform: translateY(1px); }
-.btn[disabled] { color: var(--muted); cursor: default; }
+.btn[disabled], .btn[aria-disabled="true"] { color: var(--muted); cursor: default; }
 .btn.primary { background: var(--primary); border-color: var(--primary); color: #ffffff; }
 .btn.primary:hover { background: #2e2e2e; }
 .icon-btn { display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px; border: 0; border-radius: var(--radius-control); background: none; cursor: pointer; }
