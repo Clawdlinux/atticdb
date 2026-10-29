@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 READERS = {"cat", "head", "tail", "nl", "wc", "less", "more", "sed", "grep", "egrep", "fgrep", "rg", "awk"}
 FILTERS = {"head", "tail", "grep", "egrep", "fgrep", "rg", "sed", "awk", "cut", "sort", "uniq", "wc", "nl", "tr", "cat"}
 GREPS = {"grep", "egrep", "fgrep"}
+SEARCHES = GREPS | {"rg"}  # these exit 1 when nothing matches
 RECURSIVE = {"-r", "-R", "--recursive", "--dereference-recursive"}
 # Programs whose file operands are scripts or tests to run.
 RUNNERS = {"python", "python2", "python3", "pytest", "py.test", "nosetests", "coverage", "ipython", "bash", "sh",
@@ -92,6 +93,25 @@ class Effects:
     urls: list[str] = field(default_factory=list)  # other URLs named
     cwd: str | None = None  # the working directory after the command
     why: dict[str, str] = field(default_factory=dict)  # used path -> "run", "git", "edit" or "path"
+    progs: list[str] = field(default_factory=list)  # each simple command's program, leading cd aside
+    undo: list[str] = field(default_factory=list)  # the writes a failure of the whole command rules out
+
+    def succeeded(self, code: int | None) -> bool:
+        """Whether an exit code means success. An unknown code counts as success. grep and
+        rg exit 1 when nothing matches, so 1 is success when the pipeline ends in them."""
+        return code is None or code == 0 or (code == 1 and bool(self.progs) and self.progs[-1] in SEARCHES)
+
+    def applied(self, failed: bool | None) -> list[tuple[str, str]]:
+        """The events that stand, given the observed outcome. None means unknown. A failed
+        command loses only the writes in `undo`. Its uses stay, since the action named them."""
+        if not failed:
+            return self.events
+        return [e for e in self.events if not (e[0] == "write" and e[1] in self.undo)]
+
+    def error_line(self, output: str) -> bool:
+        """True if a simple command's output opens with its program's own error, as in
+        "sed: -e expression #1, char 9: unterminated `s' command"."""
+        return len(self.progs) == 1 and output.lstrip().startswith(self.progs[0] + ": ")
 
 
 @dataclass
@@ -110,6 +130,7 @@ def effects(command: str, cwd: str | None, known: set[str]) -> Effects:
     if parts is None:
         return eff
     stages: list[Stage] = []
+    undo: list[str] = []
     for sep, words in parts:
         # Redirects first: they can come anywhere, even with no command, as in `> Makefile`.
         args, redirects = _redirects(words)
@@ -123,7 +144,10 @@ def effects(command: str, cwd: str | None, known: set[str]) -> Effects:
             if not stages:
                 continue  # leading cd commands do not stop a pure read
         stages.append(Stage(sep, prog, args[1:], redirects, eff.cwd, word))
-        _classify(stages[-1], eff, known)
+        undo = _classify(stages[-1], eff, known)
+    eff.progs = [s.prog for s in stages]
+    # Only a whole command's outcome is seen, so only a simple command's failure rules out its writes.
+    eff.undo = undo if len(stages) == 1 else []
 
     pure = _pure_read(stages, known)
     if pure is not None and not any(kind == "write" for kind, _ in eff.events):
@@ -385,45 +409,60 @@ def _copy(ops: list[str], opts: dict) -> tuple[list[str], list[str]]:
     return ops, list(dict.fromkeys(posixpath.join(target, n) if literal(n) else target for n in names))
 
 
-def _roles(prog: str, ops: list[str], opts: dict) -> tuple[list[str], list[str]] | None:
-    """The operand words a command uses and writes, by role. None where roles are unknown."""
+def _roles(prog: str, ops: list[str], opts: dict) -> tuple[list[str], list[str], int] | None:
+    """The operand words a command uses and writes, by role, and how many separate changes
+    it makes: 1 per source of a copy or move, else 1 per file changed. None where roles
+    are unknown."""
     if prog == "mv":
         sources, targets = _copy(ops, opts)
-        return [], sources + targets
+        return [], sources + targets, len(sources)
     if prog in WRITERS:
-        return [], ops
+        return [], ops, len(ops)
     if prog in COPIERS:
-        return _copy(ops, opts)
+        sources, targets = _copy(ops, opts)
+        return sources, targets, len(sources)
     if prog in READERS:
         files = _reader_files(prog, ops, opts)
-        return files, (files if _in_place(prog, opts) else [])
+        return (files, files, len(files)) if _in_place(prog, opts) else (files, [], 0)
     return None
 
 
-def _classify(stage: Stage, eff: Effects, known: set[str]) -> None:
+def _classify(stage: Stage, eff: Effects, known: set[str]) -> list[str]:
+    """Adds the stage's events to `eff`. Returns the writes its failure would rule out:
+    those of a command that makes 1 change, such as sed -i on 1 file or cp of 1 source.
+    A failure after part of a bigger change, as in rm a b, leaves its writes standing."""
     ops, opts = _operands(stage.prog, stage.args)
     where = lambda words: [resolve(w, stage.cwd, known) for w in words if literal(w)]  # noqa: E731
     roles = _roles(stage.prog, ops, opts)
+    changes = 0
     if roles is not None:  # the operands' roles are known, so any literal word is a file
-        uses, writes = where(roles[0]), where(roles[1])
+        uses, writes, changes = where(roles[0]), where(roles[1]), roles[2]
     elif stage.prog == "git" and ops[:1] in (["checkout"], ["restore"]):
-        uses, writes = [], [p for p in where(ops[1:]) if p in known]
+        uses, writes, changes = [], [p for p in where(ops[1:]) if p in known], len(ops) - 1
     else:  # roles unknown: only a word with a slash or an extension may be a path
         uses, writes = [resolve(w, stage.cwd, known) for w in ops if pathlike(w)], []
+    undo = list(writes) if changes == 1 else []
     why = "run" if stage.prog in RUNNERS else ("git" if stage.prog in ("git", "diff") else "path")
     if _in_place(stage.prog, opts):
         why = "edit"
     if pathlike(stage.word) and resolve(stage.word, stage.cwd, known) in known:
         uses, why = [resolve(stage.word, stage.cwd, known), *uses], "run"  # ./run.sh runs the file
+    redirected = set()  # the shell opens these before the command runs, so their writes stand
     for op, target in stage.redirects:
         if op in WRITE_REDIRECTS | READ_REDIRECTS and literal(target) and not target.startswith("/dev/"):
-            (writes if op in WRITE_REDIRECTS else uses).append(resolve(target, stage.cwd, known))
+            path = resolve(target, stage.cwd, known)
+            if op in WRITE_REDIRECTS:
+                writes.append(path)
+                redirected.add(path)
+            else:
+                uses.append(path)
     for p in uses:
         if p in known:
             eff.why.setdefault(p, why)
     eff.events += [("use", p) for p in uses if p in known]
     eff.events += [("write", p) for p in writes]
     eff.urls += [a for a in stage.args if URL.match(a)]
+    return [p for p in undo if p not in redirected]
 
 
 def _pure_read(stages: list[Stage], known: set[str]) -> str | None:

@@ -20,6 +20,9 @@ from .trace import Access, TraceBuilder, tokens
 ROOT = os.path.expanduser("~/.copilot/session-state")
 PATCH = re.compile(r"^\*\*\* (Update|Add|Delete) File: (.+?)\s*$|^\*\*\* Move to: (.+?)\s*$", re.M)
 NOT_CONTENT = ("File too large", "Output too large", "Path does not exist", "Error")
+# The harness ends a bash result with 1 line such as "<shellId: 12 completed with exit code 0>",
+# or a note that the command still runs. It is chrome, and the id differs on every call.
+TRAILER = re.compile(r"\n?<(?:shellId: [^\n>]+ completed with exit code (-?\d+)|command [^\n]*shellId[^\n]*)>\s*$")
 
 
 def session(path: str, traj: str, salt: str) -> tuple[list[Access], dict, set[str]]:
@@ -88,7 +91,7 @@ def _call(b: TraceBuilder, name: str, args, content: str, ok: bool) -> None:
         return
     if name == "edit" and path:
         b.use(path, "edit", text=args["old_str"] if isinstance(args.get("old_str"), str) else None)
-        if ok:
+        if ok and not content.startswith("No changes made"):
             b.write(path)
     elif name == "create" and path and ok:
         b.write(path)
@@ -100,22 +103,34 @@ def _call(b: TraceBuilder, name: str, args, content: str, ok: bool) -> None:
             if ok:
                 b.write(p)
     elif name == "bash" and isinstance(args.get("command"), str):
+        body, code = _shell_result(content)
         eff = bash.effects(args["command"], None, b.known())
-        for kind, p in eff.events:
+        # The tool reports success even when the command fails, so the exit code decides.
+        # A failed simple command changed nothing. With no exit code, its writes stand.
+        for kind, p in eff.applied(not eff.succeeded(code)):
             b.use(p, eff.why.get(p, "path")) if kind == "use" else b.write(p)
         for url in eff.urls:
             b.use_url(url)
-        if eff.read and ok:
-            b.read_file(eff.read, content)
-            return
-        if eff.url and ok:
-            b.read_url(eff.url, args["command"], content)
-            return
+        if eff.read and ok and eff.succeeded(code):
+            b.read_file(eff.read, body)
+        elif eff.url and ok and eff.succeeded(code):
+            b.read_url(eff.url, args["command"], body)
+        else:
+            b.output(name, request, body)
+        return
     elif isinstance(args.get("url"), str) and ok:
         rest = json.dumps({k: v for k, v in args.items() if k != "url"}, sort_keys=True, default=str)
         b.read_url(args["url"], f"{name}\0{rest}", content)
         return
     b.output(name, request, content)
+
+
+def _shell_result(content: str) -> tuple[str, int | None]:
+    """A bash result without the harness's last line, and the exit code that line gives."""
+    m = TRAILER.search(content)
+    if not m:
+        return content, None
+    return content[: m.start()], (int(m.group(1)) if m.group(1) else None)
 
 
 def traces(root: str = ROOT, salt: str | None = None):

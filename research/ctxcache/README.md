@@ -182,7 +182,7 @@ They are `system`, `user` (the task), then `assistant` messages with 1 tool call
 | `create` | "File created successfully" is a write. The output only confirms it, so the new content is never shown. |
 | `str_replace`, `insert` | A reference to a view of the current version, by `old_str` or `insert_line` as above, else the newest view. With no tool result, still a reference, but no write. On "has been edited", a write, and the snippet shown is a read of the new version. |
 | `undo_edit` | On success, a write, and the file shown is a read. |
-| `execute_bash` | A shell command, below. `[Current working directory: <dir>]` in the output sets the directory for the next call. A pure read that exits nonzero is an output, except grep's exit 1 for no match. |
+| `execute_bash` | A shell command, below. `[Current working directory: <dir>]` in the output sets the directory for the next call. A pure read that exits nonzero is an output. Exit 1 from a pipeline that ends in `grep` or `rg` means no match, so it is still a read. |
 | `think`, `task_tracker`, others | Outputs. |
 
 A `cat -n` in the shell and an editor view of the same lines are 1 object.
@@ -207,6 +207,7 @@ Where roles are unknown, as for `echo`, a path needs a slash or an extension.
 - **Pure read**: 1 reader with exactly 1 file operand, a literal word, maybe piped into filters, with no redirection. Readers are `cat`, `head`, `tail`, `nl`, `wc`, `less`, `more`, `sed` without `-i`, `grep` without `-r`, `rg` and `awk`. The output is a read of that file. `rg` searches directories, so it reads a file only when the operand is a known file or has an extension. An operand ending in `/` is never a file.
 - **Writes**: `rm`, `unlink`, `touch`, `truncate`, `tee`, both sides of `mv`, and the target of `cp`, `install` or `ln`. `sed -i` is a reference, then a write. Positions count before any word is dropped, so `cp a.py $DEST` never writes `a.py`. A target directory (`-t`, a trailing `/` or several sources) takes each source by name. A source with an unknown name, such as `*.py`, writes the directory. Also `git checkout` or `git restore` of a known file. Also a redirect such as `>` or `>>` into a file, even with no command.
 - **References**: every other operand that resolves to a known file, and the target of `<`.
+- **Failures**: an adapter sees 1 outcome per command, not per step. A failed simple command that changes 1 file, or copies or moves 1 source, changed nothing. Its writes go, and its uses stay. Other writes stand on failure: a failure partway through `rm a b`, a failed compound command, and any unknown outcome. The safe side is a new version. A redirect target is opened before the command runs, so its write always stands. OpenHands gives an exit code, and so does the last line of each shell result in our logs. In SWE-agent, a command failed if its output opens with its program's error, as in `sed: -e expression #1`.
 - **URLs**: `curl` or `wget` of exactly 1 URL, with no output file, is a URL read. Another command that names a known URL references it.
 
 A relative path resolves against the working directory. With no directory, as in our logs, it matches the 1 known path that ends with it.
@@ -215,9 +216,11 @@ A relative path resolves against the working directory. With no directory, as in
 
 It reads `~/.copilot/session-state/*/events.jsonl` and reports aggregates only.
 Main-agent tool calls are the `toolRequests` of `assistant.message` events with no `parentToolCallId`. Their results are `tool.execution_complete` events.
-- `view` is a read. `edit` is a reference, by `old_str`, then a write. `create` is a write.
+- `view` is a read. `edit` is a reference, by `old_str`, then a write, unless it reports "No changes made". `create` is a write.
 - `apply_patch` names files in `*** Update File:` (a reference, then a write), `*** Add File:` and `*** Delete File:` (writes).
-- `bash` follows the shell rules, with no known directory. A tool with a `url` argument, such as `web_fetch`, is a URL read. Everything else is an output.
+- `bash` follows the shell rules, with no known directory. Its last line, such as `<shellId: 12 completed with exit code 0>`, is chrome and leaves the body.
+  That line's exit code is the outcome. The tool reports success even when the command fails.
+- A tool with a `url` argument, such as `web_fetch`, is a URL read. Everything else is an output.
 - Sub-agent calls are not accesses, but their `fileEdits` still make new versions.
 - A `session.compaction_complete` event with `success` is a compaction. Re-reads are split into those in the same compaction window as the previous access and those after a compaction.
 - A session that shares at least half its tool calls with a longer session is a fork, and is skipped. 3 of our session logs share 18,005 tool calls. Without this rule they count 1 session 3 times.
@@ -253,6 +256,7 @@ So OpenHands takes 10 consecutive rows from each of 100 strata. The bootstrap re
 - **A stored trajectory may not be what the model saw.** Issue #87 notes 2 cases. OpenHands 0.54 defaults to a conversation-window condenser, so some late steps may already be condensed in stored data. We flag rows with signs of it. SWE-agent 0.7 drops old observations from each call (`LastNObservations`) without changing the saved history. The dataset card does not say which setting these runs used. If they did, a stored trajectory overstates the context. Some re-reads then happen because the model no longer saw an old output. We treat each trajectory as the reference stream. The scaffold's own policy is 1 more baseline, not ground truth.
 - **References are a proxy.** An action that names a file may not need its content, as when it runs a script. And the agent uses outputs it never names: a search result, an error message, a failing test. So we both overcount and undercount real dependencies. Identifiers and error text that appear later are not references here. The proxy check reruns every policy on the agent's own re-reads alone, which need no proxy, and on narrower proxies.
 - **Versions are coarse.** A write kills every view of the old version, even of lines it did not touch. This undercounts references to unchanged parts of edited files.
+- **Outcomes are per command.** A failed compound command keeps its writes, even when it failed before them. That can end a view that is still current.
 - **Content the agent wrote itself** is in its own messages, outside the model. A later use of a file it created references nothing. We count these uses.
 - **Unseen writes.** Scripts, `git stash`, `git apply` and installs can change files without a write we detect. So can a write to a glob or a variable, such as `rm *.pyc`. It names no file we can track. A later view with different text is still a new object, but a reference can go to a stale view.
 - **Tokens are characters / 4.** Real tokenizers give about 3 to 4 characters per token on code. All policies use the same unit, so comparisons hold. Absolute budgets are approximate.

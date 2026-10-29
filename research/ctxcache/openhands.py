@@ -139,11 +139,13 @@ def _shell(b: TraceBuilder, args: dict, content: str, cwd: str | None) -> str | 
         b.output("bash-input", command, body)
         return after[-1] if after else cwd
     eff = bash.effects(command, cwd, b.known())
-    for kind, path in eff.events:
+    code = int(exit_code.group(1)) if exit_code else None
+    # A failed simple command changed nothing. With no exit code, its writes stand.
+    for kind, path in eff.applied(not eff.succeeded(code)):
         b.use(path, eff.why.get(path, "path")) if kind == "use" else b.write(path)
     for url in eff.urls:
         b.use_url(url)
-    ok = exit_code is None or exit_code.group(1) == "0" or (exit_code.group(1) == "1" and "grep" in command)
+    ok = eff.succeeded(code)
     if eff.read and ok:
         # `cat -n` output is the editor's view of the same lines, but only if every line
         # is a `cat -n` line. A data file with a line such as "1<TAB>alpha" stays whole.

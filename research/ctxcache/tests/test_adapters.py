@@ -63,6 +63,17 @@ SWE_CASES = [
         ["line_span", "line"],
         {"writes": 1},
     ),
+    (
+        "a sed -i that prints its own error changed nothing, so the next edit still uses the window",
+        swe_row(
+            ("open src/app.py", swe_obs(swe_window(APP, 200, 1, 100), APP)),
+            ("sed -i 's/value_1/v1' src/app.py", swe_obs("sed: -e expression #1, char 13: unterminated `s' command", APP)),
+            ("edit 1:1\n    value_1 = 0\nend_of_edit", swe_obs(swe_window(APP, 200, 1, 100, tag="#e", edited=True), APP)),
+        ),
+        ["A*:file", "Ar:file", "B*:output", "Ar:file", "C*:file"],
+        ["edit", "line_span"],
+        {"writes": 1},
+    ),
 ]
 
 
@@ -148,6 +159,48 @@ OH_CASES = [
         {"writes": 0},
     ),
     (
+        "a failed simple sed -i changes nothing, so a later edit still uses the view",
+        oh_row(
+            ("str_replace_editor", {"command": "view", "path": APP}, oh_cat(APP, ["x = 1", "y = 2"])),
+            ("execute_bash", {"command": "cd /repo && sed -i 's/x/X' src/app.py"},
+             oh_bash("sed: -e expression #1, char 7: unterminated `s' command", code=1)),
+            ("str_replace_editor", {"command": "str_replace", "path": APP, "old_str": "x = 1", "new_str": "X = 1"},
+             oh_cat(APP, ["X = 1"], edited=True)),
+        ),
+        ["A*:file", "Ar:file", "B*:output", "Ar:file", "C*:file"],
+        ["edit", "edit_span"],
+        {"writes": 1},
+    ),
+    (
+        "a failed compound command and an unknown outcome keep their writes",
+        oh_row(
+            ("str_replace_editor", {"command": "view", "path": APP}, oh_cat(APP, ["x = 1"])),
+            # Either step could have failed, so sed may have run.
+            ("execute_bash", {"command": "cd /repo && sed -i 's/x/X/' src/app.py && python src/app.py"},
+             oh_bash("Traceback: boom", code=1)),
+            ("str_replace_editor", {"command": "view", "path": APP}, oh_cat(APP, ["X = 1"])),
+            # No exit code: the command may still be running.
+            ("execute_bash", {"command": "cd /repo && sed -i 's/X/Z/' src/app.py"}, "[Command is still running]"),
+            ("str_replace_editor", {"command": "str_replace", "path": APP, "old_str": "Z = 1", "new_str": "z = 1"},
+             oh_cat(APP, ["z = 1"], edited=True)),
+        ),
+        # The edit after the second sed finds no view of the version that sed made.
+        ["A*:file", "Ar:file", "B*:output", "C*:file", "Cr:file", "D*:output", "E*:file"],
+        ["edit", "edit"],
+        {"writes": 3, "refs_without_view": 1},
+    ),
+    (
+        "exit 1 is a no-match only from grep or rg, not from a path that names grep",
+        oh_row(
+            ("execute_bash", {"command": "cat /repo/grep.py"},
+             oh_bash("cat: /repo/grep.py: No such file or directory", code=1)),
+            ("execute_bash", {"command": "grep -n missing /repo/src/app.py"}, oh_bash("", code=1)),
+        ),
+        ["A*:output", "B*:file"],
+        [],
+        {},
+    ),
+    (
         "an edit with no tool result still uses its view, and writes nothing",
         oh_row(
             ("str_replace_editor", {"command": "view", "path": APP}, oh_cat(APP, ["x = 1"])),
@@ -188,6 +241,23 @@ COPILOT_CASES = [
         ["A*:file", "Ar:file", "B*:output", "C*:file", "D*:file", "E*:url", "E:url", "D:file"],
         ["edit_span"],
         {"compactions": 1, "reread_same_window": 1, "reread_after_compaction": 1},
+    ),
+    (
+        "a failed sed and an edit that changes nothing keep the version, and the shell trailer is chrome",
+        copilot_call("c1", "view", {"path": A_PY}, "print(1)\n")
+        + copilot_call("c2", "bash", {"command": "sed -i 's/1/2' /r/a.py"},
+                       "sed: -e expression #1, char 5: unterminated `s' command\n<shellId: 7 completed with exit code 1>")
+        + copilot_call("c3", "edit", {"path": A_PY, "old_str": "print(1)", "new_str": "print(2)"},
+                       "File /r/a.py updated with changes.")
+        + copilot_call("c4", "bash", {"command": "cat /r/a.py"}, "print(2)\n<shellId: 8 completed with exit code 0>")
+        + copilot_call("c5", "edit", {"path": A_PY, "old_str": "print(2)", "new_str": "print(2)"},
+                       "No changes made: old_str and new_str are the same")
+        + copilot_call("c6", "bash", {"command": "cat /r/a.py"}, "print(2)\n<shellId: 9 completed with exit code 0>"),
+        # The tool reports success on every command, so the exit code in the trailer decides.
+        # Without the trailer's shell id, the 2 reads of version 1 are 1 object (D).
+        ["A*:file", "Ar:file", "B*:output", "Ar:file", "C*:output", "D*:file", "Dr:file", "E*:output", "D:file"],
+        ["edit", "edit_span", "edit_span"],
+        {"writes": 1, "reread_same_window": 1},
     ),
 ]
 

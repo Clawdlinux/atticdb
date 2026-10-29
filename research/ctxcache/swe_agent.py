@@ -131,7 +131,9 @@ def _step(b: TraceBuilder, cmd: str, body: str, open_file: str | None, cwd: str 
 
 def _shell(b: TraceBuilder, cmd: str, body: str, cwd: str | None) -> None:
     eff = bash.effects(cmd, cwd, b.known())
-    for kind, path in eff.events:
+    # No exit code here. A simple command whose output opens with its own error, as in
+    # "rm: cannot remove 'x'", failed and changed nothing. Otherwise its writes stand.
+    for kind, path in eff.applied(eff.error_line(body)):
         b.use(path, eff.why.get(path, "path")) if kind == "use" else b.write(path)
     for url in eff.urls:
         b.use_url(url)
