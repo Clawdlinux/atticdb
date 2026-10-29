@@ -26,7 +26,7 @@ Every ratio is over proxy accesses: re-reads plus references inferred from later
 | Tool output over peak live, per trajectory, p50 / p90 | 28.0x / 85.6x, over the 1,000 trajectories that reuse anything. 0 reuse nothing |
 | The 10 trajectories with the most proxy-access tokens | hold 5.2% of them |
 | Message tokens, all trajectories | 14,073,243, outside the model (tool output: 37,557,241) |
-| Uses of a file with no view of its version | 8,218, not accesses |
+| Uses of a file with no view of its version | 8,219, not accesses |
 | Rows with signs of condensed history | 5 |
 
 ## Proxy accesses by subtype

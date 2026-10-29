@@ -15,11 +15,11 @@ openhands,compulsory_share,0.882388
 openhands,compulsory_token_share,0.905084
 openhands,objects,63059
 openhands,object_tokens,37479935
-openhands,file_token_share,0.324464
+openhands,file_token_share,0.324471
 openhands,url_token_share,1.77428e-05
-openhands,output_token_share,0.675518
+openhands,output_token_share,0.675512
 openhands,dead_share,0.920638
-openhands,file_dead_share,0.756885
+openhands,file_dead_share,0.75689
 openhands,output_dead_share,0.999289
 openhands,distance_p50,321
 openhands,distance_p90,10462
@@ -35,8 +35,8 @@ openhands,no_reuse,0
 openhands,top10_share,0.0521925
 openhands,message_tokens,14073243
 openhands,output_tokens,37557241
-openhands,refs_without_view,8218
-openhands,writes,13059
+openhands,refs_without_view,8219
+openhands,writes,13086
 openhands,condensed,5
 openhands,compactions,0
 openhands,reread_same_window,0

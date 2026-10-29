@@ -15,31 +15,31 @@ Every ratio is over proxy accesses: re-reads plus references inferred from later
 | Measure | Value |
 |---|---|
 | Trajectories used | 1,000 (skipped: 0 truncated) |
-| Accesses | 35,305: 17,803 first, 6,049 re-reads, 11,453 references |
-| Proxy accesses | 17,502, 7,818,386 tokens. Re-reads hold 27.8% of the tokens |
-| Compulsory share (first accesses) | 50.4% of accesses, 46.8% of access tokens |
+| Accesses | 35,306: 17,916 first, 5,936 re-reads, 11,454 references |
+| Proxy accesses | 17,390, 7,816,755 tokens. Re-reads hold 27.8% of the tokens |
+| Compulsory share (first accesses) | 50.7% of accesses, 46.9% of access tokens |
 | Object tokens by kind | file 74.9%, output 25.0%, url 0.1% |
-| Dead tokens (objects never accessed again) | 57.3% of object tokens. Files 47.1%, outputs 87.5% |
-| Reuse distance p50 / p90 / p99 | 171 / 1,633 / 5,334 tokens |
+| Dead tokens (objects never accessed again) | 57.3% of object tokens. Files 47.1%, outputs 87.6% |
+| Reuse distance p50 / p90 / p99 | 166 / 1,653 / 5,337 tokens |
 | Peak live tokens per trajectory, p50 / p90, separate percentiles | 1,071 / 2,086. The optimum never misses at this budget |
 | Tool output tokens per trajectory, p50 / p90, separate percentiles | 6,032 / 20,331. All tool output the trace records |
-| Tool output over peak live, per trajectory, p50 / p90 | 5.8x / 16.9x, over the 987 trajectories that reuse anything. 13 reuse nothing |
+| Tool output over peak live, per trajectory, p50 / p90 | 5.8x / 17.0x, over the 987 trajectories that reuse anything. 13 reuse nothing |
 | The 10 trajectories with the most proxy-access tokens | hold 8.6% of them |
 | Message tokens, all trajectories | 3,940,279, outside the model (tool output: 9,063,846) |
-| Uses of a file with no view of its version | 10, not accesses |
+| Uses of a file with no view of its version | 9, not accesses |
 
 ## Proxy accesses by subtype
 
 | Subtype | Accesses | Tokens | Share of proxy-access tokens |
 |---|---|---|---|
-| `reread` | 6,049 | 2,173,044 | 27.8% |
+| `reread` | 5,936 | 2,171,039 | 27.8% |
 | `edit_span` | 0 | 0 | 0.0% |
 | `edit` | 1 | 1,149 | 0.0% |
 | `line_span` | 7,013 | 4,304,732 | 55.1% |
 | `line` | 1,131 | 780,693 | 10.0% |
 | `run` | 3,088 | 536,101 | 6.9% |
 | `git` | 0 | 0 | 0.0% |
-| `path` | 220 | 22,667 | 0.3% |
+| `path` | 221 | 23,041 | 0.3% |
 
 ## Missed tokens, % of proxy-access tokens, pooled
 
@@ -48,7 +48,7 @@ All trajectories' missed tokens over all their proxy-access tokens. Long traject
 | Budget | LRU | FIFO | Clearing (oracle N) | Clearing (cap) | GDSF | PFOO-L (lower) | Belady-Size (upper) |
 |---|---|---|---|---|---|---|---|
 | 1K | 65.5 | 66.2 | 57.8 | 62.4 | 67.2 | 37.8 | 44.9 |
-| 2K | 14.6 | 18.3 | 24.3 | 28.5 | 22.1 | 1.8 | 6.1 |
+| 2K | 14.7 | 18.3 | 24.3 | 28.5 | 22.1 | 1.8 | 6.1 |
 | 4K | 4.2 | 5.7 | 8.2 | 10.6 | 5.3 | 0.9 | 1.5 |
 | 8K | 0.5 | 1.1 | 0.7 | 2.9 | 0.9 | 0.0 | 0.0 |
 | 16K | 0.0 | 0.1 | 0.0 | 0.3 | 0.2 | 0.0 | 0.0 |
@@ -75,9 +75,9 @@ Each trajectory with proxy accesses weighs the same.
 
 | Budget | LRU | FIFO | Clearing (oracle N) | Clearing (cap) | GDSF | PFOO-L (lower) | Belady-Size (upper) |
 |---|---|---|---|---|---|---|---|
-| 1K | 37.3 | 38.1 | 34.8 | 37.4 | 36.6 | 15.4 | 22.2 |
-| 2K | 11.3 | 12.7 | 17.3 | 19.5 | 10.5 | 0.4 | 2.6 |
-| 4K | 2.9 | 4.6 | 6.8 | 8.6 | 2.1 | 0.1 | 0.3 |
+| 1K | 37.5 | 38.4 | 35.1 | 37.6 | 36.8 | 15.5 | 22.4 |
+| 2K | 11.4 | 12.8 | 17.5 | 19.7 | 10.6 | 0.4 | 2.6 |
+| 4K | 2.9 | 4.6 | 6.8 | 8.7 | 2.1 | 0.1 | 0.3 |
 | 8K | 0.4 | 1.2 | 1.2 | 3.1 | 0.3 | 0.0 | 0.0 |
 | 16K | 0.0 | 0.2 | 0.0 | 0.4 | 0.0 | 0.0 | 0.0 |
 | 32K | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 |
@@ -107,25 +107,25 @@ Each variant keeps every re-read and only the named references. Cells are pooled
 
 | Variant | Budget | Proxy tokens | LRU | FIFO | Clearing (oracle N) | Clearing (cap) | GDSF | PFOO-L (lower) | Belady-Size (upper) |
 |---|---|---|---|---|---|---|---|---|---|
-| all proxy accesses | 2K | 7,818,386 | 14.6 | 18.3 | 24.3 | 28.5 | 22.1 | 1.8 | 6.1 |
-| all proxy accesses | 4K | 7,818,386 | 4.2 | 5.7 | 8.2 | 10.6 | 5.3 | 0.9 | 1.5 |
-| all proxy accesses | 8K | 7,818,386 | 0.5 | 1.1 | 0.7 | 2.9 | 0.9 | 0.0 | 0.0 |
-| re-reads only | 2K | 2,173,044 | 21.6 | 21.8 | 16.5 | 21.6 | 24.1 | 2.6 | 8.4 |
-| re-reads only | 4K | 2,173,044 | 8.8 | 9.3 | 4.8 | 8.8 | 9.3 | 0.0 | 1.4 |
-| re-reads only | 8K | 2,173,044 | 1.4 | 1.8 | 0.0 | 1.4 | 1.5 | 0.0 | 0.1 |
-| re-reads and edits | 2K | 7,259,618 | 14.1 | 18.2 | 24.3 | 28.5 | 21.7 | 1.9 | 6.4 |
-| re-reads and edits | 4K | 7,259,618 | 4.3 | 5.4 | 7.7 | 9.9 | 5.4 | 0.9 | 1.6 |
-| re-reads and edits | 8K | 7,259,618 | 0.5 | 0.9 | 0.4 | 2.2 | 1.0 | 0.0 | 0.0 |
-| re-reads and exact-span edits | 2K | 6,477,776 | 13.2 | 16.7 | 21.9 | 26.7 | 20.3 | 1.1 | 5.2 |
-| re-reads and exact-span edits | 4K | 6,477,776 | 3.5 | 4.6 | 6.2 | 8.1 | 4.6 | 0.0 | 0.7 |
-| re-reads and exact-span edits | 8K | 6,477,776 | 0.5 | 0.8 | 0.4 | 1.4 | 0.7 | 0.0 | 0.0 |
-| all but run and git references | 2K | 7,282,285 | 14.1 | 18.1 | 24.3 | 28.6 | 21.8 | 1.9 | 6.3 |
-| all but run and git references | 4K | 7,282,285 | 4.2 | 5.4 | 7.7 | 9.9 | 5.4 | 0.9 | 1.6 |
-| all but run and git references | 8K | 7,282,285 | 0.5 | 0.9 | 0.4 | 2.2 | 1.0 | 0.0 | 0.0 |
+| all proxy accesses | 2K | 7,816,755 | 14.7 | 18.3 | 24.3 | 28.5 | 22.1 | 1.8 | 6.1 |
+| all proxy accesses | 4K | 7,816,755 | 4.2 | 5.7 | 8.2 | 10.6 | 5.3 | 0.9 | 1.5 |
+| all proxy accesses | 8K | 7,816,755 | 0.5 | 1.1 | 0.7 | 2.9 | 0.9 | 0.0 | 0.0 |
+| re-reads only | 2K | 2,171,039 | 21.6 | 21.8 | 16.5 | 21.6 | 24.1 | 2.6 | 8.4 |
+| re-reads only | 4K | 2,171,039 | 8.8 | 9.4 | 4.8 | 8.8 | 9.3 | 0.0 | 1.4 |
+| re-reads only | 8K | 2,171,039 | 1.4 | 1.8 | 0.0 | 1.4 | 1.5 | 0.0 | 0.1 |
+| re-reads and edits | 2K | 7,257,613 | 14.1 | 18.2 | 24.3 | 28.5 | 21.7 | 1.9 | 6.4 |
+| re-reads and edits | 4K | 7,257,613 | 4.3 | 5.4 | 7.7 | 9.9 | 5.4 | 0.9 | 1.6 |
+| re-reads and edits | 8K | 7,257,613 | 0.5 | 0.9 | 0.4 | 2.2 | 1.0 | 0.0 | 0.0 |
+| re-reads and exact-span edits | 2K | 6,475,771 | 13.2 | 16.7 | 21.9 | 26.7 | 20.3 | 1.1 | 5.2 |
+| re-reads and exact-span edits | 4K | 6,475,771 | 3.5 | 4.6 | 6.2 | 8.1 | 4.6 | 0.0 | 0.7 |
+| re-reads and exact-span edits | 8K | 6,475,771 | 0.5 | 0.8 | 0.4 | 1.4 | 0.7 | 0.0 | 0.0 |
+| all but run and git references | 2K | 7,280,654 | 14.1 | 18.2 | 24.3 | 28.6 | 21.8 | 1.9 | 6.3 |
+| all but run and git references | 4K | 7,280,654 | 4.2 | 5.4 | 7.7 | 9.9 | 5.4 | 0.9 | 1.6 |
+| all but run and git references | 8K | 7,280,654 | 0.5 | 0.9 | 0.4 | 2.2 | 1.0 | 0.0 | 0.0 |
 
 ## Influence
 
-- LRU at 2K: 14.6% pooled. Leaving out any 1 trajectory gives 13.9% to 14.8%.
+- LRU at 2K: 14.7% pooled. Leaving out any 1 trajectory gives 13.9% to 14.8%.
 - LRU at 4K: 4.2% pooled. Leaving out any 1 trajectory gives 3.4% to 4.3%.
 - LRU at 8K: 0.5% pooled. Leaving out any 1 trajectory gives 0.4% to 0.5%.
 - The 10 trajectories with the most proxy-access tokens hold 8.6% of them.
@@ -138,5 +138,5 @@ Clearing (cap) keeps the newest tool outputs that fit the budget at every step. 
 
 ## Scaffold baselines
 
-- Keep the last 5 tool outputs, the shape of SWE-agent's `LastNObservations`: 27.7% of proxy-access tokens missed (25.9% of proxy accesses), 1,492 tokens held on average.
-- Keep everything: no misses, 4,829 tokens held on average.
+- Keep the last 5 tool outputs, the shape of SWE-agent's `LastNObservations`: 27.7% of proxy-access tokens missed (25.5% of proxy accesses), 1,491 tokens held on average.
+- Keep everything: no misses, 4,834 tokens held on average.
