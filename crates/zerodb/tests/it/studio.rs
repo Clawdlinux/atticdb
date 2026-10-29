@@ -148,6 +148,12 @@ fn studio_forwards_reads_and_refuses_the_rest() {
         let note = format!("{agent} saw <b>html</b>");
         seed(&home, &["append", "--agent", agent, "--session", "app", "--content", &note]);
     }
+    // The store takes empty agent and session names. The page pages past them and opens them.
+    seed(&home, &["append", "--agent", "", "--session", "", "--content", "no names"]);
+    seed(&home, &["append", "--agent", "copilot", "--session", "", "--content", "no session"]);
+    // URLSearchParams writes a space as + and a + as %2B.
+    seed(&home, &["append", "--agent", "copilot", "--session", "my app+1", "--content", "plus"]);
+    seed(&home, &["fact", "set", "--key", "repo/web/deploy", "--content", "pages from main"]);
     let config = data.parent().unwrap().join("zerodb.json");
     let tenants = serde_json::from_slice::<Value>(&std::fs::read(&config).unwrap()).unwrap();
     let token = tenants["tenants"][0]["token"].as_str().unwrap().to_owned();
@@ -229,6 +235,101 @@ fn studio_forwards_reads_and_refuses_the_rest() {
     let kind = Some("text/plain; version=0.0.4");
     assert_eq!((metrics.status, metrics.header("Content-Type")), (200, kind));
     assert!(metrics.body.contains("\nzerodb_durable_lsn "), "{}", metrics.body);
+
+    // The requests app.js builds, as URLSearchParams writes them. Each answers 200 with a
+    // non-empty list, and every item holds the fields the page reads.
+    let fields = |list: &str, item: &Value| -> &'static [&'static str] {
+        match (list, item["kind"].as_str()) {
+            ("sessions", _) => &["agent", "session", "turns"],
+            ("turns", _) => &["seq", "lsn", "commit_time_ns", "role", "content", "meta"],
+            ("revisions", _) => &["lsn", "commit_time_ns", "agent", "deleted", "content", "meta"],
+            ("facts", _) => &["key", "lsn", "commit_time_ns", "agent", "content", "meta"],
+            (_, Some("turn")) => {
+                &["kind", "lsn", "commit_time_ns", "agent", "session", "seq", "role", "content"]
+            }
+            (_, Some("fact")) => {
+                &["kind", "lsn", "commit_time_ns", "agent", "key", "deleted", "content"]
+            }
+            _ => panic!("{list}: no kind in {item}"),
+        }
+    };
+    let asked = |target: &str, list: &str| -> Value {
+        let reply = studio.get(target, true);
+        assert_eq!(reply.status, 200, "{target}: {}", reply.body);
+        let body = reply.json();
+        let top: &[&str] = match list {
+            "sessions" => &["next", "total"],
+            "turns" | "revisions" => &["truncated"],
+            _ => &["next"],
+        };
+        for name in top {
+            assert!(body.get(name).is_some(), "{target}: no {name} in {body}");
+        }
+        if list == "sessions" {
+            let total = &body["total"];
+            assert!(total["sessions"].is_u64() && total["turns"].is_u64(), "{target}: {body}");
+        }
+        let items = body[list].as_array().unwrap_or_else(|| panic!("{target}: {body}"));
+        assert!(!items.is_empty(), "{target}: no {list}");
+        for item in items {
+            for name in fields(list, item) {
+                assert!(item.get(name).is_some(), "{target}: no {name} in {item}");
+            }
+        }
+        body
+    };
+    let first = |body: &Value, list: &str, field: &str| body[list][0][field].clone();
+    // Sessions sort by the bytes of agent, then session, so ("", "") comes first. The cursor past
+    // it is 2 empty values, and both must reach the store.
+    let page = asked("/api/v1/sessions?limit=1000", "sessions");
+    assert_eq!(
+        (first(&page, "sessions", "agent"), first(&page, "sessions", "session")),
+        (json!(""), json!(""))
+    );
+    asked("/api/v1/sessions?limit=1", "sessions");
+    let page = asked("/api/v1/sessions?limit=1000&after_agent=&after_session=", "sessions");
+    assert_eq!(
+        (first(&page, "sessions", "agent"), first(&page, "sessions", "session")),
+        (json!("copilot"), json!(""))
+    );
+    let page = asked("/api/v1/sessions?limit=1000&after_agent=copilot&after_session=", "sessions");
+    assert_eq!(first(&page, "sessions", "session"), "app");
+    let page =
+        asked("/api/v1/sessions?limit=1000&after_agent=copilot&after_session=app", "sessions");
+    assert_eq!(first(&page, "sessions", "session"), "my app+1");
+    // The Overview and Chat start, then the log by kind. `before` takes an LSN, as `next` gives.
+    let page = asked("/api/v1/records?limit=8&max_bytes=8388608", "records");
+    let before = first(&page, "records", "lsn");
+    asked(&format!("/api/v1/records?before={before}&limit=8&max_bytes=8388608"), "records");
+    asked("/api/v1/records?limit=50&max_bytes=8388608", "records");
+    let page = asked("/api/v1/records?limit=50&kind=fact&max_bytes=8388608", "records");
+    let before = first(&page, "records", "lsn");
+    let target = format!("/api/v1/records?before={before}&limit=50&kind=fact&max_bytes=8388608");
+    let page = asked(&target, "records");
+    assert!(page["records"].as_array().unwrap().iter().all(|record| record["kind"] == "fact"));
+    // A session's newest turns, then older ones from a seq, empty names and + included.
+    asked("/api/v1/window?agent=copilot&session=app&last=50&max_bytes=8388608", "turns");
+    let target = "/api/v1/window?agent=copilot&session=app&since_seq=1&limit=1&max_bytes=8388608";
+    asked(target, "turns");
+    let page = asked("/api/v1/window?agent=&session=&last=50&max_bytes=8388608", "turns");
+    assert_eq!(first(&page, "turns", "content"), "no names");
+    let target = "/api/v1/window?agent=copilot&session=&since_seq=1&limit=1&max_bytes=8388608";
+    assert_eq!(first(&asked(target, "turns"), "turns", "content"), "no session");
+    let target = "/api/v1/window?agent=copilot&session=my+app%2B1&last=50&max_bytes=8388608";
+    assert_eq!(first(&asked(target, "turns"), "turns", "content"), "plus");
+    // A fact, every fact, the repos for Chat start, and a fact's neighbours.
+    asked("/api/v1/facts/history?key=user%2Fstyle&max_bytes=8388608", "revisions");
+    asked("/api/v1/facts/list?limit=1000", "facts");
+    asked("/api/v1/facts/list?after=repo%2Fapp%2Fbuild&limit=1000", "facts");
+    asked("/api/v1/facts/list?prefix=repo%2F&limit=1000", "facts");
+    // Chat start goes on past a repo it knows: its prefix and U+10FFFF.
+    let target = "/api/v1/facts/list?prefix=repo%2F&after=repo%2Fapp%2F%F4%8F%BF%BF&limit=1000";
+    assert_eq!(first(&asked(target, "facts"), "facts", "key"), "repo/web/deploy");
+    asked("/api/v1/facts/list?prefix=user%2F&limit=8", "facts");
+    asked("/api/v1/facts/list?limit=8", "facts");
+    let page = asked("/api/v1/search?q=html&limit=50&max_bytes=8388608", "hits");
+    let before = first(&page, "hits", "lsn");
+    asked(&format!("/api/v1/search?q=html&before={before}&limit=50&max_bytes=8388608"), "hits");
 
     // Checks run in order: Host, Origin, method, then the secret for /api/.
     let (_, sessions) = store.call(Some("localhost"), Some(&token), "GET", "/v1/sessions", None);

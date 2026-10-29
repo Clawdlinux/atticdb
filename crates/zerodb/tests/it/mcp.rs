@@ -285,6 +285,13 @@ fn tool_calls_over_stdio() {
         text(&found),
         format!("[ag/s1 #{seq} assistant] zebra two\n[a/s1 #1 user] zebra one")
     );
+    // A model may fill an optional field with "". An empty session is the default one, s1.
+    let empty = mcp.call("memory_append", json!({"content": "no name", "session": ""}));
+    assert_eq!(appended(&empty, "empty session"), first_turn + 3, "the default session");
+    let window = mcp.call("memory_recent", json!({"n": 1, "session": ""}));
+    assert_eq!(contents(&window), ["no name"], "memory_recent reads the default session too");
+    let (_, unnamed) = running.vias[1].a("GET", "/v1/window?agent=ag&session=&last=9", None);
+    assert_eq!(unnamed["turns"], json!([]), "nothing in session \"\"");
     fact_written(&mcp.call("fact_set", json!({"key": "e", "content": ""})), "empty");
     assert_eq!(text(&mcp.call("fact_get", json!({"key": "e"}))), "(empty)");
     // Keys count toward `max_bytes`, so a page of escaped NULs fits the response cap.
@@ -362,9 +369,12 @@ fn tool_calls_over_stdio() {
     assert!(silent.request("initialize", params)["result"].is_object());
     silent.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
     assert_eq!(silent.asked()["method"], "roots/list");
-    for (content, waits) in [("slow", 1_900..3_900), ("fast", 0..1_900)] {
+    // The first call's empty session is the default session too, so it waits as well.
+    let rows = [("slow", json!(""), 1_900..3_900), ("fast", Value::Null, 0..1_900)];
+    for (content, session, waits) in rows {
         let started = std::time::Instant::now();
-        appended(&silent.call("memory_append", json!({"content": content})), content);
+        let args = json!({"content": content, "session": session});
+        appended(&silent.call("memory_append", args), content);
         let elapsed = started.elapsed().as_millis() as u64;
         assert!(waits.contains(&elapsed), "{content}: {elapsed} ms");
     }

@@ -24,10 +24,11 @@ class ApiError extends Error {
   constructor(status, code, detail) { super(code); this.status = status; this.code = code; this.detail = detail || ''; }
 }
 
-// GET /api/<route>, with the secret as X-Zerodb-Studio. A 401 forgets the secret.
+// GET /api/<route>, with the secret as X-Zerodb-Studio. A 401 forgets the secret. An empty string is a value: the
+// store takes empty agent and session names, and a cursor past one must keep both halves.
 async function api(route, params) {
   const query = new URLSearchParams();
-  for (const [k, v] of Object.entries(params || {})) if (v !== undefined && v !== null && v !== '') query.set(k, String(v));
+  for (const [k, v] of Object.entries(params || {})) if (v !== undefined && v !== null) query.set(k, String(v));
   const headers = {};
   let secret = null;
   try { secret = sessionStorage.getItem(SECRET_KEY); } catch (e) { secret = null; }
@@ -80,6 +81,8 @@ function svg(tag, attrs, ...kids) {
 }
 const code = (t) => h('code', null, t);
 const fig = (t, cls) => h('span', { class: cls ? 'fig ' + cls : 'fig' }, t);
+// An agent or session name. The store takes an empty one, which shows as a muted placeholder, never as nothing.
+const nameOf = (t) => (t === '' ? h('span', { class: 'muted' }, '(empty)') : t);
 const byId = (id) => document.getElementById(id);
 // A turn can hold 4 MiB with no space, and the browser takes over 30 s to wrap 2 MiB of that. A row shows 2 lines,
 // so it gets the first 1,000 characters. A full view of text past 10,000 characters gets a break point every 32
@@ -184,18 +187,31 @@ function empty(el, ...lines) {
 }
 function errorText(err) {
   if (err.status === 401) return ['This link is out of date. Open the link ', code('zerodb studio'), ' printed.'];
-  if (err.code === 'store_unreachable') return [`Couldn't reach the store${err.detail ? ': ' + err.detail : ''}. Start it with `, code('zerodb serve'), ', then retry.'];
+  if (err.code === 'store_unreachable') return [`Couldn't reach the store${err.detail ? ': ' + err.detail : ''}. `, storeHint('unreachable')];
   if (err.code === 'store_unauthorized') return ["The store refused the studio's token. Run ", code('zerodb studio'), ' again with a token it takes.'];
-  if (err.code === 'store_timeout') return ['The store took more than 10 s to answer. Check it with ', code('zerodb serve'), ', then retry.'];
+  if (err.code === 'store_timeout') return ['The store took more than 10 s to answer. ', storeHint('timeout')];
   if (err.code === 'offline') return ['The studio stopped answering. Run ', code('zerodb studio'), ' again and open the link it prints.'];
   if (err.code === 'invalid_input') return [`The store refused the request${err.detail ? ': ' + err.detail : ''}.`];
   return [`The studio answered ${err.status || 'nothing'}${err.code !== 'http' ? ' ' + err.code : ''}${err.detail ? ': ' + err.detail : ''}.`];
+}
+// What to do about a store the studio can't reach in time. A home studio starts the home server itself, so that
+// server's log tells why it is down. Any other store runs by hand. Filled in once /api/info has answered.
+function storeHint(kind) {
+  const hint = h('span');
+  infoReady.then((info) => {
+    const log = info && info.store === 'home' && info.home ? code(`${info.home}/data/serve.log`) : null;
+    const serve = code('zerodb serve --config <path> --data-dir <dir>');
+    if (kind === 'unreachable') put(hint, ...(log ? ['The studio starts the home server itself. Its log may say more: ', log, '. Then retry.'] : ['Start it with ', serve, ', then retry.']));
+    else if (kind === 'timeout') put(hint, ...(log ? ["The home server's log may say why: ", log, '. Then retry.'] : ['Check the server you started with ', serve, ', then retry.']));
+    else put(hint, ...(log ? ['See ', log, '.'] : ['Start it with ', serve, '.']));
+  });
+  return hint;
 }
 const statsRefused = (err) => err instanceof ApiError && (err.status === 403 || err.status === 404);
 const STATS_REFUSED = 'This store does not share its stats over its URL. A home or data dir studio shows them.';
 function errorShort(err) {
   if (err.status === 401) return errorText(err);
-  if (err.code === 'store_unreachable') return ["Couldn't reach the store. Start it with ", code('zerodb serve'), '.'];
+  if (err.code === 'store_unreachable') return ["Couldn't reach the store. ", storeHint('short')];
   if (err.code === 'store_unauthorized') return ["The store refused the studio's token."];
   if (err.code === 'store_timeout') return ['The store is not answering in time.'];
   if (err.code === 'offline') return ['The studio stopped answering.'];
@@ -237,7 +253,9 @@ addEventListener('keydown', (e) => { if (e.key === 'Escape') setMenu(false); });
 for (const a of document.querySelectorAll('.nav-item')) a.addEventListener('click', () => setMenu(false));
 matchMedia('(min-width: 961px)').addEventListener('change', (e) => { if (e.matches) setMenu(false); });
 
+// `title` is text, or the element nameOf gives for an empty name.
 function titleRow(main, title, crumbs) {
+  const text = typeof title === 'string' ? title : title.textContent;
   const finding = h('p', { class: 'finding quiet' }, h('span', { class: 'sk line', 'aria-hidden': 'true' }));
   const heading = h('h1', { tabindex: '-1' }, title);
   main.append(h('header', { class: 'title-row' },
@@ -247,8 +265,8 @@ function titleRow(main, title, crumbs) {
     h('div', { class: 'title-side' },
       h('span', { class: 'stamp' }, 'Loaded ' + TIME.format(new Date())),
       h('button', { class: 'btn', type: 'button', on: { click: redraw } }, 'Refresh'))));
-  document.title = `${title} · zerodb studio`;
-  byId('topbar-screen').textContent = title;
+  document.title = `${text} · zerodb studio`;
+  byId('topbar-screen').textContent = text;
   return finding;
 }
 function say(finding, ...parts) { finding.classList.remove('quiet'); put(finding, ...parts.flat(Infinity)); }
@@ -309,13 +327,13 @@ function recordRow(rec, words) {
     : h('p', { class: 'rec-text' }, mark(preview(rec.content)));
   const where = isFact
     ? ['Fact ', h('a', { href: href('fact', { key: rec.key }) }, code(mark(rec.key)))]
-    : ['Turn ', fig(String(rec.seq)), ' in ', h('a', { href: href('session', { agent: rec.agent, session: rec.session, seq: rec.seq }) }, rec.session),
+    : ['Turn ', fig(String(rec.seq)), ' in ', h('a', { href: href('session', { agent: rec.agent, session: rec.session, seq: rec.seq }) }, nameOf(rec.session)),
         rec.role === 'assistant' ? null : [' ', h('span', { class: 'pill' }, rec.role)]];
   return h('li', { class: 'rec' },
     h('span', { class: 'rec-lsn' }, String(rec.lsn)),
     text,
-    h('p', { class: 'rec-meta' }, where, h('span', { class: 'also' }, ' by ', h('span', { class: 'who' }, rec.agent))),
-    h('span', { class: 'rec-agent' }, rec.agent),
+    h('p', { class: 'rec-meta' }, where, h('span', { class: 'also' }, ' by ', h('span', { class: 'who' }, nameOf(rec.agent)))),
+    h('span', { class: 'rec-agent' }, nameOf(rec.agent)),
     h('span', { class: 'rec-when' }, timeCell(rec.commit_time_ns), h('span', { class: 'lsn' }, 'LSN ' + rec.lsn)));
 }
 
@@ -431,7 +449,7 @@ async function allFacts(after) {
   const id = renderId;
   const facts = [];
   for (let i = 0; i < BATCH && id === renderId; i++) {
-    const page = await api('v1/facts/list', { prefix: '', after, limit: 1000 });
+    const page = await api('v1/facts/list', { after, limit: 1000 });
     facts.push(...page.facts);
     if (page.next === null) return { facts, next: null };
     after = page.next;
@@ -591,8 +609,8 @@ async function overview(main) {
   put(done(list), ...records.map((r) => recordRow(r)));
   const r = records[0];
   const what = r.kind === 'fact'
-    ? [r.agent, r.deleted ? ' deleted ' : ' set ', h('a', { href: href('fact', { key: r.key }) }, code(r.key))]
-    : [r.agent, ' saved turn ', String(r.seq), ' in ', h('a', { href: href('session', { agent: r.agent, session: r.session, seq: r.seq }) }, r.session)];
+    ? [nameOf(r.agent), r.deleted ? ' deleted ' : ' set ', h('a', { href: href('fact', { key: r.key }) }, code(r.key))]
+    : [nameOf(r.agent), ' saved turn ', String(r.seq), ' in ', h('a', { href: href('session', { agent: r.agent, session: r.session, seq: r.seq }) }, nameOf(r.session))];
   if (daysAgo(dateOf(r.commit_time_ns)) === 0) say(finding, `Newest write ${ago(r.commit_time_ns)}, at ${TIME.format(dateOf(r.commit_time_ns))}: `, what, '.');
   else say(finding, 'Nothing saved today. The newest write was ', whenWords(r.commit_time_ns), ': ', what, '.');
 
@@ -640,13 +658,16 @@ async function logScreen(main, p) {
     h('section', { class: 'card wide', 'aria-label': 'Records' }, h('div', { class: 'card-body' }, listHead(), list), foot));
   const pages = pager({
     list, foot, noun: kind === 'turn' ? 'turn' : kind === 'fact' ? 'fact revision' : 'record',
-    get: async (before) => { const pg = await api('v1/records', { before, limit: PAGE, kind, max_bytes: EIGHT_MIB }); return { items: pg.records, next: pg.next }; },
+    get: async (before) => { const pg = await api('v1/records', { before, limit: PAGE, kind: kind || undefined, max_bytes: EIGHT_MIB }); return { items: pg.records, next: pg.next }; },
     row: (r) => recordRow(r),
     emptyLines: [kind === 'fact' ? ['No fact revisions yet.'] : kind === 'turn' ? ['No turns yet.'] : nothingSaved()],
   });
-  // the tab counts need stats, which count the whole store: only shown for a store of 1 tenant
+  // The tab counts need stats, which count the whole store. Only a home studio shows them: the home holds 1 tenant,
+  // while stats count a tenant only after its first write.
   const id = renderId;
   try {
+    const info = await infoReady;
+    if (id !== renderId || !info || info.store !== 'home') return;
     const [s, ses] = await Promise.all([api('v1/stats'), api('v1/sessions', { limit: 1 })]);
     if (id !== renderId || s.tenants > 1) return;
     // fact_revisions counts the revisions the store keeps: all of a key's up to 17, then its newest 17 or 18.
@@ -732,7 +753,7 @@ async function sessionsScreen(main) {
     const cells = [[null, 'All agents', total.sessions, total.turns], ...[...byAgent].map(([a, v]) => [a, a, v.sessions, v.turns])];
     const buttons = cells.map(([key, label, ses, turns]) => {
       const b = h('button', { class: 'agent', type: 'button', 'aria-pressed': String(key === agent) },
-        h('span', { class: 'agent-name' }, label),
+        h('span', { class: 'agent-name' }, key === null ? label : nameOf(label)),
         h('span', { class: 'agent-value' }, fig(n(ses)), ses === 1 ? 'session' : 'sessions'),
         h('span', { class: 'agent-value' }, count(turns, 'turn')));
       b.addEventListener('click', () => {
@@ -764,12 +785,12 @@ async function sessionsScreen(main) {
   const paint = () => {
     const f = filter.value.trim().toLowerCase();
     const hit = rows.filter((s) => (agent === null || s.agent === agent) && (!f || s.session.toLowerCase().includes(f)));
-    put(list.heading, agent === null ? 'Every session' : `Sessions of ${agent}`);
+    put(list.heading, agent === null ? 'Every session' : ['Sessions of ', nameOf(agent)]);
     put(matchNote, f ? `${n(hit.length)} match` : '');
     if (!hit.length) { put(tbody, h('tr', null, h('td', { colspan: '3', class: 'muted' }, 'No session name holds that text.'))); return; }
     put(tbody, hit.map((s) => h('tr', { class: 'linked' },
-      h('td', null, h('a', { class: 'row-link', href: href('session', { agent: s.agent, session: s.session }) }, s.session)),
-      h('td', null, s.agent), h('td', { class: 'n' }, n(s.turns)))));
+      h('td', null, h('a', { class: 'row-link', href: href('session', { agent: s.agent, session: s.session }) }, nameOf(s.session))),
+      h('td', null, nameOf(s.agent)), h('td', { class: 'n' }, n(s.turns)))));
   };
   build();
   filter.addEventListener('input', paint);
@@ -785,11 +806,13 @@ function turnItem(t, want) {
     t.meta === null || t.meta === undefined ? null : h('p', { class: 'turn-meta' }, breakable('meta ' + JSON.stringify(t.meta))));
 }
 async function sessionScreen(main, p) {
+  // an empty agent or session name is a name: only a missing parameter means no session
+  const known = p.has('agent') && p.has('session');
   const agent = p.get('agent') || '';
   const name = p.get('session') || '';
   const want = /^\d{1,15}$/.test(p.get('seq') || '') ? Number(p.get('seq')) : null;
-  const finding = titleRow(main, name || 'Session', [h('a', { href: href('sessions') }, 'Sessions'), agent ? h('span', null, agent) : null].filter(Boolean));
-  if (!agent || !name) { note(finding, 'Open a session from the list.'); return; }
+  const finding = titleRow(main, known ? nameOf(name) : 'Session', [h('a', { href: href('sessions') }, 'Sessions'), known ? h('span', null, nameOf(agent)) : null].filter(Boolean));
+  if (!known) { note(finding, 'Open a session from the list.'); return; }
   const c = card('Turns', h('span', { class: 'card-note' }, 'Newest first'));
   const list = h('ol', { class: 'turns' });
   const foot = h('div', { class: 'card-foot' });
@@ -848,7 +871,7 @@ async function sessionScreen(main, p) {
     // a window whose newest turn alone passes max_bytes holds no turns, and a turn can pass the 1 MiB default
     const w = await api('v1/window', { agent, session: name, last: 50, max_bytes: EIGHT_MIB });
     if (id !== renderId) return;
-    if (!w.turns.length) { empty(list, ['No turns in this session.']); foot.remove(); note(finding, `No turns from ${agent} in this session.`); return; }
+    if (!w.turns.length) { empty(list, ['No turns in this session.']); foot.remove(); note(finding, 'No turns from ', nameOf(agent), ' in this session.'); return; }
     const newest = w.turns[w.turns.length - 1];
     total = newest.seq;
     let shown = w.turns;
@@ -862,7 +885,7 @@ async function sessionScreen(main, p) {
     put(done(list), ...shown.slice().reverse().map((t) => turnItem(t, want)));
     low = shown[0].seq;
     high = shown[shown.length - 1].seq;
-    say(finding, h('span', { class: 'who' }, agent), total === 1
+    say(finding, h('span', { class: 'who' }, nameOf(agent)), total === 1
       ? ` saved 1 turn here, ${whenWords(newest.commit_time_ns)}.`
       : ` saved ${count(total, 'turn')} here. The newest came ${whenWords(newest.commit_time_ns)}, ${ago(newest.commit_time_ns)}.`);
     paint();
@@ -875,8 +898,8 @@ function factRow(f, group) {
   return h('li', { class: 'fact-row linked' },
     h('a', { class: 'key row-link', href: href('fact', { key: f.key }) }, f.key.slice(group.length) || f.key),
     h('p', { class: 'rec-text' }, preview(f.content)),
-    h('span', { class: 'rec-agent' }, f.agent),
-    h('p', { class: 'rec-meta' }, 'by ', h('span', { class: 'who' }, f.agent)),
+    h('span', { class: 'rec-agent' }, nameOf(f.agent)),
+    h('p', { class: 'rec-meta' }, 'by ', h('span', { class: 'who' }, nameOf(f.agent))),
     h('span', { class: 'rec-when' }, timeCell(f.commit_time_ns), h('span', { class: 'lsn' }, 'LSN ' + f.lsn)));
 }
 async function factsScreen(main) {
@@ -941,9 +964,12 @@ async function factsScreen(main) {
     if (more) more.show(`Showing all ${count(facts.length, 'fact')}.`, false);
     deleted();
   };
-  // stats count every key the store has seen, deleted ones too (17 keys for 16 values in the seed)
+  // Stats count the keys of every tenant, deleted ones too. The home holds 1 tenant, so only there is the gap this
+  // tenant's deleted keys.
   const deleted = async () => {
     try {
+      const info = await infoReady;
+      if (id !== renderId || !info || info.store !== 'home') return;
       const s = await api('v1/stats');
       if (id !== renderId) return;
       if (s.tenants <= 1 && s.facts > facts.length) finding.append(` ${count(s.facts - facts.length, 'more key')} ${s.facts - facts.length === 1 ? 'was' : 'were'} deleted.`);
@@ -984,11 +1010,11 @@ async function factScreen(main, p) {
   const line = (label, ...v) => h('span', null, label, ' ', h('b', null, v));
   if (cur) {
     put(done(now.body), h('p', { class: 'lead' }, breakable(cur.content)),
-      h('p', { class: 'facts-line' }, line('Key', code(key)), line('Set by', cur.agent), line('At', timeCell(cur.commit_time_ns)), line('LSN', fig(String(cur.lsn)))),
+      h('p', { class: 'facts-line' }, line('Key', code(key)), line('Set by', nameOf(cur.agent)), line('At', timeCell(cur.commit_time_ns)), line('LSN', fig(String(cur.lsn)))),
       cur.meta === null || cur.meta === undefined ? null : h('p', { class: 'meta-json' }, breakable('meta ' + JSON.stringify(cur.meta))));
-    say(finding, `${shown}. Last set by `, h('span', { class: 'who' }, cur.agent), ` ${whenWords(cur.commit_time_ns)}.`);
+    say(finding, `${shown}. Last set by `, h('span', { class: 'who' }, nameOf(cur.agent)), ` ${whenWords(cur.commit_time_ns)}.`);
   } else {
-    empty(now.body, ['No current value. ', h('b', null, last.agent), ` deleted this key ${whenWords(last.commit_time_ns)}, at LSN ${last.lsn}.`]);
+    empty(now.body, ['No current value. ', h('b', null, nameOf(last.agent)), ` deleted this key ${whenWords(last.commit_time_ns)}, at LSN ${last.lsn}.`]);
     say(finding, `${shown}. Deleted ${whenWords(last.commit_time_ns)}.`);
   }
   put(done(revs.body), h('ol', { class: 'rows' }, list.map((r) => h('li', { class: 'rev' },
@@ -996,8 +1022,8 @@ async function factScreen(main, p) {
     r.deleted
       ? h('p', { class: 'rec-text is-deleted' }, h('span', { class: 'pill' }, 'Deleted'), 'The key held no value after this.')
       : h('p', { class: 'rec-text' }, r === cur ? h('span', { class: 'pill' }, 'Current') : null, breakable(r.content)),
-    h('span', { class: 'rec-agent' }, r.agent),
-    h('p', { class: 'rec-meta' }, 'by ', h('span', { class: 'who' }, r.agent)),
+    h('span', { class: 'rec-agent' }, nameOf(r.agent)),
+    h('p', { class: 'rec-meta' }, 'by ', h('span', { class: 'who' }, nameOf(r.agent))),
     h('span', { class: 'rec-when' }, timeCell(r.commit_time_ns), h('span', { class: 'lsn' }, 'LSN ' + r.lsn))))),
     hist.truncated ? h('p', { class: 'chart-note' }, 'Older revisions are not listed here. ', h('a', { class: 'link', href: href('log', { kind: 'fact' }) }, 'The log'), ' keeps every one.') : null);
 }
@@ -1012,7 +1038,7 @@ async function siblings(near, key, group) {
     let after;
     let ended = false;
     for (let i = 0; i < 20 && others.length < 7 && !ended; i++) {
-      const page = await api('v1/facts/list', { prefix: group, after, limit: 8 });
+      const page = await api('v1/facts/list', { prefix: group || undefined, after, limit: 8 });
       if (id !== renderId) return;
       others.push(...page.facts.filter((f) => f.key !== key && groupOf(f.key) === group));
       ended = page.next === null;

@@ -113,7 +113,7 @@ Newline-delimited JSON-RPC 2.0 on stdin and stdout. Logs go to stderr. It exits 
 Tools: `memory_append {content, role?, session?, meta?}`, `memory_recent {n?, session?, max_bytes?}`, the fact tools, and `memory_search {query, limit?, before?, max_bytes?}`.
 Read tools carry `readOnlyHint: true`, so VS Code runs them without asking. `initialize` returns short `instructions`: use the memory block, and where to save rules and notes. Copilot CLI adds a server's instructions to the system prompt only for allowlisted servers, or with `--allow-all-mcp-server-instructions`.
 Integers beyond ±(2^53 - 1), such as `commit_time_ns`, come back as strings in tool results, because JavaScript clients can't hold them (I-JSON, RFC 7493). The shell verbs print them as numbers.
-`--agent` defaults to `mcp`. A tool may pass `session`. The tenant still comes from the token.
+`--agent` defaults to `mcp`. A tool may pass `session`. An empty `session` counts as none, so the call uses the default session. The tenant still comes from the token.
 `--session` defaults to a repo name, by the same rule as the session-start hook.
 When the client reports roots, as VS Code does, it is the repo of the first `file://` root.
 A root that can't be read leaves the session as it was.
