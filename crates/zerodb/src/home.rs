@@ -108,6 +108,11 @@ pub fn dir() -> Result<PathBuf, String> {
 /// `zerodb.json` with tenant [`TENANT`]. Checks both directories are owner-only.
 pub fn ensure() -> Result<Home, String> {
     let dir = dir()?;
+    // With $HOME unset, as ZERODB_HOME allows, the home counts as outside it.
+    let home = user_home().ok().filter(|home| dir.starts_with(home));
+    // A $HOME missing now is made below, and nothing above it is known to be synced.
+    let made_home = home.as_deref().is_some_and(|home| home.symlink_metadata().is_err());
+    let stop = home.as_deref().filter(|_| !made_home).and_then(Path::parent);
     crate::listen::owned_dir(&dir, 0o077)?;
     let config = dir.join("zerodb.json");
     if !config.exists() {
@@ -116,16 +121,16 @@ pub fn ensure() -> Result<Home, String> {
     let data_dir = dir.join("data");
     crate::listen::owned_dir(&data_dir, 0o077)?;
     // Every call syncs, covering a concurrent creator that has not synced yet.
-    sync_dirs(&dir, &data_dir)?;
+    sync_dirs(&dir, &data_dir, stop)?;
     Ok(Home { dir, config, data_dir, tenant: TENANT.into() })
 }
 
 /// Syncs `data/`, the home and its ancestors, deepest first, so their entries survive a
-/// power loss before the first ack. A home inside `$HOME` stops at `$HOME`. Any other syncs
-/// every ancestor up to `/`, since a first use may have made any of them.
-fn sync_dirs(dir: &Path, data_dir: &Path) -> Result<(), String> {
-    // With $HOME unset, as ZERODB_HOME allows, the home counts as outside it.
-    let home = user_home().ok().filter(|home| dir.starts_with(home));
+/// power loss before the first ack. It stops after syncing `stop`, else at `/`. A home
+/// inside `$HOME` stops at `$HOME`'s parent, so a `$HOME` that another call made is synced
+/// too. Any other home, or a `$HOME` this call made, syncs every ancestor up to `/`, since
+/// a first use may have made any of them.
+fn sync_dirs(dir: &Path, data_dir: &Path, stop: Option<&Path>) -> Result<(), String> {
     for path in data_dir.ancestors() {
         let fail = |error: std::io::Error| format!("{}: cannot sync: {error}", path.display());
         match File::open(path) {
@@ -137,7 +142,7 @@ fn sync_dirs(dir: &Path, data_dir: &Path) -> Result<(), String> {
                     && dir.starts_with(path) => {}
             file => file.and_then(|file| file.sync_all()).map_err(fail)?,
         }
-        if home.as_deref() == Some(path) {
+        if stop == Some(path) {
             break;
         }
     }
