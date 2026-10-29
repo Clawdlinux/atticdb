@@ -819,6 +819,38 @@ fn connect_claude_code_adds_its_parts() {
         out.starts_with("MCP entry: removed (") && out.contains("\nSessionStart hook: removed (")
     );
 
+    // A binary with another file name, as an install may give it, still writes parts that
+    // disconnect finds, run from any binary.
+    let home = dir.0.join("v");
+    std::fs::create_dir(&home).unwrap();
+    let versioned = home.join("zerodb-0.1.0");
+    std::fs::copy(&exe, &versioned).unwrap();
+    let mut command = support::command(&versioned);
+    command.args(["connect", "claude-code"]).current_dir(&dir.0).env("HOME", &home);
+    command.env("PATH", &bin).env_remove("ZERODB_TOKEN").stdin(Stdio::null());
+    let (status, out) = Process::start(&mut command).wait();
+    assert_eq!(status.code(), Some(0), "{out}");
+    let state = read(&home.join(".claude.json"));
+    assert_eq!(state["mcpServers"]["zerodb"]["command"], versioned.to_str().unwrap());
+    let (code, out) = run(&home, None, &bin, &[], &["disconnect", "claude-code"]);
+    assert_eq!(code, Some(0), "{out}");
+    let removed =
+        ["MCP entry: removed (", "\nSessionStart hook: removed (", "\nallow rules: removed ("];
+    assert!(removed.iter().all(|said| out.contains(said)), "{out}");
+    assert_eq!(read(&home.join(".claude.json"))["mcpServers"], json!({}));
+
+    // A relative CLAUDE_CONFIG_DIR would send claude's writes under the current directory.
+    // Both verbs refuse it before any change, with exit 2.
+    let home = dir.0.join("r");
+    let start = calls().len();
+    for verb in ["connect", "disconnect"] {
+        let (code, out) = run(&home, Some(Path::new("rel")), &bin, &[], &[verb, "claude-code"]);
+        assert_eq!(code, Some(2), "{verb}: {out}");
+        assert!(out.contains("CLAUDE_CONFIG_DIR rel must be an absolute path"), "{verb}: {out}");
+    }
+    assert!(!home.exists() && !dir.0.join("rel").exists(), "nothing written");
+    assert_eq!(calls().len(), start, "no claude ran");
+
     // --no-hook and --notes are for claude-code only.
     let usage = [
         &["vscode", "--no-hook"][..],

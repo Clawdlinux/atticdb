@@ -219,7 +219,8 @@ A hook file with other content is left alone, and `disconnect` says so.
 `zerodb connect claude-code [--force] [--no-hook] [--notes ask|auto]` creates the home, then adds 3 parts.
 `zerodb disconnect claude-code` removes them.
 `--no-hook` and `--notes` work only for `claude-code`. `--notes` defaults to `auto`.
-The config dir is `$CLAUDE_CONFIG_DIR` when set and absolute, else `~/.claude`.
+The config dir is `$CLAUDE_CONFIG_DIR` when set, else `~/.claude`.
+A relative `CLAUDE_CONFIG_DIR` fails both verbs with exit 2 before any change. `claude` would inherit it and write under the current directory. An empty one counts as unset.
 
 | Part | Where | What |
 |---|---|---|
@@ -227,14 +228,16 @@ The config dir is `$CLAUDE_CONFIG_DIR` when set and absolute, else `~/.claude`.
 | Hook | `hooks.SessionStart` in `<config dir>/settings.json` | `{"hooks": [{"type": "command", "command": "'<binary>' hook session-start --harness claude-code", "timeout": 5}]}` |
 | Allow rules | `permissions.allow` in `<config dir>/settings.json` | `mcp__zerodb__memory_search`, `mcp__zerodb__memory_recent`, `mcp__zerodb__fact_get`, `mcp__zerodb__fact_list`, and `mcp__zerodb__memory_append` unless `--notes ask` |
 
-`.claude.json` is in `$CLAUDE_CONFIG_DIR` when set and absolute, else in `~`.
+`.claude.json` is in `$CLAUDE_CONFIG_DIR` when set, else in `~`.
 Claude rewrites it itself, so `connect` only reads it. It changes the entry only through `claude mcp add` and `claude mcp remove`.
 It never runs `claude mcp get`, because that starts the server to check it.
-Each `claude` command has 10 s. After it, `.claude.json` must show the entry, or the part failed.
+Each `claude` command has 10 s. It runs in its own process group, and a timeout kills the whole group.
+After it, `.claude.json` must show the entry, or the part failed.
 An entry with the same binary, args and `ZERODB_HOME` is left as it is.
 An entry that runs any absolute path with exactly `mcp --agent claude-code`, such as an old binary path, is updated: `claude mcp remove`, then `claude mcp add`.
 Any other `zerodb` entry, such as one with connection flags, is refused, and nothing changes. `--force` replaces it the same way.
-`disconnect` removes the entry only if it is what zerodb writes, for any `zerodb` binary path.
+`disconnect` removes the entry only if it is what zerodb writes, for any absolute binary path.
+The binary's file name doesn't matter, so a binary named `zerodb-0.1.0` counts too.
 Without `claude` on `PATH`, the part is skipped and the command to run is printed.
 
 The hook group has no matcher, so it also runs after compaction.
@@ -245,7 +248,7 @@ Claude Code reads the MCP server's instructions, so `CLAUDE.md` isn't touched.
 
 `settings.json` is edited as text, so only the added or removed bytes change. Key order, spacing and other entries stay.
 A missing file is created at mode 0600, and a missing config dir at 0700.
-Each part is found by its content: a group whose every handler runs a `zerodb` binary with `hook session-start --harness claude-code`, and the exact allow rules.
+Each part is found by its content: a group whose every handler runs an absolute binary path with `hook session-start --harness claude-code`, and the exact allow rules.
 `disconnect` removes every part it finds, including one you added by hand.
 A `SessionStart` array that ends up empty stays as `[]`.
 A change keeps a backup, as above. A rerun with nothing to change writes nothing.

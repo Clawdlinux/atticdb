@@ -18,10 +18,10 @@ use super::{
 use crate::home::{user_home, HOME_ENV};
 use crate::jsonedit;
 use serde_json::{json, Value};
-use std::ffi::OsStr;
 use std::fs::OpenOptions;
 use std::io::{ErrorKind, Read};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -60,21 +60,42 @@ const CLAUDE_TIMEOUT: Duration = Duration::from_secs(10);
 /// What a part did, as the line to print. `Err` when it was skipped or failed.
 type Line = Result<String, String>;
 
+/// The variable that moves Claude Code's config dir.
+const CONFIG_ENV: &str = "CLAUDE_CONFIG_DIR";
+
+/// Refuses a relative `CLAUDE_CONFIG_DIR`. The `claude` child inherits it, so it would write
+/// `.claude.json` under the current directory, where zerodb doesn't look. An empty one
+/// counts as unset.
+fn check_config_env() -> Result<(), String> {
+    match std::env::var_os(CONFIG_ENV) {
+        Some(dir) if !dir.is_empty() && !Path::new(&dir).is_absolute() => Err(format!(
+            "{CONFIG_ENV} {} must be an absolute path. Nothing changed",
+            Path::new(&dir).display()
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// `$CLAUDE_CONFIG_DIR` when set and absolute, else `~/.claude`.
 fn config_dir() -> Result<PathBuf, String> {
-    absolute_env("CLAUDE_CONFIG_DIR").map_or_else(|| Ok(user_home()?.join(".claude")), Ok)
+    absolute_env(CONFIG_ENV).map_or_else(|| Ok(user_home()?.join(".claude")), Ok)
 }
 
 /// Claude's state file, which holds the user MCP servers: `.claude.json` in
 /// `$CLAUDE_CONFIG_DIR` when set and absolute, else in `~`.
 pub(super) fn state_file() -> Result<PathBuf, String> {
-    let dir = absolute_env("CLAUDE_CONFIG_DIR").map_or_else(user_home, Ok)?;
+    let dir = absolute_env(CONFIG_ENV).map_or_else(user_home, Ok)?;
     Ok(dir.join(".claude.json"))
 }
 
 /// Adds the MCP entry, the hook when `hook`, and the allow rules for `notes`. An entry that
-/// differs is refused before anything changes, unless `force`. Returns the exit code.
+/// differs is refused before anything changes, unless `force`. Returns the exit code: 2 for
+/// a relative `CLAUDE_CONFIG_DIR`.
 pub(super) fn connect(force: bool, hook: bool, notes: Notes) -> u8 {
+    if let Err(error) = check_config_env() {
+        eprintln!("zerodb: {error}");
+        return 2;
+    }
     let prepared = (|| {
         let home = moved_home(Harness::ClaudeCode)?;
         let exe = binary()?;
@@ -123,8 +144,13 @@ pub(super) fn connect(force: bool, hook: bool, notes: Notes) -> u8 {
 }
 
 /// Removes the MCP entry when it is what zerodb writes, every hook group that runs zerodb's
-/// hook, and zerodb's allow rules. Returns the exit code.
+/// hook, and zerodb's allow rules. Returns the exit code: 2 for a relative
+/// `CLAUDE_CONFIG_DIR`.
 pub(super) fn disconnect() -> u8 {
+    if let Err(error) = check_config_env() {
+        eprintln!("zerodb: {error}");
+        return 2;
+    }
     let state = match state_file() {
         Ok(state) => state,
         Err(error) => {
@@ -221,13 +247,12 @@ fn updatable(entry: &Value) -> bool {
     command.is_some_and(Path::is_absolute) && entry["args"] == mcp_args()
 }
 
-/// Whether `entry` is what zerodb writes, for any absolute `zerodb` binary and any home.
+/// Whether `entry` is what zerodb writes, for any absolute binary path and any home. The
+/// binary's file name doesn't count, as an install may name it `zerodb-0.1.0`.
 fn written(entry: &Value) -> bool {
     let Some(entry) = entry.as_object() else { return false };
     let command = entry.get("command").and_then(Value::as_str).map(Path::new);
-    let zerodb = command.is_some_and(|command| {
-        command.is_absolute() && command.file_name() == Some(OsStr::new("zerodb"))
-    });
+    let zerodb = command.is_some_and(Path::is_absolute);
     let known = entry.keys().all(|key| ["type", "command", "args", "env"].contains(&key.as_str()));
     let stdio = entry.get("type").is_none_or(|kind| kind == "stdio");
     let env = entry
@@ -346,17 +371,19 @@ fn find_claude() -> Option<PathBuf> {
     })
 }
 
-/// Runs `claude` with `args` and stdin closed, for at most [`CLAUDE_TIMEOUT`]. An error
-/// ends with the last line `claude` printed on stderr.
+/// Runs `claude` with `args` and stdin closed, for at most [`CLAUDE_TIMEOUT`]. It runs in
+/// its own process group, so a timeout kills whatever it started too. An error ends with the
+/// last line `claude` printed on stderr.
 fn run_claude(claude: &Path, args: &[String]) -> Result<(), String> {
     let line = shell_line(args);
-    let mut child = Command::new(claude)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("{line} could not start: {error}"))?;
+    let mut command = Command::new(claude);
+    command.args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
+    command.process_group(0);
+    // zerodb reads an empty CLAUDE_CONFIG_DIR as unset, so `claude` must too.
+    if std::env::var_os(CONFIG_ENV).is_some_and(|dir| dir.is_empty()) {
+        command.env_remove(CONFIG_ENV);
+    }
+    let mut child = command.spawn().map_err(|error| format!("{line} could not start: {error}"))?;
     // Read on a thread, so a full pipe can't stall `claude` past the timeout.
     let (sender, receiver) = std::sync::mpsc::channel();
     if let Some(stderr) = child.stderr.take() {
@@ -372,6 +399,10 @@ fn run_claude(claude: &Path, args: &[String]) -> Result<(), String> {
             Ok(Some(status)) => break status,
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
             Ok(None) => {
+                // The group's id is the child's pid, and the child isn't reaped yet, so the
+                // id can't have been reused.
+                let group = rustix::process::Pid::from_child(&child);
+                let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(format!("{line} did not finish in 10 s"));
@@ -437,8 +468,8 @@ fn unquote(text: &str) -> Option<(String, &str)> {
     }
 }
 
-/// Whether `command` is a hook command zerodb writes, for any absolute `zerodb` binary and
-/// any home.
+/// Whether `command` is a hook command zerodb writes, for any absolute binary path and any
+/// home. The binary's file name doesn't count, as an install may name it `zerodb-0.1.0`.
 fn our_command(command: &str) -> bool {
     let parse = || {
         let (home, rest) = match command.strip_prefix(&format!("{HOME_ENV}=")) {
@@ -449,11 +480,9 @@ fn our_command(command: &str) -> bool {
             None => (None, command),
         };
         let (exe, rest) = unquote(rest)?;
-        let path = Path::new(&exe);
-        let zerodb = path.is_absolute() && path.file_name() == Some(OsStr::new("zerodb"));
         // Writing the command again for that binary and home must give the same text.
         let again = hook_command(&exe, home.as_deref());
-        (zerodb && rest == HOOK_ARGS && again == command).then_some(())
+        (Path::new(&exe).is_absolute() && rest == HOOK_ARGS && again == command).then_some(())
     };
     parse().is_some()
 }
