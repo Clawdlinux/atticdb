@@ -78,16 +78,17 @@ def collect(a: argparse.Namespace) -> dict[str, list[dict]]:
     groups: dict[str, list[dict]] = {k: [] for k in REF_KINDS}
     for offset, row in hf.sampled_rows(a.dataset, a.sample, a.seed, fetcher, Counter(), a.block):
         acc, info = ADAPTERS[a.dataset].trajectory(row, f"{a.dataset}:{offset}", keep_text=True)
-        last: dict[str, int] = {}
+        shown: dict[str, int] = {}  # object -> its newest tool output. References do not count.
         for t, x in enumerate(acc):
             if x.ref and t in info["notes"]:
                 note = info["notes"][t]
                 groups[x.sub].append({
                     "dataset": a.dataset, "row": offset, "step": t, "subtype": x.sub, "view_tokens": x.tokens,
-                    "accesses_since_view": t - last[x.obj], "view_excerpt": excerpt(note["view"]),
+                    "accesses_since_view": t - shown[x.obj], "view_excerpt": excerpt(note["view"]),
                     "action": note["action"] if len(note["action"]) <= 1500 else note["action"][:1500] + " [cut]",
                 })
-            last[x.obj] = t
+            if not x.ref:
+                shown[x.obj] = t
     return groups
 
 

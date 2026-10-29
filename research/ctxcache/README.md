@@ -226,6 +226,7 @@ It draws `--n` references from the same sample as the analysis, split evenly acr
 A small subtype passes its unused share on. Public sets only.
 Each row has the view's first and last 3 lines, each cut to 120 characters, and the later action, cut at 1,500.
 The `needed` (yes, no or partial) and `note` columns are left empty.
+`accesses_since_view` counts the accesses since a tool output last showed the view. References in between do not reset it.
 The sheet goes to `<cache-dir>/labels/<dataset>-n<N>-seed<S>.csv`. A path inside the repo is refused. Never commit a sheet.
 
 ## Sampling
