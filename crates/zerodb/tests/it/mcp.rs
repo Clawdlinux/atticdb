@@ -444,7 +444,7 @@ fn tool_calls_over_stdio() {
         }
     });
     let unknown = ["append", "--url", &lossy_url, "--content", "x", "--retry-deadline", "2500ms"];
-    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_zerodb"));
+    let mut command = support::command(env!("CARGO_BIN_EXE_zerodb"));
     command.args(unknown).current_dir(&dir.0).env("ZERODB_TOKEN", TOKEN_A);
     let (status, out) = support::Process::start(command.stdin(std::process::Stdio::null())).wait();
     assert_eq!(status.code(), Some(3), "unknown outcome: {out}");
@@ -700,7 +700,7 @@ fn launch_race_starts_one_server() {
 /// With no connection flags, the shell verbs create and use a per-user home, ignoring a stray
 /// `ZERODB_TOKEN` with a note. 4 parallel first runs all succeed and leave no temp config.
 /// One left by a killed run is ignored. `ZERODB_HOME` moves the home, and `HOME` stays
-/// empty. An empty `ZERODB_HOME` counts as unset.
+/// empty. It needs no `HOME`. An empty `ZERODB_HOME` counts as unset.
 #[test]
 fn no_flags_use_the_home() {
     let dir = Dir::new();
@@ -708,14 +708,16 @@ fn no_flags_use_the_home() {
     let mut rows = vec![];
     if cfg!(target_os = "linux") {
         let xdg = Some(("XDG_DATA_HOME", dir.0.join("x")));
-        rows.push(("XDG_DATA_HOME", dir.0.clone(), xdg, dir.0.join("x/zerodb")));
+        rows.push(("XDG_DATA_HOME", Some(dir.0.clone()), xdg, dir.0.join("x/zerodb")));
     }
     let home =
         if cfg!(target_os = "macos") { "Library/Application Support" } else { ".local/share" };
-    rows.push(("HOME", dir.0.clone(), None, dir.0.join(home).join("zerodb")));
-    rows.push((stray_row, dir.0.join("t"), None, dir.0.join("t").join(home).join("zerodb")));
-    let moved = Some(("ZERODB_HOME", dir.0.join("z")));
-    rows.push(("ZERODB_HOME", dir.0.join("f"), moved, dir.0.join("z")));
+    rows.push(("HOME", Some(dir.0.clone()), None, dir.0.join(home).join("zerodb")));
+    let t = dir.0.join("t");
+    rows.push((stray_row, Some(t.clone()), None, t.join(home).join("zerodb")));
+    let moved = |name| Some(("ZERODB_HOME", dir.0.join(name)));
+    rows.push(("ZERODB_HOME", Some(dir.0.join("f")), moved("z"), dir.0.join("z")));
+    rows.push(("ZERODB_HOME, HOME unset", None, moved("y"), dir.0.join("y")));
     let _holders = Holders(rows.iter().map(|(.., home)| home.join("data")).collect());
     for (case, home_env, var, home) in rows {
         let staging = home.join("data/.zs.01234567/s");
@@ -724,16 +726,16 @@ fn no_flags_use_the_home() {
             "{case}: {} is too deep, set ZERODB_TEST_DIR to a short directory",
             staging.display()
         );
-        std::fs::create_dir_all(&home_env).unwrap();
+        home_env.iter().for_each(|home_env| std::fs::create_dir_all(home_env).unwrap());
         if case == stray_row {
             std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&home).unwrap();
             std::fs::write(home.join(stray), "").unwrap();
         }
         let start = |verb: &[&str]| {
-            let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_zerodb"));
-            command.args(verb).current_dir(&dir.0).env("HOME", &home_env);
-            command.env("ZERODB_TOKEN", "x").env_remove("XDG_DATA_HOME").env("ZERODB_HOME", "");
-            command.envs(var.iter().map(|(name, value)| (name, value)));
+            let mut command = support::command(env!("CARGO_BIN_EXE_zerodb"));
+            command.args(verb).current_dir(&dir.0).env("ZERODB_TOKEN", "x");
+            command.env_remove("HOME").envs(home_env.iter().map(|home_env| ("HOME", home_env)));
+            command.env("ZERODB_HOME", "").envs(var.iter().map(|(name, value)| (name, value)));
             Process::start(command.stdin(std::process::Stdio::null()))
         };
         let note = "zerodb: ignoring ZERODB_TOKEN: no --url, --data-dir or --config given, so \
@@ -763,7 +765,7 @@ fn no_flags_use_the_home() {
             let found = std::fs::metadata(home.join(path)).unwrap().mode() & 0o777;
             assert_eq!(found, mode, "{case}: {path:?} mode");
         }
-        if !home.starts_with(&home_env) {
+        if let Some(home_env) = home_env.filter(|home_env| !home.starts_with(home_env)) {
             let left = std::fs::read_dir(&home_env).unwrap().count();
             assert_eq!(left, 0, "{case}: nothing in HOME");
         }
@@ -777,10 +779,9 @@ fn no_flags_use_the_home() {
     ];
     for (flags, zerodb_home, code, says) in rows {
         let (case, home_env) = (format!("{flags:?} ZERODB_HOME={zerodb_home:?}"), dir.0.join("u"));
-        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_zerodb"));
+        let mut command = support::command(env!("CARGO_BIN_EXE_zerodb"));
         command.arg("recent").args(flags).current_dir(&dir.0).env("HOME", &home_env);
-        command.env_remove("ZERODB_TOKEN").env_remove("XDG_DATA_HOME");
-        command.env("ZERODB_HOME", zerodb_home);
+        command.env_remove("ZERODB_TOKEN").env("ZERODB_HOME", zerodb_home);
         let (status, out) = Process::start(command.stdin(std::process::Stdio::null())).wait();
         assert_eq!(status.code(), Some(code), "{case}: {out}");
         assert!(out.contains(says), "{case}: {out}");

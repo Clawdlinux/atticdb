@@ -1,7 +1,7 @@
-use crate::support::{chmod, files, Dir, Process};
+use crate::support::{self, chmod, files, Dir, Process};
 use serde_json::{json, Value};
 use std::os::unix::fs::MetadataExt;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// `connect` adds an owner-only file, a rerun writes nothing, and an older entry is updated.
 /// An entry with connection flags is replaced only with `--force`. `disconnect` removes only
@@ -42,13 +42,8 @@ fn connect_edits_only_the_zerodb_entry() {
         let (file, mut printed) = (home.join(file), String::new());
         let parent = file.parent().unwrap().to_owned();
         let mut run = |args: &[&str]| {
-            let mut command = Command::new(env!("CARGO_BIN_EXE_zerodb"));
-            command.args(args).current_dir(&dir.0).env("HOME", &home);
-            for var in
-                ["COPILOT_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "ZERODB_HOME", "ZERODB_TOKEN"]
-            {
-                command.env_remove(var);
-            }
+            let mut command = support::command(env!("CARGO_BIN_EXE_zerodb"));
+            command.args(args).current_dir(&dir.0).env("HOME", &home).env_remove("ZERODB_TOKEN");
             command.envs(var.map(|var| (var, home.join("c"))));
             let (status, out) = Process::start(command.stdin(Stdio::null())).wait();
             printed.push_str(&out);
@@ -160,7 +155,7 @@ fn connect_edits_only_the_zerodb_entry() {
         assert!(!seen.any(|bytes| bytes.windows(token.len()).any(|w| w == token)), "{case}: leak");
         assert_eq!(files(&home_dir.join("data")).len(), 0, "{case}: no server started");
     }
-    let mut command = Command::new(env!("CARGO_BIN_EXE_zerodb"));
+    let mut command = support::command(env!("CARGO_BIN_EXE_zerodb"));
     let (status, out) =
         Process::start(command.args(["connect", "emacs"]).env("HOME", &dir.0).stdin(Stdio::null()))
             .wait();
@@ -187,13 +182,8 @@ fn connect_writes_the_session_start_hook() {
         let hooks = var.map_or(home.join(".copilot"), |_| home.join("c")).join("hooks");
         let file = hooks.join("zerodb.json");
         let run = |args: &[&str]| {
-            let mut command = Command::new(&exe);
-            command.args(args).current_dir(&dir.0).env("HOME", &home);
-            for var in
-                ["COPILOT_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "ZERODB_HOME", "ZERODB_TOKEN"]
-            {
-                command.env_remove(var);
-            }
+            let mut command = support::command(&exe);
+            command.args(args).current_dir(&dir.0).env("HOME", &home).env_remove("ZERODB_TOKEN");
             command.envs(var.map(|var| (var, home.join("c"))));
             let (status, out) = Process::start(command.stdin(Stdio::null())).wait();
             assert_eq!(status.code(), Some(0), "{var:?} {args:?}: {out}");
@@ -242,9 +232,8 @@ fn connect_writes_the_session_start_hook() {
         }
     }
     // The command runs in `sh` as the harness runs it.
-    let mut sh = Command::new("sh");
+    let mut sh = support::command("sh");
     sh.args(["-c", &bash]).env("HOME", dir.0.join("0")).stdin(Stdio::null());
-    sh.env_remove("XDG_DATA_HOME").env_remove("ZERODB_HOME");
     let (status, out) = Process::start(&mut sh).wait();
     assert_eq!((status.code(), out.lines().next()), (Some(0), Some("{}")), "{out}");
 }

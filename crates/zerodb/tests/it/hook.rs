@@ -68,7 +68,7 @@ fn session_start_prints_the_memory_block() {
         let cwd = if session.is_empty() { home.join("wt") } else { home.clone() };
         args.extend(["--agent", agent].iter().filter(|_| !agent.is_empty()));
         args.extend(["--session", session].iter().filter(|_| !session.is_empty()));
-        let (code, _, err) = zerodb(&home, &cwd, &args, b"", 0);
+        let (code, _, err) = zerodb(&home, &cwd, &args, &[], b"", 0);
         assert_eq!(code, Some(0), "{args:?}: {err}");
     }
     // A symlinked cwd names the repo it points into, as the adapter's `current_dir` does.
@@ -86,7 +86,8 @@ fn session_start_prints_the_memory_block() {
         &note[..300]
     );
     for chat in ["link", "wt"] {
-        let out: Value = serde_json::from_str(&hook(&home, &cwd(&home.join(chat)), 0).0).unwrap();
+        let out: Value =
+            serde_json::from_str(&hook(&home, &cwd(&home.join(chat)), 0, &[]).0).unwrap();
         assert_eq!(out, json!({"additionalContext": block}), "{chat}");
     }
 
@@ -95,7 +96,7 @@ fn session_start_prints_the_memory_block() {
     for n in 0..100 {
         seed(&home, &["fact", "set", "--key", &format!("repo/big/{n:03}"), "--content", &content]);
     }
-    let out: Value = serde_json::from_str(&hook(&home, &cwd(&home.join("big")), 0).0).unwrap();
+    let out: Value = serde_json::from_str(&hook(&home, &cwd(&home.join("big")), 0, &[]).0).unwrap();
     let block = out["additionalContext"].as_str().unwrap();
     let length = block.chars().count();
     assert!((6_000 - 320..=6_000).contains(&length), "{length} characters");
@@ -119,11 +120,13 @@ fn session_start_prints_nothing_on_errors() {
     chmod(&data_dir(&refused), 0o755);
     let too_long = format!(r#"{{"cwd": "{}"}}"#, "a".repeat(2 << 20));
     let (late, stop) = ("less than 2 s left before the deadline", "stopped at 4 s");
+    let relative = "relative ZERODB_HOME";
     let rows = [
         ("not JSON", &empty, "nope".to_owned(), 0, 0..5_000, ""),
         ("no cwd", &empty, r#"{"dir": "/tmp"}"#.to_owned(), 0, 0..5_000, ""),
         ("over 1 MiB", &empty, too_long, 0, 0..5_000, ""),
         ("no memory", &empty, cwd(&empty.join("repo")), 0, 0..5_000, ""),
+        (relative, &empty, cwd(&empty.join("repo")), 0, 0..5_000, "must be an absolute path"),
         ("data directory mode 0755", &refused, cwd(&refused.join("repo")), 0, 0..5_000, ""),
         ("1.5 s per read", &slow, cwd(&slow.join("repo")), 0, 1_400..5_000, late),
         // The budget counts from the start, so the first read is already late. That holds
@@ -133,8 +136,10 @@ fn session_start_prints_nothing_on_errors() {
     ];
     for (case, home, stdin, delay, range, says) in rows {
         std::fs::create_dir_all(home).unwrap();
+        // That row alone sets ZERODB_HOME.
+        let env: &[_] = if case == relative { &[("ZERODB_HOME", "rel")] } else { &[] };
         let started = Instant::now();
-        let (out, err) = hook(home, &stdin, delay);
+        let (out, err) = hook(home, &stdin, delay, env);
         let elapsed = started.elapsed();
         assert_eq!(out, "{}\n", "{case}");
         assert!(range.contains(&(elapsed.as_millis() as u64)), "{case}: {elapsed:?}");
