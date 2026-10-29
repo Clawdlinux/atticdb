@@ -355,6 +355,7 @@ function pagerFoot(foot, label, load, end) {
 // Newest-first paging with an exclusive cursor. An empty page with a cursor means the store hit its
 // visit cap, so ask again from that cursor before showing anything.
 function pager({ list, foot, get, row, noun, onFirst, emptyLines }) {
+  const id = renderId;
   let cursor = null;
   let shown = 0;
   let total = null;
@@ -368,7 +369,12 @@ function pager({ list, foot, get, row, noun, onFirst, emptyLines }) {
     try {
       let page;
       let tries = 0;
-      do { page = await get(cursor); cursor = page.next; tries++; } while (!page.items.length && cursor !== null && tries < SKIP_EMPTY);
+      do {
+        page = await get(cursor);
+        if (id !== renderId) return;
+        cursor = page.next;
+        tries++;
+      } while (!page.items.length && cursor !== null && tries < SKIP_EMPTY);
       const first = !started;
       if (first) { started = true; put(done(list)); }
       list.append(...page.items.map(row));
@@ -377,6 +383,7 @@ function pager({ list, foot, get, row, noun, onFirst, emptyLines }) {
       if (!shown && cursor === null) { empty(list, ...emptyLines); foot.hidden = true; return; }
       paint();
     } catch (err) {
+      if (id !== renderId) return;
       if (!started) { failed(list, err); foot.hidden = true; } else if (ui) ui.error(err); else throw err;
     }
   }
@@ -403,29 +410,55 @@ function groupOf(key) {
   const i = key.indexOf('/');
   return i > 0 ? key.slice(0, i + 1) : '';
 }
-async function allFacts(prefix) {
-  const out = [];
-  let after;
-  for (let i = 0; i < 50; i++) {
-    const page = await api('v1/facts/list', { prefix, after, limit: 1000 });
-    out.push(...page.facts);
-    if (page.next === null) break;
+// Reads a list page by page, at most 50 pages at a time: about 50 MiB of facts, or 50,000 sessions. Returns the
+// items and the cursor to go on from, which is null once the list is complete. A caller left with a cursor says
+// the list is incomplete and offers the rest. Once the user leaves the screen the reads stop, and the caller,
+// which checks the render too, drops what came back.
+const BATCH = 50;
+async function allFacts(after) {
+  const id = renderId;
+  const facts = [];
+  for (let i = 0; i < BATCH && id === renderId; i++) {
+    const page = await api('v1/facts/list', { prefix: '', after, limit: 1000 });
+    facts.push(...page.facts);
+    if (page.next === null) return { facts, next: null };
     after = page.next;
   }
-  return out;
+  return { facts, next: after };
 }
-async function allSessions() {
+async function allSessions(after) {
+  const id = renderId;
   const rows = [];
-  let after = null;
   let total = { sessions: 0, turns: 0 };
-  for (let i = 0; i < 50; i++) {
+  for (let i = 0; i < BATCH && id === renderId; i++) {
     const page = await api('v1/sessions', after ? { limit: 1000, after_agent: after.agent, after_session: after.session } : { limit: 1000 });
     rows.push(...page.sessions);
     total = page.total;
-    if (page.next === null) break;
+    if (page.next === null) return { rows, total, next: null };
     after = page.next;
   }
-  return { rows, total };
+  return { rows, total, next: after };
+}
+// A cursor past the keys under `prefix`: keys sort by their bytes, and U+10FFFF is the largest character. Null
+// when the cursor would pass the store's 1024 bytes, so the caller reads on from where it was.
+function pastGroup(prefix) {
+  const after = prefix + '\u{10FFFF}';
+  return new TextEncoder().encode(after).length <= 1024 ? after : null;
+}
+// The repos with a fact under repo/<repo>/, in at most 50 pages like the lists above. A page that ends inside a
+// repo goes on past it, so a repo's facts, however many or large, cost no more reads once it is known.
+async function factRepos() {
+  const id = renderId;
+  const names = new Set();
+  let after;
+  for (let i = 0; i < BATCH && id === renderId; i++) {
+    const page = await api('v1/facts/list', { prefix: 'repo/', after, limit: 1000 });
+    for (const f of page.facts) { const r = repoOf({ kind: 'fact', key: f.key }); if (r) names.add(r); }
+    if (page.next === null) return { names, next: null };
+    const m = /^repo\/[^/]+\//.exec(page.next);
+    after = (m && pastGroup(m[0])) || page.next;
+  }
+  return { names, next: after };
 }
 
 // ---------- the chat-start block: exactly what the agent gets, with its size against the cap ----------
@@ -466,13 +499,16 @@ function sections(text) {
 }
 // Renders the block for one repo into a card body. Returns the API answer, or null when it failed.
 async function showBlock(body, repo, copyInto, more) {
+  const id = renderId;
   blockSkeleton(body);
   let b;
   try { b = await api('block', { repo }); } catch (err) {
+    if (id !== renderId) return null;
     if (err instanceof ApiError && err.code === 'not_home') { empty(body, ['The chat-start hook reads only the home store. This studio reads another store, so no block applies.']); return null; }
     failed(body, err);
     return null;
   }
+  if (id !== renderId) return null;
   if (b.block === null) {
     empty(body, ['A new chat in ', h('b', null, repo), ' starts with no memory block. Agents add one by saving facts under ', code(`repo/${repo}/`), ' or turns in session ', h('b', null, repo), '.']);
     return b;
@@ -505,11 +541,14 @@ async function overview(main) {
   storeLine(line);
   busy(list, 8);
   blockSkeleton(chat.body);
+  const id = renderId;
   let records;
   try { records = (await api('v1/records', { limit: 8, max_bytes: EIGHT_MIB })).records; } catch (err) {
+    if (id !== renderId) return;
     failed(list, err); failed(chat.body, err); say(finding, errorShort(err));
     return;
   }
+  if (id !== renderId) return;
   if (!records.length) {
     empty(list, ['Nothing saved yet. To give an agent this memory:'], h('ol', { class: 'steps' },
       h('li', null, 'Run ', code('zerodb connect vscode'), ' or ', code('zerodb connect copilot'), ' in a terminal.'),
@@ -534,6 +573,7 @@ async function overview(main) {
   if (!repo) { empty(chat.body, ['The newest records name no repo. Pick one on ', h('a', { class: 'link', href: href('chat-start') }, 'Chat start'), '.']); return; }
   put(chat.heading, 'Next chat in ', repo);
   const info = await infoReady;
+  if (id !== renderId) return;
   if (info && info.store !== 'home') { empty(chat.body, ['The chat-start hook reads only the home store. This studio reads another store.']); return; }
   const copy = h('span');
   put(actions, copy);
@@ -541,10 +581,12 @@ async function overview(main) {
 }
 
 async function storeLine(line) {
+  const id = renderId;
   const head = h('h2', null, 'Store');
   put(line, head, h('span', { class: 'sk short', 'aria-hidden': 'true' }));
   try {
     const [s, ses] = await Promise.all([api('v1/stats'), api('v1/sessions', { limit: 1 })]);
+    if (id !== renderId) return;
     const item = (label, v) => h('span', { class: 'item' }, label, h('b', { class: v === 0 ? 'zero' : null }, n(v)));
     put(line, head,
       h('span', { class: 'item' }, h('span', { class: s.health === 'ok' ? 'dot' : 'dot bad' }), s.health === 'ok' ? 'Healthy' : `Health: ${s.health}`),
@@ -552,6 +594,7 @@ async function storeLine(line) {
       h('a', { class: 'link', href: href('health') }, 'Open health'));
   } catch (err) {
     if (!(err instanceof ApiError)) throw err;
+    if (id !== renderId) return;
     put(line, head, h('p', null, statsRefused(err) ? STATS_REFUSED : errorShort(err)));
   }
 }
@@ -575,9 +618,10 @@ async function logScreen(main, p) {
     emptyLines: [kind === 'fact' ? ['No fact revisions yet.'] : kind === 'turn' ? ['No turns yet.'] : nothingSaved()],
   });
   // the tab counts need stats, which count the whole store: only shown for a store of 1 tenant
+  const id = renderId;
   try {
     const [s, ses] = await Promise.all([api('v1/stats'), api('v1/sessions', { limit: 1 })]);
-    if (s.tenants > 1) return;
+    if (id !== renderId || s.tenants > 1) return;
     // fact_revisions counts the revisions the store keeps: all of a key's up to 17, then its newest 17 or 18.
     // The log keeps every one. A key past 17 keeps 17 and every other key 1 or more, so below facts + 16 they match.
     if (s.fact_revisions >= s.facts + 16) {
@@ -605,9 +649,11 @@ async function searchScreen(main, p) {
     if (location.hash === to) redraw(); else location.hash = to;
   });
   main.append(form);
+  // every Search screen starts in its box, so a search can be changed and sent again at once
+  input.focus();
+  input.setSelectionRange(q.length, q.length);
   if (!q) {
     note(finding, 'Find a note or a fact. Every word must appear in it, in any case. A plural also finds its singular.');
-    input.focus();
     return;
   }
   const words = q.toLowerCase().split(/\s+/).filter(Boolean);
@@ -628,6 +674,7 @@ async function searchScreen(main, p) {
 
 // 3. Sessions: which sessions hold turns, by agent and by name
 async function sessionsScreen(main) {
+  const id = renderId;
   const finding = titleRow(main, 'Sessions');
   const strip = h('div', { class: 'agents', role: 'group', 'aria-label': 'Show one agent' });
   const filter = h('input', { class: 'input', type: 'search', placeholder: 'Filter by session name', 'aria-label': 'Filter sessions by name', autocomplete: 'off', spellcheck: 'false' });
@@ -639,30 +686,53 @@ async function sessionsScreen(main) {
   busy(strip, 1);
   busy(list.body, 6);
   let data;
-  try { data = await allSessions(); } catch (err) { failed(list.body, err); strip.remove(); say(finding, errorShort(err)); return; }
-  const { rows, total } = data;
-  if (!rows.length) { empty(list.body, nothingSaved()); strip.remove(); note(finding, 'No sessions yet.'); return; }
-  const byAgent = new Map();
-  for (const s of rows) {
-    const a = byAgent.get(s.agent) || { sessions: 0, turns: 0 };
-    a.sessions++; a.turns += s.turns; byAgent.set(s.agent, a);
-  }
-  say(finding, `${count(total.sessions, 'session')} hold ${count(total.turns, 'turn')}, from ${count(byAgent.size, 'agent')}.`);
+  try { data = await allSessions(); } catch (err) { if (id !== renderId) return; failed(list.body, err); strip.remove(); say(finding, errorShort(err)); return; }
+  if (id !== renderId) return;
+  const rows = data.rows;
+  let { total, next } = data;
+  if (!rows.length && next === null) { empty(list.body, nothingSaved()); strip.remove(); note(finding, 'No sessions yet.'); return; }
   let agent = null;
-  const cells = [[null, 'All agents', total.sessions, total.turns], ...[...byAgent].map(([a, v]) => [a, a, v.sessions, v.turns])];
-  const buttons = cells.map(([key, label, ses, turns]) => {
-    const b = h('button', { class: 'agent', type: 'button', 'aria-pressed': String(key === agent) },
-      h('span', { class: 'agent-name' }, label),
-      h('span', { class: 'agent-value' }, fig(n(ses)), ses === 1 ? 'session' : 'sessions'),
-      h('span', { class: 'agent-value' }, count(turns, 'turn')));
-    b.addEventListener('click', () => {
-      agent = key;
-      buttons.forEach((x, i) => x.setAttribute('aria-pressed', String(cells[i][0] === agent)));
-      paint();
+  let more = null;
+  // Until the list is complete, the agent strip and the filter cover only the sessions loaded, and the foot says so.
+  const build = () => {
+    const byAgent = new Map();
+    for (const s of rows) {
+      const a = byAgent.get(s.agent) || { sessions: 0, turns: 0 };
+      a.sessions++; a.turns += s.turns; byAgent.set(s.agent, a);
+    }
+    if (next === null) say(finding, `${count(total.sessions, 'session')} hold ${count(total.turns, 'turn')}, from ${count(byAgent.size, 'agent')}.`);
+    else say(finding, `${count(total.sessions, 'session')} hold ${count(total.turns, 'turn')}. The first ${n(rows.length)} are loaded.`);
+    const cells = [[null, 'All agents', total.sessions, total.turns], ...[...byAgent].map(([a, v]) => [a, a, v.sessions, v.turns])];
+    const buttons = cells.map(([key, label, ses, turns]) => {
+      const b = h('button', { class: 'agent', type: 'button', 'aria-pressed': String(key === agent) },
+        h('span', { class: 'agent-name' }, label),
+        h('span', { class: 'agent-value' }, fig(n(ses)), ses === 1 ? 'session' : 'sessions'),
+        h('span', { class: 'agent-value' }, count(turns, 'turn')));
+      b.addEventListener('click', () => {
+        agent = key;
+        buttons.forEach((x, i) => x.setAttribute('aria-pressed', String(cells[i][0] === agent)));
+        paint();
+      });
+      return b;
     });
-    return b;
-  });
-  put(done(strip), buttons);
+    put(done(strip), buttons);
+    if (next === null && !more) return;
+    if (!more) {
+      const foot = h('div', { class: 'card-foot' });
+      list.el.append(foot);
+      more = pagerFoot(foot, 'Load more sessions', async () => {
+        try {
+          const page = await allSessions(next);
+          if (id !== renderId) return;
+          rows.push(...page.rows);
+          ({ total, next } = page);
+          build();
+          paint();
+        } catch (err) { if (id === renderId) more.error(err); }
+      }, null);
+    }
+    more.show(next === null ? `Showing all ${count(total.sessions, 'session')}.` : `Showing ${n(rows.length)} of ${count(total.sessions, 'session')}. The rest are not loaded, so counts by agent cover these.`, next !== null);
+  };
   put(done(list.body), table);
   const paint = () => {
     const f = filter.value.trim().toLowerCase();
@@ -674,6 +744,7 @@ async function sessionsScreen(main) {
       h('td', null, h('a', { class: 'row-link', href: href('session', { agent: s.agent, session: s.session }) }, s.session)),
       h('td', null, s.agent), h('td', { class: 'n' }, n(s.turns)))));
   };
+  build();
   filter.addEventListener('input', paint);
   paint();
 }
@@ -700,44 +771,76 @@ async function sessionScreen(main, p) {
   main.append(c.el);
   busy(list, 4);
   const id = renderId;
+  // the turns shown are low to high, of the session's total
   let low = 0;
+  let high = 0;
   let total = 0;
-  let ui = null;
-  const paint = () => {
-    const shown = total - low + 1;
-    ui = ui || pagerFoot(foot, 'Older turns', async () => { try { await older(); paint(); } catch (err) { ui.error(err); } }, null);
-    ui.show(low > 1 ? `Showing ${n(shown)} of ${count(total, 'turn')}.` : `Showing all ${count(total, 'turn')}.`, low > 1);
-  };
-  async function older() {
-    const since = Math.max(1, low - 50);
+  let older = null;
+  let newer = null;
+  // Turns from seq `from` to `to`, oldest first. Since keeps the oldest, so a cut answer goes on from its last turn.
+  // Null when the user has left the screen.
+  async function span(from, to) {
     const got = [];
-    for (let from = since; from < low;) {
-      const w = await api('v1/window', { agent, session: name, since_seq: from, limit: low - from, max_bytes: EIGHT_MIB });
+    for (let at = from; at <= to;) {
+      const w = await api('v1/window', { agent, session: name, since_seq: at, limit: to - at + 1, max_bytes: EIGHT_MIB });
+      if (id !== renderId) return null;
       got.push(...w.turns);
       if (!w.truncated || !w.turns.length) break;
-      from = w.turns[w.turns.length - 1].seq + 1;
+      at = w.turns[w.turns.length - 1].seq + 1;
     }
-    if (!got.length) { low = 1; return; }
-    list.append(...got.slice().reverse().map((t) => turnItem(t, want)));
-    low = got[0].seq;
+    return got;
   }
+  const paint = () => {
+    older = older || pagerFoot(foot, 'Older turns', async () => {
+      try {
+        const got = await span(Math.max(1, low - 50), low - 1);
+        if (!got) return;
+        list.append(...got.slice().reverse().map((t) => turnItem(t, want)));
+        low = got.length ? got[0].seq : 1;
+        paint();
+      } catch (err) { if (id === renderId) older.error(err); }
+    }, null);
+    older.show(low === 1 && high === total ? `Showing all ${count(total, 'turn')}.` : `Showing ${n(high - low + 1)} of ${count(total, 'turn')}.`, low > 1);
+    if (high === total && !newer) return;
+    if (!newer) {
+      const bar = h('div', { class: 'newer' });
+      list.before(bar);
+      newer = pagerFoot(bar, 'Newer turns', async () => {
+        try {
+          const got = await span(high + 1, Math.min(total, high + 50));
+          if (!got) return;
+          list.prepend(...got.slice().reverse().map((t) => turnItem(t, want)));
+          high = got.length ? got[got.length - 1].seq : total;
+          paint();
+        } catch (err) { if (id === renderId) newer.error(err); }
+      }, null);
+    }
+    newer.show(high < total ? `${count(total - high, 'newer turn')} not shown.` : 'These are the newest turns.', high < total);
+  };
   try {
     // a window whose newest turn alone passes max_bytes holds no turns, and a turn can pass the 1 MiB default
     const w = await api('v1/window', { agent, session: name, last: 50, max_bytes: EIGHT_MIB });
+    if (id !== renderId) return;
     if (!w.turns.length) { empty(list, ['No turns in this session.']); foot.remove(); note(finding, `No turns from ${agent} in this session.`); return; }
-    put(done(list), ...w.turns.slice().reverse().map((t) => turnItem(t, want)));
-    low = w.turns[0].seq;
     const newest = w.turns[w.turns.length - 1];
     total = newest.seq;
+    let shown = w.turns;
+    // a link to a turn older than these reads a window around it, however far back it is
+    if (want !== null && want < shown[0].seq) {
+      const at = Math.max(1, want - 25);
+      shown = await span(at, Math.min(total, at + 49));
+      if (!shown) return;
+      if (!shown.length) shown = w.turns;
+    }
+    put(done(list), ...shown.slice().reverse().map((t) => turnItem(t, want)));
+    low = shown[0].seq;
+    high = shown[shown.length - 1].seq;
     say(finding, h('span', { class: 'who' }, agent), total === 1
       ? ` saved 1 turn here, ${whenWords(newest.commit_time_ns)}.`
       : ` saved ${count(total, 'turn')} here. The newest came ${whenWords(newest.commit_time_ns)}, ${ago(newest.commit_time_ns)}.`);
-    // a link to one turn: page back until it shows, then bring it into view
-    for (let i = 0; want !== null && want < low && i < 100 && id === renderId; i++) await older();
     paint();
-    const target = list.querySelector('[aria-current="true"]');
-    if (target && id === renderId) target.scrollIntoView({ block: 'center' });
-  } catch (err) { failed(list, err); foot.remove(); say(finding, errorShort(err)); }
+    list.querySelector('[aria-current="true"]')?.scrollIntoView({ block: 'center' });
+  } catch (err) { if (id !== renderId) return; failed(list, err); foot.remove(); say(finding, errorShort(err)); }
 }
 
 // 4. Facts: the current value of every key, grouped by prefix
@@ -750,36 +853,76 @@ function factRow(f, group) {
     h('span', { class: 'rec-when' }, timeCell(f.commit_time_ns), h('span', { class: 'lsn' }, 'LSN ' + f.lsn)));
 }
 async function factsScreen(main) {
+  const id = renderId;
   const finding = titleRow(main, 'Facts');
   const holder = card('Current values');
   main.append(holder.el);
   busy(holder.body, 6);
-  let facts;
-  try { facts = await allFacts(''); } catch (err) { failed(holder.body, err); say(finding, errorShort(err)); return; }
-  if (!facts.length) {
+  let data;
+  try { data = await allFacts(); } catch (err) { if (id !== renderId) return; failed(holder.body, err); say(finding, errorShort(err)); return; }
+  if (id !== renderId) return;
+  const facts = data.facts;
+  let next = data.next;
+  if (!facts.length && next === null) {
     empty(holder.body, ['No facts yet. An agent saves one with the ', code('fact_set'), ' tool, under ', code('user/'), ' for rules or ', code('repo/<repo>/'), ' for a repo.']);
     note(finding, 'No facts yet.');
     return;
   }
-  const groups = new Map();
-  for (const f of facts) {
-    const g = groupOf(f.key);
-    if (!groups.has(g)) groups.set(g, []);
-    groups.get(g).push(f);
-  }
   const rank = (g) => (g === 'user/' ? 0 : g.startsWith('repo/') ? 1 : g ? 2 : 3);
-  const order = [...groups.keys()].sort((a, b) => rank(a) - rank(b) || (a < b ? -1 : a > b ? 1 : 0));
-  holder.el.replaceWith(...order.map((g) => {
-    const c = card(g ? code(g) : 'Keys with no prefix', h('span', { class: 'card-note' }, count(groups.get(g).length, 'fact')));
-    c.body.append(h('ol', { class: 'rows' }, groups.get(g).map((f) => factRow(f, g))));
-    return c.el;
-  }));
-  say(finding, `${count(facts.length, 'fact')} hold a value, in ${count(order.length, 'group')}.`);
+  let cards = [holder.el];
+  let more = null;
+  let moreCard = null;
+  // Until the list is complete the groups show the facts loaded and a last card offers the rest. Only a complete
+  // list tells how many keys were deleted.
+  const paint = () => {
+    const groups = new Map();
+    for (const f of facts) {
+      const g = groupOf(f.key);
+      if (!groups.has(g)) groups.set(g, []);
+      groups.get(g).push(f);
+    }
+    const order = [...groups.keys()].sort((a, b) => rank(a) - rank(b) || (a < b ? -1 : a > b ? 1 : 0));
+    const fresh = order.map((g) => {
+      const c = card(g ? code(g) : 'Keys with no prefix', h('span', { class: 'card-note' }, count(groups.get(g).length, 'fact')));
+      c.body.append(h('ol', { class: 'rows' }, groups.get(g).map((f) => factRow(f, g))));
+      return c.el;
+    });
+    const anchor = cards[0] || moreCard;
+    if (anchor) anchor.before(...fresh); else main.append(...fresh);
+    for (const el of cards) el.remove();
+    cards = fresh;
+    if (next !== null) {
+      say(finding, `The first ${count(facts.length, 'fact')} with a value, in ${count(order.length, 'group')}. More keys follow.`);
+      if (!more) {
+        const foot = h('div', { class: 'card-foot' });
+        moreCard = h('section', { class: 'card', 'aria-label': 'More facts' }, foot);
+        main.append(moreCard);
+        more = pagerFoot(foot, 'Load more facts', async () => {
+          try {
+            const page = await allFacts(next);
+            if (id !== renderId) return;
+            facts.push(...page.facts);
+            next = page.next;
+            paint();
+          } catch (err) { if (id === renderId) more.error(err); }
+        }, null);
+      }
+      more.show(`Showing ${count(facts.length, 'fact')}. The rest are not loaded.`, true);
+      return;
+    }
+    say(finding, `${count(facts.length, 'fact')} hold a value, in ${count(order.length, 'group')}.`);
+    if (more) more.show(`Showing all ${count(facts.length, 'fact')}.`, false);
+    deleted();
+  };
   // stats count every key the store has seen, deleted ones too (17 keys for 16 values in the seed)
-  try {
-    const s = await api('v1/stats');
-    if (s.tenants <= 1 && s.facts > facts.length) finding.append(` ${count(s.facts - facts.length, 'more key')} ${s.facts - facts.length === 1 ? 'was' : 'were'} deleted.`);
-  } catch (err) { if (!(err instanceof ApiError)) throw err; }
+  const deleted = async () => {
+    try {
+      const s = await api('v1/stats');
+      if (id !== renderId) return;
+      if (s.tenants <= 1 && s.facts > facts.length) finding.append(` ${count(s.facts - facts.length, 'more key')} ${s.facts - facts.length === 1 ? 'was' : 'were'} deleted.`);
+    } catch (err) { if (!(err instanceof ApiError)) throw err; }
+  };
+  paint();
 }
 
 // 4b. Fact: the current value and every revision, newest first, deletes marked
@@ -795,12 +938,15 @@ async function factScreen(main, p) {
   siblings(near, key, group);
   busy(now.body, 1);
   busy(revs.body, 3);
+  const id = renderId;
   let got;
   let hist;
   try { [got, hist] = await Promise.all([api('v1/facts/get', { key }), api('v1/facts/history', { key, max_bytes: EIGHT_MIB })]); } catch (err) {
+    if (id !== renderId) return;
     failed(now.body, err); failed(revs.body, err); say(finding, errorShort(err));
     return;
   }
+  if (id !== renderId) return;
   const list = hist.revisions;
   if (!list.length) { empty(now.body, ['No fact has the key ', code(key), '.']); revs.el.remove(); note(finding, 'No such fact.'); return; }
   const last = list[0];
@@ -827,21 +973,38 @@ async function factScreen(main, p) {
     hist.truncated ? h('p', { class: 'chart-note' }, 'Older revisions are not listed here. ', h('a', { class: 'link', href: href('log', { kind: 'fact' }) }, 'The log'), ' keeps every one.') : null);
 }
 
+// Up to 6 other keys of the fact's group. Keys with no prefix lie between whole groups of prefixed keys, so for them
+// a page that ends inside a group goes on past it. This reads until a 7th turns up or the list ends, at most 20 pages.
 async function siblings(near, key, group) {
+  const id = renderId;
   busy(near.body, 3);
   try {
-    const page = await api('v1/facts/list', { prefix: group, limit: 7 });
-    const others = page.facts.filter((f) => f.key !== key && groupOf(f.key) === group).slice(0, 6);
-    if (!others.length) { empty(near.body, ['No other fact shares this prefix.']); return; }
-    put(done(near.body), h('ol', { class: 'rows' }, others.map((f) => factRow(f, group))),
-      page.next !== null ? h('p', { class: 'chart-note' }, 'More keys share this prefix. ', h('a', { class: 'link', href: href('facts') }, 'See them all'), '.') : null);
-  } catch (err) { failed(near.body, err); }
+    const others = [];
+    let after;
+    let ended = false;
+    for (let i = 0; i < 20 && others.length < 7 && !ended; i++) {
+      const page = await api('v1/facts/list', { prefix: group, after, limit: 8 });
+      if (id !== renderId) return;
+      others.push(...page.facts.filter((f) => f.key !== key && groupOf(f.key) === group));
+      ended = page.next === null;
+      after = page.next;
+      const slash = group || ended ? -1 : after.indexOf('/');
+      if (slash > 0) after = pastGroup(after.slice(0, slash + 1)) || after;
+    }
+    const all = h('a', { class: 'link', href: href('facts') }, 'See them all');
+    if (!others.length) { empty(near.body, ended ? ['No other fact shares this prefix.'] : ['None turned up in the keys read so far. ', all, '.']); return; }
+    put(done(near.body), h('ol', { class: 'rows' }, others.slice(0, 6).map((f) => factRow(f, group))),
+      others.length > 6 ? h('p', { class: 'chart-note' }, 'More keys share this prefix. ', all, '.')
+        : ended ? null : h('p', { class: 'chart-note' }, 'More keys may share this prefix. ', all, '.'));
+  } catch (err) { if (id === renderId) failed(near.body, err); }
 }
 
 // 6. Chat start: the block a new chat in a repo starts with
 async function chatStartScreen(main, p) {
+  const id = renderId;
   const finding = titleRow(main, 'Chat start');
   const info = await infoReady;
+  if (id !== renderId) return;
   if (info && info.store !== 'home') {
     note(finding, `The chat-start hook reads only the home store. This studio reads a ${info.store === 'url' ? 'store at a URL' : 'data dir'}, so no block applies here.`);
     return;
@@ -855,11 +1018,12 @@ async function chatStartScreen(main, p) {
   let sessions;
   let records = [];
   try {
-    [facts, sessions] = await Promise.all([allFacts('repo/'), allSessions()]);
+    [facts, sessions] = await Promise.all([factRepos(), allSessions()]);
+    if (id !== renderId) return;
     if (!p.get('repo')) records = (await api('v1/records', { limit: 50, max_bytes: EIGHT_MIB })).records;
-  } catch (err) { tabs.remove(); failed(view.body, err); say(finding, errorShort(err)); return; }
-  const names = new Set();
-  for (const f of facts) { const r = repoOf({ kind: 'fact', key: f.key }); if (r) names.add(r); }
+  } catch (err) { if (id !== renderId) return; tabs.remove(); failed(view.body, err); say(finding, errorShort(err)); return; }
+  if (id !== renderId) return;
+  const names = facts.names;
   for (const s of sessions.rows) { const r = s.session.split('@')[0]; if (r) names.add(r); }
   const sorted = [...names].sort();
   const repo = p.get('repo') || newestRepo(records) || sorted[0] || '';
@@ -874,10 +1038,14 @@ async function chatStartScreen(main, p) {
   const select = h('select', { class: 'input repo-select', 'aria-label': 'Repo' }, sorted.map((r) => h('option', { value: r, selected: r === repo }, r)));
   select.addEventListener('change', () => { location.hash = href('chat-start', { repo: select.value }); });
   tabs.after(select);
+  if (facts.next !== null || sessions.next !== null) {
+    select.after(h('p', { class: 'toolbar muted' }, 'Some repos may be missing: the store holds more facts or sessions than this list reads at once.'));
+  }
   put(view.heading, repo);
   const copy = h('span');
   put(actions, copy);
   const b = await showBlock(view.body, repo, copy);
+  if (id !== renderId) return;
   if (!b) { note(finding, 'No block to show.'); return; }
   if (b.block === null) { note(finding, 'A new chat in ', h('b', null, repo), ' starts with no memory block.'); return; }
   const cut = b.block.endsWith('\n(more in zerodb)');
@@ -959,9 +1127,11 @@ async function healthScreen(main) {
   const labels = ['Health', 'Durable LSN', 'Fact keys', 'Fact revisions', 'Writer groups', 'Busy replies'];
   put(kpis, ...labels.map((l) => kpi(l, h('span', { class: 'sk line', 'aria-hidden': 'true' }))));
   busy(ack.body, 4); busy(stages.body, 4); busy(index.body, 2); busy(store.body, 2);
+  const id = renderId;
   let s;
   let text;
   try { [s, text] = await Promise.all([api('v1/stats'), api('metrics')]); } catch (err) {
+    if (id !== renderId) return;
     if (statsRefused(err)) { for (const c of [ack, stages, index, store]) empty(c.body, [STATS_REFUSED]); note(finding, STATS_REFUSED); } else {
       for (const c of [ack, stages, index, store]) failed(c.body, err);
       say(finding, errorShort(err));
@@ -969,6 +1139,7 @@ async function healthScreen(main) {
     put(kpis, ...labels.map((l) => kpi(l, '-', 'zero')));
     return;
   }
+  if (id !== renderId) return;
   const num = (v) => [n(v), v === 0 ? 'zero' : null];
   const ok = s.health === 'ok';
   put(kpis, 
