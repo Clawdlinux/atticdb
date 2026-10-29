@@ -24,15 +24,20 @@ pub fn files(dir: &Path) -> BTreeMap<String, Option<Vec<u8>>> {
     entries.map(|e| (e.file_name().into_string().unwrap(), std::fs::read(e.path()).ok())).collect()
 }
 
-/// Every path under `dir`, with a file's bytes, or `None` for a directory.
+/// Every path under `dir`, with a file's bytes or a symlink's target, or `None` for a
+/// directory. Symlinks aren't followed.
 pub fn tree(dir: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
     let (mut all, mut todo) = (BTreeMap::new(), vec![dir.to_owned()]);
     while let Some(dir) = todo.pop() {
         for entry in std::fs::read_dir(&dir).unwrap() {
             let path = entry.unwrap().path();
-            if std::fs::symlink_metadata(&path).unwrap().is_dir() {
+            let meta = std::fs::symlink_metadata(&path).unwrap();
+            if meta.is_dir() {
                 todo.push(path.clone());
                 all.insert(path, None);
+            } else if meta.is_symlink() {
+                let target = std::fs::read_link(&path).unwrap();
+                all.insert(path, Some(target.into_os_string().into_encoded_bytes()));
             } else {
                 all.insert(path.clone(), Some(std::fs::read(&path).unwrap()));
             }

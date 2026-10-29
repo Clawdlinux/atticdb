@@ -194,7 +194,7 @@ fn setup_asks_and_stops_without_answers() {
     let dry_both = [&dry[..], &["claude-code,codex"]].concat();
     let codex_home = [("CODEX_HOME", "rel")];
     let skipped = "\n  SessionStart hook: skipped, ";
-    let rows: [Row<'_>; 15] = [
+    let rows: [Row<'_>; 16] = [
         ("claude-code and codex", &[], &terminal, &path, "claude-code,codex\n\nn\ny\n", 0, ""),
         ("declined", &[], &terminal, &path, "codex\nn\n\nno\n", 0, "N] Nothing changed.\n"),
         ("not a terminal", &[], &[], &path, "claude-code\n\n\ny\n", 2, needs),
@@ -213,6 +213,7 @@ fn setup_asks_and_stops_without_answers() {
         ("dry run skips", &dry_claude, &[], &path, "", 1, skipped),
         ("dry run stops", &dry_both, &codex_home, &path, "", 2, "  stopped: CODEX_HOME rel must"),
         ("home 0755", &dry_codex, &[], &path, "", 1, "must be a directory owned by uid"),
+        ("home link", &dry_codex, &[], &path, "", 1, "is a symlink to a path that doesn't exist"),
     ];
     for (row, (case, args, env, path, stdin, wanted, said)) in rows.into_iter().enumerate() {
         let home = dir.0.join(format!("h{row}"));
@@ -243,6 +244,10 @@ fn setup_asks_and_stops_without_answers() {
         if case == "home 0755" {
             std::fs::create_dir_all(&zerodb_home).unwrap();
             support::chmod(&zerodb_home, 0o755);
+        }
+        if case == "home link" {
+            std::fs::create_dir_all(zerodb_home.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(home.join("missing"), &zerodb_home).unwrap();
         }
         let before = tree(&home);
         let (code, out, err) = setup(&home, &dir.0, path, env, args, stdin);
@@ -296,13 +301,18 @@ fn setup_asks_and_stops_without_answers() {
             assert!(out.starts_with("usage: zerodb setup [--yes] [--harness <list>]"), "{out}");
             assert!(err.is_empty(), "{case}: {err}");
         }
-        if case == "home 0755" {
+        if case.starts_with("home ") {
             let uid = rustix::process::geteuid().as_raw();
-            let refused = format!(
-                "{} must be a directory owned by uid {uid}, mode 0700 or stricter, found mode 0755 \
-                 owned by uid {uid}\n",
-                zerodb_home.display()
-            );
+            let refused = match case {
+                "home link" => {
+                    format!("{} is a symlink to a path that doesn't exist\n", zerodb_home.display())
+                }
+                _ => format!(
+                    "{} must be a directory owned by uid {uid}, mode 0700 or stricter, found mode \
+                     0755 owned by uid {uid}\n",
+                    zerodb_home.display()
+                ),
+            };
             assert!(out.contains(&format!("\n  stopped: {refused}")), "{case}: {out}");
             let (code, out, err) = setup(&home, &dir.0, path, env, &codex[..], stdin);
             assert_eq!(code, Some(1), "{case}: applied: {out}{err}");

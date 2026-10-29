@@ -49,10 +49,11 @@ pub fn resolve_group(group: &str) -> Result<u32, String> {
 
 /// Checks that `dir` is a directory owned by the effective uid with none of the `mask`
 /// mode bits: 0o022 for a socket's directory, 0o077 for a data directory, which is
-/// first created with mode 0700 if missing.
+/// first created with mode 0700 if missing. An existing entry, such as a dangling symlink,
+/// is never created over, so [`check_owned`] reports it.
 pub fn owned_dir(dir: &Path, mask: u32) -> Result<(), String> {
     let fail = |error: std::io::Error| format!("{}: {error}", dir.display());
-    if mask == 0o077 {
+    if mask == 0o077 && fs::symlink_metadata(dir).is_err() {
         DirBuilder::new().recursive(true).mode(0o700).create(dir).map_err(fail)?;
     }
     check_owned(dir, mask)
@@ -61,7 +62,12 @@ pub fn owned_dir(dir: &Path, mask: u32) -> Result<(), String> {
 /// The check of [`owned_dir`], on an existing `dir`. It creates nothing.
 pub fn check_owned(dir: &Path, mask: u32) -> Result<(), String> {
     let fail = |error: std::io::Error| format!("{}: {error}", dir.display());
-    let meta = fs::metadata(dir).map_err(fail)?;
+    let meta = match fs::metadata(dir) {
+        Err(error) if error.kind() == ErrorKind::NotFound && fs::symlink_metadata(dir).is_ok() => {
+            return Err(format!("{} is a symlink to a path that doesn't exist", dir.display()));
+        }
+        meta => meta.map_err(fail)?,
+    };
     let euid = rustix::process::geteuid().as_raw();
     if !meta.is_dir() || meta.uid() != euid || meta.mode() & mask != 0 {
         let rule =
