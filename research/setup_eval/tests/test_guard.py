@@ -135,3 +135,79 @@ def test_redact():
     assert "<root>/zh" in out and "token=[redacted]" in out
     assert len(guard.excerpt("word " * 100)) == 200
     assert guard.excerpt("a\n\n b") == "a b"
+
+
+def test_refuses_an_eval_dir_that_shares_a_target_with_any_claude_entry(home, tmp_path):
+    # ~/.claude-alt links outside the home, and the eval dir links into the same place. No
+    # name check can see it; file identity does.
+    elsewhere = tmp_path / "elsewhere" / "cfg"
+    (elsewhere / "sub").mkdir(parents=True)
+    os.symlink(elsewhere, os.path.join(home, ".claude-alt"))
+    claude, codex = guard.eval_dirs(home)
+    os.makedirs(os.path.dirname(claude))
+    os.symlink(elsewhere / "sub", claude)
+    with pytest.raises(guard.Refused, match=r"~/\.claude-alt, the user's own config, overlap"):
+        guard.check_config_dirs(claude, codex, home)
+
+
+def test_refuses_a_claude_entry_that_links_into_the_eval_dir(home):
+    claude, codex = guard.eval_dirs(home)
+    os.makedirs(claude)
+    os.makedirs(codex)
+    os.symlink(claude, os.path.join(home, ".claude-work"))
+    with pytest.raises(guard.Refused, match=r"~/\.claude-work"):
+        guard.check_config_dirs(claude, codex, home)
+    os.remove(os.path.join(home, ".claude-work"))
+    os.symlink(os.path.join(codex, "deep"), os.path.join(home, ".copilot"))  # dangling, into the eval dir
+    with pytest.raises(guard.Refused, match=r"~/\.copilot"):
+        guard.check_config_dirs(claude, codex, home)
+
+
+def test_unrelated_claude_entries_pass(home, tmp_path):
+    claude, codex = guard.eval_dirs(home)
+    os.makedirs(claude)
+    os.makedirs(codex)
+    os.makedirs(os.path.join(home, ".claude", "projects"))
+    open(os.path.join(home, ".claude.json"), "w").close()
+    os.symlink(tmp_path / "gone", os.path.join(home, ".claude-old"))  # dangling, elsewhere
+    guard.check_config_dirs(claude, codex, home)
+
+
+def test_refuses_when_a_claude_entry_cannot_be_inspected(home):
+    claude, codex = guard.eval_dirs(home)
+    loop = os.path.join(home, ".claude-loop")
+    os.symlink(loop, loop)
+    with pytest.raises(guard.Refused, match="can't be inspected"):
+        guard.check_config_dirs(claude, codex, home)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can list any directory")
+def test_refuses_when_the_home_cannot_be_listed(home):
+    claude, codex = guard.eval_dirs(home)
+    os.makedirs(claude)
+    os.makedirs(codex)
+    os.chmod(home, 0o311)
+    try:
+        with pytest.raises(guard.Refused, match="cannot list the home"):
+            guard.check_config_dirs(claude, codex, home)
+    finally:
+        os.chmod(home, 0o755)
+
+
+def test_check_env_resolves_links_first(tmp_path):
+    root, outside = tmp_path / "r", tmp_path / "out"
+    root.mkdir()
+    outside.mkdir()
+    os.symlink(outside, root / "zh")
+    with pytest.raises(guard.UnsafeEnv):
+        guard.check_env({"ZERODB_HOME": str(root / "zh")}, str(root))
+    os.symlink(outside, root / "link")
+    with pytest.raises(guard.UnsafeEnv):
+        guard.check_env({"ZERODB_HOME": str(root / "link" / "zh")}, str(root))
+    with pytest.raises(guard.UnsafeEnv):
+        guard.check_env({"ZERODB_HOME": str(root)}, str(root))
+    (root / "real").mkdir()
+    guard.check_env({"ZERODB_HOME": str(root / "real" / "zh")}, str(root))
+    # A root reached through a link still holds its own home.
+    os.symlink(root, tmp_path / "alias")
+    guard.check_env({"ZERODB_HOME": str(tmp_path / "alias" / "real" / "zh")}, str(root))

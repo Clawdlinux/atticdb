@@ -4,8 +4,10 @@ The eval must never touch the user's own Claude Code, Codex or Copilot config, o
 user's own zerodb store. So:
 
 - `check_config_dirs` refuses eval dirs that are, or lie in, `~/.claude*`, `~/.codex` or
-  `~/.copilot`, through any symlink.
-- `check_env` refuses to start a child whose env has no `ZERODB_HOME` under the run's root.
+  `~/.copilot`, through any symlink. Each existing such entry is compared by file identity
+  and ancestry, both ways. An entry that can't be inspected is refused.
+- `check_env` refuses to start a child whose env has no `ZERODB_HOME` under the run's root,
+  after both resolve.
 - `snapshot` records the size and mtime of each file in the real home's `data/`. It only
   stats them and never opens one.
 """
@@ -71,9 +73,63 @@ def _forbidden_name(path: str, home: str) -> str | None:
     return None
 
 
+def _own_name(name: str) -> bool:
+    low = name.lower()
+    return low.startswith(".claude") or low in (".codex", ".copilot")
+
+
+def _key(path: str) -> str:
+    """`path` for string comparison: case-folded on macOS, whose disks usually ignore case."""
+    return path.casefold() if sys.platform == "darwin" else path
+
+
+def _related(a: str, b: str) -> bool:
+    """True if `a` and `b` are 1 file, or 1 lies in the other: by file identity where the
+    paths exist, and by resolved path text where they don't yet."""
+    if _below(a, b) or _below(b, a):
+        return True
+    ka, kb = _key(a), _key(b)
+    return ka == kb or ka.startswith(kb.rstrip(os.sep) + os.sep) or kb.startswith(ka.rstrip(os.sep) + os.sep)
+
+
+def own_entries(home: str) -> list[str]:
+    """Every `~/.claude*`, `~/.codex` and `~/.copilot` entry, by name only. Refuses when the
+    home can't be listed, as the eval dirs could not be checked against them."""
+    try:
+        names = os.listdir(home)
+    except OSError as e:
+        raise Refused(f"cannot list the home to find ~/.claude* entries ({e.strerror}). Refused") from None
+    return sorted(os.path.join(home, n) for n in names if _own_name(n))
+
+
+def _check_against_own(what: str, path: str, home: str) -> None:
+    """Refuses `path` when it and any existing user config entry are 1 file, or 1 lies in the
+    other, as written or resolved. Refuses when an entry can't be inspected."""
+    forms = {os.path.abspath(path), os.path.realpath(path)}
+    for entry in own_entries(home):
+        name = "~/" + os.path.basename(entry)
+        try:
+            os.lstat(entry)
+        except FileNotFoundError:
+            continue  # removed since the listing
+        except OSError as e:
+            raise Refused(f"{name} can't be inspected ({e.strerror}). Refused") from None
+        try:
+            os.stat(entry)  # follows a link, so a loop or a denied target shows here
+        except FileNotFoundError:
+            pass  # a dangling link: its resolved path is still compared
+        except OSError as e:
+            raise Refused(f"{name} can't be inspected ({e.strerror}). Refused") from None
+        for own in {entry, os.path.realpath(entry)}:
+            if any(_related(form, own) for form in forms):
+                raise Refused(f"{what} {path} and {name}, the user's own config, overlap. Refused")
+
+
 def check_config_dirs(claude_dir: str, codex_dir: str, home: str) -> None:
     """Refuses unless both dirs are the eval's own: absolute, distinct, and neither `~` nor
-    in `~/.claude*`, `~/.codex` or `~/.copilot`, as written or after symlinks resolve."""
+    in `~/.claude*`, `~/.codex` or `~/.copilot`, as written or after symlinks resolve. Every
+    existing `~/.claude*`, `~/.codex` and `~/.copilot` entry is also compared by file identity
+    and ancestry, both ways, so a link from either side is caught."""
     real_home = os.path.realpath(home)
     for what, path in (("CLAUDE_CONFIG_DIR", claude_dir), ("CODEX_HOME", codex_dir)):
         if not os.path.isabs(path):
@@ -88,17 +144,22 @@ def check_config_dirs(claude_dir: str, codex_dir: str, home: str) -> None:
                 raise Refused(f"{what} {path} is or lies in ~/{name}, the user's own config. Refused")
         if _below(home, os.path.realpath(path)) or os.path.realpath(path) == real_home:
             raise Refused(f"{what} {path} holds the home directory. Refused")
+        _check_against_own(what, path, home)
     if os.path.realpath(claude_dir) == os.path.realpath(codex_dir):
         raise Refused("CLAUDE_CONFIG_DIR and CODEX_HOME must differ")
 
 
 def check_env(env: dict, root: str) -> None:
-    """Raises UnsafeEnv unless `env` sets `ZERODB_HOME` to an absolute path under `root`.
-    An explicit raise, not `assert`, so `python -O` keeps it."""
+    """Raises UnsafeEnv unless `env` sets `ZERODB_HOME` to an absolute path strictly under
+    `root`, after both resolve. An explicit raise, not `assert`, so `python -O` keeps it."""
     home = env.get(HOME_ENV, "")
     if not home or not os.path.isabs(home):
         raise UnsafeEnv(f"a child env has no absolute {HOME_ENV}. Refused")
-    if not _below(home, root) and not os.path.realpath(home).startswith(os.path.realpath(root) + os.sep):
+    # Both resolved first, so a link at or above `<root>/zh` that points out is refused.
+    real_home, real_root = os.path.realpath(home), os.path.realpath(root)
+    inside = (real_home.startswith(real_root.rstrip(os.sep) + os.sep)
+              or _below(os.path.dirname(real_home), real_root))
+    if real_home == real_root or not inside:
         raise UnsafeEnv(f"a child env has {HOME_ENV} outside its run root. Refused")
 
 

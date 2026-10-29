@@ -18,6 +18,8 @@ The eval uses 2 config dirs of its own:
 
 They must hold no other hooks, plugins, MCP servers or instructions.
 The harness refuses to run if either one is, or lies in, `~/.claude*`, `~/.codex` or `~/.copilot`, through any symlink.
+It also compares each existing `~/.claude*`, `~/.codex` and `~/.copilot` entry with the eval dirs by file identity and ancestry, both ways.
+If the home can't be listed, or an entry can't be inspected, it refuses.
 
 Each run gets a new temp root with:
 
@@ -36,7 +38,7 @@ It also drops the credential and provider vars, so runs use the logins in the ev
 - provider and endpoint switches: `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `OPENAI_ORG_ID`.
 
 `--keep-api-keys` passes them all on.
-The harness refuses to start any child whose `ZERODB_HOME` is not under its run root.
+The harness refuses to start any child whose `ZERODB_HOME` is not under its run root, after both resolve, so a link that points out is refused.
 The harness's own git calls skip the user's git config.
 
 The real zerodb home is never used.
