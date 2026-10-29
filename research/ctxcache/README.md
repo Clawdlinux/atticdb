@@ -42,11 +42,14 @@ python3 -m pytest research/ctxcache/tests
 | `--input`, `--copilot-root` | | a trace file, or another Copilot log directory |
 
 The repo check compares files, not strings, so a path to the checkout under another case or through `/System/Volumes/Data` is refused too.
-Every file a run writes is checked that way, after symlinks resolve: each cached row, the exported trace and the sheet.
+Every file a run writes is checked that way: each cached row, the exported trace and the sheet.
+Each path counts as written and after symlinks resolve.
 So a symlink below the cache directory cannot pull rows into the repo.
 No path check can see a hard link, which is an outside name for a repo file. So a write never opens its destination.
 It writes a new file in the same folder, then renames it over the destination. A rename replaces the name, so a linked repo file keeps its content.
 On an error, the destination stays as it was.
+A destination that is a symlink is refused, since the rename would replace the link where it sits.
+So is a destination whose own folder lies in the repo, even when a link there points out.
 `--export-trace` must not be the `--input` file, under any symlink or hard link. The export would replace the input.
 Bad flags and fetch or file errors exit with code 2. A run writes 4 files to `--out`:
 - `<dataset>.csv`: 1 row per budget and policy, pooled and macro, with intervals and leave-one-out ranges.

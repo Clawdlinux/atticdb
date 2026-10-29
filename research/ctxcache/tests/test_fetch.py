@@ -113,3 +113,46 @@ def test_cached_rows_never_land_in_the_repo(tmp_path, name, rel, refused):
     else:
         assert f.row(7)[1] == "ok", name
     assert sorted(os.listdir(repo)) == ["rows"] and os.listdir(repo / "rows") == [], f"{name}: the repo is untouched"
+
+
+# name, destination under the stand-in repo's parent, its target if it is a symlink, refused.
+# In every case repo/out-link is a symlink to the outside folder, which holds old.csv.
+WRITES = [
+    ("a new file outside the repo", "out/new.csv", None, False),
+    ("a file below the repo", "repo/new.csv", None, True),
+    ("a symlink in the repo that points out", "repo/sheet.csv", "out/old.csv", True),
+    ("a symlink in the repo that points out to no file yet", "repo/sheet.csv", "out/missing.csv", True),
+    ("a file in a folder of the repo that links out", "repo/out-link/new.csv", None, True),
+    ("a symlink outside the repo", "out/link.csv", "out/old.csv", True),
+]
+
+
+def entries(folder) -> list:
+    """Each entry with its link target or its text. Links are not followed."""
+    return sorted((e.name, os.readlink(e) if e.is_symlink() else e.read_text()) for e in folder.iterdir())
+
+
+@pytest.mark.parametrize("name, rel, target, refused", WRITES, ids=[w[0] for w in WRITES])
+def test_a_write_never_lands_in_the_repo(tmp_path, name, rel, target, refused):
+    # The new file is made and renamed in the destination's own folder, not its target's.
+    repo, out = tmp_path / "repo", tmp_path / "out"
+    repo.mkdir()
+    out.mkdir()
+    (out / "old.csv").write_text("old")
+    os.symlink(out, repo / "out-link")
+    if target:
+        os.symlink(tmp_path / target, tmp_path / rel)
+    before = entries(repo)
+
+    def write():
+        with guard.replacing(str(tmp_path / rel), "the sheet", root=str(repo)) as f:
+            f.write("new")
+
+    if refused:
+        with pytest.raises(guard.InsideRepo):
+            write()
+    else:
+        write()
+        assert (tmp_path / rel).read_text() == "new", name
+    assert entries(repo) == before, f"{name}: nothing in the repo changed"
+    assert (out / "old.csv").read_text() == "old", f"{name}: a link's target is never written"
