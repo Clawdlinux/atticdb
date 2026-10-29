@@ -71,6 +71,7 @@ zerodb disconnect vscode    # removes only zerodb's entry
 
 It edits the user MCP config and keeps a backup of the old file. The entry holds no token.
 Under `ZERODB_HOME`, the entry and the hook pass it on, so the harness uses that home too.
+VS Code and Copilot CLI share the hook, so `connect` refuses to give them different homes.
 Notes go to a session named after the repo, so each repo keeps its own.
 VS Code reports its workspace folders, and the first one is the repo.
 Copilot's agent host and Copilot CLI start zerodb in the working folder, which is the repo.

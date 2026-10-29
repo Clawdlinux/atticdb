@@ -166,6 +166,7 @@ fn connect_edits_only_the_zerodb_entry() {
 /// `connect` writes 1 hook file for both harnesses, and `disconnect` removes it once neither
 /// is connected. A hook file zerodb did not write stays. The quoted path runs in `sh`. Under
 /// `ZERODB_HOME`, both entries and the hook pass it on, and a path with a `$` is refused.
+/// Both entries must pass the same home, as the hook reads 1.
 #[test]
 fn connect_writes_the_session_start_hook() {
     let dir = Dir::new();
@@ -179,6 +180,10 @@ fn connect_writes_the_session_start_hook() {
     let wanted = json!({"version": 1, "hooks": {"sessionStart": [
         {"type": "command", "bash": bash, "timeoutSec": 5}]}});
     let config = if cfg!(target_os = "macos") { "Library/Application Support" } else { ".config" };
+    let env_of = |path: &std::path::Path, section: &str| {
+        let config: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        config[section]["zerodb"]["env"].clone()
+    };
     let rows = [None, Some("COPILOT_HOME"), Some("ZERODB_HOME")];
     for (row, var) in rows.into_iter().enumerate() {
         let home = dir.0.join(row.to_string());
@@ -192,10 +197,6 @@ fn connect_writes_the_session_start_hook() {
         if moved {
             wanted["hooks"]["sessionStart"][0]["env"] = env.clone();
         }
-        let env_of = |path: std::path::PathBuf, section: &str| {
-            let config: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-            config[section]["zerodb"]["env"].clone()
-        };
         let run = |args: &[&str]| {
             let mut command = support::command(&exe);
             command.args(args).current_dir(&dir.0).env("HOME", &home).env_remove("ZERODB_TOKEN");
@@ -212,13 +213,13 @@ fn connect_writes_the_session_start_hook() {
         assert_eq!(std::fs::metadata(&hooks).unwrap().mode() & 0o777, 0o700, "{var:?}");
         assert_eq!(std::fs::metadata(&file).unwrap().mode() & 0o777, 0o600, "{var:?}");
         let vscode = home.join(config).join("Code/User/mcp.json");
-        assert_eq!(env_of(vscode, "servers"), env, "{var:?}: VS Code's entry");
+        assert_eq!(env_of(&vscode, "servers"), env, "{var:?}: VS Code's entry");
         let before = (files(&hooks), std::fs::metadata(&file).unwrap().modified().unwrap());
         let out = run(&["connect", "copilot"]);
         assert!(out.ends_with(&format!("\nthe sessionStart hook is already in place ({shown})\n")));
         let after = (files(&hooks), std::fs::metadata(&file).unwrap().modified().unwrap());
         assert_eq!(after, before, "{var:?}: nothing written");
-        let entry = env_of(copilot.join("mcp-config.json"), "mcpServers");
+        let entry = env_of(&copilot.join("mcp-config.json"), "mcpServers");
         assert_eq!(entry, env, "{var:?}: Copilot's entry");
 
         let out = run(&["disconnect", "vscode"]);
@@ -262,4 +263,61 @@ fn connect_writes_the_session_start_hook() {
     assert_eq!(status.code(), Some(1), "{out}");
     assert!(out.contains("holds a $") && out.contains("Nothing changed"), "{out}");
     assert!(!home.exists() && !moved.exists(), "nothing written: {out}");
+
+    // The hook reads 1 home, so the 2 entries must pass the same one. A mismatch either way is
+    // refused and changes nothing. --force goes ahead and names the harness on the other home.
+    let (home, zh) = (dir.0.join("4"), dir.0.join("4/zh"));
+    let (vscode, copilot) = (home.join(config).join("Code/User/mcp.json"), home.join(".copilot"));
+    let (entry, hook) = (copilot.join("mcp-config.json"), copilot.join("hooks/zerodb.json"));
+    let connect = |args: &[&str], moved: bool| {
+        let mut command = support::command(&exe);
+        command.args(args).current_dir(&dir.0).env("HOME", &home);
+        command.envs(moved.then_some(("ZERODB_HOME", &zh)));
+        let (status, out) = Process::start(command.stdin(Stdio::null())).wait();
+        (status.code(), out)
+    };
+    let now = || [&vscode, &entry, &hook].map(|path| std::fs::read(path).ok());
+    let hook_env = || {
+        let hook: Value = serde_json::from_slice(&std::fs::read(&hook).unwrap()).unwrap();
+        hook["hooks"]["sessionStart"][0]["env"].clone()
+    };
+    let (moved, fix) = (format!("ZERODB_HOME {}", zh.display()), "Nothing changed. Connect");
+    assert_eq!(connect(&["connect", "vscode"], false).0, Some(0), "VS Code on the default home");
+    let before = now();
+    let (code, out) = connect(&["connect", "copilot"], true);
+    let said = format!("vscode's zerodb entry uses the default home, but this would use {moved}.");
+    assert_eq!(code, Some(1), "mismatch: {out}");
+    assert!(out.contains(&said) && out.contains(fix), "mismatch: {out}");
+    assert!(out.contains("vscode again under the same ZERODB_HOME, or disconnect"), "{out}");
+    assert_eq!(now(), before, "mismatch: no file changed");
+    assert!(!zh.exists(), "mismatch: no home made");
+    let (code, out) = connect(&["connect", "copilot", "--force"], true);
+    let said = format!(
+        "vscode still uses the default home, but the shared sessionStart hook now \
+        reads {moved}."
+    );
+    assert_eq!(code, Some(0), "--force: {out}");
+    assert!(out.contains(&said), "--force: {out}");
+    let env = json!({"ZERODB_HOME": zh});
+    assert_eq!((env_of(&entry, "mcpServers"), hook_env()), (env.clone(), env.clone()), "--force");
+    // The other way round: VS Code again with ZERODB_HOME unset.
+    let before = now();
+    let (code, out) = connect(&["connect", "vscode"], false);
+    let said = format!("copilot's zerodb entry uses {moved}, but this would use the default home.");
+    assert_eq!(code, Some(1), "unset: {out}");
+    assert!(out.contains(&said) && out.contains(fix), "unset: {out}");
+    assert_eq!(now(), before, "unset: no file changed");
+    // Matching homes connect cleanly.
+    let (code, out) = connect(&["connect", "vscode"], true);
+    assert_eq!(code, Some(0), "matching: {out}");
+    assert!(!out.contains("still uses"), "matching: {out}");
+    assert_eq!((env_of(&vscode, "servers"), hook_env()), (env.clone(), env), "matching");
+    // A hand-made VS Code entry in a file with comments passes no ZERODB_HOME, so it is on the
+    // default home, as Copilot is about to be.
+    std::fs::write(&vscode, "// mine\n{\"servers\": {\"zerodb\": {\"command\": \"zerodb\"}}}\n")
+        .unwrap();
+    let (code, out) = connect(&["connect", "copilot"], false);
+    assert_eq!(code, Some(0), "comments: {out}");
+    assert!(!out.contains("still uses"), "comments: {out}");
+    assert_eq!((env_of(&entry, "mcpServers"), hook_env()), (Value::Null, Value::Null), "comments");
 }

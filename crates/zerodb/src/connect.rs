@@ -6,7 +6,7 @@
 use crate::home::{user_home, HOME_ENV};
 use serde_json::{json, Map, Value};
 use std::fs::{File, OpenOptions, Permissions};
-use std::io::Write;
+use std::io::{ErrorKind, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use zerodb_tape::{Io, StdIo};
@@ -112,16 +112,78 @@ fn binary() -> Result<String, String> {
 
 /// Adds zerodb's entry to `harness`'s config and writes the hook, after creating the home.
 /// An entry with connection flags is replaced only with `force`. Under `ZERODB_HOME`, the
-/// entry and the hook pass it on. Returns the exit code.
+/// entry and the hook pass it on. The other harness must pass the same home, as both share
+/// the hook. Else nothing changes, unless `force`. Returns the exit code.
 pub fn connect(harness: Harness, force: bool) -> u8 {
     finish(moved_home().and_then(|moved| {
+        let split = split_home(harness, moved.as_deref(), force)?;
         let home = crate::home::ensure()?;
         let exe = binary()?;
         let guard = (!force).then_some(home.data_dir.as_path());
         let entry = harness.entry(&exe, moved.as_deref());
         println!("{}", edit(harness, Some(entry), guard)?);
-        set_hook(&exe, moved.as_deref())
+        println!("{}", set_hook(&exe, moved.as_deref())?);
+        if let Some(split) = split {
+            eprintln!("zerodb: {split}");
+        }
+        Ok(String::new())
     }))
+}
+
+/// Checks the home `harness` would pass against the other connected harness's. Both share
+/// the hook, which reads 1 home, so a mismatch splits memory. It is refused before any file
+/// changes. With `force`, it comes back as a note to print.
+fn split_home(harness: Harness, home: Option<&str>, force: bool) -> Result<Option<String>, String> {
+    let ours = home_words(home);
+    for other in Harness::ALL.into_iter().filter(|other| *other != harness) {
+        let theirs = match entry_home(other, &other.file()?) {
+            Ok(None) => continue,
+            Ok(Some(theirs)) if theirs.as_deref().map(Path::new) == home.map(Path::new) => continue,
+            Ok(Some(theirs)) => home_words(theirs.as_deref()),
+            Err(why) => format!("an unknown home, as {why}"),
+        };
+        let name = other.name();
+        if force {
+            return Ok(Some(format!(
+                "{name} still uses {theirs}, but the shared sessionStart hook now reads {ours}. \
+                 Connect {name} again under the same {HOME_ENV}"
+            )));
+        }
+        return Err(format!(
+            "{name}'s zerodb entry uses {theirs}, but this would use {ours}. Both share the \
+             sessionStart hook, which reads 1 home. Nothing changed. Connect {name} again under \
+             the same {HOME_ENV}, or disconnect it first. Or add --force to go ahead anyway"
+        ));
+    }
+    Ok(None)
+}
+
+/// The home that `harness`'s zerodb entry in `path` passes in its `env`, `Some(None)` for
+/// the default home. `None` when it has no entry. In a file that isn't plain JSON, an entry
+/// counts as on the default home unless the file holds the text `ZERODB_HOME`. Then its home
+/// is unknown, and the error says why.
+fn entry_home(harness: Harness, path: &Path) -> Result<Option<Option<String>>, String> {
+    let mut bytes = Vec::new();
+    let read = match crate::config::open_regular(OpenOptions::new().read(true), path) {
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        opened => opened.and_then(|mut file| file.read_to_end(&mut bytes)),
+    };
+    read.map_err(|error| format!("{} can't be read: {error}", path.display()))?;
+    let holds = |text: &[u8]| bytes.windows(text.len()).any(|window| window == text);
+    match serde_json::from_slice::<Value>(&bytes) {
+        Ok(root) => Ok(root
+            .get(harness.section())
+            .and_then(|servers| servers.get("zerodb"))
+            .map(|entry| entry["env"][HOME_ENV].as_str().map(str::to_owned))),
+        Err(_) if !holds(b"\"zerodb\"") => Ok(None),
+        Err(_) if !holds(HOME_ENV.as_bytes()) => Ok(Some(None)),
+        Err(_) => Err(format!("{} is not plain JSON", path.display())),
+    }
+}
+
+/// `home` in words: `ZERODB_HOME <path>`, or the default home for `None`.
+fn home_words(home: Option<&str>) -> String {
+    home.map_or_else(|| "the default home".into(), |home| format!("{HOME_ENV} {home}"))
 }
 
 /// `$ZERODB_HOME` for the entry and the hook, or `None` when it is unset. A harness started

@@ -173,6 +173,10 @@ Under `ZERODB_HOME`, the entry and the hook below also get `"env": {"ZERODB_HOME
 So a harness started from the Dock, which doesn't see your shell's variables, uses the same home.
 Copilot expands variables in a hook's env, so `connect` refuses a path with a `$` and changes nothing.
 Connecting under another `ZERODB_HOME`, or with it unset, updates both files, with backups.
+Both harnesses share the hook, which reads 1 home, so their entries must pass the same home.
+`connect` refuses a home that differs from the other connected harness's, and changes nothing.
+The message names that harness and both homes. No `env` means the default home.
+`--force` goes ahead, then says which harness still uses the other home.
 Install it with `cargo install --path crates/zerodb --locked` first. An entry that points into `target/` breaks on `cargo clean`.
 Neither entry passes `--session`, so the session is the repo the client works in. That is the session the hook reads.
 VS Code reports its workspace folders as roots, and the first one names the session.
