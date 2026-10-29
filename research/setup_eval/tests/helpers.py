@@ -10,7 +10,8 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIXTURES = os.path.join(os.path.dirname(HERE), "fixtures")
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
-ZERODB = os.path.join(REPO_ROOT, "target", "debug", "zerodb")
+# CI points ZERODB_BIN at the binary it built, as for the Python client tests.
+ZERODB = os.path.abspath(os.environ.get("ZERODB_BIN") or os.path.join(REPO_ROOT, "target", "debug", "zerodb"))
 
 
 def install_stubs(bin_dir) -> None:

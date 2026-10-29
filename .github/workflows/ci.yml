@@ -43,3 +43,5 @@ jobs:
       - run: ZERODB_BIN=target/release/zerodb python3 -m pytest clients/python/tests
       # Research code: synthetic fixtures only, no network.
       - run: python3 -m pytest research/ctxcache/tests
+      # Stub agents only, never a real model. The end-to-end test runs the binary built above.
+      - run: ZERODB_BIN=target/release/zerodb python3 -m pytest research/setup_eval/tests

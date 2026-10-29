@@ -14,11 +14,14 @@ def test_claude_argv_puts_the_prompt_before_the_variadic_flag():
     prompt = SCENARIOS["S1"].prompt
     argv = agents.agent_argv("claude-code", prompt)
     assert argv == ["claude", "-p", prompt, "--output-format", "stream-json", "--verbose",
-                    "--allowedTools=mcp__zerodb__fact_set"]
+                    "--permission-mode", "acceptEdits", "--allowedTools=mcp__zerodb__fact_set"]
     allowed = [i for i, a in enumerate(argv) if a.startswith("--allowedTools") or a.startswith("--allowed-tools")]
     assert allowed == [len(argv) - 1], "1 allow flag, last, so it can swallow nothing"
-    assert argv.index(prompt) < allowed[0]
+    assert argv.index(prompt) == 2 < allowed[0]
     assert "=" in argv[-1], "the --flag=value form takes exactly 1 value"
+    mode = argv.index("--permission-mode")
+    assert argv[mode + 1] == "acceptEdits" and argv.index(prompt) < mode < allowed[0], \
+        "before the variadic flag, so acceptEdits is its value and not a tool name"
 
 
 def test_codex_argv():
@@ -46,6 +49,40 @@ def test_child_env_drops_the_users_zerodb_and_config_vars():
     env = agents.child_env(base, home="/h", zerodb_home="/r/zh", claude_dir="/e/claude", codex_dir="/e/codex")
     assert env == {"PATH": "/bin", "HOME": "/h", "ZERODB_HOME": "/r/zh", "CLAUDE_CONFIG_DIR": "/e/claude",
                    "CODEX_HOME": "/e/codex"}
+
+
+def test_api_keys_are_stripped_unless_kept():
+    base = {"PATH": "/bin", "ANTHROPIC_API_KEY": "a", "ANTHROPIC_AUTH_TOKEN": "b", "OPENAI_API_KEY": "c",
+            "CODEX_API_KEY": "d", "OTHER": "e"}
+    kw = dict(home="/h", zerodb_home="/r/zh", claude_dir="/e/claude", codex_dir="/e/codex")
+    env = agents.child_env(base, **kw)
+    assert not any(k in env for k in agents.API_KEYS) and env["OTHER"] == "e"
+    assert agents.stripped_keys(base) == list(agents.API_KEYS)
+    kept = agents.child_env(base, keep_api_keys=True, **kw)
+    assert all(kept[k] == base[k] for k in agents.API_KEYS)
+    assert agents.stripped_keys(base, keep_api_keys=True) == []
+
+
+def test_dry_run_names_stripped_keys_never_values(monkeypatch, tmp_path, capsys):
+    fake_home(monkeypatch, tmp_path)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-value-1")
+    monkeypatch.setenv("CODEX_API_KEY", "codex-value-2")
+    base = ["run", "--zerodb", "/z", "--out", str(tmp_path / "o.csv"), "--dry-run"]
+    assert cli.main(base) == 0
+    text = capsys.readouterr().out
+    assert "API keys stripped from every child: ANTHROPIC_API_KEY, CODEX_API_KEY." in text
+    assert "sk-ant-value-1" not in text and "codex-value-2" not in text
+    assert cli.main(base + ["--keep-api-keys"]) == 0
+    text = capsys.readouterr().out
+    assert "API keys: kept (--keep-api-keys)" in text and "sk-ant-value-1" not in text
+
+
+def test_children_get_no_api_keys(monkeypatch, tmp_path):
+    paths = fake_home(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "v")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "v")
+    assert cli.main(["check"]) == 0
+    assert all(c["api_keys"] == [] for c in stub_calls(paths["log"]))
 
 
 def test_budget_guard(monkeypatch, tmp_path, capsys):

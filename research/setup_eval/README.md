@@ -4,6 +4,9 @@ Does `zerodb setup` make agents use memory, with the user-level files exactly as
 This harness runs Claude Code and Codex headless on a small fixture repo and checks.
 It is the headless eval of Task 7 in the setup plan.
 
+The package is `research/setup_eval`, with an underscore so it imports.
+The plan and the brief call it `research/setup-eval`; that path does not exist.
+
 Python 3, standard library only. Tests use pytest and stub agents.
 
 ## Isolation
@@ -27,6 +30,8 @@ It names 1 harness at a time, so `connect vscode` and `connect copilot` never ru
 After the agent, it runs `zerodb disconnect <h>`, stops the zerodb server the run started, and deletes the root.
 
 Every child gets the inherited env without `ZERODB_*`, `CLAUDE_CONFIG_DIR` and `CODEX_HOME`, then the run's own values.
+It also drops `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY` and `CODEX_API_KEY`, so the agents bill the logins in the eval dirs.
+`--keep-api-keys` passes them on.
 The harness refuses to start any child whose `ZERODB_HOME` is not under its run root.
 The harness's own git calls skip the user's git config.
 
@@ -54,12 +59,14 @@ python3 -m research.setup_eval run --harness both --scenarios S1,S2,S3,S4,B1,B2 
 python3 -m pytest research/setup_eval/tests
 ```
 
+The end-to-end test runs the real zerodb with stub agents. It uses `$ZERODB_BIN`, else `target/debug/zerodb`, and is skipped when neither exists.
+
 `check` runs `claude auth status` and `codex login status` on the eval dirs, 20 s each.
 It prints only whether each is logged in, never their output.
 It is the only command that may start the real binaries without a run.
 
 `--dry-run` prints every command of every run, with its cwd, timeout and env names.
-It starts nothing and writes nothing. Env values are not shown.
+It also names the API keys it strips. It starts nothing and writes nothing. Env values are not shown.
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -69,6 +76,7 @@ It starts nothing and writes nothing. Env values are not shown.
 | `--zerodb` | | the zerodb binary to set up and seed with |
 | `--out` | `research/setup_eval/results/<date>.csv` | rows are appended |
 | `--dry-run` | off | print the plan, run nothing |
+| `--keep-api-keys` | off | pass the 4 API keys on, so the agents may bill them |
 | `--max-runs` | 12 | refuse a larger batch. At most 36, the plan's whole budget |
 
 Exit codes: 0 when the batch ran, 1 when a run hit a harness error, 2 for a refusal or a bad flag.
@@ -104,10 +112,11 @@ If setup exits other than 0, the agent does not run, and the run fails. The note
 Claude Code, from the fixture repo, with a 300 s timeout:
 
 ```sh
-claude -p <prompt> --output-format stream-json --verbose --allowedTools=mcp__zerodb__fact_set
+claude -p <prompt> --output-format stream-json --verbose --permission-mode acceptEdits --allowedTools=mcp__zerodb__fact_set
 ```
 
 `--allowedTools` takes a list. So the prompt comes right after `-p`, and the flag uses the `=` form, last.
+`--permission-mode acceptEdits` comes before it, so `acceptEdits` is never read as a tool name.
 
 Codex:
 
@@ -121,7 +130,9 @@ Each agent runs in its own process group. On timeout the group is killed.
 Eval-only overrides, which the results must list:
 
 - Claude Code: `--allowedTools=mcp__zerodb__fact_set`, as nobody can answer a prompt.
+- Claude Code: `--permission-mode acceptEdits`, so S4 tests memory, not the permission prompt for the edit.
 - Codex: `--dangerously-bypass-hook-trust`, and `-c` to approve `fact_set`.
+- Both: no API keys in the env, unless `--keep-api-keys`.
 
 ## Parsing
 

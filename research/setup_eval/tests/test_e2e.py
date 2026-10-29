@@ -1,4 +1,5 @@
-"""End to end with the real zerodb binary and stub agents. Build it first: cargo build -p zerodb."""
+"""End to end with the real zerodb binary and stub agents. Build it first: cargo build -p zerodb,
+or set ZERODB_BIN to a built binary."""
 
 import csv
 import json
@@ -13,7 +14,7 @@ from research.setup_eval import cli
 
 from .helpers import FIXTURES, ZERODB, fake_home, stub_calls
 
-pytestmark = pytest.mark.skipif(not os.access(ZERODB, os.X_OK), reason="build target/debug/zerodb first")
+pytestmark = pytest.mark.skipif(not os.access(ZERODB, os.X_OK), reason="build target/debug/zerodb or set ZERODB_BIN")
 
 
 @pytest.fixture
@@ -26,7 +27,7 @@ def short_tmp(monkeypatch):
 
 
 def servers_under(path: str) -> list[str]:
-    ps = subprocess.run(["ps", "-ax", "-o", "command="], capture_output=True, text=True, timeout=10).stdout
+    ps = subprocess.run(["ps", "-A", "-o", "command="], capture_output=True, text=True, timeout=10).stdout
     return [line for line in ps.splitlines() if " serve " in line and path in line]
 
 
@@ -37,6 +38,8 @@ def rows(path) -> list[dict]:
 
 def test_full_batch_with_stub_agents(monkeypatch, tmp_path, short_tmp, capsys):
     paths = fake_home(monkeypatch, tmp_path)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "v")
+    monkeypatch.setenv("OPENAI_API_KEY", "v")
     out = tmp_path / "results" / "batch.csv"
     code = cli.main(["run", "--harness", "both", "--scenarios", "S1,S2,S3,S4,B1,B2", "--runs", "1",
                      "--zerodb", ZERODB, "--out", str(out)])
@@ -74,8 +77,9 @@ def test_full_batch_with_stub_agents(monkeypatch, tmp_path, short_tmp, capsys):
     assert len(agent_calls) == 12
     assert all(c["zerodb_home"] and c["cwd"].endswith("/evalrepo") for c in agent_calls)
     first = agent_calls[0]["argv"]
-    assert first[0] == "-p" and first[-1] == "--allowedTools=mcp__zerodb__fact_set"
-    assert all(c["zerodb_home"] for c in stub_calls(paths["log"]))
+    assert first[0] == "-p" and first[-3:] == ["--permission-mode", "acceptEdits",
+                                               "--allowedTools=mcp__zerodb__fact_set"]
+    assert all(c["zerodb_home"] and c["api_keys"] == [] for c in stub_calls(paths["log"]))
     assert "Every child had ZERODB_HOME set under its own run root" in text
     assert "real zerodb home's data dir did not change" in text
 

@@ -27,7 +27,10 @@ def log():
     if path:
         with open(path, "a") as f:
             f.write(json.dumps({"prog": PROG, "argv": ARGS, "cwd": os.getcwd(),
-                                "zerodb_home": bool(os.environ.get("ZERODB_HOME"))}) + "\n")
+                                "zerodb_home": bool(os.environ.get("ZERODB_HOME")),
+                                "api_keys": sorted(k for k in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
+                                                               "OPENAI_API_KEY", "CODEX_API_KEY")
+                                                   if k in os.environ)}) + "\n")
 
 
 def read_json(path, default):

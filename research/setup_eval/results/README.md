@@ -15,8 +15,10 @@ Fill this in after a real batch. The method is in [../README.md](../README.md).
 ## Eval-only overrides
 
 - Claude Code: `--allowedTools=mcp__zerodb__fact_set`, as nobody can answer a prompt.
+- Claude Code: `--permission-mode acceptEdits`, so S4 tests memory, not the permission prompt for the edit.
 - Codex: `--dangerously-bypass-hook-trust`, and `-c 'mcp_servers.zerodb.tools.fact_set.approval_mode="approve"'` to approve `fact_set`.
 - Codex keeps the default `workspace-write` sandbox.
+- API keys stripped from the env: `<yes, or --keep-api-keys>`.
 - `<any other change from the plan>`
 
 ## Claude Code

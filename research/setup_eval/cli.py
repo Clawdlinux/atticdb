@@ -62,6 +62,8 @@ def parse(argv) -> argparse.Namespace:
     r.add_argument("--out", default=os.path.join(HERE, "results", f"{today}.csv"),
                    help="the CSV rows are appended to")
     r.add_argument("--dry-run", action="store_true", help="print every command and env name, run nothing")
+    r.add_argument("--keep-api-keys", action="store_true",
+                   help=f"pass {', '.join(agents.API_KEYS)} on to the children, so they may bill those keys")
     r.add_argument("--max-runs", type=positive, default=DEFAULT_MAX_RUNS,
                    help=f"refuse a batch larger than this. At most {BUDGET_CAP}")
     a = p.parse_args(argv)
@@ -77,11 +79,11 @@ def parse(argv) -> argparse.Namespace:
     return a
 
 
-def config(zerodb: str) -> Config:
+def config(zerodb: str, keep_api_keys: bool = False) -> Config:
     home = guard.user_home()
     claude_dir, codex_dir = guard.eval_dirs(home)
     return Config(zerodb=zerodb, home=home, claude_dir=claude_dir, codex_dir=codex_dir,
-                  tmp_parent=tempfile.gettempdir())
+                  tmp_parent=tempfile.gettempdir(), keep_api_keys=keep_api_keys)
 
 
 def check(out=print) -> int:
@@ -99,6 +101,7 @@ def check(out=print) -> int:
             continue
         root = tempfile.mkdtemp(prefix="zse-check-")
         try:
+            # Without API keys, so the status shows the eval login.
             env = agents.child_env(dict(os.environ), home=home, zerodb_home=os.path.join(root, "zh"),
                                    claude_dir=claude_dir, codex_dir=codex_dir)
             r = runner.run(agents.check_argv(harness), env=env, root=root, cwd=root,
@@ -122,9 +125,15 @@ def dry_run(a: argparse.Namespace, cfg: Config, out=print) -> int:
     guard.check_config_dirs(cfg.claude_dir, cfg.codex_dir, cfg.home)  # paths only
     out(f"Dry run: {a.total} runs, nothing is started. Rows would go to {a.out}.")
     out(f"<root> is a new temp dir per run in {cfg.tmp_parent}.")
-    out("env base, by name only: the inherited env without ZERODB_*, CLAUDE_CONFIG_DIR and CODEX_HOME, "
+    keys = "" if cfg.keep_api_keys else f", {', '.join(agents.API_KEYS)}"
+    out(f"env base, by name only: the inherited env without ZERODB_*, CLAUDE_CONFIG_DIR, CODEX_HOME{keys}, "
         f"then HOME, ZERODB_HOME (<root>/zh), CLAUDE_CONFIG_DIR and CODEX_HOME (the eval dirs under "
         f"~/{guard.EVAL_DIR}).")
+    if cfg.keep_api_keys:
+        out("API keys: kept (--keep-api-keys). The agents may bill them instead of the eval logins.")
+    else:
+        stripped = agents.stripped_keys(cfg.base_env)
+        out(f"API keys stripped from every child: {', '.join(stripped) if stripped else 'none were set'}.")
     for n in range(1, a.runs + 1):
         for harness in a.harnesses:
             for sid in a.scenarios:
@@ -177,7 +186,7 @@ def main(argv=None) -> int:
     try:
         if a.command == "check":
             return check()
-        cfg = config(a.zerodb)
+        cfg = config(a.zerodb, a.keep_api_keys)
         if a.dry_run:
             return dry_run(a, cfg)
         return batch(a, cfg)

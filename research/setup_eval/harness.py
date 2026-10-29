@@ -40,6 +40,7 @@ class Config:
     tmp_parent: str | None = None
     agent_timeout: float = agents.AGENT_TIMEOUT
     base_env: dict = field(default_factory=lambda: dict(os.environ))
+    keep_api_keys: bool = False
 
 
 @dataclass
@@ -93,7 +94,7 @@ def plan(cfg: Config, harness: str, scenario: Scenario, root: str) -> dict[str, 
 def env_for(cfg: Config, root: str, step: Step) -> dict:
     zh, _ = paths(root)
     return agents.child_env(cfg.base_env, home=cfg.home, zerodb_home=zh, claude_dir=cfg.claude_dir,
-                            codex_dir=cfg.codex_dir, extra=step.extra_env)
+                            codex_dir=cfg.codex_dir, extra=step.extra_env, keep_api_keys=cfg.keep_api_keys)
 
 
 def describe(cfg: Config, harness: str, scenario: Scenario, root: str = "<root>") -> list[str]:
