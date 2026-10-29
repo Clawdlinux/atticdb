@@ -403,6 +403,18 @@ function newestRepo(records) {
   for (const r of records) { const repo = repoOf(r); if (repo) return repo; }
   return null;
 }
+// The newest records, or null when SKIP_EMPTY pages in a row came back empty with a cursor. A records read visits at
+// most 1,000,000 LSNs, other tenants' records included, so an empty page with a cursor does not mean an empty store.
+async function newestRecords(limit) {
+  const id = renderId;
+  let before;
+  for (let i = 0; i < SKIP_EMPTY && id === renderId; i++) {
+    const page = await api('v1/records', { before, limit, max_bytes: EIGHT_MIB });
+    if (page.records.length || page.next === null) return page.records;
+    before = page.next;
+  }
+  return null;
+}
 function groupOf(key) {
   if (key.startsWith('user/')) return 'user/';
   const m = /^repo\/[^/]+\//.exec(key);
@@ -544,12 +556,18 @@ async function overview(main) {
   blockSkeleton(chat.body);
   const id = renderId;
   let records;
-  try { records = (await api('v1/records', { limit: 8, max_bytes: EIGHT_MIB })).records; } catch (err) {
+  try { records = await newestRecords(8); } catch (err) {
     if (id !== renderId) return;
     failed(list, err); failed(chat.body, err); say(finding, errorShort(err));
     return;
   }
   if (id !== renderId) return;
+  if (records === null) {
+    empty(list, ['No recent records found yet. ', h('a', { class: 'link', href: href('log') }, 'Open the log'), ' to look further back.']);
+    empty(chat.body, ['No recent record names a repo. Pick one on ', h('a', { class: 'link', href: href('chat-start') }, 'Chat start'), '.']);
+    note(finding, 'No recent records found yet.');
+    return;
+  }
   if (!records.length) {
     empty(list, ['Nothing saved yet. To give an agent this memory:'], h('ol', { class: 'steps' },
       h('li', null, 'Run ', code('zerodb connect vscode'), ' or ', code('zerodb connect copilot'), ' in a terminal.'),
@@ -940,9 +958,9 @@ async function factScreen(main, p) {
   busy(now.body, 1);
   busy(revs.body, 3);
   const id = renderId;
-  let got;
+  // 1 read, so the current value, a delete and the revisions all come from the same snapshot of the store
   let hist;
-  try { [got, hist] = await Promise.all([api('v1/facts/get', { key }), api('v1/facts/history', { key, max_bytes: EIGHT_MIB })]); } catch (err) {
+  try { hist = await api('v1/facts/history', { key, max_bytes: EIGHT_MIB }); } catch (err) {
     if (id !== renderId) return;
     failed(now.body, err); failed(revs.body, err); say(finding, errorShort(err));
     return;
@@ -950,15 +968,17 @@ async function factScreen(main, p) {
   if (id !== renderId) return;
   const list = hist.revisions;
   if (!list.length) { empty(now.body, ['No fact has the key ', code(key), '.']); revs.el.remove(); note(finding, 'No such fact.'); return; }
+  // the newest revision is the current value, unless it is a delete
   const last = list[0];
+  const cur = last.deleted ? null : last;
   // truncated: the store lists only its newest revisions, at most 16 and 8 MiB of them. The log keeps every one.
   const shown = `${count(list.length, 'revision')}${hist.truncated ? ' shown' : ''}`;
   const line = (label, ...v) => h('span', null, label, ' ', h('b', null, v));
-  if (got.fact) {
-    put(done(now.body), h('p', { class: 'lead' }, breakable(got.fact.content)),
-      h('p', { class: 'facts-line' }, line('Key', code(key)), line('Set by', got.fact.agent), line('At', timeCell(got.fact.commit_time_ns)), line('LSN', fig(String(got.fact.lsn)))),
-      got.fact.meta === null || got.fact.meta === undefined ? null : h('p', { class: 'meta-json' }, breakable('meta ' + JSON.stringify(got.fact.meta))));
-    say(finding, `${shown}. Last set by `, h('span', { class: 'who' }, last.agent), ` ${whenWords(last.commit_time_ns)}.`);
+  if (cur) {
+    put(done(now.body), h('p', { class: 'lead' }, breakable(cur.content)),
+      h('p', { class: 'facts-line' }, line('Key', code(key)), line('Set by', cur.agent), line('At', timeCell(cur.commit_time_ns)), line('LSN', fig(String(cur.lsn)))),
+      cur.meta === null || cur.meta === undefined ? null : h('p', { class: 'meta-json' }, breakable('meta ' + JSON.stringify(cur.meta))));
+    say(finding, `${shown}. Last set by `, h('span', { class: 'who' }, cur.agent), ` ${whenWords(cur.commit_time_ns)}.`);
   } else {
     empty(now.body, ['No current value. ', h('b', null, last.agent), ` deleted this key ${whenWords(last.commit_time_ns)}, at LSN ${last.lsn}.`]);
     say(finding, `${shown}. Deleted ${whenWords(last.commit_time_ns)}.`);
@@ -967,7 +987,7 @@ async function factScreen(main, p) {
     h('span', { class: 'rec-lsn' }, String(r.lsn)),
     r.deleted
       ? h('p', { class: 'rec-text is-deleted' }, h('span', { class: 'pill' }, 'Deleted'), 'The key held no value after this.')
-      : h('p', { class: 'rec-text' }, got.fact && r.lsn === got.fact.lsn ? h('span', { class: 'pill' }, 'Current') : null, breakable(r.content)),
+      : h('p', { class: 'rec-text' }, r === cur ? h('span', { class: 'pill' }, 'Current') : null, breakable(r.content)),
     h('span', { class: 'rec-agent' }, r.agent),
     h('p', { class: 'rec-meta' }, 'by ', h('span', { class: 'who' }, r.agent)),
     h('span', { class: 'rec-when' }, timeCell(r.commit_time_ns), h('span', { class: 'lsn' }, 'LSN ' + r.lsn))))),
@@ -1021,19 +1041,22 @@ async function chatStartScreen(main, p) {
   try {
     [facts, sessions] = await Promise.all([factRepos(), allSessions()]);
     if (id !== renderId) return;
-    if (!p.get('repo')) records = (await api('v1/records', { limit: 50, max_bytes: EIGHT_MIB })).records;
+    if (!p.get('repo')) records = (await newestRecords(50)) || [];
   } catch (err) { if (id !== renderId) return; tabs.remove(); failed(view.body, err); say(finding, errorShort(err)); return; }
   if (id !== renderId) return;
   const names = facts.names;
   for (const s of sessions.rows) { const r = s.session.split('@')[0]; if (r) names.add(r); }
-  const sorted = [...names].sort();
-  const repo = p.get('repo') || newestRepo(records) || sorted[0] || '';
+  const repo = p.get('repo') || newestRepo(records) || [...names].sort()[0] || '';
   if (!repo) {
     tabs.remove();
     empty(view.body, ['A repo shows here once an agent saves a fact under ', code('repo/<repo>/'), ' or a turn in a session named after the repo.']);
     note(finding, 'No repo yet.');
     return;
   }
+  // The picker holds the repo whose block shows, or a phone's select would name another. A link can name any repo,
+  // and the newest record can be the delete of a repo's last fact.
+  names.add(repo);
+  const sorted = [...names].sort();
   put(tabs, sorted.map((r) => h('a', { href: href('chat-start', { repo: r }), 'aria-current': r === repo ? 'page' : null }, r)));
   // a phone picks the repo from a select instead, so the chosen one is never scrolled out of view
   const select = h('select', { class: 'input repo-select', 'aria-label': 'Repo' }, sorted.map((r) => h('option', { value: r, selected: r === repo }, r)));
