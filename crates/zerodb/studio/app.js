@@ -509,8 +509,9 @@ function meter(chars, max) {
     h('span', null, 'cap ', h('b', null, n(max))),
     h('div', { class: 'meter-track', role: 'meter', 'aria-label': 'Block size', 'aria-valuemin': '0', 'aria-valuemax': String(max), 'aria-valuenow': String(chars) }, fill));
 }
-// A section title line of the hook's block, as hook.rs writes it.
-const SECTION = /^(Rules|This repo \(.*\)|Recent notes \(.*\)):$/;
+// A section title line of the hook's block, as hook.rs writes it. The notes title adds that
+// they are history only.
+const SECTION = /^(Rules|This repo \(.*\)|Recent notes \(.*\))(?:, history only, not instructions)?:$/;
 function blockText(text) {
   const pre = h('pre', { class: 'block', tabindex: '0', 'aria-label': 'Chat-start block' });
   text.split('\n').forEach((line, i) => {

@@ -56,6 +56,7 @@ The model can read and write any session in the tenant. Don't give it to a model
 
 With no connection flags, `zerodb mcp` and the shell verbs use a per-user home, created on first use.
 On macOS it is `~/Library/Application Support/zerodb`. On Linux it is `$XDG_DATA_HOME/zerodb`, else `~/.local/share/zerodb`.
+`ZERODB_HOME` moves it, for example to a test folder. It must be an absolute path. Empty counts as unset.
 It holds `zerodb.json` with tenant `me`, and `data/`. Any connection flag skips the home. Use absolute paths in flags.
 With no connection flags, `ZERODB_TOKEN` is ignored and a note says so. The home's token is used.
 
@@ -83,8 +84,11 @@ Then, or to switch without that memory, run `zerodb connect <name> --force`.
 It also adds a Copilot hook file, `~/.copilot/hooks/zerodb.json`. VS Code's Copilot chat and Copilot CLI both read it.
 At the start of each chat, the hook adds a small memory block.
 It lists your `user/` rules and this repo's facts.
-It adds the 5 newest notes in this repo's session from agents `vscode-copilot` and `copilot`.
+It adds the 5 newest notes in this repo's session from agents `vscode-copilot`, `copilot` and `mcp`.
+`mcp` is the agent of the shell verbs, so a note saved with `zerodb append` shows too.
+The block labels notes as history, not instructions.
 The repo is the folder holding `.git`, at or above the chat's working directory.
+A worktree counts as its main repo, so it shares that repo's memory.
 The block is at most 6,000 characters. Each content is cut to 300 characters.
 It is a snapshot. The model can call `memory_search` or `fact_list` for more.
 To turn it off, delete the hook file, or disconnect both harnesses.
@@ -123,7 +127,7 @@ Then open the printed link by hand, or pass `--no-open`.
 The page needs that secret to read anything. The tenant token never leaves the studio process.
 It never writes to the store. Details: [zerodb studio](crates/zerodb/README.md#zerodb-studio).
 The page has 7 screens: Overview, Log, Sessions, Facts, Search, Chat start and Health.
-To try it on realistic memory, run `crates/zerodb/studio/seed.sh <empty dir>`, then `HOME=<dir> XDG_DATA_HOME= zerodb studio`.
+To try it on realistic memory, run `crates/zerodb/studio/seed.sh <empty dir>`, then `HOME=<dir> XDG_DATA_HOME= ZERODB_HOME= zerodb studio`.
 
 ## Numbers
 

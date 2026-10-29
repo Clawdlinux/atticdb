@@ -511,10 +511,11 @@ pub type Output = (Option<i32>, String, String);
 
 /// Runs `zerodb` in `cwd` with `HOME` set to `home` and writes `stdin` after `delay`, keeping
 /// it open until the exit. A stray `ZERODB_TOKEN` is set, which the home's users ignore.
+/// `ZERODB_HOME` is removed, so the home is under `home`.
 pub fn zerodb(home: &Path, cwd: &Path, args: &[&str], stdin: &[u8], delay: u64) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_zerodb"));
     command.args(args).current_dir(cwd).env("HOME", home).stdin(Stdio::piped());
-    for var in ["COPILOT_HOME", "XDG_DATA_HOME"] {
+    for var in ["COPILOT_HOME", "XDG_DATA_HOME", "ZERODB_HOME"] {
         command.env_remove(var);
     }
     command.env("ZERODB_TOKEN", "x");

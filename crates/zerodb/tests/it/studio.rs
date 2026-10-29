@@ -110,7 +110,7 @@ impl Studio {
 fn command(home: &Path, args: &[&str], env: &[(&str, &OsStr)]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_zerodb"));
     command.arg("studio").args(args).current_dir(home).env("HOME", home).stdin(Stdio::null());
-    for var in ["COPILOT_HOME", "XDG_DATA_HOME", "ZERODB_TOKEN"] {
+    for var in ["COPILOT_HOME", "XDG_DATA_HOME", "ZERODB_HOME", "ZERODB_TOKEN"] {
         command.env_remove(var);
     }
     command.envs(env.iter().copied());

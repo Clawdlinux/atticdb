@@ -1,7 +1,7 @@
 #!/bin/sh
 # Seeds a throwaway zerodb home with realistic memory, for studio screenshots and manual checks.
 # Usage: crates/zerodb/studio/seed.sh <empty dir>
-# Then: HOME=<dir> XDG_DATA_HOME= zerodb studio
+# Then: HOME=<dir> XDG_DATA_HOME= ZERODB_HOME= zerodb studio
 # The seeded home's server keeps running. The script prints its pid, to stop it with kill.
 set -eu
 
@@ -23,8 +23,9 @@ pid() {
 # A failed step leaves running the server that the first step started.
 trap 'code=$?; if [ "$code" -ne 0 ] && [ -n "$(pid)" ]; then echo "seed.sh: failed. Stop the home server with: kill $(pid)" >&2; fi' EXIT
 
-# Only HOME changes, so the real home is never touched. XDG_DATA_HOME would win on Linux.
-run() { HOME="$dir" XDG_DATA_HOME= "$bin" "$@" >/dev/null; }
+# Only HOME is set, so the real home is never touched. XDG_DATA_HOME would win on Linux, and
+# ZERODB_HOME everywhere, so both are cleared.
+run() { HOME="$dir" XDG_DATA_HOME= ZERODB_HOME= "$bin" "$@" >/dev/null; }
 note() { run append --agent "$1" --session "$2" --role "${4:-assistant}" --content "$3"; }
 fact() { run fact set --agent "$1" --key "$2" --content "$3"; }
 

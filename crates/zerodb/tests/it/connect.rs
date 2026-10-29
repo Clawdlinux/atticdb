@@ -44,7 +44,9 @@ fn connect_edits_only_the_zerodb_entry() {
         let mut run = |args: &[&str]| {
             let mut command = Command::new(env!("CARGO_BIN_EXE_zerodb"));
             command.args(args).current_dir(&dir.0).env("HOME", &home);
-            for var in ["COPILOT_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "ZERODB_TOKEN"] {
+            for var in
+                ["COPILOT_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "ZERODB_HOME", "ZERODB_TOKEN"]
+            {
                 command.env_remove(var);
             }
             command.envs(var.map(|var| (var, home.join("c"))));
@@ -187,7 +189,9 @@ fn connect_writes_the_session_start_hook() {
         let run = |args: &[&str]| {
             let mut command = Command::new(&exe);
             command.args(args).current_dir(&dir.0).env("HOME", &home);
-            for var in ["COPILOT_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "ZERODB_TOKEN"] {
+            for var in
+                ["COPILOT_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "ZERODB_HOME", "ZERODB_TOKEN"]
+            {
                 command.env_remove(var);
             }
             command.envs(var.map(|var| (var, home.join("c"))));
@@ -240,6 +244,7 @@ fn connect_writes_the_session_start_hook() {
     // The command runs in `sh` as the harness runs it.
     let mut sh = Command::new("sh");
     sh.args(["-c", &bash]).env("HOME", dir.0.join("0")).stdin(Stdio::null());
+    sh.env_remove("XDG_DATA_HOME").env_remove("ZERODB_HOME");
     let (status, out) = Process::start(&mut sh).wait();
     assert_eq!((status.code(), out.lines().next()), (Some(0), Some("{}")), "{out}");
 }

@@ -36,10 +36,16 @@ const USAGE: &str = "usage:
              [--retry-deadline <n>s|<n>ms]
   The token comes from --token-file, ZERODB_TOKEN, or the config entry for --tenant.
   With no --url, --data-dir, --config, --tenant or --token-file, the home is used and
-  ZERODB_TOKEN is ignored.
+  ZERODB_TOKEN is ignored. ZERODB_HOME, when set, is the home. It must be an absolute path.
+  --agent defaults to mcp. --session defaults to the repo of the current directory, named
+  after the folder holding .git. A worktree takes its main repo's name.
   append, recent, search and fact print one JSON line. They exit 1 when nothing was written,
   3 when a write may or may not be saved.
   studio serves a read-only page on 127.0.0.1 and opens it. It runs until Ctrl-C.";
+
+/// Commands that use the home. A relative `ZERODB_HOME` fails them with exit 2, so none falls
+/// back to the default home. The hook prints `{}` for it, as for any error.
+const HOME_COMMANDS: [&str; 7] = ["mcp", "connect", "studio", "append", "recent", "search", "fact"];
 
 /// Flags of every command that talks to a server as a tenant. The first 5 pick the store.
 const CONNECT: [&str; 8] = [
@@ -55,6 +61,11 @@ const CONNECT: [&str; 8] = [
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|command| HOME_COMMANDS.contains(&command.as_str())) {
+        if let Err(error) = zerodb::home::env_dir() {
+            return ExitCode::from(usage(&error));
+        }
+    }
     let code = match args.split_first() {
         Some((command, rest)) => match command.as_str() {
             "init" => flags(rest, &["--config", "--tenant"], &[]).and_then(init),
