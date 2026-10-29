@@ -52,8 +52,8 @@ pub fn command(program: impl AsRef<OsStr>) -> Command {
 /// <name>` edit `.claude.json` in `$CLAUDE_CONFIG_DIR`, else in `$HOME`, as Claude Code does.
 /// `mcp add` parses as the real CLI does: `-e` takes `K=V` values until `--` or the next
 /// option, so `-e K=V <name>` fails. `mcp get` answers from the file. With
-/// `FAKE_CLAUDE=slow`, it starts a shell that touches `$FAKE_CLAUDE_MARKER` after 12 s, then
-/// sleeps 60 s. With `FAKE_CLAUDE=add-fails`, `mcp add` exits 1.
+/// `FAKE_CLAUDE=slow`, it starts a python child that writes `$FAKE_CLAUDE_MARKER` after 12 s,
+/// then sleeps 60 s. With `FAKE_CLAUDE=add-fails`, `mcp add` exits 1.
 pub fn fake_claude(bin: &Path) -> PathBuf {
     let path = std::env::var_os("PATH").unwrap_or_default();
     let python = std::env::split_paths(&path).map(|dir| dir.join("python3")).find(|p| p.is_file());
@@ -67,7 +67,9 @@ with open(os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "argv"), "
 mode = os.environ.get("FAKE_CLAUDE", "")
 if mode == "slow":
     marker = os.environ["FAKE_CLAUDE_MARKER"]
-    subprocess.Popen(["/bin/sh", "-c", "sleep 12 && touch \"$0\"", marker])
+    # Python itself, as PATH holds only this fake's directory, with no sleep or touch.
+    later = "import sys, time; time.sleep(12); open(sys.argv[1], 'w').close()"
+    subprocess.Popen([sys.executable, "-c", later, marker])
     time.sleep(60)
 path = os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.environ["HOME"], ".claude.json")
 try:
