@@ -164,7 +164,8 @@ fn connect_edits_only_the_zerodb_entry() {
 }
 
 /// `connect` writes 1 hook file for both harnesses, and `disconnect` removes it once neither
-/// is connected. A hook file zerodb did not write stays. The quoted path runs in `sh`.
+/// is connected. A hook file zerodb did not write stays. The quoted path runs in `sh`. Under
+/// `ZERODB_HOME`, both entries and the hook pass it on, and a path with a `$` is refused.
 #[test]
 fn connect_writes_the_session_start_hook() {
     let dir = Dir::new();
@@ -177,10 +178,24 @@ fn connect_writes_the_session_start_hook() {
     let bash = format!("'{}' hook session-start", exe.to_str().unwrap().replace('\'', r"'\''"));
     let wanted = json!({"version": 1, "hooks": {"sessionStart": [
         {"type": "command", "bash": bash, "timeoutSec": 5}]}});
-    for (row, var) in [None, Some("COPILOT_HOME")].into_iter().enumerate() {
+    let config = if cfg!(target_os = "macos") { "Library/Application Support" } else { ".config" };
+    let rows = [None, Some("COPILOT_HOME"), Some("ZERODB_HOME")];
+    for (row, var) in rows.into_iter().enumerate() {
         let home = dir.0.join(row.to_string());
-        let hooks = var.map_or(home.join(".copilot"), |_| home.join("c")).join("hooks");
+        let copilot =
+            if var == Some("COPILOT_HOME") { home.join("c") } else { home.join(".copilot") };
+        let hooks = copilot.join("hooks");
         let file = hooks.join("zerodb.json");
+        let moved = var == Some("ZERODB_HOME");
+        let env = if moved { json!({"ZERODB_HOME": home.join("c")}) } else { Value::Null };
+        let mut wanted = wanted.clone();
+        if moved {
+            wanted["hooks"]["sessionStart"][0]["env"] = env.clone();
+        }
+        let env_of = |path: std::path::PathBuf, section: &str| {
+            let config: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            config[section]["zerodb"]["env"].clone()
+        };
         let run = |args: &[&str]| {
             let mut command = support::command(&exe);
             command.args(args).current_dir(&dir.0).env("HOME", &home).env_remove("ZERODB_TOKEN");
@@ -196,11 +211,15 @@ fn connect_writes_the_session_start_hook() {
         assert_eq!(std::fs::read_to_string(&file).unwrap(), pretty, "{var:?}");
         assert_eq!(std::fs::metadata(&hooks).unwrap().mode() & 0o777, 0o700, "{var:?}");
         assert_eq!(std::fs::metadata(&file).unwrap().mode() & 0o777, 0o600, "{var:?}");
+        let vscode = home.join(config).join("Code/User/mcp.json");
+        assert_eq!(env_of(vscode, "servers"), env, "{var:?}: VS Code's entry");
         let before = (files(&hooks), std::fs::metadata(&file).unwrap().modified().unwrap());
         let out = run(&["connect", "copilot"]);
         assert!(out.ends_with(&format!("\nthe sessionStart hook is already in place ({shown})\n")));
         let after = (files(&hooks), std::fs::metadata(&file).unwrap().modified().unwrap());
         assert_eq!(after, before, "{var:?}: nothing written");
+        let entry = env_of(copilot.join("mcp-config.json"), "mcpServers");
+        assert_eq!(entry, env, "{var:?}: Copilot's entry");
 
         let out = run(&["disconnect", "vscode"]);
         let kept = format!("\nkept the sessionStart hook ({shown}): zerodb is still connected");
@@ -216,8 +235,6 @@ fn connect_writes_the_session_start_hook() {
             json!(r"'/opt/it'\''s/zerodb' hook session-start");
         let other = serde_json::to_string_pretty(&other).unwrap() + "\n";
         // A config with comments and no zerodb entry does not keep the hook.
-        let config =
-            if cfg!(target_os = "macos") { "Library/Application Support" } else { ".config" };
         std::fs::write(home.join(config).join("Code/User/mcp.json"), "// mine\n{}\n").unwrap();
         let rows = [
             (other.as_str(), "removed the sessionStart hook", None),
@@ -236,4 +253,13 @@ fn connect_writes_the_session_start_hook() {
     sh.args(["-c", &bash]).env("HOME", dir.0.join("0")).stdin(Stdio::null());
     let (status, out) = Process::start(&mut sh).wait();
     assert_eq!((status.code(), out.lines().next()), (Some(0), Some("{}")), "{out}");
+
+    // Copilot expands variables in a hook's env, so a home path with a `$` is refused.
+    let (home, moved) = (dir.0.join("3"), dir.0.join("$HOME"));
+    let mut command = support::command(&exe);
+    command.args(["connect", "copilot"]).env("HOME", &home).env("ZERODB_HOME", &moved);
+    let (status, out) = Process::start(command.stdin(Stdio::null())).wait();
+    assert_eq!(status.code(), Some(1), "{out}");
+    assert!(out.contains("holds a $") && out.contains("Nothing changed"), "{out}");
+    assert!(!home.exists() && !moved.exists(), "nothing written: {out}");
 }

@@ -1,9 +1,9 @@
 //! `zerodb connect` and `zerodb disconnect`: add or remove zerodb's entry in a harness's
 //! user MCP config, and the Copilot `sessionStart` hook file both harnesses share. The
-//! entry and the hook run the binary on the home, so they hold no token or path but the
-//! binary's.
+//! entry and the hook run the binary on the home, so they hold no token. The only paths
+//! they hold are the binary's and, under `ZERODB_HOME`, the home's.
 
-use crate::home::user_home;
+use crate::home::{user_home, HOME_ENV};
 use serde_json::{json, Map, Value};
 use std::fs::{File, OpenOptions, Permissions};
 use std::io::Write;
@@ -71,8 +71,9 @@ impl Harness {
         }
     }
 
-    fn entry(self, command: &str) -> Value {
-        match self {
+    /// The entry that runs `command`, passing `home` as `ZERODB_HOME` when set.
+    fn entry(self, command: &str, home: Option<&str>) -> Value {
+        let entry = match self {
             // No `--session`: the adapter names the session after the repo of the client's
             // first root, else of its working folder, as the session-start hook reads it.
             // VS Code reports roots. It doesn't resolve variables in the user `mcp.json`.
@@ -80,8 +81,17 @@ impl Harness {
                 "args": ["mcp", "--agent", self.agent()]}),
             Self::Copilot => json!({"type": "local", "command": command,
                 "args": ["mcp", "--agent", self.agent()], "tools": ["*"]}),
-        }
+        };
+        with_home(entry, home)
     }
+}
+
+/// `object` with `"env": {"ZERODB_HOME": home}` added when `home` is set.
+fn with_home(mut object: Value, home: Option<&str>) -> Value {
+    if let Some(home) = home {
+        object["env"] = json!({ HOME_ENV: home });
+    }
+    object
 }
 
 fn absolute_env(name: &str) -> Option<PathBuf> {
@@ -101,14 +111,33 @@ fn binary() -> Result<String, String> {
 }
 
 /// Adds zerodb's entry to `harness`'s config and writes the hook, after creating the home.
-/// An entry with connection flags is replaced only with `force`. Returns the exit code.
+/// An entry with connection flags is replaced only with `force`. Under `ZERODB_HOME`, the
+/// entry and the hook pass it on. Returns the exit code.
 pub fn connect(harness: Harness, force: bool) -> u8 {
-    finish(crate::home::ensure().and_then(|home| {
+    finish(moved_home().and_then(|moved| {
+        let home = crate::home::ensure()?;
         let exe = binary()?;
         let guard = (!force).then_some(home.data_dir.as_path());
-        println!("{}", edit(harness, Some(harness.entry(&exe)), guard)?);
-        set_hook(&exe)
+        let entry = harness.entry(&exe, moved.as_deref());
+        println!("{}", edit(harness, Some(entry), guard)?);
+        set_hook(&exe, moved.as_deref())
     }))
+}
+
+/// `$ZERODB_HOME` for the entry and the hook, or `None` when it is unset. A harness started
+/// from the Dock doesn't get the shell's variables, so its files must name the home.
+/// Copilot expands variables in a hook's env, so a path with a `$` is refused.
+fn moved_home() -> Result<Option<String>, String> {
+    let Some(dir) = crate::home::env_dir()? else { return Ok(None) };
+    let dir = dir.into_os_string().into_string();
+    let dir = dir.map_err(|_| format!("{HOME_ENV} must be UTF-8 to go in a harness config"))?;
+    if dir.contains('$') {
+        return Err(format!(
+            "{HOME_ENV} {dir} holds a $. Copilot expands variables in a hook's env, so the hook \
+             would read another home. Nothing changed. Use a path without $"
+        ));
+    }
+    Ok(Some(dir))
 }
 
 /// Removes zerodb's entry from `harness`'s config, and the hook once no harness has one.
@@ -238,18 +267,19 @@ fn hook_file() -> Result<PathBuf, String> {
     Ok(copilot_home()?.join("hooks/zerodb.json"))
 }
 
-/// The hook file's text: a `sessionStart` hook that runs `exe hook session-start`.
-fn hook_text(exe: &str) -> Result<String, String> {
+/// The hook file's text: a `sessionStart` hook that runs `exe hook session-start`, passing
+/// `home` as `ZERODB_HOME` when set.
+fn hook_text(exe: &str, home: Option<&str>) -> Result<String, String> {
     let bash = format!("'{}' hook session-start", exe.replace('\'', r"'\''"));
-    let hook = json!({"version": 1, "hooks": {"sessionStart": [
-        {"type": "command", "bash": bash, "timeoutSec": 5}]}});
+    let command = with_home(json!({"type": "command", "bash": bash, "timeoutSec": 5}), home);
+    let hook = json!({"version": 1, "hooks": {"sessionStart": [command]}});
     let text = serde_json::to_string_pretty(&hook);
     Ok(text.map_err(|error| format!("cannot encode the hook: {error}"))? + "\n")
 }
 
-/// Writes the hook file for `exe`. Returns the message to print.
-fn set_hook(exe: &str) -> Result<String, String> {
-    let (path, text) = (hook_file()?, hook_text(exe)?);
+/// Writes the hook file for `exe` and `home`. Returns the message to print.
+fn set_hook(exe: &str, home: Option<&str>) -> Result<String, String> {
+    let (path, text) = (hook_file()?, hook_text(exe, home)?);
     let shown = path.display();
     let old = read(&path).map_err(|why| format!("{shown}: {why}. The hook was not written"))?;
     if old.as_ref().is_some_and(|(bytes, _)| *bytes == text.as_bytes()) {
@@ -263,16 +293,18 @@ fn set_hook(exe: &str) -> Result<String, String> {
     })
 }
 
-/// Whether `bytes` are exactly the hook zerodb writes for some absolute binary path, so a
-/// hook from a moved or other zerodb binary counts too.
+/// Whether `bytes` are exactly the hook zerodb writes for some absolute binary path, with
+/// or without a `ZERODB_HOME`, so a hook from a moved or other zerodb binary counts too.
 fn ours(bytes: &[u8]) -> bool {
     let hook: Value = serde_json::from_slice(bytes).unwrap_or_default();
-    let bash = hook["hooks"]["sessionStart"][0]["bash"].as_str().unwrap_or_default();
+    let command = &hook["hooks"]["sessionStart"][0];
+    let bash = command["bash"].as_str().unwrap_or_default();
     let quoted = bash.strip_suffix(" hook session-start").and_then(|q| q.strip_prefix('\''));
     let exe = quoted.and_then(|q| q.strip_suffix('\'')).map(|q| q.replace(r"'\''", "'"));
     let exe = exe.filter(|exe| Path::new(exe).is_absolute());
-    // Writing the hook again for that path must give the same bytes.
-    exe.and_then(|exe| hook_text(&exe).ok()).is_some_and(|text| text.as_bytes() == bytes)
+    // Writing the hook again for that path and home must give the same bytes.
+    let home = command["env"][HOME_ENV].as_str();
+    exe.and_then(|exe| hook_text(&exe, home).ok()).is_some_and(|text| text.as_bytes() == bytes)
 }
 
 /// Whether `harness`'s config has a zerodb entry. A config that is not plain JSON, such as

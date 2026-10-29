@@ -169,6 +169,10 @@ It also writes the session-start hook file, described below.
 | `copilot` | `$COPILOT_HOME/mcp-config.json` when set and absolute, else `~/.copilot/mcp-config.json` | `mcpServers.zerodb`: `zerodb mcp --agent copilot`, all tools |
 
 The entry runs the absolute path of the binary you ran. It holds no token and no config path.
+Under `ZERODB_HOME`, the entry and the hook below also get `"env": {"ZERODB_HOME": "<path>"}`.
+So a harness started from the Dock, which doesn't see your shell's variables, uses the same home.
+Copilot expands variables in a hook's env, so `connect` refuses a path with a `$` and changes nothing.
+Connecting under another `ZERODB_HOME`, or with it unset, updates both files, with backups.
 Install it with `cargo install --path crates/zerodb --locked` first. An entry that points into `target/` breaks on `cargo clean`.
 Neither entry passes `--session`, so the session is the repo the client works in. That is the session the hook reads.
 VS Code reports its workspace folders as roots, and the first one names the session.
@@ -199,7 +203,7 @@ VS Code's Copilot chat and Copilot CLI both read it:
 The binary path is single-quoted for the shell, with each `'` written as `'\''`.
 The rules above apply: no write when it matches, a backup, a synced temp file and a rename.
 `disconnect` deletes it once neither config has a zerodb entry, then syncs the directory. No backup is kept.
-It deletes the hook zerodb writes for any absolute binary path, so a moved binary's hook goes too.
+It deletes the hook zerodb writes for any absolute binary path, with or without that env. So a moved binary's hook goes too.
 A hook file with other content is left alone, and `disconnect` says so.
 
 ## `zerodb hook session-start`
