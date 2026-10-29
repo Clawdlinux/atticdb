@@ -233,7 +233,7 @@ A relative `CLAUDE_CONFIG_DIR` fails both verbs with exit 2 before any change. `
 Claude rewrites it itself, so `connect` only reads it. It changes the entry only through `claude mcp add` and `claude mcp remove`.
 It never runs `claude mcp get`, because that starts the server to check it.
 Each `claude` command has 10 s. It runs in its own process group, and a timeout kills the whole group.
-Its stderr is read to the end, and its last line goes in an error.
+Its output is never shown. An error there can quote the config, and Node's JSON errors quote the text they failed on. The line says which command failed, with its exit code.
 After it, `.claude.json` must show the entry, or the part failed. It is read up to 5 times, 50 ms apart, as a running Claude Code may be rewriting it.
 An entry with the same binary, args and `ZERODB_HOME`, and no other env, is left as it is.
 An entry that runs any absolute path with exactly `mcp --agent claude-code`, such as an old binary path, is updated: `claude mcp remove`, then `claude mcp add`.
@@ -302,17 +302,20 @@ So `disconnect` gives back the file byte for byte.
 A missing file is created at mode 0600, and a missing config dir at 0700.
 A block that matches writes nothing. Another one, such as one from an old binary path, is replaced in place, with a backup.
 The lines between the markers are zerodb's. Don't add your own there, as `disconnect` removes them.
+zerodb reads `config.toml` with a small scanner. It tracks strings, multi-line strings, arrays and inline tables, so text inside them never counts. It decodes keys, so `"zero\u0064b"` is `zerodb`, and `"zerodb.proxy"` is 1 key.
+A file it can't read, such as one with a string that isn't closed, skips the part.
+A marker is a comment line that is exactly the begin line zerodb writes, or `# zerodb:end`. `# zerodb:beginner` is not one.
 Marker lines that don't pair up skip the part: an end line without a begin line, a begin line without an end line, or 2 begin lines.
-A `zerodb` server outside the block, as a `[mcp_servers.zerodb]` table or a `zerodb` key under `mcp_servers`, is refused. A second one would break the file.
-So is `mcp_servers = { ... }` at the root, as the block's tables can't extend an inline table.
+A `zerodb` server outside the block is refused: a `[mcp_servers.zerodb]` table or one under it, a `zerodb` key under `[mcp_servers]`, or a dotted key `mcp_servers.zerodb`. A second one would break the file.
+So is `mcp_servers = { ... }` at the root. zerodb doesn't read inside it, so it can't tell whether it holds `zerodb`, and the block's tables can't extend it.
 zerodb never edits either, even with `--force`. The line shows the block to merge by hand, and never a server's env.
 
 After a write, `codex mcp get zerodb --json` must show the binary, `mcp --agent codex` and the home. That command only prints config.
 It runs in the config dir, so a project's `.codex/config.toml` can't answer. It has 10 s, as `claude` does above.
 If it shows something else, fails or prints no JSON, the file is put back: the backup is renamed over it, or a file zerodb made is deleted. The part fails.
-Its output is never shown, as its env may hold secrets.
+Its output is never shown, as its env and its errors may hold secrets. A failure says `codex mcp get zerodb --json failed (exit <n>); run it yourself to see why`.
 Without `codex` on `PATH`, the block is written but not checked. The line says so, and the exit code stays 0.
-`disconnect` removes the block and the blank line before it, with a backup. A `zerodb` server outside the block stays, which counts as skipped.
+`disconnect` removes the block and the blank line before it, with a backup. A `zerodb` server outside the block stays, which counts as skipped. So does a root `mcp_servers = { ... }` when there is no block, as it may hold `zerodb`.
 
 The hook group is appended last, with no matcher, through the same JSON editor as Claude Code's `settings.json`.
 It's found the same way: a group whose every handler runs an absolute binary path with `hook session-start --harness codex`.

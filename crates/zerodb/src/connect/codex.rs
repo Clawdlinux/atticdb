@@ -22,10 +22,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use zerodb_tape::{Io, StdIo};
 
+mod scan;
+use scan::{scan, Entry, Item};
+
 /// The variable that moves Codex's config dir.
 const CODEX_ENV: &str = "CODEX_HOME";
-/// How every begin line of zerodb's block starts, whatever its version.
-const BEGIN: &str = "# zerodb:begin";
 /// The begin line zerodb writes.
 const BEGIN_LINE: &str = "# zerodb:begin v1. zerodb disconnect codex removes this block.";
 /// The begin line zerodb writes after adding the line end the file lacked, so `disconnect`
@@ -208,70 +209,77 @@ fn block(exe: &str, home: Option<&str>, notes: Notes) -> Result<String, String> 
     Ok(lines.iter().map(|line| format!("{line}\n")).collect())
 }
 
-/// The bytes of zerodb's block in `text`, from the start of its begin line to the end of its
-/// end line. An error says how the marker lines don't pair up.
-fn find_block(text: &str) -> Result<Option<Range<usize>>, String> {
-    let (mut begins, mut ends, mut at) = (Vec::new(), Vec::new(), 0);
-    for line in text.split_inclusive('\n') {
-        let marker = line.trim();
-        if marker.starts_with(BEGIN) {
-            begins.push(at);
-        } else if marker == END {
-            ends.push(at + line.len());
+/// The bytes of zerodb's block in a file scanned as `entries`, from the start of its begin
+/// line to the end of its end line. Markers are comment lines that are exactly a begin line
+/// zerodb writes, or [`END`]. An error says how they don't pair up.
+fn find_block(entries: &[Entry]) -> Result<Option<Range<usize>>, String> {
+    let (mut begins, mut ends) = (Vec::new(), Vec::new());
+    for entry in entries {
+        let Item::Comment(comment) = &entry.item else { continue };
+        match comment.trim() {
+            BEGIN_LINE | BEGIN_ADDED => begins.push(entry.span.start),
+            END => ends.push(entry.span.end),
+            _ => {}
         }
-        at += line.len();
     }
     match (begins.as_slice(), ends.as_slice()) {
         ([], []) => Ok(None),
         ([begin], [end]) if begin < end => Ok(Some(*begin..*end)),
-        ([], _) => Err(format!("it has a line {END} without a line {BEGIN}")),
-        ([_], []) => Err(format!("it has a line {BEGIN} without a line {END}")),
+        ([], _) => Err(format!("it has a line {END} without a zerodb begin line")),
+        ([_], []) => Err(format!("it has a zerodb begin line without a line {END}")),
         _ => Err(format!(
-            "its lines {BEGIN} and {END} don't pair up: each must come once, in that order"
+            "its zerodb begin lines and lines {END} don't pair up: each must come once, in \
+             that order"
         )),
     }
 }
 
-/// The keys and table headers of `text` outside `skip`, as dotted paths from the root, with
-/// each key's value. A line scan, enough to find a table or a key: it doesn't parse
-/// multi-line strings or arrays, and splits quoted keys at their dots too.
-fn keys(text: &str, skip: Option<&Range<usize>>) -> Vec<(Vec<String>, Option<String>)> {
-    let path = |key: &str| -> Vec<String> {
-        key.split('.').map(|part| part.trim().trim_matches(['"', '\'']).to_owned()).collect()
-    };
-    let (mut table, mut found, mut at) = (Vec::new(), Vec::new(), 0);
-    for line in text.split_inclusive('\n') {
-        let start = at;
-        at += line.len();
-        let line = line.trim();
-        if skip.is_some_and(|skip| skip.contains(&start)) || line.starts_with('#') {
-            continue;
-        }
-        if let Some(header) = line.strip_prefix('[') {
-            let header = header.trim_start_matches('[');
-            if let Some(end) = header.find(']') {
-                table = path(&header[..end]);
-                found.push((table.clone(), None));
+/// What outside zerodb's block keeps zerodb from adding it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Clash {
+    /// A `zerodb` MCP server zerodb didn't write.
+    Server,
+    /// `mcp_servers = { ... }` at the root. zerodb doesn't read inside it, so it can't tell
+    /// whether it holds `zerodb`, and a `[mcp_servers.zerodb]` table would break the file.
+    Inline,
+}
+
+impl Clash {
+    /// Why connect refuses, after the file's path.
+    fn why(self) -> &'static str {
+        match self {
+            Self::Server => {
+                "has a zerodb MCP server that zerodb didn't write. zerodb doesn't edit it, even \
+                 with --force, and adding the block would break the file"
             }
-        } else if let Some((key, value)) = line.split_once('=') {
-            let full = table.iter().cloned().chain(path(key)).collect();
-            found.push((full, Some(value.trim().to_owned())));
+            Self::Inline => {
+                "sets mcp_servers as an inline table, so zerodb can't tell whether it holds \
+                 zerodb, and adding the block would break the file"
+            }
+        }
+    }
+}
+
+/// What in a file scanned as `entries`, outside `ours`, zerodb's block, clashes with it. A
+/// `zerodb` server counts as a table, as a key under `[mcp_servers]`, or as a dotted key, by
+/// the decoded key path.
+fn clash(entries: &[Entry], ours: Option<&Range<usize>>) -> Option<Clash> {
+    let outside =
+        entries.iter().filter(|entry| ours.is_none_or(|ours| !ours.contains(&entry.span.start)));
+    let mut found = None;
+    for entry in outside {
+        let (Item::Table(path) | Item::Key(path, _)) = &entry.item else { continue };
+        match path.as_slice() {
+            [servers, zerodb, ..] if servers == "mcp_servers" && zerodb == "zerodb" => {
+                return Some(Clash::Server);
+            }
+            [servers] if servers == "mcp_servers" && matches!(entry.item, Item::Key(..)) => {
+                found = Some(Clash::Inline);
+            }
+            _ => {}
         }
     }
     found
-}
-
-/// Whether `text` defines a `zerodb` MCP server outside `ours`, zerodb's block.
-fn foreign(text: &str, ours: Option<&Range<usize>>) -> bool {
-    keys(text, ours)
-        .iter()
-        .any(|(path, _)| path.starts_with(&["mcp_servers".into(), "zerodb".into()]))
-}
-
-/// Whether `text` sets `mcp_servers` at its root, outside `ours`, as with
-/// `mcp_servers = { ... }`. A `[mcp_servers.zerodb]` table after it would break the file.
-fn inline_servers(text: &str, ours: Option<&Range<usize>>) -> bool {
-    keys(text, ours).iter().any(|(path, value)| value.is_some() && *path == ["mcp_servers"])
 }
 
 /// Whether `block`, zerodb's block in a file, starts with [`BEGIN_ADDED`].
@@ -282,16 +290,17 @@ fn added_end(block: &str) -> bool {
 /// Whether the `config.toml` at `path` turns hooks off with `hooks = false` in `[features]`.
 fn hooks_off(path: &Path) -> bool {
     let Ok(Some((bytes, _))) = read(path) else { return false };
-    let wanted = ["features", "hooks"].map(String::from);
-    keys(&String::from_utf8_lossy(&bytes), None).iter().any(|(key, value)| {
-        let value = value.as_deref().and_then(|value| value.split('#').next());
-        *key == wanted && value.is_some_and(|value| value.trim() == "false")
+    let entries = std::str::from_utf8(&bytes).map_err(|_| String::new()).and_then(scan);
+    entries.unwrap_or_default().iter().any(|entry| match &entry.item {
+        Item::Key(path, value) => *path == ["features", "hooks"] && value == "false",
+        _ => false,
     })
 }
 
 /// Puts zerodb's block for `exe`, `home` and `notes` in the `config.toml` at `path`: in place
 /// of an older one, else at the end, after 1 blank line. A file with CRLF line ends gets
-/// CRLF. A file without a final line end gets one, and the block says so. Then `codex mcp get zerodb --json` must show it, or the file is put back.
+/// CRLF. A file without a final line end gets one, and the block says so. Then
+/// `codex mcp get zerodb --json` must show it, or the file is put back.
 fn set_block(path: &Path, exe: &str, home: Option<&str>, notes: Notes) -> Line {
     let shown = path.display();
     let skipped = |why: String| format!("MCP entry: skipped, {why}");
@@ -303,21 +312,19 @@ fn set_block(path: &Path, exe: &str, home: Option<&str>, notes: Notes) -> Line {
             .map_err(|_| skipped(format!("{shown} is not UTF-8. {add}")))?,
         None => "",
     };
-    let found = find_block(text).map_err(|why| {
+    let entries = scan(text).map_err(|why| {
+        skipped(format!("{shown} isn't TOML zerodb can read: {why}. Nothing changed. {add}"))
+    })?;
+    let found = find_block(&entries).map_err(|why| {
         skipped(format!(
             "{shown}: {why}. Nothing changed. Remove the zerodb lines there by hand, then re-run \
              zerodb connect codex"
         ))
     })?;
-    let clash = if foreign(text, found.as_ref()) {
-        Some("a zerodb MCP server that zerodb didn't write")
-    } else {
-        inline_servers(text, found.as_ref()).then_some("mcp_servers as an inline table")
-    };
-    if let Some(clash) = clash {
+    if let Some(clash) = clash(&entries, found.as_ref()) {
         return Err(skipped(format!(
-            "{shown} has {clash}. zerodb doesn't edit it, even with --force, and adding the \
-             block would break the file. Nothing changed. Merge this block into it by hand:\n{}",
+            "{shown} {}. Nothing changed. Merge this block into it by hand:\n{}",
+            clash.why(),
             wanted.trim_end()
         )));
     }
@@ -367,7 +374,8 @@ fn set_block(path: &Path, exe: &str, home: Option<&str>, notes: Notes) -> Line {
 }
 
 /// Checks that `codex mcp get zerodb --json`, run in `dir`, shows zerodb's command and args
-/// for `exe`, and `home`. Its output is never shown, as its env may hold secrets.
+/// for `exe`, and `home`. Its output is never shown, as its env and its errors may hold
+/// secrets from the config.
 fn check(codex: &Path, dir: &Path, exe: &str, home: Option<&str>) -> Result<(), String> {
     let args = GET.map(String::from);
     let line = shell_line("codex", &args);
@@ -378,7 +386,8 @@ fn check(codex: &Path, dir: &Path, exe: &str, home: Option<&str>) -> Result<(), 
     if std::env::var_os(CODEX_ENV).is_some_and(|dir| dir.is_empty()) {
         command.env_remove(CODEX_ENV);
     }
-    let out = run(&mut command, &line, true)?;
+    let out = run(&mut command, &line, true)
+        .map_err(|why| format!("{why}; run it yourself to see why"))?;
     let out: Value =
         serde_json::from_slice(&out).map_err(|_| format!("{line} did not print JSON"))?;
     let server = &out["transport"];
@@ -409,7 +418,7 @@ fn restore(path: &Path, backup: Option<&Path>) -> String {
             }),
         None => delete(path),
     };
-    let again = "Check what codex mcp get zerodb --json shows, then re-run zerodb connect codex";
+    let again = "Re-run zerodb connect codex once that is fixed";
     match (undone, backup) {
         (Ok(()), Some(_)) => format!("{shown} is back as it was. {again}"),
         (Ok(()), None) => format!("{shown} is deleted again, as zerodb made it. {again}"),
@@ -427,20 +436,29 @@ fn restore(path: &Path, backup: Option<&Path>) -> String {
 /// put before it, and the line end it added.
 fn drop_block(path: &Path) -> Line {
     let shown = path.display();
-    let by_hand = format!("Remove the lines from {BEGIN} to {END} in {shown} by hand");
+    let by_hand = format!("Remove zerodb's block, through its line {END}, from {shown} by hand");
     let old = read(path).map_err(|why| format!("MCP entry: skipped, {shown} {why}. {by_hand}"))?;
     let Some((bytes, _)) = &old else { return Ok(format!("MCP entry: not found ({shown})")) };
     let text = std::str::from_utf8(bytes)
         .map_err(|_| format!("MCP entry: skipped, {shown} is not UTF-8. {by_hand}"))?;
-    let range = match find_block(text) {
+    let entries = scan(text).map_err(|why| {
+        format!("MCP entry: skipped, {shown} isn't TOML zerodb can read: {why}. {by_hand}")
+    })?;
+    let range = match find_block(&entries) {
         Ok(Some(range)) => range,
-        Ok(None) if foreign(text, None) => {
-            return Err(format!(
-                "MCP entry: skipped, {shown} has a zerodb MCP server that zerodb didn't write. \
-                 Remove it by hand to disconnect it"
-            ));
+        Ok(None) => {
+            return match clash(&entries, None) {
+                Some(Clash::Server) => Err(format!(
+                    "MCP entry: skipped, {shown} has a zerodb MCP server that zerodb didn't \
+                     write. Remove it by hand to disconnect it"
+                )),
+                Some(Clash::Inline) => Err(format!(
+                    "MCP entry: skipped, {shown} sets mcp_servers as an inline table, so zerodb \
+                     can't tell whether it holds zerodb. If it does, remove zerodb there by hand"
+                )),
+                None => Ok(format!("MCP entry: not found ({shown})")),
+            };
         }
-        Ok(None) => return Ok(format!("MCP entry: not found ({shown})")),
         Err(why) => {
             return Err(format!(
                 "MCP entry: skipped, {shown}: {why}. Nothing changed. Remove the zerodb lines \
@@ -468,7 +486,7 @@ fn drop_block(path: &Path) -> Line {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
-    use super::{find_block, foreign, inline_servers, keys, toml_string};
+    use super::{clash, find_block, scan, toml_string, Clash};
 
     #[test]
     fn toml_strings_escape_and_refuse_control_characters() {
@@ -479,28 +497,32 @@ mod tests {
     }
 
     #[test]
-    fn the_line_scan_finds_tables_and_keys() {
-        let text = "model = \"o3\"\nmcp_servers.zerodb.command = \"x\"\n[mcp_servers]\n\
-                    zerodb = { command = \"x\" }\n[ mcp_servers . \"zerodb\" .env ]\n";
-        let found: Vec<_> = keys(text, None).into_iter().map(|(path, _)| path.join(".")).collect();
-        let wanted = [
-            "model",
-            "mcp_servers.zerodb.command",
-            "mcp_servers",
-            "mcp_servers.zerodb",
-            "mcp_servers.zerodb.env",
+    fn clashes_and_markers_go_by_the_decoded_structure() {
+        let server = Some(Clash::Server);
+        let rows = [
+            ("[mcp_servers.zerodb]\n", server),
+            ("[ mcp_servers . 'zerodb' . env ]\n", server),
+            ("[mcp_servers.\"zero\\u0064b\"]\n", server),
+            ("[mcp_servers]\nzerodb = { command = \"x\" }\n", server),
+            ("mcp_servers.zerodb.command = \"x\"\n", server),
+            ("[[mcp_servers.zerodb.list]]\n", server),
+            ("[mcp_servers.\"zerodb.proxy\"]\n", None),
+            ("[mcp_servers.zerodbx]\n[mcp_server.zerodb]\n# [mcp_servers.zerodb]\n", None),
+            ("s = \"\"\"\n[mcp_servers.zerodb]\n\"\"\"\n", None),
+            ("a = [\n[\"mcp_servers.zerodb\"],\n]\n", None),
+            ("[profiles.x]\nmcp_servers = {}\n", None),
+            (" mcp_servers= { zerodb = {} }\n", Some(Clash::Inline)),
         ];
-        assert_eq!(found, wanted);
-        assert!(!foreign(
-            "[mcp_servers.zerodbx]\n[mcp_server.zerodb]\n# [mcp_servers.zerodb]\n",
-            None
-        ));
-        let text = "a = 1\n# zerodb:begin v1\n[mcp_servers.zerodb]\n# zerodb:end\n";
-        let ours = find_block(text).unwrap().unwrap();
+        for (text, wanted) in rows {
+            assert!(clash(&scan(text).unwrap(), None) == wanted, "{text:?}");
+        }
+        let begin = "# zerodb:begin v1. zerodb disconnect codex removes this block.";
+        let text = format!("a = 1\n {begin} \n[mcp_servers.zerodb]\n# zerodb:end\n");
+        let entries = scan(&text).unwrap();
+        let ours = find_block(&entries).unwrap().unwrap();
         assert_eq!(&text[ours.clone()], &text[6..]);
-        assert!(!foreign(text, Some(&ours)) && foreign(text, None));
-        // Only a root key sets the servers inline. A profile's own `mcp_servers` doesn't.
-        assert!(inline_servers(" mcp_servers= {}\n", None));
-        assert!(!inline_servers("[mcp_servers]\n[profiles.x]\nmcp_servers = {}\n", None));
+        assert!(clash(&entries, Some(&ours)).is_none() && clash(&entries, None) == server);
+        let not_markers = format!("# zerodb:beginner\n# zerodb:end.\ns = '''\n{begin}\n'''\n");
+        assert_eq!(find_block(&scan(&not_markers).unwrap()), Ok(None));
     }
 }

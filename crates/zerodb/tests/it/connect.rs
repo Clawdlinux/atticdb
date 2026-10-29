@@ -1257,19 +1257,30 @@ fn connect_codex_adds_its_parts() {
     assert_eq!(text(&config), "");
 
     // A zerodb server zerodb didn't write is refused, with --force too, and its env never
-    // shows. So is `mcp_servers` set inline, which the block's table would break. The hook
-    // still goes in. disconnect leaves the server too.
+    // shows. Keys count decoded, and a table name inside an array doesn't count. `mcp_servers`
+    // set inline is refused too, as zerodb can't tell what it holds. The hook still goes in.
+    // disconnect leaves both, which counts as skipped.
     let home = dir.0.join("f");
     let config = home.join(".codex/config.toml");
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();
     let secret = format!("sk-{}", "s3cret".repeat(6));
-    let server = "a zerodb MCP server that zerodb didn't write";
+    let server = (
+        "has a zerodb MCP server that zerodb didn't write. zerodb doesn't edit it, even with \
+         --force, and adding the block would break the file",
+        "has a zerodb MCP server that zerodb didn't write. Remove it by hand to disconnect it",
+    );
+    let inline = (
+        "sets mcp_servers as an inline table, so zerodb can't tell whether it holds zerodb, and \
+         adding the block would break the file",
+        "sets mcp_servers as an inline table, so zerodb can't tell whether it holds zerodb. If \
+         it does, remove zerodb there by hand",
+    );
     let theirs = [
         (
             format!(
                 "model = \"o3\"\n  mcp_servers = {{ gh = {{ env = {{ K = \"{secret}\" }} }} }}\n"
             ),
-            "mcp_servers as an inline table",
+            inline,
         ),
         (
             format!(
@@ -1284,11 +1295,17 @@ fn connect_codex_adds_its_parts() {
             server,
         ),
         (format!("model = \"o3\"\nmcp_servers.zerodb.env.API_KEY = \"{secret}\"\n"), server),
+        (format!("[mcp_servers.\"zero\\u0064b\"]\ncommand = \"{secret}\"\n"), server),
+        (
+            format!(
+                "args = [\n  [\"a\"],\n  [ \"b\" ],\n]\n[mcp_servers.zerodb]\ncommand = \"{secret}\"\n"
+            ),
+            server,
+        ),
     ];
-    for (theirs, clash) in &theirs {
+    for (theirs, (refused, left)) in &theirs {
         let refused = format!(
-            "MCP entry: skipped, {} has {clash}. zerodb doesn't edit it, even with --force, and \
-             adding the block would break the file. Nothing changed. Merge this block into it by \
+            "MCP entry: skipped, {} {refused}. Nothing changed. Merge this block into it by \
              hand:\n{}",
             config.display(),
             block(None, true)
@@ -1304,13 +1321,41 @@ fn connect_codex_adds_its_parts() {
             assert_eq!(text(&config), *theirs, "{force:?}: unchanged");
             assert_eq!(calls().len(), start, "no codex ran");
         }
+        let (code, out) = run(&home, None, &bin, &[], &["disconnect", "codex"]);
+        assert_eq!(code, Some(1), "{theirs}: {out}");
+        let left = format!("MCP entry: skipped, {} {left}\n", config.display());
+        assert!(out.starts_with(&left), "{theirs}: {out}");
+        assert!(out.contains("\nSessionStart hook: removed ("), "{out}");
+        assert!(!out.contains(&secret), "{out}");
+        assert_eq!(text(&config), *theirs);
     }
-    let (code, out) = run(&home, None, &bin, &[], &["disconnect", "codex"]);
-    assert_eq!(code, Some(1), "{out}");
-    let said = "has a zerodb MCP server that zerodb didn't write. Remove it by hand";
-    assert!(out.starts_with("MCP entry: skipped, ") && out.contains(said), "{out}");
-    assert!(out.contains("\nSessionStart hook: removed ("), "{out}");
-    assert_eq!(text(&config), theirs.last().unwrap().0);
+
+    // TOML that only looks like zerodb's: its markers and server inside a multi-line string, a
+    // quoted key with a dot, a table name inside an array, and a comment that starts like a
+    // marker. connect appends the block, and disconnect gives the file back.
+    let home = dir.0.join("n");
+    let config = home.join(".codex/config.toml");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    let begin = "# zerodb:begin v1. zerodb disconnect codex removes this block.";
+    let lookalikes = [
+        format!(
+            "developer_instructions = \"\"\"\nKeep these lines:\n{begin}\n[mcp_servers.zerodb]\n\
+             # zerodb:end\n\"\"\"\n{CODEX_CONFIG}"
+        ),
+        format!("{CODEX_CONFIG}[mcp_servers.\"zerodb.proxy\"]\ncommand = \"npx\"\n"),
+        format!("servers = [\n  [\"mcp_servers.zerodb\"],\n]\n{CODEX_CONFIG}"),
+        format!("# zerodb:beginner\n{CODEX_CONFIG}"),
+    ];
+    for kept in &lookalikes {
+        std::fs::write(&config, kept).unwrap();
+        let (code, out) = run(&home, None, &bin, &[], &["connect", "codex", "--no-hook"]);
+        assert_eq!(code, Some(0), "{kept}: {out}");
+        assert!(out.starts_with("MCP entry: added ("), "{kept}: {out}");
+        assert_eq!(text(&config), format!("{kept}\n{}", block(None, true)), "{kept}");
+        let (code, out) = run(&home, None, &bin, &[], &["disconnect", "codex"]);
+        assert_eq!(code, Some(0), "{kept}: {out}");
+        assert_eq!(text(&config), *kept, "{kept}: the string stays");
+    }
 
     // zerodb's block from an old binary path is updated in place, with a backup, and the
     // tables after it stay.
@@ -1340,9 +1385,17 @@ fn connect_codex_adds_its_parts() {
     assert_eq!(out, said);
     assert_eq!((text(&config), calls().len()), (block(None, true), start));
 
-    // A read-back that doesn't show zerodb's entry, or isn't JSON, puts the file back, with
-    // its mode, and leaves no backup. One zerodb made is deleted again. The hook still goes in.
-    for (mode, said) in [("mismatch", "does not show "), ("garbage", "did not print JSON")] {
+    // A read-back that doesn't show zerodb's entry, isn't JSON, or fails, puts the file back,
+    // with its mode, and leaves no backup. One zerodb made is deleted again. codex's output is
+    // never shown, as its errors can quote the config. codex runs in the config dir. The hook
+    // still goes in.
+    let token = format!("tok-{}", "0123456789abcdef".repeat(2));
+    let reads = [
+        ("mismatch", "does not show "),
+        ("garbage", "did not print JSON"),
+        ("fails", "failed (exit 1); run it yourself to see why. "),
+    ];
+    for (mode, said) in reads {
         for kept in [Some(CODEX_CONFIG), None] {
             let home = dir.0.join(format!("b-{mode}-{}", kept.is_some()));
             let codex_dir = home.join(".codex");
@@ -1352,11 +1405,15 @@ fn connect_codex_adds_its_parts() {
                 std::fs::write(&config, kept).unwrap();
                 chmod(&config, 0o640);
             }
-            let fake = [("FAKE_CODEX", Path::new(mode))];
+            let fake = [("FAKE_CODEX", Path::new(mode)), ("FAKE_CODEX_TOKEN", Path::new(&token))];
             let (code, out) = run(&home, None, &bin, &fake, &["connect", "codex"]);
             assert_eq!(code, Some(1), "{mode}: {out}");
             let failed = format!("MCP entry: failed, codex mcp get zerodb --json {said}");
             assert!(out.starts_with(&failed), "{mode}: {out}");
+            assert!(!out.contains(&token) && !out.contains("api_key"), "{mode}: {out}");
+            let cwd = std::fs::read_to_string(bin.join("cwd")).unwrap();
+            let codex_dir_real = std::fs::canonicalize(&codex_dir).unwrap();
+            assert_eq!(cwd.lines().last(), codex_dir_real.to_str(), "{mode}: codex's cwd");
             assert!(out.contains("\nSessionStart hook: added ("), "{mode}: {out}");
             let names: Vec<String> = files(&codex_dir).into_keys().collect();
             let left =
@@ -1380,13 +1437,13 @@ fn connect_codex_adds_its_parts() {
     let home = dir.0.join("k");
     let config = home.join(".codex/config.toml");
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();
-    let pairs = "its lines # zerodb:begin and # zerodb:end don't pair up: each must come once, in \
-                 that order";
+    let pairs = "its zerodb begin lines and lines # zerodb:end don't pair up: each must come \
+                 once, in that order";
     let rows = [
-        ("# zerodb:end\n", "it has a line # zerodb:end without a line # zerodb:begin"),
-        ("# zerodb:begin v1\n", "it has a line # zerodb:begin without a line # zerodb:end"),
-        ("# zerodb:begin v1\n# zerodb:begin v1\n# zerodb:end\n", pairs),
-        ("# zerodb:end\n# zerodb:begin v1\n", pairs),
+        ("# zerodb:end\n".to_owned(), "it has a line # zerodb:end without a zerodb begin line"),
+        (format!("{begin}\n"), "it has a zerodb begin line without a line # zerodb:end"),
+        (format!("{begin}\n{begin}\n# zerodb:end\n"), pairs),
+        (format!("# zerodb:end\n{begin}\n"), pairs),
     ];
     for (marks, said) in rows {
         let kept = format!("{CODEX_CONFIG}\n{marks}");

@@ -53,8 +53,6 @@ const ALLOW: [&str; 2] = ["permissions", "allow"];
 const REMOVE: [&str; 5] = ["mcp", "remove", "-s", "user", "zerodb"];
 /// The most of `.claude.json` read. It holds all of Claude's state, so it can be large.
 const MAX_STATE: u64 = 64 << 20;
-/// The most of a child's stderr kept, from its end.
-const KEPT_STDERR: usize = 64 << 10;
 /// The most of a child's stdout read back.
 const MAX_STDOUT: usize = 1 << 20;
 /// How long a `claude` or `codex` command may run.
@@ -472,18 +470,16 @@ fn drain(mut from: impl Read + Send + 'static, keep: usize) -> Receiver<(Vec<u8>
 
 /// Runs `command` with stdin closed, for at most [`CHILD_TIMEOUT`]. `line` names it in
 /// errors. It runs in its own process group, so a timeout kills whatever it started too.
-/// Its stderr, and with `capture` its stdout, are read to their end. Returns its stdout, up
-/// to [`MAX_STDOUT`], or nothing without `capture`. An error ends with the last line it
-/// printed on stderr, but never a line that quotes a config file.
+/// With `capture`, its stdout is read to its end and returned, up to [`MAX_STDOUT`]. Its
+/// stderr is discarded. An error never shows the child's output: `claude` and `codex` can
+/// quote their config in an error, and Node's JSON errors quote the text they failed on.
 pub(super) fn run(command: &mut Command, line: &str, capture: bool) -> Result<Vec<u8>, String> {
     let stdout = if capture { Stdio::piped() } else { Stdio::null() };
-    command.stdin(Stdio::null()).stdout(stdout).stderr(Stdio::piped());
+    command.stdin(Stdio::null()).stdout(stdout).stderr(Stdio::null());
     command.process_group(0);
     // Retries take at most 200 ms of the 10 s budget.
     let mut child =
         crate::spawn(command).map_err(|error| format!("{line} could not start: {error}"))?;
-    // Only the last 64 KiB of stderr are kept, for the last line.
-    let stderr = child.stderr.take().map(|stderr| drain(stderr, KEPT_STDERR));
     let stdout = child.stdout.take().map(|stdout| drain(stdout, MAX_STDOUT));
     let deadline = Instant::now() + CHILD_TIMEOUT;
     let status = loop {
@@ -502,26 +498,15 @@ pub(super) fn run(command: &mut Command, line: &str, capture: bool) -> Result<Ve
             Err(error) => return Err(format!("{line}: {error}")),
         }
     };
-    // A process the child left behind may hold a pipe open, so wait for its end only briefly.
-    let read = |from: Option<Receiver<(Vec<u8>, usize)>>| {
-        from.and_then(|from| from.recv_timeout(Duration::from_secs(1)).ok())
-    };
     if !status.success() {
-        let (stderr, _) = read(stderr).unwrap_or_default();
-        let stderr = String::from_utf8_lossy(&stderr);
-        // A config parse error shows the bad line as `12 | <line>`, which may hold a secret.
-        let quoted = |line: &str| {
-            let rest = line.trim_start().trim_start_matches(|c: char| c.is_ascii_digit());
-            rest.trim_start().starts_with('|')
-        };
-        let mut lines = stderr.lines().rev();
-        let last = lines.find(|line| !line.trim().is_empty() && !quoted(line)).unwrap_or_default();
-        return Err(format!("{line} exited with {status}: {}", last.trim()));
+        let code = status.code().map_or_else(|| status.to_string(), |code| format!("exit {code}"));
+        return Err(format!("{line} failed ({code})"));
     }
     if !capture {
         return Ok(Vec::new());
     }
-    match read(stdout) {
+    // A process the child left behind may hold the pipe open, so wait for its end only briefly.
+    match stdout.and_then(|from| from.recv_timeout(Duration::from_secs(1)).ok()) {
         Some((stdout, total)) if total == stdout.len() => Ok(stdout),
         Some(_) => Err(format!("{line} printed over 1 MiB")),
         None => Err(format!("{line} did not close its output")),

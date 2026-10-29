@@ -128,12 +128,15 @@ with open(path, "w") as f:
 }
 
 /// A fake `codex` in the new directory `bin`, for a `PATH` of just `bin`. It appends its args
-/// as a JSON line to `bin/argv`, which it returns. It answers only `mcp get <name> [--json]`,
+/// as a JSON line to `bin/argv`, which it returns, and its working directory as a line to
+/// `bin/cwd`. It answers only `mcp get <name> [--json]`,
 /// as Codex 0.147.0 does: it parses `config.toml` in `$CODEX_HOME`, else in `$HOME/.codex`,
 /// with Python's `tomllib`, so a file that isn't valid TOML fails. A missing server exits 1.
 /// `--json` prints the server as `{"name", "enabled", "transport": {"type": "stdio",
 /// "command", "args", "env", ...}, ...}`. With `FAKE_CODEX=mismatch`, it shows another
-/// command. With `FAKE_CODEX=garbage`, it prints text that isn't JSON.
+/// command. With `FAKE_CODEX=garbage`, it prints text that isn't JSON. With
+/// `FAKE_CODEX=fails`, it prints `$FAKE_CODEX_TOKEN` on stdout and stderr, as an error quoting
+/// the config would, and exits 1.
 pub fn fake_codex(bin: &Path) -> PathBuf {
     let path = std::env::var_os("PATH").unwrap_or_default();
     let python = std::env::split_paths(&path).map(|dir| dir.join("python3")).find(|p| p.is_file());
@@ -153,7 +156,13 @@ except ImportError:
 args = sys.argv[1:]
 with open(os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "argv"), "a") as log:
     log.write(json.dumps(args) + "\n")
+with open(os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "cwd"), "a") as log:
+    log.write(os.getcwd() + "\n")
 mode = os.environ.get("FAKE_CODEX", "")
+if mode == "fails":
+    line = "3 | api_key = \"" + os.environ["FAKE_CODEX_TOKEN"] + "\""
+    print(line)
+    sys.exit("Error loading config.toml: TOML parse error at line 3\n" + line + "\ninvalid")
 if args[:2] != ["mcp", "get"]:
     sys.exit("unexpected args")
 name, as_json = None, False
