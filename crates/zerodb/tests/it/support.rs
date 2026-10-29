@@ -138,6 +138,11 @@ pub fn fake_codex(bin: &Path) -> PathBuf {
     let path = std::env::var_os("PATH").unwrap_or_default();
     let python = std::env::split_paths(&path).map(|dir| dir.join("python3")).find(|p| p.is_file());
     let python = python.unwrap_or_else(|| panic!("the fake codex needs python3 on PATH"));
+    // CI's runners have Python 3.12 (Ubuntu 24.04) and 3.14 (macOS 15).
+    let mut check = command(&python);
+    check.args(["-c", "import tomllib"]).stdout(Stdio::null()).stderr(Stdio::null());
+    let has_tomllib = spawn(&mut check).wait().unwrap().success();
+    assert!(has_tomllib, "the fake codex needs Python 3.11 or later, for tomllib: {python:?}");
     let script = format!(
         r#"#!{}
 import json, os, sys

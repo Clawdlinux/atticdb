@@ -1123,6 +1123,7 @@ fn connect_codex_adds_its_parts() {
         ("CODEX_HOME", true, None),
         ("hand-kept", true, Some(CODEX_CONFIG)),
         ("CRLF", true, Some(crlf.as_str())),
+        ("no final newline", true, Some(CODEX_CONFIG.trim_end())),
     ];
     for (row, (case, moved, kept)) in rows.into_iter().enumerate() {
         let home = dir.0.join(format!("h{row}"));
@@ -1141,9 +1142,16 @@ fn connect_codex_adds_its_parts() {
         let disconnect = || run(&home, codex, &bin, &[], &["disconnect", "codex"]);
         let original = kept.unwrap_or_default();
         let eol = if case == "CRLF" { "\r\n" } else { "\n" };
+        // A file without a final line end gets one, and the block's first line says so.
+        let added = "removes this block and the line end it added above.";
         let with = |block: &str| match original {
             "" => block.to_owned(),
-            original => format!("{original}{eol}{}", block.replace('\n', eol)),
+            original if original.ends_with('\n') => {
+                format!("{original}{eol}{}", block.replace('\n', eol))
+            }
+            original => {
+                format!("{original}\n\n{}", block.replacen("removes this block.", added, 1))
+            }
         };
         let (at, shown) = (config.display().to_string(), hooks.display().to_string());
         let start = calls().len();
@@ -1249,26 +1257,42 @@ fn connect_codex_adds_its_parts() {
     assert_eq!(text(&config), "");
 
     // A zerodb server zerodb didn't write is refused, with --force too, and its env never
-    // shows. The hook still goes in. disconnect leaves it too.
+    // shows. So is `mcp_servers` set inline, which the block's table would break. The hook
+    // still goes in. disconnect leaves the server too.
     let home = dir.0.join("f");
     let config = home.join(".codex/config.toml");
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();
     let secret = format!("sk-{}", "s3cret".repeat(6));
+    let server = "a zerodb MCP server that zerodb didn't write";
     let theirs = [
-        format!("[mcp_servers.zerodb]\ncommand = \"npx\"\nenv = {{ API_KEY = \"{secret}\" }}\n"),
-        format!(
-            "[mcp_servers]\nzerodb = {{ command = \"npx\", env = {{ KEY = \"{secret}\" }} }}\n"
+        (
+            format!(
+                "model = \"o3\"\n  mcp_servers = {{ gh = {{ env = {{ K = \"{secret}\" }} }} }}\n"
+            ),
+            "mcp_servers as an inline table",
         ),
-        format!("model = \"o3\"\nmcp_servers.zerodb.env.API_KEY = \"{secret}\"\n"),
+        (
+            format!(
+                "[mcp_servers.zerodb]\ncommand = \"npx\"\nenv = {{ API_KEY = \"{secret}\" }}\n"
+            ),
+            server,
+        ),
+        (
+            format!(
+                "[mcp_servers]\nzerodb = {{ command = \"npx\", env = {{ KEY = \"{secret}\" }} }}\n"
+            ),
+            server,
+        ),
+        (format!("model = \"o3\"\nmcp_servers.zerodb.env.API_KEY = \"{secret}\"\n"), server),
     ];
-    let refused = format!(
-        "MCP entry: skipped, {} has a zerodb MCP server that zerodb didn't write. zerodb doesn't \
-         edit it, even with --force, and a second one would break the file. Nothing changed. \
-         Merge this block into it by hand:\n{}",
-        config.display(),
-        block(None, true)
-    );
-    for theirs in &theirs {
+    for (theirs, clash) in &theirs {
+        let refused = format!(
+            "MCP entry: skipped, {} has {clash}. zerodb doesn't edit it, even with --force, and \
+             adding the block would break the file. Nothing changed. Merge this block into it by \
+             hand:\n{}",
+            config.display(),
+            block(None, true)
+        );
         for force in [&[][..], &["--force"]] {
             std::fs::write(&config, theirs).unwrap();
             let start = calls().len();
@@ -1286,7 +1310,7 @@ fn connect_codex_adds_its_parts() {
     let said = "has a zerodb MCP server that zerodb didn't write. Remove it by hand";
     assert!(out.starts_with("MCP entry: skipped, ") && out.contains(said), "{out}");
     assert!(out.contains("\nSessionStart hook: removed ("), "{out}");
-    assert_eq!(text(&config), *theirs.last().unwrap());
+    assert_eq!(text(&config), theirs.last().unwrap().0);
 
     // zerodb's block from an old binary path is updated in place, with a backup, and the
     // tables after it stay.

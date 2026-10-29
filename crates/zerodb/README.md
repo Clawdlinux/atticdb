@@ -297,12 +297,15 @@ The `memory_append` table saves notes without asking. `--notes ask` leaves it ou
 Under `ZERODB_HOME`, the block also has `env = { ZERODB_HOME = "<path>" }`.
 Paths are TOML strings, with `\` and `"` escaped. A path with a control character is refused.
 The block goes after 1 blank line. A file with CRLF line ends gets CRLF.
+A file without a final line end gets one, and the begin line then ends `removes this block and the line end it added above.`
+So `disconnect` gives back the file byte for byte.
 A missing file is created at mode 0600, and a missing config dir at 0700.
 A block that matches writes nothing. Another one, such as one from an old binary path, is replaced in place, with a backup.
 The lines between the markers are zerodb's. Don't add your own there, as `disconnect` removes them.
 Marker lines that don't pair up skip the part: an end line without a begin line, a begin line without an end line, or 2 begin lines.
 A `zerodb` server outside the block, as a `[mcp_servers.zerodb]` table or a `zerodb` key under `mcp_servers`, is refused. A second one would break the file.
-zerodb never edits it, even with `--force`. The line shows the block to merge by hand, and never that server's env.
+So is `mcp_servers = { ... }` at the root, as the block's tables can't extend an inline table.
+zerodb never edits either, even with `--force`. The line shows the block to merge by hand, and never a server's env.
 
 After a write, `codex mcp get zerodb --json` must show the binary, `mcp --agent codex` and the home. That command only prints config.
 It runs in the config dir, so a project's `.codex/config.toml` can't answer. It has 10 s, as `claude` does above.

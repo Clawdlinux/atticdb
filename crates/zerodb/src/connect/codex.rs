@@ -28,6 +28,10 @@ const CODEX_ENV: &str = "CODEX_HOME";
 const BEGIN: &str = "# zerodb:begin";
 /// The begin line zerodb writes.
 const BEGIN_LINE: &str = "# zerodb:begin v1. zerodb disconnect codex removes this block.";
+/// The begin line zerodb writes after adding the line end the file lacked, so `disconnect`
+/// removes that line end too.
+const BEGIN_ADDED: &str = "# zerodb:begin v1. zerodb disconnect codex removes this block and \
+                           the line end it added above.";
 /// The end line of zerodb's block.
 const END: &str = "# zerodb:end";
 /// The `codex` args that print zerodb's server config.
@@ -264,6 +268,17 @@ fn foreign(text: &str, ours: Option<&Range<usize>>) -> bool {
         .any(|(path, _)| path.starts_with(&["mcp_servers".into(), "zerodb".into()]))
 }
 
+/// Whether `text` sets `mcp_servers` at its root, outside `ours`, as with
+/// `mcp_servers = { ... }`. A `[mcp_servers.zerodb]` table after it would break the file.
+fn inline_servers(text: &str, ours: Option<&Range<usize>>) -> bool {
+    keys(text, ours).iter().any(|(path, value)| value.is_some() && *path == ["mcp_servers"])
+}
+
+/// Whether `block`, zerodb's block in a file, starts with [`BEGIN_ADDED`].
+fn added_end(block: &str) -> bool {
+    block.lines().next().is_some_and(|line| line.trim() == BEGIN_ADDED)
+}
+
 /// Whether the `config.toml` at `path` turns hooks off with `hooks = false` in `[features]`.
 fn hooks_off(path: &Path) -> bool {
     let Ok(Some((bytes, _))) = read(path) else { return false };
@@ -276,7 +291,7 @@ fn hooks_off(path: &Path) -> bool {
 
 /// Puts zerodb's block for `exe`, `home` and `notes` in the `config.toml` at `path`: in place
 /// of an older one, else at the end, after 1 blank line. A file with CRLF line ends gets
-/// CRLF. Then `codex mcp get zerodb --json` must show it, or the file is put back.
+/// CRLF. A file without a final line end gets one, and the block says so. Then `codex mcp get zerodb --json` must show it, or the file is put back.
 fn set_block(path: &Path, exe: &str, home: Option<&str>, notes: Notes) -> Line {
     let shown = path.display();
     let skipped = |why: String| format!("MCP entry: skipped, {why}");
@@ -294,11 +309,15 @@ fn set_block(path: &Path, exe: &str, home: Option<&str>, notes: Notes) -> Line {
              zerodb connect codex"
         ))
     })?;
-    if foreign(text, found.as_ref()) {
+    let clash = if foreign(text, found.as_ref()) {
+        Some("a zerodb MCP server that zerodb didn't write")
+    } else {
+        inline_servers(text, found.as_ref()).then_some("mcp_servers as an inline table")
+    };
+    if let Some(clash) = clash {
         return Err(skipped(format!(
-            "{shown} has a zerodb MCP server that zerodb didn't write. zerodb doesn't edit it, \
-             even with --force, and a second one would break the file. Nothing changed. Merge \
-             this block into it by hand:\n{}",
+            "{shown} has {clash}. zerodb doesn't edit it, even with --force, and adding the \
+             block would break the file. Nothing changed. Merge this block into it by hand:\n{}",
             wanted.trim_end()
         )));
     }
@@ -306,7 +325,13 @@ fn set_block(path: &Path, exe: &str, home: Option<&str>, notes: Notes) -> Line {
         Some(at) if text[..at].ends_with('\r') => "\r\n",
         _ => "\n",
     };
-    let ours = wanted.replace('\n', eol);
+    // A block written after an added line end keeps saying so when it is replaced.
+    let added = match &found {
+        Some(range) => added_end(&text[range.clone()]),
+        None => !text.is_empty() && !text.ends_with('\n'),
+    };
+    let begin = if added { BEGIN_ADDED } else { BEGIN_LINE };
+    let ours = wanted.replacen(BEGIN_LINE, begin, 1).replace('\n', eol);
     let (new, verb, by_hand) = match found {
         Some(range) if text[range.clone()] == ours => {
             return Ok(format!("MCP entry: unchanged ({shown})"));
@@ -399,7 +424,7 @@ fn restore(path: &Path, backup: Option<&Path>) -> String {
 }
 
 /// Removes zerodb's block from the `config.toml` at `path`, with the blank line `connect`
-/// put before it.
+/// put before it, and the line end it added.
 fn drop_block(path: &Path) -> Line {
     let shown = path.display();
     let by_hand = format!("Remove the lines from {BEGIN} to {END} in {shown} by hand");
@@ -424,9 +449,15 @@ fn drop_block(path: &Path) -> Line {
         }
     };
     let before = &text[..range.start];
-    // The blank line `connect` put before the block goes too, so its line end stays.
+    // The blank line `connect` put before the block goes too, so its line end stays. So does
+    // that line end when `connect` added it.
     let blank = ["\r\n\r\n", "\n\n"].into_iter().find(|blank| before.ends_with(blank));
-    let before = blank.map_or(before, |blank| &before[..before.len() - blank.len() / 2]);
+    let mut before = blank.map_or(before, |blank| &before[..before.len() - blank.len() / 2]);
+    let block = &text[range.clone()];
+    if added_end(block) {
+        let crlf = block.split('\n').next().is_some_and(|line| line.ends_with('\r'));
+        before = before.strip_suffix(if crlf { "\r\n" } else { "\n" }).unwrap_or(before);
+    }
     let new = format!("{before}{}", &text[range.end..]);
     let backup = write(path, old.as_ref(), new.as_bytes())
         .map_err(|why| format!("MCP entry: failed, {why}. {by_hand}"))?;
@@ -437,7 +468,7 @@ fn drop_block(path: &Path) -> Line {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
-    use super::{find_block, foreign, keys, toml_string};
+    use super::{find_block, foreign, inline_servers, keys, toml_string};
 
     #[test]
     fn toml_strings_escape_and_refuse_control_characters() {
@@ -468,5 +499,8 @@ mod tests {
         let ours = find_block(text).unwrap().unwrap();
         assert_eq!(&text[ours.clone()], &text[6..]);
         assert!(!foreign(text, Some(&ours)) && foreign(text, None));
+        // Only a root key sets the servers inline. A profile's own `mcp_servers` doesn't.
+        assert!(inline_servers(" mcp_servers= {}\n", None));
+        assert!(!inline_servers("[mcp_servers]\n[profiles.x]\nmcp_servers = {}\n", None));
     }
 }
