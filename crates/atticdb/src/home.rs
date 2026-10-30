@@ -90,14 +90,69 @@ pub fn env_dir() -> Result<Option<PathBuf>, String> {
     }
 }
 
-/// The home directory: `$ATTICDB_HOME` when set, by [`env_dir`], else [`default_dir`]. It
-/// refuses, by [`crate::legacy::check_home`], when data from before the rename is in the
-/// way, so nothing makes a new home beside it.
+/// The home directory, by [`Lookup::ENV`].
 pub fn dir() -> Result<PathBuf, String> {
-    crate::legacy::check_env()?;
-    let (dir, default) = unchecked_dir()?;
-    crate::legacy::check_home(&dir, default)?;
-    Ok(dir)
+    Lookup::ENV.dir()
+}
+
+/// How to find the home. Commands read `ATTICDB_HOME` and run the legacy guards, by
+/// [`Lookup::ENV`]. `atticdb migrate` passes the home it resolved and skips the guards, as old
+/// names may still be set in its environment.
+#[derive(Clone, Debug)]
+pub struct Lookup {
+    /// `None` reads `ATTICDB_HOME`. `Some` stands for its value, `Some(None)` for unset.
+    given: Option<Option<PathBuf>>,
+    /// Whether [`crate::legacy`]'s guards run.
+    guards: bool,
+}
+
+impl Lookup {
+    /// The home the environment names, with the legacy guards.
+    pub const ENV: Self = Self { given: None, guards: true };
+
+    /// The home `dir` names as `ATTICDB_HOME` would, the default home for `None`, without
+    /// the legacy guards.
+    pub(crate) fn given(dir: Option<PathBuf>) -> Self {
+        Self { given: Some(dir), guards: false }
+    }
+
+    /// `ATTICDB_HOME` as [`env_dir`] reads it, or as given.
+    pub(crate) fn env_dir(&self) -> Result<Option<PathBuf>, String> {
+        match &self.given {
+            Some(dir) => Ok(dir.clone()),
+            None => env_dir(),
+        }
+    }
+
+    /// The home directory: [`Self::env_dir`] when set, else [`default_dir`]. With the guards,
+    /// it refuses by [`crate::legacy::check_home`] when data from before the rename is in the
+    /// way, so nothing makes a new home beside it.
+    pub fn dir(&self) -> Result<PathBuf, String> {
+        if self.guards {
+            crate::legacy::check_env()?;
+        }
+        let (dir, default) = match self.env_dir()? {
+            Some(dir) => (dir, false),
+            None => (default_dir(NAME)?, true),
+        };
+        if self.guards {
+            crate::legacy::check_home(&dir, default)?;
+        }
+        Ok(dir)
+    }
+
+    /// Gives a child `atticdb` this home: `ATTICDB_HOME` when given, and without the old
+    /// names when the guards are off, so the child finds the same home.
+    pub(crate) fn pass(&self, command: &mut std::process::Command) {
+        match &self.given {
+            Some(Some(dir)) => drop(command.env(HOME_ENV, dir)),
+            Some(None) => drop(command.env_remove(HOME_ENV)),
+            None => {}
+        }
+        if !self.guards {
+            crate::legacy::clear_env(command);
+        }
+    }
 }
 
 /// The home directory as [`dir`] finds it, without its checks, and whether it is the default.
@@ -120,44 +175,56 @@ pub(crate) fn default_dir(name: &str) -> Result<PathBuf, String> {
     Ok(xdg.filter(|xdg| xdg.is_absolute()).unwrap_or_else(|| home.join(".local/share")).join(name))
 }
 
-/// Creates the home if missing: the directory and `data/` with mode 0700, and
-/// `atticdb.json` with tenant [`TENANT`]. Checks both directories are owner-only.
+/// Creates the home if missing, by [`Lookup::ENV`].
 pub fn ensure() -> Result<Home, String> {
-    let dir = dir()?;
-    // With $HOME unset, as ATTICDB_HOME allows, the home counts as outside it.
-    let home = user_home().ok().filter(|home| dir.starts_with(home));
-    // A $HOME missing now is made below, and nothing above it is known to be synced.
-    let made_home = home.as_deref().is_some_and(|home| home.symlink_metadata().is_err());
-    let stop = home.as_deref().filter(|_| !made_home).and_then(Path::parent);
-    // The parent of the highest directory this call makes holds that directory's new entry,
-    // so it must be synced even when this user can't read it.
-    let data_dir = dir.join("data");
-    let made = data_dir.ancestors().take_while(|path| path.symlink_metadata().is_err()).last();
-    let holder = made.and_then(Path::parent).map(Path::to_owned);
-    crate::listen::owned_dir(&dir, 0o077)?;
-    let config = dir.join(CONFIG);
-    if !config.exists() {
-        publish(&dir, &config)?;
-    }
-    crate::listen::owned_dir(&data_dir, 0o077)?;
-    // Every call syncs, covering a concurrent creator that has not synced yet.
-    sync_dirs(&dir, &data_dir, stop, holder.as_deref())?;
-    Ok(Home { dir, config, data_dir, tenant: TENANT.into() })
+    Lookup::ENV.ensure()
 }
 
-/// Checks the home and its `data/`, where they exist, as [`ensure`] does: each must be a
-/// directory owned by this user, mode 0700 or stricter. A symlink counts as existing, even a
-/// dangling one, as [`ensure`] refuses that too. It creates nothing, so a plan shows the
-/// refusal that [`ensure`] would give.
+/// Checks the home and its `data/`, by [`Lookup::ENV`].
 pub fn check_existing() -> Result<(), String> {
-    let home = dir()?;
-    for dir in [home.clone(), home.join("data")] {
-        match std::fs::symlink_metadata(&dir) {
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
-            _ => crate::listen::check_owned(&dir, 0o077)?,
+    Lookup::ENV.check_existing()
+}
+
+impl Lookup {
+    /// Creates the home if missing: the directory and `data/` with mode 0700, and
+    /// `atticdb.json` with tenant [`TENANT`]. Checks both directories are owner-only.
+    pub fn ensure(&self) -> Result<Home, String> {
+        let dir = self.dir()?;
+        // With $HOME unset, as ATTICDB_HOME allows, the home counts as outside it.
+        let home = user_home().ok().filter(|home| dir.starts_with(home));
+        // A $HOME missing now is made below, and nothing above it is known to be synced.
+        let made_home = home.as_deref().is_some_and(|home| home.symlink_metadata().is_err());
+        let stop = home.as_deref().filter(|_| !made_home).and_then(Path::parent);
+        // The parent of the highest directory this call makes holds that directory's new entry,
+        // so it must be synced even when this user can't read it.
+        let data_dir = dir.join("data");
+        let made = data_dir.ancestors().take_while(|path| path.symlink_metadata().is_err()).last();
+        let holder = made.and_then(Path::parent).map(Path::to_owned);
+        crate::listen::owned_dir(&dir, 0o077)?;
+        let config = dir.join(CONFIG);
+        if !config.exists() {
+            publish(&dir, &config)?;
         }
+        crate::listen::owned_dir(&data_dir, 0o077)?;
+        // Every call syncs, covering a concurrent creator that has not synced yet.
+        sync_dirs(&dir, &data_dir, stop, holder.as_deref())?;
+        Ok(Home { dir, config, data_dir, tenant: TENANT.into() })
     }
-    Ok(())
+
+    /// Checks the home and its `data/`, where they exist, as [`Self::ensure`] does: each must
+    /// be a directory owned by this user, mode 0700 or stricter. A symlink counts as existing,
+    /// even a dangling one, as [`Self::ensure`] refuses that too. It creates nothing, so a plan
+    /// shows the refusal that [`Self::ensure`] would give.
+    pub fn check_existing(&self) -> Result<(), String> {
+        let home = self.dir()?;
+        for dir in [home.clone(), home.join("data")] {
+            match std::fs::symlink_metadata(&dir) {
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                _ => crate::listen::check_owned(&dir, 0o077)?,
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Syncs the existing home `dir` and its ancestors as [`ensure`] does, after it was moved or

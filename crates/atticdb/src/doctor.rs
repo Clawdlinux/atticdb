@@ -3,6 +3,7 @@
 //! The parts check is [`connect::connect`] in [`Mode::Plan`], the code that writes.
 
 use crate::connect::{self, Harness, Mode, Notes, Options, Report};
+use crate::home::Lookup;
 use crate::setup::{check_hook, check_store, title, ORDER};
 use atticdb_tape::{Io, StdIo};
 use std::io::ErrorKind;
@@ -121,7 +122,7 @@ pub fn run(harnesses: Option<Vec<Harness>>) -> u8 {
         return 1;
     }
     let cwd = std::env::current_dir().map_err(|error| format!("no current dir: {error}"));
-    match cwd.clone().and_then(|cwd| check_store(&cwd)) {
+    match cwd.clone().and_then(|cwd| check_store(&cwd, &Lookup::ENV)) {
         Ok(()) => println!("Server and store: ok"),
         Err(why) => {
             println!("Server and store: {why}");
@@ -186,7 +187,8 @@ fn app(
     if plan.hooks_off {
         checks.warn("hook", HOOKS_OFF);
     } else if plan.hook.is_some_and(connect::State::in_place) {
-        checks.line("hook", cwd.clone().and_then(|cwd| check_hook(harness, &cwd)));
+        let hook = cwd.clone().and_then(|cwd| check_hook(harness, &cwd, &Lookup::ENV));
+        checks.line("hook", hook);
     }
     if harness == Harness::Codex {
         // It only reads config, and never shows codex's output, which may hold secrets.

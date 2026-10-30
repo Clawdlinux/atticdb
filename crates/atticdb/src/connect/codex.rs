@@ -20,7 +20,7 @@ use super::{
     absolute_env, add_or_update, binary, delete, moved_home, planned, read, write, Harness, Line,
     Mode, Notes, Report, State,
 };
-use crate::home::{user_home, HOME_ENV};
+use crate::home::{user_home, Lookup, HOME_ENV};
 use atticdb_tape::{Io, StdIo};
 use serde_json::{json, Value};
 use std::cell::Cell;
@@ -85,19 +85,19 @@ pub(crate) fn hooks_file() -> Result<PathBuf, String> {
 
 /// Adds the MCP block for `notes`, the hook when `hook`, and the guide. It stops with exit
 /// code 2 for a relative `CODEX_HOME`. In Plan mode, it writes nothing and runs no `codex`.
-pub(super) fn connect(hook: bool, notes: Notes, mode: Mode) -> Report {
+pub(super) fn connect(hook: bool, notes: Notes, mode: Mode, lookup: &Lookup) -> Report {
     if let Err(error) = check_codex_env() {
         return Report::stopped(2, error);
     }
     let prepared = (|| {
-        let home = moved_home(Harness::Codex)?;
+        let home = moved_home(Harness::Codex, lookup)?;
         let exe = binary()?;
         let dir = codex_home()?;
         let config = dir.join("config.toml");
         let warnings = split(Harness::Codex, home.as_deref());
         match mode {
-            Mode::Apply => drop(crate::home::ensure()?),
-            Mode::Plan => crate::home::check_existing()?,
+            Mode::Apply => drop(lookup.ensure()?),
+            Mode::Plan => lookup.check_existing()?,
         }
         Ok::<_, String>((home, exe, dir, config, warnings))
     })();
@@ -164,9 +164,9 @@ pub(super) fn binaries() -> Vec<(PathBuf, String)> {
 
 /// Checks that `codex mcp get atticdb --json`, which only reads config, shows AtticDB's entry
 /// for this binary and home. `Ok` without running anything when `codex` is not on `PATH`.
-pub(super) fn verify() -> Result<(), String> {
+pub(super) fn verify(lookup: &Lookup) -> Result<(), String> {
     check_codex_env()?;
-    let home = moved_home(Harness::Codex)?;
+    let home = moved_home(Harness::Codex, lookup)?;
     let (exe, config) = (binary()?, config_file()?);
     let Some(codex) = find_program("codex") else { return Ok(()) };
     check(&codex, config.parent().unwrap_or(Path::new("/")), &exe, home.as_deref())

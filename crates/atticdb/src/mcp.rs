@@ -172,8 +172,17 @@ impl HomeReader {
     /// `ATTICDB_TOKEN`. All reads together, connects and server starts included, end by
     /// `deadline`.
     pub(crate) fn new(session: &str, deadline: Instant) -> Result<Self, String> {
+        Self::in_home(session, deadline, &crate::home::Lookup::ENV)
+    }
+
+    /// [`Self::new`] on the home `lookup` finds.
+    pub(crate) fn in_home(
+        session: &str,
+        deadline: Instant,
+        lookup: &crate::home::Lookup,
+    ) -> Result<Self, String> {
         let flags = HashMap::from([("--session".into(), session.into())]);
-        let adapter = Adapter::open(flags, false)?;
+        let adapter = Adapter::open(flags, false, lookup)?;
         Ok(Self { adapter, deadline })
     }
 
@@ -242,12 +251,17 @@ impl StoreFlags {
     /// home, creating it if missing, and ignores `ATTICDB_TOKEN`. With `note`, says so on
     /// stderr when that variable is set.
     pub(crate) fn open(self, note: bool) -> Result<Store, String> {
+        self.open_in(note, &crate::home::Lookup::ENV)
+    }
+
+    /// [`Self::open`], with the home `lookup` finds.
+    fn open_in(self, note: bool, lookup: &crate::home::Lookup) -> Result<Store, String> {
         let Self { url, data_dir, config, token_file, tenant } = self;
         // With no connection flags, use the per-user home and its token, never the
         // environment's.
         let flags = [&data_dir, &config, &token_file, &tenant];
         let given = url.is_some() || flags.iter().any(|flag| flag.is_some());
-        let home = (!given).then(crate::home::ensure).transpose()?;
+        let home = (!given).then(|| lookup.ensure()).transpose()?;
         if home.is_some() && std::env::var_os(TOKEN_ENV).is_some() && note {
             eprintln!(
                 "atticdb: ignoring {TOKEN_ENV}: no --url, --data-dir or --config given, so the \
@@ -297,11 +311,15 @@ impl StoreFlags {
 
 impl Adapter {
     fn new(flags: HashMap<String, String>) -> Result<Self, String> {
-        Self::open(flags, true)
+        Self::open(flags, true, &crate::home::Lookup::ENV)
     }
 
     /// With `note`, says on stderr when the home is used and `ATTICDB_TOKEN` is ignored.
-    fn open(mut flags: HashMap<String, String>, note: bool) -> Result<Self, String> {
+    fn open(
+        mut flags: HashMap<String, String>,
+        note: bool,
+        lookup: &crate::home::Lookup,
+    ) -> Result<Self, String> {
         let store = StoreFlags::take(&mut flags)?;
         let mut duration = |name: &str, default: u64| match flags.remove(name) {
             None => Ok(Duration::from_secs(default)),
@@ -315,7 +333,7 @@ impl Adapter {
         };
         // Checked before the store is opened, which may create the home.
         let retry_deadline = duration("--retry-deadline", 30)?;
-        let Store { launch, token, .. } = store.open(note)?;
+        let Store { launch, token, .. } = store.open_in(note, lookup)?;
         let session = flags.remove("--session");
         Ok(Self {
             agent: flags.remove("--agent").unwrap_or_else(|| DEFAULT_AGENT.into()),

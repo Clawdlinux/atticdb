@@ -157,7 +157,7 @@ impl Report {
     }
 }
 
-use crate::home::{user_home, HOME_ENV};
+use crate::home::{user_home, Lookup, HOME_ENV};
 use atticdb_tape::{Io, StdIo};
 use serde_json::{json, Map, Value};
 use std::fs::{File, OpenOptions, Permissions};
@@ -323,29 +323,39 @@ pub fn detect(harness: Harness) -> bool {
 /// For Claude Code and Codex, a part that can't be applied is skipped, with what to do by
 /// hand, and the others still apply.
 pub fn connect(harness: Harness, options: Options, mode: Mode) -> Report {
+    connect_in(harness, options, mode, &Lookup::ENV)
+}
+
+/// [`connect`] on the home `lookup` finds.
+pub(crate) fn connect_in(
+    harness: Harness,
+    options: Options,
+    mode: Mode,
+    lookup: &Lookup,
+) -> Report {
     let Options { force, hook, notes } = options;
     match harness {
-        Harness::ClaudeCode => claude::connect(force, hook, notes, mode),
-        Harness::Codex => codex::connect(hook, notes, mode),
-        Harness::Vscode | Harness::Copilot => connect_shared(harness, force, mode),
+        Harness::ClaudeCode => claude::connect(force, hook, notes, mode, lookup),
+        Harness::Codex => codex::connect(hook, notes, mode, lookup),
+        Harness::Vscode | Harness::Copilot => connect_shared(harness, force, mode, lookup),
     }
 }
 
 /// [`connect`] for VS Code and Copilot CLI.
-fn connect_shared(harness: Harness, force: bool, mode: Mode) -> Report {
+fn connect_shared(harness: Harness, force: bool, mode: Mode, lookup: &Lookup) -> Report {
     let (mut lines, mut hook_state) = (Vec::new(), None);
     let result = (|| {
-        let moved = moved_home(harness)?;
+        let moved = moved_home(harness, lookup)?;
         if !force {
-            check_flags(harness, &crate::home::dir()?.join("data"))?;
+            check_flags(harness, &lookup.dir()?.join("data"))?;
         }
         let split = split_home(harness, moved.as_deref(), force)?;
         // Plan mode must not create the home, so it names the data dir without making it.
         let data = match mode {
-            Mode::Apply => crate::home::ensure()?.data_dir,
+            Mode::Apply => lookup.ensure()?.data_dir,
             Mode::Plan => {
-                crate::home::check_existing()?;
-                crate::home::dir()?.join("data")
+                lookup.check_existing()?;
+                lookup.dir()?.join("data")
             }
         };
         let exe = binary()?;
@@ -375,7 +385,12 @@ pub fn on_path(name: &str) -> bool {
 /// Checks that `codex mcp get atticdb --json`, which only reads config, shows AtticDB's entry.
 /// `Ok` without running anything when `codex` is not on `PATH`.
 pub fn verify_codex() -> Result<(), String> {
-    codex::verify()
+    codex::verify(&Lookup::ENV)
+}
+
+/// [`verify_codex`] for the home `lookup` finds.
+pub(crate) fn verify_codex_in(lookup: &Lookup) -> Result<(), String> {
+    codex::verify(lookup)
 }
 
 /// Runs [`refuse_flags`] on `harness`'s current entry, before any file changes. `data` is
@@ -465,12 +480,13 @@ fn home_words(home: Option<&str>) -> String {
     home.map_or_else(|| "the default home".into(), |home| format!("{HOME_ENV} {home}"))
 }
 
-/// `$ATTICDB_HOME` for the entry and the hook, or `None` when it is unset. A harness started
+/// `$ATTICDB_HOME`, as `lookup` reads it, for the entry and the hook, or `None` when it is
+/// unset. A harness started
 /// from the Dock doesn't get the shell's variables, so its files must name the home.
 /// Copilot expands variables in a hook's env, and Claude Code in its MCP config, so a path
 /// with a `$` is refused. The message names `harness`.
-fn moved_home(harness: Harness) -> Result<Option<String>, String> {
-    let Some(dir) = crate::home::env_dir()? else { return Ok(None) };
+fn moved_home(harness: Harness, lookup: &Lookup) -> Result<Option<String>, String> {
+    let Some(dir) = lookup.env_dir()? else { return Ok(None) };
     let dir = dir.into_os_string().into_string();
     let dir = dir.map_err(|_| format!("{HOME_ENV} must be UTF-8 to go in a harness config"))?;
     if dir.contains('$') {

@@ -88,12 +88,12 @@ AtticDB was called zerodb until 2026-10-30. To keep your memory:
 
 1. It finds the old home: `ZERODB_HOME` when set, else the old default path, such as `~/Library/Application Support/zerodb`.
 2. A server that holds the old home's `data/LOCK` stops it, with exit 1. It names the pid to stop.
-3. It renames the old default home to the new default path, then renames `zerodb.json` to `atticdb.json` and removes the stale `data/zerodb.sock`. It syncs the directories, as creating a home does.
+3. It renames the old default home to the AtticDB home: `ATTICDB_HOME` when set, else the new default path. It first writes `MOVED_FROM_ZERODB` in the old home, holding its path. That file moves with it and stays. Then it renames `zerodb.json` to `atticdb.json` and removes the stale `data/zerodb.sock`. It syncs the directories, as creating a home does.
 4. For each app with zerodb parts, in the order VS Code, Copilot CLI, Claude Code and Codex, it runs the old binary's `disconnect <app>`, with a 30 s limit. The old binary is the one the old entry or hook runs, else `zerodb` on `PATH`. Without one, it lists the files and parts to remove by hand.
 5. It writes a 0600 file at the old default path that says where the home went. An old binary that still runs then fails, instead of making a new, empty home.
 6. It connects the apps that had zerodb parts, as `atticdb setup --yes` does. Claude Code or Codex without a zerodb hook gets none.
 
-A second run finishes a run that stopped, and says when the move is done. `--dry-run` prints the same steps and writes nothing.
+A second run finishes a run that stopped, and says when the move is done. A home with `MOVED_FROM_ZERODB` and no note at the old path gets the note. A home without it never does. `--dry-run` prints the same steps and writes nothing.
 It never merges 2 homes: when both exist, it stops with exit 1. It never moves a home set by `ZERODB_HOME`. It renames that home's config and says to set `ATTICDB_HOME`. It never edits your own instruction files. It warns about a Copilot `*.instructions.md` file that mentions zerodb.
 Exit 0 when everything is done or there is nothing to do, 1 when a step stopped, 2 for a usage error.
 

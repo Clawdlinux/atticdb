@@ -15,7 +15,7 @@ use super::{
     absolute_env, add_or_update, binary, entry_exe, entry_home, home_words, moved_home, planned,
     read, refuse_flags, save, write, Harness, Line, Mode, Report, State, COPILOT_SHARED,
 };
-use crate::home::{user_home, HOME_ENV};
+use crate::home::{user_home, Lookup, HOME_ENV};
 use crate::jsonedit;
 use serde_json::{json, Value};
 use std::fs::OpenOptions;
@@ -89,26 +89,32 @@ pub(crate) fn state_file() -> Result<PathBuf, String> {
 /// Adds the MCP entry, the hook when `hook`, and the allow rules for `notes`. An entry that
 /// differs is refused before anything changes, unless `force`. It stops with exit code 2 for
 /// a relative `CLAUDE_CONFIG_DIR`. In Plan mode, it writes nothing and runs no `claude`.
-pub(super) fn connect(force: bool, hook: bool, notes: Notes, mode: Mode) -> Report {
+pub(super) fn connect(
+    force: bool,
+    hook: bool,
+    notes: Notes,
+    mode: Mode,
+    lookup: &Lookup,
+) -> Report {
     if let Err(error) = check_config_env() {
         return Report::stopped(2, error);
     }
     let prepared = (|| {
-        let home = moved_home(Harness::ClaudeCode)?;
+        let home = moved_home(Harness::ClaudeCode, lookup)?;
         let exe = binary()?;
         let state = state_file()?;
         let current = current(&state);
         if let (false, Ok(Some(entry))) = (force, &current) {
             if !same(entry, &exe, home.as_deref()) && !updatable(entry) {
-                let data = crate::home::dir()?.join("data");
+                let data = lookup.dir()?.join("data");
                 refuse_flags(Harness::ClaudeCode, &state, entry, &data)?;
                 return Err(differs(&state, entry, &exe, home.as_deref()));
             }
         }
         let warnings = split(Harness::ClaudeCode, home.as_deref());
         match mode {
-            Mode::Apply => drop(crate::home::ensure()?),
-            Mode::Plan => crate::home::check_existing()?,
+            Mode::Apply => drop(lookup.ensure()?),
+            Mode::Plan => lookup.check_existing()?,
         }
         Ok((home, exe, state, current, warnings))
     })();

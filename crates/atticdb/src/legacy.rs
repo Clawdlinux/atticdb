@@ -3,7 +3,7 @@
 //! app. `atticdb migrate` moves an existing install: the home, then each app's parts.
 
 use crate::connect::{self, Harness, Notes, Options};
-use crate::home::{CONFIG, HOME_ENV};
+use crate::home::{Lookup, CONFIG, HOME_ENV};
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -24,6 +24,9 @@ const OLD_CONFIG: &str = "zerodb.json";
 const OLD_SOCKET: &str = "zerodb.sock";
 /// The line the old binary put in the Copilot instructions file it wrote.
 const OLD_MARKER: &str = "<!-- written by zerodb connect -->";
+/// The file `migrate` writes in the old home just before moving it, holding the old path. It
+/// moves with the home, so a rerun after a crash knows to leave the note. It stays.
+const MARKER: &str = "MOVED_FROM_ZERODB";
 /// How the note left at the old default home starts.
 const MOVED: &str = "AtticDB moved this home to";
 /// Where the README says how to move.
@@ -40,6 +43,13 @@ pub fn check_env() -> Result<(), String> {
     match RENAMED_ENV.into_iter().find(|(old, new)| set(old) && !set(new)) {
         Some((old, new)) => Err(format!("{old} was renamed to {new}. Rename it and run again.")),
         None => Ok(()),
+    }
+}
+
+/// Removes the old variables from a child's environment, so its guards pass.
+pub(crate) fn clear_env(command: &mut Command) {
+    for (old, _) in RENAMED_ENV {
+        command.env_remove(old);
     }
 }
 
@@ -329,10 +339,17 @@ fn run(plan: bool) -> Result<u8, (u8, String)> {
     if old_env.as_ref().is_some_and(|dir| !dir.is_absolute()) {
         return Err((2, format!("{OLD_HOME_ENV} must be an absolute path")));
     }
-    let new = crate::home::default_dir(crate::home::NAME).map_err(stop)?;
     let old = crate::home::default_dir(NAME).map_err(stop)?;
-    // The home in use, where a run that stopped after the move left the old config.
-    let target = crate::home::env_dir().map_err(|error| (2, error))?.unwrap_or_else(|| new.clone());
+    // The home AtticDB will read: `ATTICDB_HOME` when set, else the default. The old default
+    // home moves there, so nothing is left behind an empty one.
+    let env_home = crate::home::env_dir().map_err(|error| (2, error))?;
+    let new = match &env_home {
+        Some(dir) => dir.clone(),
+        None => crate::home::default_dir(crate::home::NAME).map_err(stop)?,
+    };
+    // Setup reads that home, or the one ZERODB_HOME names, without the guards, as the old
+    // variables may still be set here.
+    let lookup = Lookup::given(env_home.or_else(|| old_env.clone()));
     let mut acted = false;
     let mut moved = false;
     match &old_env {
@@ -351,7 +368,7 @@ fn run(plan: bool) -> Result<u8, (u8, String)> {
                     old.display(),
                     new.display()
                 );
-                acted |= finish(&target, true, plan).map_err(stop)?;
+                acted |= finish(&new, true, plan).map_err(stop)?;
             }
             Old::Home => {
                 running(&old).map_err(stop)?;
@@ -364,6 +381,7 @@ fn run(plan: bool) -> Result<u8, (u8, String)> {
                 }
                 let (from, to) = (old.display(), new.display());
                 step(plan, format!("move {from} to {to}"), format!("Moved {from} to {to}"), || {
+                    mark(&old)?;
                     move_home(&old, &new)
                 })
                 .map_err(stop)?;
@@ -372,8 +390,10 @@ fn run(plan: bool) -> Result<u8, (u8, String)> {
                 (acted, moved) = (true, true);
             }
             Old::Missing => {
-                // A run that stopped after the move left the old config in the new home.
-                if finish(&target, true, plan).map_err(stop)? {
+                // A run that stopped after the move left its marker, and maybe the old
+                // config, in the new home, and no note at the old path.
+                moved = !exists(&old) && marked(&new, &old);
+                if finish(&new, true, plan).map_err(stop)? || moved {
                     acted = true;
                 } else {
                     println!("No zerodb home found.");
@@ -411,13 +431,6 @@ fn run(plan: bool) -> Result<u8, (u8, String)> {
         println!("Next:\n  {UNINSTALL}\n  Start new chat sessions.");
         return Ok(u8::from(failed));
     }
-    // Setup reads the home through these. The old home stays where ZERODB_HOME put it.
-    if let Some(dir) = old_env.as_ref().filter(|_| !set(HOME_ENV)) {
-        std::env::set_var(HOME_ENV, dir);
-    }
-    for (old, _) in RENAMED_ENV {
-        std::env::remove_var(old);
-    }
     let order = crate::setup::ORDER.into_iter();
     let chosen: Vec<(Harness, Options)> = order
         .filter_map(|h| apps.iter().find(|(app, _)| *app == h))
@@ -426,7 +439,7 @@ fn run(plan: bool) -> Result<u8, (u8, String)> {
             (*h, Options { force: false, hook, notes: Notes::Auto })
         })
         .collect();
-    let code = crate::setup::apply(&chosen, vec![UNINSTALL.into()]);
+    let code = crate::setup::apply(&chosen, vec![UNINSTALL.into()], &lookup);
     Ok(code.max(u8::from(failed)))
 }
 
@@ -439,6 +452,26 @@ fn running(dir: &Path) -> Result<(), String> {
         "A zerodb server is running (pid {pid}). Quit the apps that use zerodb, then stop it: \
          `kill {pid}`. Nothing changed."
     ))
+}
+
+/// Writes [`MARKER`] in the old home `dir`, holding its path, and syncs it.
+fn mark(dir: &Path) -> Result<(), String> {
+    let path = dir.join(MARKER);
+    let fail = |error: std::io::Error| {
+        format!("{}: cannot write: {error}. Nothing changed.", path.display())
+    };
+    let mut options = OpenOptions::new();
+    let mut file =
+        options.write(true).create(true).truncate(true).mode(0o600).open(&path).map_err(fail)?;
+    file.write_all(format!("{}\n", dir.display()).as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(fail)?;
+    File::open(dir).and_then(|dir| dir.sync_all()).map_err(fail)
+}
+
+/// Whether the home `dir` holds [`MARKER`] naming `old`, so it was moved from there.
+fn marked(dir: &Path, old: &Path) -> bool {
+    read(&dir.join(MARKER)).is_some_and(|text| text.trim_end() == old.display().to_string())
 }
 
 /// Renames the old default home to the new one, making the new one's parent at mode 0700 if

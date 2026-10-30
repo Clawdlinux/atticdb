@@ -789,7 +789,9 @@ fn fake_holder(data: &Path, ready: &Path) -> (Process, u32) {
 
 /// `atticdb migrate` moves a zerodb install, row by row: the default home with its data, the
 /// old binary's own `disconnect` for each app in order, then setup's apply for those apps. It
-/// refuses a running server and 2 homes. It leaves a home from `ZERODB_HOME` in place.
+/// refuses a running server and 2 homes. The home moves to `ATTICDB_HOME` when that is set.
+/// A rerun after a crash before the note leaves the note, and a home that was never moved
+/// gets none. It leaves a home from `ZERODB_HOME` in place.
 /// Without an old binary, it lists what to remove by hand. It warns about a hand-written
 /// instructions file. `--dry-run` writes nothing.
 #[test]
@@ -797,6 +799,9 @@ fn migrate_moves_a_zerodb_install() {
     let rows = [
         "nothing to migrate",
         "default home",
+        "ATTICDB_HOME",
+        "crash before the note",
+        "ZERODB_HOME with app parts",
         "running server",
         "both homes",
         "ZERODB_HOME",
@@ -812,8 +817,9 @@ fn migrate_moves_a_zerodb_install() {
         let (fakes_path, _, _) = fakes(&dir.0);
         let (old, data) = (old_home(&home), data_dir(&home));
         let new = data.parent().unwrap().to_owned();
-        let custom = dir.0.join("custom");
-        let _holders = Holders(vec![data.clone(), old.join("data"), custom.join("data")]);
+        let (custom, attic) = (dir.0.join("custom"), dir.0.join("attic"));
+        let homes = [&data, &old, &custom, &attic];
+        let _holders = Holders(homes.map(|home| home.join("data")).into());
         let exe = fake_zerodb(&dir.0.join("old"));
         let argv = dir.0.join("old/zerodb.argv");
         let mine = home.join(".copilot/instructions/mine.instructions.md");
@@ -821,15 +827,34 @@ fn migrate_moves_a_zerodb_install() {
         let mut args = vec![];
         let mut holder = None;
         match case {
-            "nothing to migrate" => {}
+            // An AtticDB home that was never moved.
+            "nothing to migrate" => {
+                support::seed(&home, &["fact", "list", "--prefix", "user/"]);
+                assert!(support::kill_holder(&data));
+                std::fs::remove_file(data.join("atticdb.sock")).unwrap();
+            }
             "default home" | "both homes" => old_store(&home, &old, &[]),
+            "ATTICDB_HOME" => {
+                old_store(&home, &old, &[]);
+                env.push(("ATTICDB_HOME", attic.to_str().unwrap().into()));
+            }
+            "crash before the note" => {
+                // The move finished, then the note was lost, as a crash between them leaves it.
+                old_store(&home, &old, &[]);
+                let (code, _, err) = atticdb("migrate", &home, &home, &fakes_path, &[], &[], "");
+                assert_eq!(code, Some(0), "{case}: {err}");
+                std::fs::remove_file(&old).unwrap();
+            }
             "running server" => {
                 old_store(&home, &old, &[]);
                 holder = Some(fake_holder(&old.join("data"), &dir.0.join("ready")));
             }
-            "ZERODB_HOME" => {
+            "ZERODB_HOME" | "ZERODB_HOME with app parts" => {
                 old_store(&home, &custom, &[("ATTICDB_HOME", custom.to_str().unwrap())]);
                 env.push(("ZERODB_HOME", custom.to_str().unwrap().into()));
+                if case != "ZERODB_HOME" {
+                    old_parts(&home, exe.to_str().unwrap());
+                }
             }
             "app parts" | "dry run" => {
                 old_store(&home, &old, &[]);
@@ -869,6 +894,51 @@ fn migrate_moves_a_zerodb_install() {
                     (Some(0), "No zerodb home found.\nNothing to migrate.\n"),
                     "{case}: {err}"
                 );
+                assert!(
+                    !old.exists() && !new.join("MOVED_FROM_ZERODB").exists(),
+                    "{case}: no note"
+                );
+            }
+            "ATTICDB_HOME" => {
+                let a = attic.display();
+                let wanted = format!(
+                    "Moved {o} to {a}.\nRenamed {a}/zerodb.json to atticdb.json.\nRemoved the \
+                     stale socket {a}/data/zerodb.sock.\nLeft a note at {o}.\nNext:\n  Stop using \
+                     the zerodb binary: `cargo uninstall zerodb`.\n  Start new chat sessions.\n"
+                );
+                assert_eq!((code, out.as_str()), (Some(0), wanted.as_str()), "{case}: {err}");
+                let note = format!(
+                    "AtticDB moved this home to {a}. {}",
+                    &note[note.find("See ").unwrap()..]
+                );
+                assert_eq!(std::fs::read_to_string(&old).unwrap(), note, "{case}: the note");
+                assert!(!new.exists(), "{case}: nothing at the default path");
+                let get = ["fact", "get", "--key", "repo/h/kept"];
+                let env = [("ATTICDB_HOME", attic.to_str().unwrap())];
+                let (code, got, err) = support::atticdb(&home, &home, &get, &env, b"", 0);
+                assert_eq!(code, Some(0), "{case}: {err}");
+                let fact = serde_json::from_str::<Value>(&got).unwrap();
+                assert_eq!(fact["fact"]["content"], "kept", "{case}: read through ATTICDB_HOME");
+            }
+            "ZERODB_HOME with app parts" => {
+                // Setup gets the home explicitly, as ZERODB_HOME is still set in migrate.
+                assert_eq!(code, Some(0), "{case}: {out}{err}");
+                assert!(
+                    out.contains("\n4 connected, 0 with skipped parts.\nChecks:\n"),
+                    "{case}: {out}"
+                );
+                let entry = &read(&vscode_file(&home))["servers"]["atticdb"];
+                assert_eq!(entry["env"]["ATTICDB_HOME"], custom.to_str().unwrap(), "{case}");
+                assert!(!new.exists() && !old.exists(), "{case}: no default home, and no note");
+            }
+            "crash before the note" => {
+                let wanted = "Left a note at {o}.\nNext:\n  Stop using the zerodb binary: \
+                              `cargo uninstall zerodb`.\n  Start new chat sessions.\n";
+                let wanted = wanted.replace("{o}", &o.to_string());
+                assert_eq!((code, out), (Some(0), wanted), "{case}: {err}");
+                assert_eq!(std::fs::read_to_string(&old).unwrap(), note, "{case}: the note");
+                let marker = std::fs::read_to_string(new.join("MOVED_FROM_ZERODB")).unwrap();
+                assert_eq!(marker, format!("{o}\n"), "{case}: the marker stays");
             }
             "default home" => {
                 let wanted = format!(
