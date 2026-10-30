@@ -1341,6 +1341,14 @@ fn connect_codex_adds_its_parts() {
         ("trailing spaces", None, spaced.clone(), near, spaced),
         ("bare CR", None, bare_cr.clone(), "added", bare_cr),
         ("near cap", None, at_cap.clone(), over_cap, at_cap),
+        // Only spaces and tabs may follow a closing fence, so U+00A0 leaves it open.
+        (
+            "nbsp fence",
+            None,
+            marks(&format!("```markdown\n{guide}```\u{a0}\n")),
+            "has a code fence that never closes",
+            marks(&format!("```markdown\n{guide}```\u{a0}\n")),
+        ),
     ];
     for (row, (case, over, kept, does, left)) in rows.into_iter().enumerate() {
         let home = dir.0.join(format!("a{row}"));
@@ -1444,7 +1452,8 @@ fn connect_codex_adds_its_parts() {
         assert_eq!(support::tree(&home), before, "{case}: a rerun writes nothing");
 
         let (status, out) = run(&home, None, &bin, &[], &["disconnect", "codex"]);
-        let malformed = code == 1 && !matches!(case, "symlink" | "open fence" | "near cap");
+        let malformed =
+            code == 1 && !matches!(case, "symlink" | "open fence" | "near cap" | "nbsp fence");
         assert_eq!(status, Some(i32::from(malformed)), "{case}: {out}");
         let lines: Vec<&str> = out.lines().filter(|line| line.contains("zerodb guide")).collect();
         let removed = |path: &Path| format!("zerodb guide: removed ({}, backup: ", path.display());

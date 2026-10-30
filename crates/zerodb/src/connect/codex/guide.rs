@@ -73,7 +73,8 @@ fn rows(text: &str) -> Vec<Row<'_>> {
 }
 
 /// A code fence line: up to 3 spaces, then 3 or more backticks or tildes. Returns the fence
-/// character, how many, and the text after them.
+/// character, how many, and the text after them. Only `' '` counts as indent, as in
+/// CommonMark, where a tab is 4 columns and so too much.
 fn fence(line: &str) -> Option<(char, usize, &str)> {
     let rest = line.trim_start_matches(' ');
     if line.len() - rest.len() > 3 {
@@ -86,7 +87,8 @@ fn fence(line: &str) -> Option<(char, usize, &str)> {
 }
 
 /// The lines of `text` outside fenced code, without the fence lines, and whether a fence is
-/// still open at the end. As in CommonMark, a fence that never closes runs to the end.
+/// still open at the end. As in CommonMark, a fence that never closes runs to the end, and
+/// only spaces and tabs may follow a closing fence, not other Unicode whitespace.
 fn plain(text: &str) -> (Vec<Row<'_>>, bool) {
     let (mut open, mut plain) = (None, Vec::new());
     for row in rows(text) {
@@ -97,7 +99,7 @@ fn plain(text: &str) -> (Vec<Row<'_>>, bool) {
             }
             (None, _) => plain.push(row),
             (Some((mark, len)), Some((closer, n, after)))
-                if closer == mark && n >= len && after.trim().is_empty() =>
+                if closer == mark && n >= len && after.chars().all(|c| matches!(c, ' ' | '\t')) =>
             {
                 open = None;
             }
