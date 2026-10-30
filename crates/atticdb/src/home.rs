@@ -9,6 +9,10 @@ use std::path::{Path, PathBuf};
 
 /// The tenant the home's config names.
 pub const TENANT: &str = "me";
+/// The home's directory name at its default path.
+pub(crate) const NAME: &str = "atticdb";
+/// The home's config file.
+pub(crate) const CONFIG: &str = "atticdb.json";
 /// The variable that moves the home. Empty counts as unset.
 pub const HOME_ENV: &str = "ATTICDB_HOME";
 /// Most bytes read from a `.git` or `commondir` file. A longer one names no real path.
@@ -86,22 +90,34 @@ pub fn env_dir() -> Result<Option<PathBuf>, String> {
     }
 }
 
-/// The home directory: `$ATTICDB_HOME` when set, by [`env_dir`]. Else on macOS
-/// `$HOME/Library/Application Support/atticdb`. On Linux `$XDG_DATA_HOME/atticdb` when that
-/// is set and absolute, else `$HOME/.local/share/atticdb`.
+/// The home directory: `$ATTICDB_HOME` when set, by [`env_dir`], else [`default_dir`]. It
+/// refuses, by [`crate::legacy::check_home`], when data from before the rename is in the
+/// way, so nothing makes a new home beside it.
 pub fn dir() -> Result<PathBuf, String> {
-    if let Some(dir) = env_dir()? {
-        return Ok(dir);
+    crate::legacy::check_env()?;
+    let (dir, default) = unchecked_dir()?;
+    crate::legacy::check_home(&dir, default)?;
+    Ok(dir)
+}
+
+/// The home directory as [`dir`] finds it, without its checks, and whether it is the default.
+pub(crate) fn unchecked_dir() -> Result<(PathBuf, bool), String> {
+    match env_dir()? {
+        Some(dir) => Ok((dir, false)),
+        None => Ok((default_dir(NAME)?, true)),
     }
+}
+
+/// The default home called `name`. On macOS `$HOME/Library/Application Support/<name>`. On
+/// Linux `$XDG_DATA_HOME/<name>` when that is set and absolute, else
+/// `$HOME/.local/share/<name>`.
+pub(crate) fn default_dir(name: &str) -> Result<PathBuf, String> {
     let home = user_home()?;
     if cfg!(target_os = "macos") {
-        return Ok(home.join("Library/Application Support/atticdb"));
+        return Ok(home.join("Library/Application Support").join(name));
     }
     let xdg = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from);
-    Ok(xdg
-        .filter(|xdg| xdg.is_absolute())
-        .unwrap_or_else(|| home.join(".local/share"))
-        .join("atticdb"))
+    Ok(xdg.filter(|xdg| xdg.is_absolute()).unwrap_or_else(|| home.join(".local/share")).join(name))
 }
 
 /// Creates the home if missing: the directory and `data/` with mode 0700, and
@@ -119,7 +135,7 @@ pub fn ensure() -> Result<Home, String> {
     let made = data_dir.ancestors().take_while(|path| path.symlink_metadata().is_err()).last();
     let holder = made.and_then(Path::parent).map(Path::to_owned);
     crate::listen::owned_dir(&dir, 0o077)?;
-    let config = dir.join("atticdb.json");
+    let config = dir.join(CONFIG);
     if !config.exists() {
         publish(&dir, &config)?;
     }
@@ -142,6 +158,15 @@ pub fn check_existing() -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Syncs the existing home `dir` and its ancestors as [`ensure`] does, after it was moved or
+/// a file in it was renamed.
+pub(crate) fn sync(dir: &Path) -> Result<(), String> {
+    let home = user_home().ok().filter(|home| dir.starts_with(home));
+    let data = dir.join("data");
+    let deepest = if data.is_dir() { data } else { dir.to_owned() };
+    sync_dirs(dir, &deepest, home.as_deref().and_then(Path::parent), None)
 }
 
 /// Syncs `data/`, the home and its ancestors, deepest first, so their entries survive a

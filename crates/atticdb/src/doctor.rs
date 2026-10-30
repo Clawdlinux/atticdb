@@ -49,6 +49,12 @@ impl Checks {
         }
     }
 
+    /// Prints `  <text>` and counts a failure.
+    fn fail(&mut self, text: &str) {
+        println!("  {text}");
+        self.failed = true;
+    }
+
     /// Prints `  <what>: warning: <why>`. A warning is not a failure.
     fn warn(&self, what: &str, why: &str) {
         println!("  {what}: warning: {why}");
@@ -158,6 +164,9 @@ fn app(
                 println!("    {change}");
             }
         }
+    }
+    for found in crate::legacy::found_lines(harness) {
+        checks.fail(&found);
     }
     let stale = match exe {
         Ok(exe) => stale(harness, exe),

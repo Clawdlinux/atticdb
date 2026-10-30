@@ -400,7 +400,7 @@ fn try_start(config: Config, exit_on_poison: bool, log_requests: bool) -> Result
 }
 
 /// The `LOCK` contents when another process holds the data directory lock.
-fn lock_holder(dir: &Path) -> Option<String> {
+pub(crate) fn lock_holder(dir: &Path) -> Option<String> {
     let mut options = std::fs::OpenOptions::new();
     let mut file = crate::config::open_regular(options.read(true), &dir.join("LOCK")).ok()?;
     let held = matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock));

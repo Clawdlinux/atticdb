@@ -11,6 +11,11 @@ mod codex;
 pub use claude::Notes;
 /// What to do after Codex's hook is added.
 pub(crate) use codex::APPROVE as CODEX_APPROVE;
+// The files the legacy check reads, and how it finds the old binary.
+pub(crate) use claude::{
+    find_program, settings_file as claude_settings, state_file as claude_state,
+};
+pub(crate) use codex::{codex_home, hooks_file as codex_hooks};
 
 /// What a part did, or in [`Mode::Plan`] would do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -214,7 +219,7 @@ impl Harness {
     /// The config file. VS Code's lives in its user profile. Copilot's in `$COPILOT_HOME`.
     /// Claude Code's is `.claude.json`, which only the `claude` CLI writes. Codex's is
     /// `config.toml`, which isn't JSON, so only [`codex`] reads it.
-    fn file(self) -> Result<PathBuf, String> {
+    pub(crate) fn file(self) -> Result<PathBuf, String> {
         Ok(match self {
             Self::Vscode if cfg!(target_os = "macos") => {
                 user_home()?.join("Library/Application Support/Code/User/mcp.json")
@@ -231,7 +236,7 @@ impl Harness {
     }
 
     /// The object in the file that holds the servers.
-    fn section(self) -> &'static str {
+    pub(crate) fn section(self) -> &'static str {
         match self {
             Self::Vscode => "servers",
             Self::Copilot | Self::ClaudeCode => "mcpServers",

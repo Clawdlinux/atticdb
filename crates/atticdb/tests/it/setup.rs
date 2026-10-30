@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::Write;
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -682,4 +682,415 @@ fn doctor_checks_an_install_and_writes_nothing() {
     assert!(gets.iter().all(|args| *args == ["mcp", "get", "atticdb", "--json"]), "{gets:?}");
     let others = dir.0.join("other");
     assert!(!others.join("copilot.argv").exists() && !others.join("code.argv").exists());
+}
+
+/// The old default home when `HOME` is `home`: `zerodb` beside the new home.
+fn old_home(home: &Path) -> PathBuf {
+    data_dir(home).parent().unwrap().with_file_name("zerodb")
+}
+
+/// Makes a zerodb home at `old` holding the fact `repo/h/kept`, as the old binary named its
+/// files: this binary writes it with `env`, then its config is renamed and an old socket
+/// left.
+fn old_store(home: &Path, old: &Path, env: &[(&str, &str)]) {
+    let args = ["fact", "set", "--key", "repo/h/kept", "--content", "kept"];
+    let (code, _, err) = support::atticdb(home, home, &args, env, b"", 0);
+    assert_eq!(code, Some(0), "{err}");
+    let new = match env {
+        [("ATTICDB_HOME", dir)] => PathBuf::from(dir),
+        _ => data_dir(home).parent().unwrap().to_owned(),
+    };
+    assert!(support::kill_holder(&new.join("data")));
+    std::fs::rename(new.join("atticdb.json"), new.join("zerodb.json")).unwrap();
+    // A file stands in for the stale socket, so the tree can be read.
+    std::fs::remove_file(new.join("data/atticdb.sock")).unwrap();
+    std::fs::write(new.join("data/zerodb.sock"), "").unwrap();
+    if new != old {
+        std::fs::rename(&new, old).unwrap();
+    }
+}
+
+/// Writes `text` to `path`, making its parent.
+fn put(path: &Path, text: &str) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, text).unwrap();
+}
+
+/// zerodb's parts in the 4 apps' files under `home`, as the old binary wrote them, each
+/// running `exe`. Returns the files.
+fn old_parts(home: &Path, exe: &str) -> Vec<PathBuf> {
+    let entry =
+        |agent: &str| json!({"type": "stdio", "command": exe, "args": ["mcp", "--agent", agent]});
+    let hook = |harness: &str| {
+        let command = format!("'{exe}' hook session-start --harness {harness}");
+        json!({"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": command}]}]}})
+    };
+    let copilot = home.join(".copilot");
+    let mut settings = hook("claude-code");
+    settings["permissions"] = json!({"allow": ["mcp__zerodb__memory_append"]});
+    let bash = format!("'{exe}' hook session-start");
+    let begin = "zerodb:begin v1. zerodb disconnect codex removes this block.";
+    let files = [
+        (vscode_file(home), json!({"servers": {"zerodb": entry("vscode-copilot")}}).to_string()),
+        (copilot.join("mcp-config.json"), json!({"mcpServers": {"zerodb": entry("copilot")}}).to_string()),
+        (
+            copilot.join("hooks/zerodb.json"),
+            json!({"version": 1, "hooks": {"sessionStart": [{"type": "command", "bash": bash}]}})
+                .to_string(),
+        ),
+        (
+            copilot.join("instructions/zerodb.instructions.md"),
+            "---\napplyTo: \"**\"\n---\n<!-- written by zerodb connect -->\n\nUse zerodb.\n".into(),
+        ),
+        (home.join(".claude.json"), json!({"mcpServers": {"zerodb": entry("claude-code")}}).to_string()),
+        (home.join(".claude/settings.json"), settings.to_string()),
+        (
+            home.join(".codex/config.toml"),
+            format!("# {begin}\n[mcp_servers.zerodb]\ncommand = \"{exe}\"\nargs = [\"mcp\"]\n# zerodb:end\n"),
+        ),
+        (home.join(".codex/hooks.json"), hook("codex").to_string()),
+        (home.join(".codex/AGENTS.md"), format!("<!-- {begin} -->\nUse zerodb.\n<!-- zerodb:end -->\n")),
+    ];
+    for (path, text) in &files {
+        put(path, text);
+    }
+    files.into_iter().map(|(path, _)| path).collect()
+}
+
+/// A fake old `zerodb` in the new directory `bin`. It appends its args to `bin/zerodb.argv`,
+/// prints 1 line and exits 0. Returns its path.
+fn fake_zerodb(bin: &Path) -> PathBuf {
+    std::fs::create_dir_all(bin).unwrap();
+    let exe = bin.join("zerodb");
+    let script = "#!/bin/sh\necho \"$*\" >> \"$0.argv\"\necho \"zerodb: removed from $2\"\n";
+    std::fs::write(&exe, script).unwrap();
+    support::chmod(&exe, 0o755);
+    exe
+}
+
+/// A process that holds the lock on the data directory `data`, as a running server does,
+/// with its pid in `LOCK`. Returns it and the pid.
+fn fake_holder(data: &Path, ready: &Path) -> (Process, u32) {
+    let script = "import fcntl, os, sys, time\n\
+                  f = open(sys.argv[1], 'a+')\n\
+                  fcntl.flock(f, fcntl.LOCK_EX)\n\
+                  f.truncate(0)\n\
+                  f.write('pid=%d instance=x unix=/nowhere tcp=none' % os.getpid())\n\
+                  f.flush()\n\
+                  open(sys.argv[2], 'w').close()\n\
+                  time.sleep(60)\n";
+    let mut command = support::command("python3");
+    command.args(["-c", script]).arg(data.join("LOCK")).arg(ready);
+    let process = Process::start(&mut command);
+    support::wait_for("the fake holder", || ready.exists());
+    let pid = process.child.id();
+    (process, pid)
+}
+
+/// `atticdb migrate` moves a zerodb install, row by row: the default home with its data, the
+/// old binary's own `disconnect` for each app in order, then setup's apply for those apps. It
+/// refuses a running server and 2 homes. It leaves a home from `ZERODB_HOME` in place.
+/// Without an old binary, it lists what to remove by hand. It warns about a hand-written
+/// instructions file. `--dry-run` writes nothing.
+#[test]
+fn migrate_moves_a_zerodb_install() {
+    let rows = [
+        "nothing to migrate",
+        "default home",
+        "running server",
+        "both homes",
+        "ZERODB_HOME",
+        "app parts",
+        "no old binary",
+        "hand-written instructions",
+        "dry run",
+    ];
+    for case in rows {
+        let dir = Dir::new();
+        let home = dir.0.join("h");
+        std::fs::create_dir(&home).unwrap();
+        let (fakes_path, _, _) = fakes(&dir.0);
+        let (old, data) = (old_home(&home), data_dir(&home));
+        let new = data.parent().unwrap().to_owned();
+        let custom = dir.0.join("custom");
+        let _holders = Holders(vec![data.clone(), old.join("data"), custom.join("data")]);
+        let exe = fake_zerodb(&dir.0.join("old"));
+        let argv = dir.0.join("old/zerodb.argv");
+        let mine = home.join(".copilot/instructions/mine.instructions.md");
+        let mut env: Vec<(&str, String)> = Vec::new();
+        let mut args = vec![];
+        let mut holder = None;
+        match case {
+            "nothing to migrate" => {}
+            "default home" | "both homes" => old_store(&home, &old, &[]),
+            "running server" => {
+                old_store(&home, &old, &[]);
+                holder = Some(fake_holder(&old.join("data"), &dir.0.join("ready")));
+            }
+            "ZERODB_HOME" => {
+                old_store(&home, &custom, &[("ATTICDB_HOME", custom.to_str().unwrap())]);
+                env.push(("ZERODB_HOME", custom.to_str().unwrap().into()));
+            }
+            "app parts" | "dry run" => {
+                old_store(&home, &old, &[]);
+                old_parts(&home, exe.to_str().unwrap());
+            }
+            "no old binary" => {
+                old_store(&home, &old, &[]);
+                old_parts(&home, dir.0.join("gone/zerodb").to_str().unwrap());
+            }
+            _ => put(&mine, "Save notes in ZeroDB.\n"),
+        }
+        if case == "both homes" {
+            std::fs::DirBuilder::new().mode(0o700).create(&new).unwrap();
+        }
+        if case == "dry run" {
+            args.push("--dry-run");
+        }
+        let env: Vec<(&str, &str)> =
+            env.iter().map(|(name, value)| (*name, value.as_str())).collect();
+        let before = tree(&dir.0);
+        let (code, out, err) = atticdb("migrate", &home, &home, &fakes_path, &env, &args, "");
+        let (o, n) = (old.display(), new.display());
+        let note = format!(
+            "AtticDB moved this home to {n}. See {}\n",
+            "https://github.com/Clawdlinux/atticdb#moving-from-zerodb"
+        );
+        let moved = [
+            format!("Moved {o} to {n}.\n"),
+            format!("Renamed {n}/zerodb.json to atticdb.json.\n"),
+            format!("Removed the stale socket {n}/data/zerodb.sock.\n"),
+        ]
+        .concat();
+        match case {
+            "nothing to migrate" => {
+                assert_eq!(
+                    (code, out.as_str()),
+                    (Some(0), "No zerodb home found.\nNothing to migrate.\n"),
+                    "{case}: {err}"
+                );
+            }
+            "default home" => {
+                let wanted = format!(
+                    "{moved}Left a note at {o}.\nNext:\n  Stop using the zerodb binary: \
+                     `cargo uninstall zerodb`.\n  Start new chat sessions.\n"
+                );
+                assert_eq!((code, out.as_str()), (Some(0), wanted.as_str()), "{case}: {err}");
+                assert_eq!(std::fs::read_to_string(&old).unwrap(), note, "{case}: the note");
+                assert_eq!(std::fs::metadata(&old).unwrap().mode() & 0o777, 0o600, "{case}");
+                assert!(
+                    new.join("atticdb.json").is_file() && !new.join("zerodb.json").exists(),
+                    "{case}"
+                );
+                assert!(!data.join("zerodb.sock").exists(), "{case}: no stale socket");
+                let get = ["fact", "get", "--key", "repo/h/kept"];
+                let (code, got, err) = support::atticdb(&home, &home, &get, &[], b"", 0);
+                assert_eq!(code, Some(0), "{case}: {err}");
+                assert_eq!(
+                    serde_json::from_str::<Value>(&got).unwrap()["fact"]["content"],
+                    "kept",
+                    "{case}"
+                );
+                assert!(support::kill_holder(&data));
+                let (code, again, err) =
+                    atticdb("migrate", &home, &home, &fakes_path, &[], &[], "");
+                let done = format!(
+                    "The zerodb home at {o} was already moved to {n}.\nNothing to migrate.\n"
+                );
+                assert_eq!((code, again), (Some(0), done), "{case}: a second run: {err}");
+            }
+            "running server" => {
+                let pid = holder.as_ref().unwrap().1;
+                let wanted = format!(
+                    "atticdb: A zerodb server is running (pid {pid}). Quit the apps that use \
+                     zerodb, then stop it: `kill {pid}`. Nothing changed.\n"
+                );
+                assert_eq!((code, out.as_str(), err), (Some(1), "", wanted), "{case}");
+                assert_eq!(tree(&dir.0), before, "{case}: nothing changed");
+            }
+            "both homes" => {
+                let wanted = format!("atticdb: Both homes exist: {o} and {n}. Merge them by hand. Nothing changed.\n");
+                assert_eq!((code, err), (Some(1), wanted), "{case}: {out}");
+                assert_eq!(tree(&dir.0), before, "{case}: nothing changed");
+            }
+            "ZERODB_HOME" => {
+                let c = custom.display();
+                let wanted = format!(
+                    "Renamed {c}/zerodb.json to atticdb.json.\nThe zerodb home at {c} stays where \
+                     it is.\nSet ATTICDB_HOME={c}.\nNext:\n  Stop using the zerodb binary: \
+                     `cargo uninstall zerodb`.\n  Start new chat sessions.\n"
+                );
+                assert_eq!((code, out.as_str()), (Some(0), wanted.as_str()), "{case}: {err}");
+                assert!(
+                    custom.join("atticdb.json").is_file()
+                        && custom.join("data/zerodb.sock").exists(),
+                    "{case}"
+                );
+                assert!(!new.exists() && !old.exists(), "{case}: no default home, and no note");
+            }
+            "app parts" => {
+                assert_eq!(code, Some(0), "{case}: {out}{err}");
+                assert!(out.starts_with(&moved), "{case}: {out}");
+                let ran = ["vscode", "copilot", "claude-code", "codex"].map(|app| {
+                    format!(
+                        "Ran {} disconnect {app}:\n  zerodb: removed from {app}\n",
+                        exe.display()
+                    )
+                });
+                assert!(
+                    out.contains(&format!("{}Left a note at {o}.\nApplying:\n", ran.concat())),
+                    "{case}: {out}"
+                );
+                let logged = std::fs::read_to_string(&argv).unwrap();
+                assert_eq!(logged, "disconnect vscode\ndisconnect copilot\ndisconnect claude-code\ndisconnect codex\n");
+                assert!(
+                    out.contains("\n4 connected, 0 with skipped parts.\nChecks:\n"),
+                    "{case}: {out}"
+                );
+                for app in ["Copilot CLI", "VS Code", "Claude Code", "Codex"] {
+                    assert!(out.contains(&format!("\n  {app}: ok\n")), "{case}: {app}: {out}");
+                }
+                assert!(
+                    out.contains("\n  Stop using the zerodb binary: `cargo uninstall zerodb`.\n"),
+                    "{case}"
+                );
+                assert!(read(&vscode_file(&home))["servers"]["atticdb"].is_object(), "{case}");
+                assert!(home.join(".copilot/hooks/atticdb.json").is_file(), "{case}");
+                assert!(
+                    read(&home.join(".claude.json"))["mcpServers"]["atticdb"].is_object(),
+                    "{case}"
+                );
+                let hooks = std::fs::read_to_string(home.join(".claude/settings.json")).unwrap();
+                assert!(
+                    hooks.contains("hook session-start --harness claude-code"),
+                    "{case}: the hook kept"
+                );
+                let config = std::fs::read_to_string(home.join(".codex/config.toml")).unwrap();
+                assert!(config.contains("\n[mcp_servers.atticdb]\n"), "{case}: {config}");
+            }
+            "no old binary" => {
+                assert_eq!(code, Some(1), "{case}: {out}{err}");
+                assert!(out.starts_with(&moved), "{case}: {out}");
+                let h = home.display();
+                let by_hand = format!(
+                    "No zerodb binary found to disconnect Claude Code. Remove these by hand:\n  \
+                     {h}/.claude.json: the \"zerodb\" entry in \"mcpServers\"\n  \
+                     {h}/.claude/settings.json: the mcp__zerodb__ allow rules\n  \
+                     {h}/.claude/settings.json: the SessionStart hooks that run zerodb\n\
+                     No zerodb binary found to disconnect Codex."
+                );
+                assert!(out.contains(&by_hand), "{case}: {out}");
+                assert!(
+                    out.contains(&format!("  {h}/.copilot/hooks/zerodb.json: the file\n")),
+                    "{case}"
+                );
+                assert_eq!(std::fs::read_to_string(&old).unwrap(), note, "{case}: moved");
+            }
+            "hand-written instructions" => {
+                let warned = format!(
+                    "{} mentions zerodb. Update it by hand.\nNothing to migrate.\n",
+                    mine.display()
+                );
+                assert_eq!(
+                    (code, out.as_str()),
+                    (Some(0), format!("No zerodb home found.\n{warned}").as_str()),
+                    "{case}: {err}"
+                );
+                assert_eq!(
+                    std::fs::read_to_string(&mine).unwrap(),
+                    "Save notes in ZeroDB.\n",
+                    "{case}"
+                );
+            }
+            _ => {
+                assert_eq!(code, Some(0), "{case}: {out}{err}");
+                assert!(
+                    out.starts_with(&format!(
+                        "Would move {o} to {n}.\nWould rename {o}/zerodb.json"
+                    )),
+                    "{case}: {out}"
+                );
+                let run = format!(
+                    "Would run {} disconnect codex.\nWould leave a note at {o}",
+                    exe.display()
+                );
+                assert!(out.contains(&run), "{case}: {out}");
+                assert!(out.ends_with("Would connect vscode, copilot, claude-code, codex again, as atticdb setup --yes does.\nDry run: nothing was written.\n"), "{case}: {out}");
+                assert_eq!(tree(&dir.0), before, "{case}: nothing written");
+                assert!(!argv.exists(), "{case}: the old binary never ran");
+            }
+        }
+    }
+}
+
+/// Before the move, zerodb data stops the home commands with exit 2, so none makes a new,
+/// empty home: an old variable, the old default home, and a home with only the old config.
+/// The hook prints `{}` and says why on stderr. Doctor fails on it. For the old home, setup's
+/// plan shows a stop line. Setup's plan and doctor name each file with zerodb parts.
+#[test]
+fn zerodb_data_stops_home_commands() {
+    for case in ["old variable", "old home", "half moved"] {
+        let dir = Dir::new();
+        let home = dir.0.join("h");
+        std::fs::create_dir(&home).unwrap();
+        let (path, _, _) = fakes(&dir.0);
+        let (old, data) = (old_home(&home), data_dir(&home));
+        let new = data.parent().unwrap().to_owned();
+        let _holders = Holders(vec![data.clone(), old.join("data")]);
+        let (env, why): (Vec<(&str, &str)>, String) = match case {
+            "old variable" => (
+                vec![("ZERODB_HOME", "/elsewhere")],
+                "ZERODB_HOME was renamed to ATTICDB_HOME. Rename it and run again.".into(),
+            ),
+            "old home" => {
+                old_store(&home, &old, &[]);
+                (vec![], format!("Found zerodb data at {}. AtticDB was called zerodb. Run `atticdb migrate` to move it. Nothing changed.", old.display()))
+            }
+            _ => {
+                old_store(&home, &new, &[]);
+                (vec![], format!("Found zerodb data at {}. AtticDB was called zerodb. Run `atticdb migrate` to move it. Nothing changed.", new.display()))
+            }
+        };
+        let before = tree(&dir.0);
+        let list = ["--prefix", "user/"];
+        let (code, out, err) =
+            atticdb("fact", &home, &home, &path, &env, &[&["list"][..], &list].concat(), "");
+        assert_eq!((code, out.as_str(), err), (Some(2), "", format!("atticdb: {why}\n")), "{case}");
+        let input = support::cwd(&home);
+        let (code, out, err) =
+            atticdb("hook", &home, &home, &path, &env, &["session-start"], &input);
+        assert_eq!((code, out.as_str()), (Some(0), "{}\n"), "{case}: {err}");
+        assert_eq!(err, format!("atticdb: hook session-start: {why}\n"), "{case}");
+        let (code, out, err) = atticdb("doctor", &home, &home, &path, &env, &[], "");
+        assert_eq!(code, Some(1), "{case}: {err}");
+        assert!(out.contains(&format!("\n  home: {why}\n")), "{case}: {out}");
+        let (code, out, err) = setup(&home, &home, &path, &env, &["--dry-run", "--yes"], "");
+        if case == "old variable" {
+            assert_eq!((code, err), (Some(2), format!("atticdb: {why}\n")), "{case}: {out}");
+        } else {
+            assert_eq!(code, Some(1), "{case}: {err}");
+            assert!(out.contains(&format!("\nCodex:\n  stopped: {why}\n")), "{case}: {out}");
+        }
+        assert_eq!(tree(&dir.0), before, "{case}: no new home, nothing written");
+    }
+
+    // zerodb parts in each app, beside a working home.
+    let dir = Dir::new();
+    let home = dir.0.join("h");
+    std::fs::create_dir(&home).unwrap();
+    let (path, _, _) = fakes(&dir.0);
+    let _holders = Holders(vec![data_dir(&home)]);
+    support::seed(&home, &["fact", "list", "--prefix", "user/"]);
+    let files = old_parts(&home, "/opt/old/zerodb");
+    let found = |file: &PathBuf| {
+        format!("  zerodb parts found in {}; run `atticdb migrate`\n", file.display())
+    };
+    let (code, plan, err) = setup(&home, &home, &path, &[], &["--dry-run", "--yes"], "");
+    assert_eq!(code, Some(0), "{plan}{err}");
+    let (code, doctor, err) = atticdb("doctor", &home, &home, &path, &[], &[], "");
+    assert_eq!(code, Some(1), "{doctor}{err}");
+    for file in &files {
+        assert!(plan.contains(&found(file)), "setup: {}: {plan}", file.display());
+        assert!(doctor.contains(&found(file)), "doctor: {}: {doctor}", file.display());
+    }
 }

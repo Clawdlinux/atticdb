@@ -50,6 +50,19 @@ curl -s --unix-socket data/atticdb.sock -H "Authorization: Bearer $TOKEN" \
 
 That appends over TCP and reads over the Unix socket. A repeated `idem_key` returns `"deduplicated": true`. Facts live at `/v1/facts/put`, `get`, `list` and `delete`. Each key holds 1 current value, and a later put replaces it. With `"if_lsn": <lsn>`, a put writes only if the current value still has that LSN. A mismatch is 409 `conflict`.
 
+## Moving from zerodb
+
+AtticDB was called zerodb until 2026-10-30. To keep your memory:
+
+1. Install AtticDB: `cargo install --path crates/atticdb --locked`.
+2. Quit the apps that use zerodb.
+3. Run `atticdb migrate --dry-run`, then `atticdb migrate`.
+4. Run `cargo uninstall zerodb`.
+
+`migrate` moves the zerodb home to the AtticDB home and renames its config. For each app with zerodb parts, it runs the old binary's own `disconnect`, then connects AtticDB as `atticdb setup --yes` does. It leaves a note at the old home's path, so an old binary that still runs fails instead of making a new, empty home.
+It never merges 2 homes, never moves a home set by `ZERODB_HOME`, and never edits your own instruction files. It says what to do by hand instead.
+Until you migrate, AtticDB commands stop with exit 2 when they find zerodb data or a `ZERODB_*` variable. Details: [Moving from zerodb](crates/atticdb/README.md#moving-from-zerodb).
+
 ## MCP
 
 `atticdb mcp` gives the model `memory_append`, `memory_recent`, `fact_set`, `fact_get`, `fact_list` and `memory_search`. Search finds turns and current facts by words, across every session, newest first. It starts the server if none is running.

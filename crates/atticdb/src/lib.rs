@@ -15,6 +15,7 @@ pub mod hook;
 pub mod http;
 pub mod jsonedit;
 pub mod launch;
+pub mod legacy;
 pub mod listen;
 pub mod mcp;
 pub mod ops;

@@ -69,7 +69,7 @@ fn check_codex_env() -> Result<(), String> {
 }
 
 /// `$CODEX_HOME` when set and absolute, else `~/.codex`.
-pub(super) fn codex_home() -> Result<PathBuf, String> {
+pub(crate) fn codex_home() -> Result<PathBuf, String> {
     absolute_env(CODEX_ENV).map_or_else(|| Ok(user_home()?.join(".codex")), Ok)
 }
 
@@ -79,7 +79,7 @@ pub(super) fn config_file() -> Result<PathBuf, String> {
 }
 
 /// Codex's `hooks.json`.
-fn hooks_file() -> Result<PathBuf, String> {
+pub(crate) fn hooks_file() -> Result<PathBuf, String> {
     Ok(codex_home()?.join("hooks.json"))
 }
 

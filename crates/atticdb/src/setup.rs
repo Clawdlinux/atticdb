@@ -127,7 +127,8 @@ pub fn run(flags: Flags) -> u8 {
             }
         }
     }
-    apply(&harnesses, options)
+    let chosen: Vec<(Harness, Options)> = harnesses.iter().map(|h| (*h, options)).collect();
+    apply(&chosen, Vec::new())
 }
 
 /// Asks on stdout and reads the answers from stdin.
@@ -265,6 +266,9 @@ fn show_plan(harnesses: &[Harness], options: Options) -> u8 {
     for &harness in harnesses {
         let report = connect::connect(harness, options, Mode::Plan);
         show(harness, &report, &mut shown, "stopped");
+        for found in crate::legacy::found_lines(harness) {
+            println!("  {found}");
+        }
         reports.push(report);
         if harness == Harness::Vscode {
             let dir = connect::copilot_home().map(|dir| dir.display().to_string());
@@ -289,26 +293,26 @@ fn code(reports: &[Report]) -> u8 {
     stopped.unwrap_or_else(|| u8::from(reports.iter().any(Report::skipped)))
 }
 
-/// Connects each app in turn, past any that fails, then checks each one and prints what to
-/// do next. Returns the exit code: the highest an app stopped with, else 1 when a part was
-/// skipped or a check failed.
-fn apply(harnesses: &[Harness], options: Options) -> u8 {
+/// Connects each app with its options in turn, past any that fails, then checks each one and
+/// prints what to do next, then `more`. Returns the exit code: the highest an app stopped
+/// with, else 1 when a part was skipped or a check failed.
+pub(crate) fn apply(chosen: &[(Harness, Options)], more: Vec<String>) -> u8 {
     println!("Applying:");
     let mut reports = Vec::new();
-    for &harness in harnesses {
+    for &(harness, options) in chosen {
         let report = connect::connect(harness, options, Mode::Apply);
         show(harness, &report, &mut Vec::new(), "failed");
-        reports.push((harness, report));
+        reports.push((harness, options, report));
     }
-    let skipped = reports.iter().filter(|(_, report)| report.skipped()).count();
+    let skipped = reports.iter().filter(|(.., report)| report.skipped()).count();
     println!("{} connected, {skipped} with skipped parts.", reports.len() - skipped);
     let mut failed_check = false;
     println!("Checks:");
     let cwd = std::env::current_dir().map_err(|error| format!("no current dir: {error}"));
     let mut store = None;
     let mut next = Vec::new();
-    for (harness, report) in reports.iter().filter(|(_, report)| report.stopped.is_none()) {
-        let (harness, mut failed) = (*harness, Vec::new());
+    for (harness, options, report) in reports.iter().filter(|(.., r)| r.stopped.is_none()) {
+        let (harness, options, mut failed) = (*harness, *options, Vec::new());
         // The parts are in place when a plan now finds nothing to change.
         let plan = connect::connect(harness, options, Mode::Plan);
         for line in plan.lines.iter().filter(|line| !in_place(line)) {
@@ -345,20 +349,21 @@ fn apply(harnesses: &[Harness], options: Options) -> u8 {
         }
     }
     let connected: Vec<Harness> =
-        reports.iter().filter(|(_, report)| report.stopped.is_none()).map(|(h, _)| *h).collect();
+        reports.iter().filter(|(.., report)| report.stopped.is_none()).map(|(h, ..)| *h).collect();
     if !connected.is_empty() {
         next.push("Start new chat sessions to load memory.".into());
     }
     if connected.contains(&Harness::Vscode) {
         next.push("VS Code: reload the window to load atticdb.".into());
     }
+    next.extend(more);
     if !next.is_empty() {
         println!("Next:");
         for step in next {
             println!("  {step}");
         }
     }
-    let applied: Vec<Report> = reports.into_iter().map(|(_, report)| report).collect();
+    let applied: Vec<Report> = reports.into_iter().map(|(.., report)| report).collect();
     code(&applied).max(u8::from(failed_check))
 }
 

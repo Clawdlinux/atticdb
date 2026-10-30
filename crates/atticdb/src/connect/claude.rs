@@ -81,7 +81,7 @@ pub(super) fn config_dir() -> Result<PathBuf, String> {
 
 /// Claude's state file, which holds the user MCP servers: `.claude.json` in
 /// `$CLAUDE_CONFIG_DIR` when set and absolute, else in `~`.
-pub(super) fn state_file() -> Result<PathBuf, String> {
+pub(crate) fn state_file() -> Result<PathBuf, String> {
     let dir = absolute_env(CONFIG_ENV).map_or_else(user_home, Ok)?;
     Ok(dir.join(".claude.json"))
 }
@@ -452,7 +452,7 @@ fn drop_entry(state: &Path) -> Line {
 
 /// The first `name` on `PATH` that is an executable regular file. Relative `PATH` entries
 /// are skipped.
-pub(super) fn find_program(name: &str) -> Option<PathBuf> {
+pub(crate) fn find_program(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     let dirs = std::env::split_paths(&path).filter(|dir| dir.is_absolute());
     dirs.map(|dir| dir.join(name)).find(|program| {
@@ -806,7 +806,7 @@ pub(super) struct Part<'a> {
 }
 
 /// Claude's `settings.json`, in its config dir.
-fn settings_file() -> Result<PathBuf, String> {
+pub(crate) fn settings_file() -> Result<PathBuf, String> {
     Ok(config_dir()?.join("settings.json"))
 }
 
