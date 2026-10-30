@@ -61,7 +61,7 @@ README_MD = "# evalrepo\n\nA small calculator module.\n"
 
 
 def seed_commands(scenario: Scenario) -> list[list[str]]:
-    """The zerodb args that seed the store, run with cwd = the fixture repo."""
+    """The atticdb args that seed the store, run with cwd = the fixture repo."""
     if scenario.seed == "recall":
         return [["fact", "set", "--key", TEST_RUNNER_KEY, "--content", TEST_RUNNER_FACT]]
     if scenario.seed == "search":
@@ -116,7 +116,7 @@ def added_lines(diff: str) -> list[str]:
 
 def check_summary(out: Outcome, block: str, diff: str) -> Verdict:
     """`calc.py` gained `def add(a, b)`, a `memory_append` had no session, and the next block
-    shows the start of that note. zerodb reads a `session` of "" or null as none, and models
+    shows the start of that note. atticdb reads a `session` of "" or null as none, and models
     fill optional fields with "", so those count as no session."""
     changed = any(_has(line, ADD_LINE) for line in added_lines(diff))
     notes = [c.args["content"] for c in out.calls

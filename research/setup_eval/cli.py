@@ -1,9 +1,9 @@
-"""Run the zerodb setup eval headless, or check the eval logins.
+"""Run the atticdb setup eval headless, or check the eval logins.
 
     python3 -m research.setup_eval check
-    python3 -m research.setup_eval run --zerodb target/debug/zerodb --dry-run
+    python3 -m research.setup_eval run --atticdb target/debug/atticdb --dry-run
     python3 -m research.setup_eval run --harness both --scenarios S1,S2,S3,S4,B1,B2 --runs 1 \\
-        --zerodb target/debug/zerodb
+        --atticdb target/debug/atticdb
 
 README.md has the details.
 """
@@ -57,7 +57,7 @@ def parse(argv) -> argparse.Namespace:
     r.add_argument("--scenarios", type=scenario_list, default=list(SCENARIOS),
                    help="comma list of S1,S2,S3,S4,B1,B2")
     r.add_argument("--runs", type=positive, default=1, help="runs per harness and scenario")
-    r.add_argument("--zerodb", required=True, help="the zerodb binary to set up and seed with")
+    r.add_argument("--atticdb", required=True, help="the atticdb binary to set up and seed with")
     today = datetime.date.today().isoformat()
     r.add_argument("--out", default=os.path.join(HERE, "results", f"{today}.csv"),
                    help="the CSV rows are appended to")
@@ -76,14 +76,14 @@ def parse(argv) -> argparse.Namespace:
         if a.total > a.max_runs:
             p.error(f"the batch is {a.total} runs, over --max-runs {a.max_runs}. Each run is 1 headless "
                     "agent session. Raise --max-runs to allow it")
-        a.zerodb = os.path.abspath(a.zerodb)
+        a.atticdb = os.path.abspath(a.atticdb)
     return a
 
 
-def config(zerodb: str, keep_api_keys: bool = False) -> Config:
+def config(atticdb: str, keep_api_keys: bool = False) -> Config:
     home = guard.user_home()
     claude_dir, codex_dir = guard.eval_dirs(home)
-    return Config(zerodb=zerodb, home=home, claude_dir=claude_dir, codex_dir=codex_dir,
+    return Config(atticdb=atticdb, home=home, claude_dir=claude_dir, codex_dir=codex_dir,
                   tmp_parent=tempfile.gettempdir(), keep_api_keys=keep_api_keys)
 
 
@@ -103,7 +103,7 @@ def check(out=print) -> int:
         root = tempfile.mkdtemp(prefix="zse-check-")
         try:
             # Without credential or provider vars, so the status shows the eval login.
-            env = agents.child_env(dict(os.environ), home=home, zerodb_home=os.path.join(root, "zh"),
+            env = agents.child_env(dict(os.environ), home=home, atticdb_home=os.path.join(root, "zh"),
                                    claude_dir=claude_dir, codex_dir=codex_dir)
             r = runner.run(agents.check_argv(harness), env=env, root=root, cwd=root,
                            timeout=agents.CHECK_TIMEOUT)
@@ -127,8 +127,8 @@ def dry_run(a: argparse.Namespace, cfg: Config, out=print) -> int:
     out(f"Dry run: {a.total} runs, nothing is started. Rows would go to {a.out}.")
     out(f"<root> is a new temp dir per run in {cfg.tmp_parent}.")
     keys = "" if cfg.keep_api_keys else ", the credential and provider vars below"
-    out(f"env base, by name only: the inherited env without ZERODB_*, CLAUDE_CONFIG_DIR, CODEX_HOME{keys}, "
-        f"then HOME, ZERODB_HOME (<root>/zh), CLAUDE_CONFIG_DIR and CODEX_HOME (the eval dirs under "
+    out(f"env base, by name only: the inherited env without ATTICDB_*, CLAUDE_CONFIG_DIR, CODEX_HOME{keys}, "
+        f"then HOME, ATTICDB_HOME (<root>/zh), CLAUDE_CONFIG_DIR and CODEX_HOME (the eval dirs under "
         f"~/{guard.EVAL_DIR}).")
     if cfg.keep_api_keys:
         out("Credential and provider vars: kept (--keep-api-keys). The agents may not use the eval logins.")
@@ -164,8 +164,8 @@ def batch(a: argparse.Namespace, cfg: Config, out=print, environ=None) -> int:
         if harness in a.harnesses and not os.path.isdir(folder):
             raise guard.Refused(f"{folder} is missing. Log in once: "
                                 f"{agents.login_hint(harness, cfg.claude_dir, cfg.codex_dir)}, then run check")
-    if not (os.path.isfile(a.zerodb) and os.access(a.zerodb, os.X_OK)):
-        raise guard.Refused(f"--zerodb {a.zerodb} is not an executable file. Build it: cargo build -p zerodb")
+    if not (os.path.isfile(a.atticdb) and os.access(a.atticdb, os.X_OK)):
+        raise guard.Refused(f"--atticdb {a.atticdb} is not an executable file. Build it: cargo build -p atticdb")
     environ = cfg.base_env if environ is None else environ
     data_dirs = guard.watched_data_dirs(environ)
     before = {label: guard.snapshot(path) for label, path in data_dirs}
@@ -185,7 +185,7 @@ def batch(a: argparse.Namespace, cfg: Config, out=print, environ=None) -> int:
             out(line)
         out("")
         out(f"Rows: {a.out}")
-        out(f"Every child had ZERODB_HOME set under its own run root: {runner.children} children checked.")
+        out(f"Every child had ATTICDB_HOME set under its own run root: {runner.children} children checked.")
         for label, path in data_dirs:
             warn(out, f"files in {label}", guard.compare(before[label], guard.snapshot(path)),
                  f"{label[0].upper()}{label[1:]} did not change (size and mtime of each file).")
@@ -200,7 +200,7 @@ def main(argv=None) -> int:
     try:
         if a.command == "check":
             return check()
-        cfg = config(a.zerodb, a.keep_api_keys)
+        cfg = config(a.atticdb, a.keep_api_keys)
         if a.dry_run:
             return dry_run(a, cfg)
         return batch(a, cfg)

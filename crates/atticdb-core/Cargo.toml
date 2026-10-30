@@ -1,0 +1,24 @@
+[package]
+name = "atticdb-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+sim = ["atticdb-tape/sim"]
+
+[dependencies]
+atticdb-tape = { path = "../atticdb-tape" }
+blake3 = "=1.8.7"
+
+[dev-dependencies]
+proptest = { version = "1.9", default-features = false, features = ["std"] }
+atticdb-tape = { path = "../atticdb-tape", features = ["sim"] }
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "g1"
+harness = false

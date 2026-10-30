@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from helpers import TOKEN, send_without_reading, trickle, turns, wait_for
-from zerodb_client import Client, Conflict, NotCommitted, OutcomeUnknown
+from atticdb_client import Client, Conflict, NotCommitted, OutcomeUnknown
 
 
 def contents(client, session):

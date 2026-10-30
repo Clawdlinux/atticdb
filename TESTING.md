@@ -54,7 +54,7 @@ tests/test_<area>.py   one file per behavior area
 ## Running
 
 ```sh
-cargo test -p zerodb-tape --test it recovery::     # 1 behavior module
+cargo test -p atticdb-tape --test it recovery::     # 1 behavior module
 cargo test --workspace -- --ignored                # the slow checks, in debug
 ```
 
@@ -63,7 +63,7 @@ Debug builds skip slow filesystem tests and seeded tape schedules. The release C
 
 ## Fault injection
 
-Wrap storage in `zerodb_tape::HookIo` (feature `sim`). Do not write a new `Io` impl, and do not add fault flags to a shared mock.
+Wrap storage in `atticdb_tape::HookIo` (feature `sim`). Do not write a new `Io` impl, and do not add fault flags to a shared mock.
 
 ```rust
 let io = Arc::new(HookIo::sim(7));                             // fresh SimDisk
@@ -93,16 +93,16 @@ Failures print the seed, the capacity plan and the command that reproduces the r
 
 `tests/crash/power_loss.py` runs the release binary on [LazyFS](https://github.com/dsrhaslab/lazyfs), a FUSE filesystem that holds unsynced writes in memory.
 Killing LazyFS drops them, as a power cut does. Each round cuts power at a random moment or at a chosen syscall, such as before a segment `fsync` or after a `MANIFEST` rename.
-After each cut it runs `zerodb verify` on the raw directory, reopens, and checks that every acknowledged turn is back at its sequence, sequences are dense, and no batch is partial.
+After each cut it runs `atticdb verify` on the raw directory, reopens, and checks that every acknowledged turn is back at its sequence, sequences are dense, and no batch is partial.
 
-The `deep` workflow runs it nightly as 3 parallel runs of 20 cuts, and once with 20 cuts on pull requests that touch `zerodb-tape/src` or the harness. It needs Linux and FUSE:
+The `deep` workflow runs it nightly as 3 parallel runs of 20 cuts, and once with 20 cuts on pull requests that touch `atticdb-tape/src` or the harness. It needs Linux and FUSE:
 
 ```sh
 tests/crash/build-lazyfs.sh ~/lazyfs
-ZERODB_CRASH_SEED=<seed> python3 tests/crash/power_loss.py --lazyfs ~/lazyfs
+ATTICDB_CRASH_SEED=<seed> python3 tests/crash/power_loss.py --lazyfs ~/lazyfs
 ```
 
-The build script pins LazyFS and adds `statfs`. Without it FUSE reports 0 free bytes, and zerodb's disk-full floor keeps it read-only.
+The build script pins LazyFS and adds `statfs`. Without it FUSE reports 0 free bytes, and AtticDB's disk-full floor keeps it read-only.
 
 LazyFS passes metadata calls such as `rename` straight to the disk below, so it cannot catch a missing directory sync. It has no `fallocate`, so segments use the zero-fill fallback there.
 The same nightly job runs both sims on 20,000 new seeds each night.

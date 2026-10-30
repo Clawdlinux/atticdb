@@ -38,8 +38,8 @@ fetch dicedb dicedb/dicedb 1.0.0
 for name in redis valkey dicedb; do
     [ -x "$TOOLS/$name/src/$name-server" ] || make -C "$TOOLS/$name" -j"$(nproc)" >/dev/null 2>&1
 done
-cargo build -q --release -p zerodb
-ZDB=target/release/zerodb
+cargo build -q --release -p atticdb
+ZDB=target/release/atticdb
 
 # Waits for a server's socket. Fails with its log if the server exits first.
 wait_socket() {
@@ -60,14 +60,14 @@ pick() {
 # Busy and total jiffies across all CPUs. Fields 2 to 9 only: guest time is already in user.
 cpu() { awk '/^cpu /{t=0; for(i=2;i<=9;i++) t+=$i; print t-$5-$6, t}' /proc/stat; }
 
-zerodb() {
-    local data=$DISK/zerodb
+atticdb() {
+    local data=$DISK/atticdb
     rm -rf "$data" "$TMP/c.json"
     (umask 077 && "$ZDB" init --config "$TMP/c.json" --tenant h2h >"$TMP/token")
     $SPIN "$ZDB" serve --config "$TMP/c.json" --data-dir "$data" --listen none >"$TMP/serve.log" 2>&1 &
     local pid=$! status=0
-    wait_socket $pid "$data/zerodb.sock" "$TMP/serve.log"
-    ZERODB_TOKEN=$(cat "$TMP/token") $CPIN python3 bench/h2h_paced.py zerodb "$data/zerodb.sock" \
+    wait_socket $pid "$data/atticdb.sock" "$TMP/serve.log"
+    ATTICDB_TOKEN=$(cat "$TMP/token") $CPIN python3 bench/h2h_paced.py atticdb "$data/atticdb.sock" \
         "$1" "$PER" $SIZE "$THINK" >"$TMP/load" || status=$?
     kill $pid && wait $pid || true
     # A failed run must not become a row.
@@ -95,7 +95,7 @@ sqlite() {
 
 {
     echo "# $(uname -sr) $(findmnt -no SOURCE,FSTYPE --target "$DISK"), think ${THINK} ms"
-    echo "# zerodb ${H2H_ZERODB_REV:-$(git rev-parse --short HEAD)}, client bench/h2h_paced.py, $REPS reps"
+    echo "# atticdb ${H2H_ATTICDB_REV:-$(git rev-parse --short HEAD)}, client bench/h2h_paced.py, $REPS reps"
     echo "# $(nproc) vCPUs, server cpus ${H2H_SERVER_CPUS:-any}, client cpus ${H2H_CLIENT_CPUS:-any}"
     for name in redis valkey dicedb; do echo "# $("$TOOLS/$name/src/$name-server" --version)"; done
     echo "# sqlite $(python3 -c 'import sqlite3; print(sqlite3.sqlite_version)')"
@@ -103,10 +103,10 @@ sqlite() {
 } >"$OUT"
 for rep in $(seq "$REPS"); do
     for writers in $WRITERS; do
-        for system in $(printf '%s\n' ${H2H_SYSTEMS:-zerodb redis valkey dicedb sqlite} | shuf); do
+        for system in $(printf '%s\n' ${H2H_SYSTEMS:-atticdb redis valkey dicedb sqlite} | shuf); do
             read -r b0 t0 < <(cpu)
             case $system in
-                zerodb) row=$(zerodb "$writers") ;;
+                atticdb) row=$(atticdb "$writers") ;;
                 sqlite) row=$(sqlite "$writers") ;;
                 *) row=$(resp "$writers" "$system") ;;
             esac

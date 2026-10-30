@@ -14,7 +14,7 @@ on:
         default: ""
   pull_request:
     paths:
-      - crates/zerodb-tape/src/**
+      - crates/atticdb-tape/src/**
       - tests/crash/**
       - .github/workflows/deep.yml
 permissions:
@@ -47,12 +47,12 @@ jobs:
           key: lazyfs-${{ hashFiles('tests/crash/build-lazyfs.sh') }}-ubuntu-24.04
       - if: steps.lazyfs.outputs.cache-hit != 'true'
         run: tests/crash/build-lazyfs.sh ~/lazyfs
-      - run: cargo build --locked --release -p zerodb
+      - run: cargo build --locked --release -p atticdb
       - run: python3 tests/crash/power_loss.py --lazyfs ~/lazyfs
         env:
           LD_LIBRARY_PATH: /home/runner/lazyfs/libs/libpcache/build
-          ZERODB_CRASH_ROUNDS: ${{ inputs.rounds || '20' }}
-          ZERODB_CRASH_SEED: ${{ inputs.seed }}
+          ATTICDB_CRASH_ROUNDS: ${{ inputs.rounds || '20' }}
+          ATTICDB_CRASH_SEED: ${{ inputs.seed }}
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
@@ -67,12 +67,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
-      ZERODB_SIM_SEEDS: "20000"
+      ATTICDB_SIM_SEEDS: "20000"
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # A new window of seeds each run. Failures print the seed to rerun.
-      - run: echo "ZERODB_SIM_SEED=$((GITHUB_RUN_NUMBER * ZERODB_SIM_SEEDS))" >> "$GITHUB_ENV"
-      - run: cargo test --locked -p zerodb-tape --release --features sim --test sim
-      - run: cargo test --locked -p zerodb-core --release --features sim --test engine_sim
+      - run: echo "ATTICDB_SIM_SEED=$((GITHUB_RUN_NUMBER * ATTICDB_SIM_SEEDS))" >> "$GITHUB_ENV"
+      - run: cargo test --locked -p atticdb-tape --release --features sim --test sim
+      - run: cargo test --locked -p atticdb-core --release --features sim --test engine_sim

@@ -2,7 +2,7 @@
 
 Requests are sequential. There is a sleep between calls and backoff on 429 and 5xx.
 The request count and the wall time are both capped. Rows are cached under
-~/.cache/zerodb-ctxcache/<dataset>/ and never in the repo.
+~/.cache/atticdb-ctxcache/<dataset>/ and never in the repo.
 """
 
 from __future__ import annotations
@@ -23,8 +23,8 @@ from dataclasses import dataclass
 from . import guard
 
 API = "https://datasets-server.huggingface.co/rows"
-CACHE = os.path.expanduser("~/.cache/zerodb-ctxcache")
-HEADERS = {"User-Agent": "zerodb-ctxcache/0.1 (research; https://github.com/Clawdlinux/zerodb)"}
+CACHE = os.path.expanduser("~/.cache/atticdb-ctxcache")
+HEADERS = {"User-Agent": "atticdb-ctxcache/0.1 (research; https://github.com/Clawdlinux/atticdb)"}
 
 
 @dataclass(frozen=True)

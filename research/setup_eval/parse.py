@@ -5,8 +5,8 @@ whose fields have the wrong shape, counts as unparsed. An event of a type the pa
 know counts as unknown. Neither stops the parse. `parse_ok` holds when the final reply was
 found and no line was unparsed.
 
-Tool calls keep the bare tool name of the zerodb server: `mcp__zerodb__fact_set` in
-Claude Code and `{"server": "zerodb", "tool": "fact_set"}` in Codex both give `fact_set`.
+Tool calls keep the bare tool name of the atticdb server: `mcp__atticdb__fact_set` in
+Claude Code and `{"server": "atticdb", "tool": "fact_set"}` in Codex both give `fact_set`.
 
 Token counts mean the same in both: `input_tokens` is every prompt token, cache reads and
 writes included, and `cache_read_tokens` is the part read from the cache.
@@ -18,13 +18,13 @@ import json
 from collections import Counter
 from dataclasses import dataclass, field
 
-SERVER = "zerodb"
+SERVER = "atticdb"
 CLAUDE_PREFIX = f"mcp__{SERVER}__"
 
 
 @dataclass
 class Call:
-    name: str  # the bare zerodb tool name
+    name: str  # the bare AtticDB tool name
     args: dict | None  # None when the arguments were not a JSON object
 
 

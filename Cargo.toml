@@ -7,7 +7,7 @@ version = "0.0.1"
 edition = "2021"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/Clawdlinux/zerodb"
+repository = "https://github.com/Clawdlinux/atticdb"
 authors = ["Clawdlinux contributors"]
 
 [workspace.lints.rust]

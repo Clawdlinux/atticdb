@@ -7,4 +7,4 @@ cd "$(dirname "$0")/.."
 # G1_SYMMETRIC=0 runs readers on Engine only, as in traces before D74.
 export G1_TURNS="${G1_TURNS:-1000000}"
 export G1_BATCH="${G1_BATCH:-4}"
-cargo bench -p zerodb-core --bench g1
+cargo bench -p atticdb-core --bench g1

@@ -12,7 +12,7 @@ def read(name: str) -> bytes:
 
 def test_claude_stream_fixture():
     out = parse.parse_claude(read("claude-stream.jsonl"))
-    # The repeated toolu_02 counts once. Read is not a zerodb tool.
+    # The repeated toolu_02 counts once. Read is not an AtticDB tool.
     assert [c.name for c in out.calls] == ["memory_search", "fact_set"]
     assert out.calls[1].args == {"key": "repo/evalrepo/node-version", "content": "Always pin Node 22."}
     assert out.counts() == {"fact_set": 1, "memory_search": 1}
@@ -73,7 +73,7 @@ def test_claude_error_result():
 
 def test_codex_legacy_events():
     lines = [
-        '{"id":"0","msg":{"type":"mcp_tool_call_end","call_id":"c1","invocation":{"server":"zerodb",'
+        '{"id":"0","msg":{"type":"mcp_tool_call_end","call_id":"c1","invocation":{"server":"atticdb",'
         '"tool":"fact_set","arguments":{"key":"repo/evalrepo/k","content":"x"}}}}',
         '{"id":"0","msg":{"type":"token_count","info":{"total_token_usage":{"input_tokens":5,'
         '"cached_input_tokens":2,"output_tokens":1}}}}',

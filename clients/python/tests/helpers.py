@@ -9,10 +9,10 @@ import threading
 import time
 
 TOKEN = "token-a-0123456789abcdefghijklmnopqrstuv"
-BIN = os.path.abspath(os.environ["ZERODB_BIN"])
+BIN = os.path.abspath(os.environ["ATTICDB_BIN"])
 # Socket paths must fit sun_path (104 bytes on macOS), so the default is short.
-# Set ZERODB_TEST_DIR to a short directory when the checkout is deep.
-ROOT = os.environ.get("ZERODB_TEST_DIR") or os.path.join(
+# Set ATTICDB_TEST_DIR to a short directory when the checkout is deep.
+ROOT = os.environ.get("ATTICDB_TEST_DIR") or os.path.join(
     os.path.dirname(__file__), "..", "..", "..", "target", "s"
 )
 NEXT = itertools.count()
@@ -32,7 +32,7 @@ def turns(*contents):
 
 
 class Server:
-    """`zerodb serve` on TCP port 0 and the default socket, with tenant `a`."""
+    """`atticdb serve` on TCP port 0 and the default socket, with tenant `a`."""
 
     def __init__(self):
         os.makedirs(ROOT, exist_ok=True)
@@ -63,7 +63,7 @@ class Server:
         def serving():
             assert self.process.poll() is None, f"server exited: {self.log()}"
             lines = self.log()[offset:].splitlines(keepends=True)
-            ready = (line for line in lines if line.startswith("zerodb: serving "))
+            ready = (line for line in lines if line.startswith("atticdb: serving "))
             return next((line for line in ready if line.endswith("\n")), None)
 
         fields = dict(f.split("=", 1) for f in wait_for(serving, "serving").split()[2:])

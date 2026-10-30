@@ -8,14 +8,14 @@ from research.setup_eval import agents, cli, proc
 from research.setup_eval import harness as harness_mod
 from research.setup_eval.scenarios import SCENARIOS
 
-from .helpers import ZERODB, fake_home, stub_calls
+from .helpers import ATTICDB, fake_home, stub_calls
 
 
 def test_claude_argv_puts_the_prompt_before_the_variadic_flag():
     prompt = SCENARIOS["S1"].prompt
     argv = agents.agent_argv("claude-code", prompt)
     assert argv == ["claude", "-p", prompt, "--output-format", "stream-json", "--verbose",
-                    "--permission-mode", "acceptEdits", "--allowedTools=mcp__zerodb__fact_set"]
+                    "--permission-mode", "acceptEdits", "--allowedTools=mcp__atticdb__fact_set"]
     allowed = [i for i, a in enumerate(argv) if a.startswith("--allowedTools") or a.startswith("--allowed-tools")]
     assert allowed == [len(argv) - 1], "1 allow flag, last, so it can swallow nothing"
     assert argv.index(prompt) == 2 < allowed[0]
@@ -29,7 +29,7 @@ def test_codex_argv():
     prompt = SCENARIOS["S3"].prompt
     assert agents.agent_argv("codex", prompt) == [
         "codex", "exec", "--json", "--dangerously-bypass-hook-trust", "-c",
-        'mcp_servers.zerodb.tools.fact_set.approval_mode="approve"', "--sandbox", "workspace-write",
+        'mcp_servers.atticdb.tools.fact_set.approval_mode="approve"', "--sandbox", "workspace-write",
         "--skip-git-repo-check", prompt]
     argv = agents.agent_argv("codex", prompt)
     # Explicit, as a fresh config without a trust entry would get read-only. Never a wider one.
@@ -48,11 +48,11 @@ def test_setup_names_1_harness_only():
             agents.disconnect_argv("/z", bad)
 
 
-def test_child_env_drops_the_users_zerodb_and_config_vars():
-    base = {"PATH": "/bin", "ZERODB_TOKEN": "t", "ZERODB_HOME": "/real", "CLAUDE_CONFIG_DIR": "/c",
-            "CODEX_HOME": "/x", "ZERODB_SETUP_INTERACTIVE": "1"}
-    env = agents.child_env(base, home="/h", zerodb_home="/r/zh", claude_dir="/e/claude", codex_dir="/e/codex")
-    assert env == {"PATH": "/bin", "HOME": "/h", "ZERODB_HOME": "/r/zh", "CLAUDE_CONFIG_DIR": "/e/claude",
+def test_child_env_drops_the_users_atticdb_and_config_vars():
+    base = {"PATH": "/bin", "ATTICDB_TOKEN": "t", "ATTICDB_HOME": "/real", "CLAUDE_CONFIG_DIR": "/c",
+            "CODEX_HOME": "/x", "ATTICDB_SETUP_INTERACTIVE": "1"}
+    env = agents.child_env(base, home="/h", atticdb_home="/r/zh", claude_dir="/e/claude", codex_dir="/e/codex")
+    assert env == {"PATH": "/bin", "HOME": "/h", "ATTICDB_HOME": "/r/zh", "CLAUDE_CONFIG_DIR": "/e/claude",
                    "CODEX_HOME": "/e/codex"}
 
 
@@ -64,7 +64,7 @@ def test_credential_and_provider_vars_are_stripped_unless_kept():
     assert agents.ACCOUNT_PREFIXES == ("ANTHROPIC_FOUNDRY_",)
     named = exact + ["ANTHROPIC_FOUNDRY_API_KEY", "ANTHROPIC_FOUNDRY_RESOURCE", "ANTHROPIC_FOUNDRY_BASE_URL"]
     base = {"PATH": "/bin", "OTHER": "e", "ANTHROPIC_FOUNDRYX": "not the prefix", **{k: "v" for k in named}}
-    kw = dict(home="/h", zerodb_home="/r/zh", claude_dir="/e/claude", codex_dir="/e/codex")
+    kw = dict(home="/h", atticdb_home="/r/zh", claude_dir="/e/claude", codex_dir="/e/codex")
     env = agents.child_env(base, **kw)
     assert not any(k in env for k in named) and env["OTHER"] == "e" and env["ANTHROPIC_FOUNDRYX"]
     assert agents.stripped_keys(base) == sorted(named)
@@ -78,7 +78,7 @@ def test_dry_run_names_stripped_keys_never_values(monkeypatch, tmp_path, capsys)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-value-1")
     monkeypatch.setenv("CODEX_API_KEY", "codex-value-2")
     monkeypatch.setenv("ANTHROPIC_FOUNDRY_API_KEY", "foundry-value-3")
-    base = ["run", "--zerodb", "/z", "--out", str(tmp_path / "o.csv"), "--dry-run"]
+    base = ["run", "--atticdb", "/z", "--out", str(tmp_path / "o.csv"), "--dry-run"]
     assert cli.main(base) == 0
     text = capsys.readouterr().out
     assert ("Credential and provider vars stripped from every child: ANTHROPIC_API_KEY, ANTHROPIC_FOUNDRY_API_KEY, "
@@ -100,7 +100,7 @@ def test_children_get_no_api_keys(monkeypatch, tmp_path):
 
 def test_budget_guard(monkeypatch, tmp_path, capsys):
     fake_home(monkeypatch, tmp_path)
-    base = ["run", "--zerodb", "/z", "--out", str(tmp_path / "o.csv"), "--dry-run"]
+    base = ["run", "--atticdb", "/z", "--out", str(tmp_path / "o.csv"), "--dry-run"]
     assert cli.main(base) == 0, "both harnesses x 6 scenarios = 12, the default cap"
     with pytest.raises(SystemExit) as e:
         cli.main(base + ["--runs", "2"])
@@ -121,7 +121,7 @@ def test_dry_run_runs_nothing(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(proc.Runner, "run", lambda *a, **k: started.append(a))
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: started.append(a))
     out = tmp_path / "o.csv"
-    assert cli.main(["run", "--zerodb", ZERODB, "--out", str(out), "--dry-run"]) == 0
+    assert cli.main(["run", "--atticdb", ATTICDB, "--out", str(out), "--dry-run"]) == 0
     text = capsys.readouterr().out
     assert started == [] and stub_calls(paths["log"]) == []
     assert not out.exists() and os.listdir(tmp_parent) == []
@@ -136,15 +136,15 @@ def test_dry_run_runs_nothing(monkeypatch, tmp_path, capsys):
 
 def test_run_refuses_without_eval_dirs(monkeypatch, tmp_path, capsys):
     paths = fake_home(monkeypatch, tmp_path, make_eval_dirs=False)
-    assert cli.main(["run", "--zerodb", "/bin/sh", "--out", str(tmp_path / "o.csv")]) == 2
+    assert cli.main(["run", "--atticdb", "/bin/sh", "--out", str(tmp_path / "o.csv")]) == 2
     assert "claude auth login" in capsys.readouterr().err
     assert stub_calls(paths["log"]) == []
 
 
-def test_run_refuses_a_missing_zerodb(monkeypatch, tmp_path, capsys):
+def test_run_refuses_a_missing_atticdb(monkeypatch, tmp_path, capsys):
     fake_home(monkeypatch, tmp_path)
-    assert cli.main(["run", "--zerodb", str(tmp_path / "nope"), "--out", str(tmp_path / "o.csv")]) == 2
-    assert "cargo build -p zerodb" in capsys.readouterr().err
+    assert cli.main(["run", "--atticdb", str(tmp_path / "nope"), "--out", str(tmp_path / "o.csv")]) == 2
+    assert "cargo build -p atticdb" in capsys.readouterr().err
 
 
 def test_check(monkeypatch, tmp_path, capsys):
@@ -154,7 +154,7 @@ def test_check(monkeypatch, tmp_path, capsys):
     assert "claude-code: logged in" in text and "codex: logged in" in text
     calls = stub_calls(paths["log"])
     assert [(c["prog"], c["argv"]) for c in calls] == [("claude", ["auth", "status"]), ("codex", ["login", "status"])]
-    assert all(c["zerodb_home"] for c in calls)
+    assert all(c["atticdb_home"] for c in calls)
     monkeypatch.setenv("STUB_LOGGED_OUT", "1")
     assert cli.main(["check"]) == 1
     assert "not logged in (exit 1)" in capsys.readouterr().out
@@ -168,15 +168,15 @@ def test_check_reports_a_missing_dir(monkeypatch, tmp_path, capsys):
     assert stub_calls(paths["log"]) == []
 
 
-def test_batch_warns_on_changes_to_user_config_and_the_parent_zerodb_home(monkeypatch, tmp_path):
+def test_batch_warns_on_changes_to_user_config_and_the_parent_atticdb_home(monkeypatch, tmp_path):
     paths = fake_home(monkeypatch, tmp_path)
     home = paths["home"]
     os.makedirs(os.path.join(home, ".claude"))
     parent_home = tmp_path / "parent-zh"
     (parent_home / "data").mkdir(parents=True)
     (parent_home / "data" / "seg").write_text("1")
-    monkeypatch.setenv("ZERODB_HOME", str(parent_home))
-    a = cli.parse(["run", "--harness", "claude-code", "--scenarios", "S1", "--zerodb", "/bin/sh",
+    monkeypatch.setenv("ATTICDB_HOME", str(parent_home))
+    a = cli.parse(["run", "--harness", "claude-code", "--scenarios", "S1", "--atticdb", "/bin/sh",
                    "--out", str(tmp_path / "o.csv")])
 
     def fake_run(cfg, runner, harness, scenario, n):
@@ -187,18 +187,18 @@ def test_batch_warns_on_changes_to_user_config_and_the_parent_zerodb_home(monkey
 
     monkeypatch.setattr(cli, "run_one", fake_run)
     lines = []
-    assert cli.batch(a, cli.config(a.zerodb), out=lines.append) == 0
+    assert cli.batch(a, cli.config(a.atticdb), out=lines.append) == 0
     text = "\n".join(lines)
-    assert "WARNING: 1 files in $ZERODB_HOME/data of the parent env changed during the batch (seg)" in text
+    assert "WARNING: 1 files in $ATTICDB_HOME/data of the parent env changed during the batch (seg)" in text
     # The new file, and the mtime of the dir that holds it.
     assert ("WARNING: 2 entries at the top level of ~/.claude*, ~/.codex or ~/.copilot changed during the "
             "batch (~/.claude, ~/.claude/settings.json)") in text
-    assert "The real zerodb home's data dir did not change" in text
+    assert "The real atticdb home's data dir did not change" in text
     assert str(parent_home) not in text
 
     lines.clear()
     monkeypatch.setattr(cli, "run_one", lambda cfg, runner, h, s, n: harness_mod.RunResult(h, s.id, n))
-    assert cli.batch(a, cli.config(a.zerodb), out=lines.append) == 0
+    assert cli.batch(a, cli.config(a.atticdb), out=lines.append) == 0
     assert "WARNING" not in "\n".join(lines)
     assert "The top level of ~/.claude*, ~/.codex and ~/.copilot did not change" in "\n".join(lines)
 
@@ -206,7 +206,7 @@ def test_batch_warns_on_changes_to_user_config_and_the_parent_zerodb_home(monkey
 def test_inherited_git_vars_are_dropped_before_extra():
     base = {"PATH": "/bin", "GIT_DIR": "/real/.git", "GIT_WORK_TREE": "/real", "GIT_INDEX_FILE": "/real/.git/index",
             "GIT_SSH_COMMAND": "ssh -i k", "GIT_CONFIG_GLOBAL": "/real/gitconfig", "GITHUB_TOKEN": "kept-by-name"}
-    kw = dict(home="/h", zerodb_home="/r/zh", claude_dir="/e/claude", codex_dir="/e/codex")
+    kw = dict(home="/h", atticdb_home="/r/zh", claude_dir="/e/claude", codex_dir="/e/codex")
     env = agents.child_env(base, **kw)
     assert not any(k.startswith("GIT_") for k in env), "no inherited GIT_* reaches any child"
     assert env["GITHUB_TOKEN"] == "kept-by-name", "only the GIT_ prefix is dropped"

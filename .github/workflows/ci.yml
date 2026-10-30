@@ -27,21 +27,21 @@ jobs:
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --locked --workspace
       - run: cargo test --locked --workspace --release
-      - run: cargo test --locked -p zerodb-tape --release --features sim --test sim
+      - run: cargo test --locked -p atticdb-tape --release --features sim --test sim
         env:
-          ZERODB_SIM_SEEDS: "2000"
-      - run: cargo test --locked -p zerodb-core --release --features sim --test engine_sim
+          ATTICDB_SIM_SEEDS: "2000"
+      - run: cargo test --locked -p atticdb-core --release --features sim --test engine_sim
         env:
-          ZERODB_SIM_SEEDS: "2000"
+          ATTICDB_SIM_SEEDS: "2000"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: python3 -m pip install -r clients/python/requirements-test.txt
-      - run: cargo test --locked -p zerodb --release --features fault-inject --test it -- --include-ignored
-      # Rebuild without test dev-dependencies, so pytest runs the binary users get, not one with zerodb-tape's sim code.
-      - run: cargo build --locked -p zerodb --release --features fault-inject
-      - run: ZERODB_BIN=target/release/zerodb python3 -m pytest clients/python/tests
+      - run: cargo test --locked -p atticdb --release --features fault-inject --test it -- --include-ignored
+      # Rebuild without test dev-dependencies, so pytest runs the binary users get, not one with atticdb-tape's sim code.
+      - run: cargo build --locked -p atticdb --release --features fault-inject
+      - run: ATTICDB_BIN=target/release/atticdb python3 -m pytest clients/python/tests
       # Research code: synthetic fixtures only, no network.
       - run: python3 -m pytest research/ctxcache/tests
       # Stub agents only, never a real model. The end-to-end test runs the binary built above.
-      - run: ZERODB_BIN=target/release/zerodb python3 -m pytest research/setup_eval/tests
+      - run: ATTICDB_BIN=target/release/atticdb python3 -m pytest research/setup_eval/tests

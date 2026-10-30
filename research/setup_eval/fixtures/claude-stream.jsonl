@@ -1,10 +1,10 @@
-{"type": "system", "subtype": "init", "session_id": "0b1c", "cwd": "/tmp/x/evalrepo", "tools": ["Bash", "Edit", "mcp__zerodb__memory_search", "mcp__zerodb__fact_set"], "mcp_servers": [{"name": "zerodb", "status": "connected"}], "model": "claude-sonnet"}
+{"type": "system", "subtype": "init", "session_id": "0b1c", "cwd": "/tmp/x/evalrepo", "tools": ["Bash", "Edit", "mcp__atticdb__memory_search", "mcp__atticdb__fact_set"], "mcp_servers": [{"name": "atticdb", "status": "connected"}], "model": "claude-sonnet"}
 {"type": "assistant", "message": {"id": "msg_1", "role": "assistant", "model": "claude-sonnet", "content": [{"type": "text", "text": "Let me check memory."}], "usage": {"input_tokens": 3, "output_tokens": 5}}, "session_id": "0b1c"}
-{"type": "assistant", "message": {"id": "msg_1", "role": "assistant", "content": [{"type": "tool_use", "id": "toolu_01", "name": "mcp__zerodb__memory_search", "input": {"query": "Redis"}}]}, "session_id": "0b1c"}
+{"type": "assistant", "message": {"id": "msg_1", "role": "assistant", "content": [{"type": "tool_use", "id": "toolu_01", "name": "mcp__atticdb__memory_search", "input": {"query": "Redis"}}]}, "session_id": "0b1c"}
 this is not json
 {"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_01", "content": [{"type": "text", "text": "{\"hits\":[]}"}]}]}, "session_id": "0b1c"}
-{"type": "assistant", "message": {"id": "msg_2", "role": "assistant", "content": [{"type": "tool_use", "id": "toolu_02", "name": "mcp__zerodb__fact_set", "input": {"key": "repo/evalrepo/node-version", "content": "Always pin Node 22."}}]}, "session_id": "0b1c"}
-{"type": "assistant", "message": {"id": "msg_2", "role": "assistant", "content": [{"type": "tool_use", "id": "toolu_02", "name": "mcp__zerodb__fact_set", "input": {"key": "repo/evalrepo/node-version", "content": "Always pin Node 22."}}]}, "session_id": "0b1c"}
+{"type": "assistant", "message": {"id": "msg_2", "role": "assistant", "content": [{"type": "tool_use", "id": "toolu_02", "name": "mcp__atticdb__fact_set", "input": {"key": "repo/evalrepo/node-version", "content": "Always pin Node 22."}}]}, "session_id": "0b1c"}
+{"type": "assistant", "message": {"id": "msg_2", "role": "assistant", "content": [{"type": "tool_use", "id": "toolu_02", "name": "mcp__atticdb__fact_set", "input": {"key": "repo/evalrepo/node-version", "content": "Always pin Node 22."}}]}, "session_id": "0b1c"}
 [1, 2, 3]
 {"type": "assistant", "message": {"id": "msg_3", "role": "assistant", "content": [{"type": "tool_use", "id": "toolu_03", "name": "Read", "input": {"file_path": "calc.py"}}]}, "session_id": "0b1c"}
 

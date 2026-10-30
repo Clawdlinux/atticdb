@@ -1,12 +1,12 @@
 # Watch a bench run live. Linux only: host networking, every port on 127.0.0.1.
-# ZERODB_SOCKET_DIR is the directory holding zerodb.sock, usually the data directory.
+# ATTICDB_SOCKET_DIR is the directory holding atticdb.sock, usually the data directory.
 services:
   bridge:
     # Prometheus cannot scrape a Unix socket (prometheus/prometheus#12024).
     image: alpine/socat:1.8.1.3
     network_mode: host
-    volumes: ["${ZERODB_SOCKET_DIR:?set ZERODB_SOCKET_DIR}:/zerodb:ro"]
-    command: TCP-LISTEN:9425,bind=127.0.0.1,reuseaddr,fork UNIX-CONNECT:/zerodb/zerodb.sock
+    volumes: ["${ATTICDB_SOCKET_DIR:?set ATTICDB_SOCKET_DIR}:/atticdb:ro"]
+    command: TCP-LISTEN:9425,bind=127.0.0.1,reuseaddr,fork UNIX-CONNECT:/atticdb/atticdb.sock
     restart: unless-stopped
   node:
     image: prom/node-exporter:v1.12.1
@@ -26,7 +26,7 @@ services:
       GF_SERVER_HTTP_ADDR: 127.0.0.1
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
-      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/zerodb.json
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/atticdb.json
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro

@@ -9,7 +9,7 @@ impl TestDir {
     pub(crate) fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let path = PathBuf::from(ROOT).join(format!(
-            "zerodb-{}-{}",
+            "atticdb-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));

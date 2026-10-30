@@ -2,12 +2,12 @@
 {"type": "turn.started"}
 WARN something printed to stdout
 {"type": "item.completed", "item": {"id": "item_0", "type": "reasoning", "text": "**Searching memory**"}}
-{"type": "item.started", "item": {"id": "item_1", "type": "mcp_tool_call", "server": "zerodb", "tool": "memory_search", "arguments": {"query": "Redis"}, "result": null, "error": null, "status": "in_progress"}}
-{"type": "item.completed", "item": {"id": "item_1", "type": "mcp_tool_call", "server": "zerodb", "tool": "memory_search", "arguments": {"query": "Redis"}, "result": {"content": [{"type": "text", "text": "{}"}]}, "error": null, "status": "completed"}}
+{"type": "item.started", "item": {"id": "item_1", "type": "mcp_tool_call", "server": "atticdb", "tool": "memory_search", "arguments": {"query": "Redis"}, "result": null, "error": null, "status": "in_progress"}}
+{"type": "item.completed", "item": {"id": "item_1", "type": "mcp_tool_call", "server": "atticdb", "tool": "memory_search", "arguments": {"query": "Redis"}, "result": {"content": [{"type": "text", "text": "{}"}]}, "error": null, "status": "completed"}}
 {"type": "item.completed", "item": "not an object"}
 {"type": "item.started", "item": {"id": "item_2", "type": "command_execution", "command": "bash -lc 'cat calc.py'", "aggregated_output": "", "exit_code": null, "status": "in_progress"}}
 {"type": "item.completed", "item": {"id": "item_2", "type": "command_execution", "command": "bash -lc 'cat calc.py'", "aggregated_output": "def subtract(a, b):\n", "exit_code": 0, "status": "completed"}}
-{"type": "item.completed", "item": {"id": "item_3", "type": "mcp_tool_call", "server": "zerodb", "tool": "memory_append", "arguments": "{\"content\": \"Added add(a, b) to calc.py.\"}", "status": "completed"}}
+{"type": "item.completed", "item": {"id": "item_3", "type": "mcp_tool_call", "server": "atticdb", "tool": "memory_append", "arguments": "{\"content\": \"Added add(a, b) to calc.py.\"}", "status": "completed"}}
 {"type": "item.completed", "item": {"id": "item_4", "type": "mcp_tool_call", "server": "other", "tool": "lookup", "arguments": {}, "status": "completed"}}
 {"type": "item.completed", "item": {"id": "item_5", "type": "file_change", "changes": [{"path": "calc.py", "kind": "update"}], "status": "completed"}}
 {"type": "item.updated", "item": {"id": "item_6", "type": "todo_list", "items": []}}

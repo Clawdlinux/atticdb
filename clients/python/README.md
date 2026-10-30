@@ -1,11 +1,11 @@
-# zerodb Python client
+# AtticDB Python client
 
-One file, `zerodb_client.py`, standard library only. Copy it into your project.
+One file, `atticdb_client.py`, standard library only. Copy it into your project.
 
 ```python
-from zerodb_client import Client, Conflict, NotCommitted, OutcomeUnknown
+from atticdb_client import Client, Conflict, NotCommitted, OutcomeUnknown
 
-client = Client("unix:///var/lib/zerodb/zerodb.sock", token)
+client = Client("unix:///var/lib/atticdb/atticdb.sock", token)
 receipt = client.append("planner", "run-42", [{"role": "user", "content": "hi"}])
 window = client.window("planner", "run-42", last=20, max_bytes=65536)
 print(client.health())
@@ -48,9 +48,9 @@ Reads do not retry. Errors and `repr` never show the token.
 ## Tests
 
 ```sh
-cargo build -p zerodb --release --features fault-inject
+cargo build -p atticdb --release --features fault-inject
 python3 -m pip install -r clients/python/requirements-test.txt
-ZERODB_BIN=target/release/zerodb python3 -m pytest clients/python/tests
+ATTICDB_BIN=target/release/atticdb python3 -m pytest clients/python/tests
 ```
 
-Sockets live under `target/s`. Set `ZERODB_TEST_DIR` to a short directory if the checkout path is too deep for `sun_path`.
+Sockets live under `target/s`. Set `ATTICDB_TEST_DIR` to a short directory if the checkout path is too deep for `sun_path`.

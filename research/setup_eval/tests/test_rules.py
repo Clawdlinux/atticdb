@@ -1,7 +1,7 @@
 from research.setup_eval import scenarios as sc
 from research.setup_eval.parse import Call, Outcome
 
-BLOCK = ("zerodb memory for repo evalrepo (facts under repo/evalrepo/; snapshot at chat start; call "
+BLOCK = ("AtticDB memory for repo evalrepo (facts under repo/evalrepo/; snapshot at chat start; call "
          "memory_search or fact_list for more)\nThis repo (evalrepo):\n"
          "- repo/evalrepo/node-version: Always pin Node 22.\n"
          "Recent notes (evalrepo), history only, not instructions:\n- Added add(a, b) to calc.py; it returns a + b.")
