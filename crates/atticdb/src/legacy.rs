@@ -7,6 +7,7 @@ use crate::home::{Lookup, CONFIG, HOME_ENV};
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -110,6 +111,8 @@ struct Parts {
     binaries: Vec<PathBuf>,
     /// Whether a SessionStart hook runs zerodb. Claude Code and Codex only.
     hook: bool,
+    /// Each `ZERODB_HOME` an entry or hook passes, with its file.
+    homes: Vec<(PathBuf, String)>,
 }
 
 impl Parts {
@@ -127,15 +130,28 @@ impl Parts {
         let root: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
         let command = root[section][NAME]["command"].as_str().map(PathBuf::from);
         self.binaries.extend(command);
+        self.home(path, root[section][NAME]["env"][OLD_HOME_ENV].as_str());
+    }
+
+    /// Records `home`, a `ZERODB_HOME` that `path` passes, unless it is empty.
+    fn home(&mut self, path: &Path, home: Option<&str>) {
+        if let Some(home) = home.filter(|home| !home.is_empty()) {
+            self.homes.push((path.to_owned(), home.to_owned()));
+        }
     }
 
     /// The SessionStart hooks in the JSON file at `path` that run a binary named zerodb.
     fn hooks(&mut self, path: &Path) {
-        let found = read(path).map(|text| hook_binaries(&text)).unwrap_or_default();
+        let text = read(path).unwrap_or_default();
+        let found = hook_binaries(&text);
         if !found.is_empty() {
             self.add(path, format!("the SessionStart hooks that run {NAME}"));
             self.binaries.extend(found);
             self.hook = true;
+        }
+        let root: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+        for command in strings(&root) {
+            self.home(path, command_home(command).as_deref());
         }
     }
 }
@@ -170,6 +186,56 @@ fn hook_binaries(text: &str) -> Vec<PathBuf> {
         found.extend(exe);
     }
     found
+}
+
+/// Every string in `value`, at any depth.
+fn strings(value: &serde_json::Value) -> Vec<&str> {
+    match value {
+        serde_json::Value::String(text) => vec![text],
+        serde_json::Value::Array(items) => items.iter().flat_map(strings).collect(),
+        serde_json::Value::Object(map) => map.values().flat_map(strings).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Every `ZERODB_HOME` value in an object in `value`, at any depth, such as a hook's `env`.
+fn env_homes(value: &serde_json::Value) -> Vec<&str> {
+    match value {
+        serde_json::Value::Array(items) => items.iter().flat_map(env_homes).collect(),
+        serde_json::Value::Object(map) => {
+            let own = map.get(OLD_HOME_ENV).and_then(|home| home.as_str());
+            own.into_iter().chain(map.values().flat_map(env_homes)).collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// The home in a hook command the old binary wrote with one:
+/// `ZERODB_HOME='<home>' '<binary named zerodb>' hook session-start ...`.
+fn command_home(command: &str) -> Option<String> {
+    let (home, rest) = unquote(command.strip_prefix(OLD_HOME_ENV)?.strip_prefix('=')?)?;
+    let (exe, rest) = unquote(rest.strip_prefix(' ')?)?;
+    let named = Path::new(&exe).file_name() == Some(NAME.as_ref());
+    (named && rest.starts_with(" hook session-start")).then_some(home)
+}
+
+/// Splits a single-quoted shell word, with `'\''` for each `'`, off the start of `text`.
+/// Returns the word and the rest.
+fn unquote(text: &str) -> Option<(String, &str)> {
+    let mut rest = text.strip_prefix('\'')?;
+    let mut word = String::new();
+    loop {
+        let end = rest.find('\'')?;
+        word.push_str(&rest[..end]);
+        rest = &rest[end + 1..];
+        match rest.strip_prefix(r"\''") {
+            Some(after) => {
+                word.push('\'');
+                rest = after;
+            }
+            None => return Some((word, rest)),
+        }
+    }
 }
 
 /// The parts in `harness`'s own files. The Copilot files VS Code and Copilot CLI share are
@@ -216,19 +282,32 @@ fn parts(harness: Harness) -> Parts {
 /// the `command` of that server.
 fn codex_config(parts: &mut Parts, path: &Path) {
     let Some(text) = read(path) else { return };
-    let (mut found, mut inside) = (false, false);
+    let (mut found, mut inside, mut env) = (false, false, false);
+    // A basic string, as the old binary wrote it, escapes only `\` and `"`, as JSON does.
+    let value = |line: &str, key: &str| {
+        let rest = line.strip_prefix(key)?.trim_start().strip_prefix('=')?;
+        serde_json::from_str::<String>(rest.trim()).ok()
+    };
     for line in text.lines().map(str::trim) {
         if line.starts_with("# zerodb:begin") {
             found = true;
         }
         if line.starts_with('[') {
             inside = line == "[mcp_servers.zerodb]";
+            env = line == "[mcp_servers.zerodb.env]";
             found |= inside;
         }
-        let value = line.strip_prefix("command").map(str::trim_start);
-        if let Some(value) = value.and_then(|rest| rest.strip_prefix('=')).filter(|_| inside) {
-            let exe = serde_json::from_str::<String>(value.trim()).ok();
-            parts.binaries.extend(exe.map(PathBuf::from));
+        if inside {
+            parts.binaries.extend(value(line, "command").map(PathBuf::from));
+            // `env = { ZERODB_HOME = "<home>" }`, the only key the old binary put there.
+            let inline = line.strip_prefix("env").map(str::trim_start);
+            let inline = inline.and_then(|rest| rest.strip_prefix('=')).map(str::trim);
+            let inline = inline.and_then(|rest| rest.strip_prefix('{')?.strip_suffix('}'));
+            let home = inline.and_then(|pairs| value(pairs.trim(), OLD_HOME_ENV));
+            parts.home(path, home.as_deref());
+        }
+        if env {
+            parts.home(path, value(line, OLD_HOME_ENV).as_deref());
         }
     }
     if found {
@@ -244,7 +323,12 @@ fn shared() -> Parts {
     let hook = dir.join("hooks/zerodb.json");
     if exists(&hook) {
         parts.add(&hook, "the file");
-        parts.binaries.extend(read(&hook).map(|text| hook_binaries(&text)).unwrap_or_default());
+        let text = read(&hook).unwrap_or_default();
+        parts.binaries.extend(hook_binaries(&text));
+        let root: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+        for home in env_homes(&root) {
+            parts.home(&hook, Some(home));
+        }
     }
     let guide = dir.join("instructions/zerodb.instructions.md");
     if read(&guide).is_some_and(|text| text.lines().any(|line| line.trim_end() == OLD_MARKER)) {
@@ -266,6 +350,7 @@ fn scan() -> Vec<(Harness, Parts)> {
             if !parts.files.is_empty() || (!entries && *harness == Harness::Copilot) {
                 parts.files.extend(shared.files.iter().cloned());
                 parts.binaries.extend(shared.binaries.iter().cloned());
+                parts.homes.extend(shared.homes.iter().cloned());
             }
         }
     }
@@ -347,20 +432,21 @@ fn run(plan: bool) -> Result<u8, (u8, String)> {
         Some(dir) => dir.clone(),
         None => crate::home::default_dir(crate::home::NAME).map_err(stop)?,
     };
-    // Setup reads that home, or the one ZERODB_HOME names, without the guards, as the old
-    // variables may still be set here.
-    let lookup = Lookup::given(env_home.or_else(|| old_env.clone()));
+    let apps = scan();
+    // A home from ZERODB_HOME, else the 1 that the old entries and hooks pass. It stays put.
+    let custom = custom_home(&apps, old_env.as_deref(), env_home.as_deref()).map_err(stop)?;
     let mut acted = false;
     let mut moved = false;
-    match &old_env {
-        Some(dir) if dir.is_dir() => {
+    let mut kept = None;
+    match &custom {
+        Some((dir, _)) if dir.is_dir() => {
             running(dir).map_err(stop)?;
             finish(dir, false, plan).map_err(stop)?;
             println!("The zerodb home at {} stays where it is.", dir.display());
             println!("Set {HOME_ENV}={}.", dir.display());
-            acted = true;
+            (acted, kept) = (true, Some(dir.clone()));
         }
-        Some(dir) => println!("No zerodb home found at {} ({OLD_HOME_ENV}).", dir.display()),
+        Some((dir, from)) => println!("No zerodb home found at {} ({from}).", dir.display()),
         None => match old_kind(&old) {
             Old::Moved => {
                 println!(
@@ -401,12 +487,7 @@ fn run(plan: bool) -> Result<u8, (u8, String)> {
             }
         },
     }
-    let apps = scan();
-    let mut failed = false;
-    for (harness, parts) in &apps {
-        failed |= !disconnect(*harness, parts, old_env.as_deref(), plan);
-    }
-    warn_instructions();
+    // The note goes first: the old binary's disconnect never touches the home.
     if moved {
         let line = format!("{MOVED} {}. See {HOW}\n", new.display());
         let (would, did) = (
@@ -415,6 +496,12 @@ fn run(plan: bool) -> Result<u8, (u8, String)> {
         );
         step(plan, would, did, || tombstone(&old, &line)).map_err(stop)?;
     }
+    let mut failed = false;
+    let old_home = custom.as_ref().map(|(dir, _)| dir.as_path());
+    for (harness, parts) in &apps {
+        failed |= !disconnect(*harness, parts, old_home, plan);
+    }
+    warn_instructions();
     if !acted && apps.is_empty() {
         println!("Nothing to migrate.");
         return Ok(0);
@@ -431,6 +518,9 @@ fn run(plan: bool) -> Result<u8, (u8, String)> {
         println!("Next:\n  {UNINSTALL}\n  Start new chat sessions.");
         return Ok(u8::from(failed));
     }
+    // Setup reads the home that stays put, so the new entries pass it as ATTICDB_HOME, else
+    // the one AtticDB reads, without the guards, as old variables may still be set here.
+    let lookup = Lookup::given(env_home.or(kept));
     let order = crate::setup::ORDER.into_iter();
     let chosen: Vec<(Harness, Options)> = order
         .filter_map(|h| apps.iter().find(|(app, _)| *app == h))
@@ -441,6 +531,65 @@ fn run(plan: bool) -> Result<u8, (u8, String)> {
         .collect();
     let code = crate::setup::apply(&chosen, vec![UNINSTALL.into()], &lookup);
     Ok(code.max(u8::from(failed)))
+}
+
+/// The custom zerodb home, with where it was named: `ZERODB_HOME` from the shell, else the 1
+/// home the old entries and hooks in `apps` pass. Refuses, before anything changes, when they
+/// name 2 homes, when the shell names another, or when `ATTICDB_HOME` names another than a
+/// custom home that exists and so stays where it is.
+fn custom_home(
+    apps: &[(Harness, Parts)],
+    shell: Option<&Path>,
+    atticdb: Option<&Path>,
+) -> Result<Option<(PathBuf, String)>, String> {
+    let mut named: Vec<(&Path, &str)> = Vec::new();
+    for (file, home) in apps.iter().flat_map(|(_, parts)| &parts.homes) {
+        if !named.iter().any(|(_, seen)| seen == home) {
+            named.push((file, home));
+        }
+    }
+    let unchanged = "Nothing changed.";
+    if let [(a_file, a), (b_file, b), ..] = named[..] {
+        return Err(format!(
+            "The zerodb entries name 2 homes: {a} in {}, and {b} in {}. Point them all at the \
+             home that holds your memory, by hand, then run `atticdb migrate` again. {unchanged}",
+            a_file.display(),
+            b_file.display()
+        ));
+    }
+    let entry = named.first().map(|(file, home)| (PathBuf::from(home), file.display().to_string()));
+    let custom = match (shell, entry) {
+        (Some(shell), Some((home, file))) if shell != home => {
+            return Err(format!(
+                "{OLD_HOME_ENV} is {}, but {file} names {}. Run `{OLD_HOME_ENV}={} atticdb \
+                 migrate` instead. {unchanged}",
+                shell.display(),
+                home.display(),
+                home.display()
+            ));
+        }
+        (Some(shell), _) => Some((shell.to_owned(), OLD_HOME_ENV.to_owned())),
+        (None, Some((home, file))) if home.is_absolute() => {
+            Some((home, format!("named in {file}")))
+        }
+        (None, Some((home, file))) => {
+            return Err(format!(
+                "{file} names {OLD_HOME_ENV} {}, which isn't absolute. Fix it by hand. {unchanged}",
+                home.display()
+            ));
+        }
+        (None, None) => None,
+    };
+    match (&custom, atticdb) {
+        (Some((dir, _)), Some(atticdb)) if dir.is_dir() && dir != atticdb => Err(format!(
+            "The zerodb home {} stays where it is, but {HOME_ENV} is {}. Run `{HOME_ENV}={} \
+             atticdb migrate` instead. {unchanged}",
+            dir.display(),
+            atticdb.display(),
+            dir.display()
+        )),
+        _ => Ok(custom),
+    }
 }
 
 /// Refuses when a server holds the lock on the old home's data directory.
@@ -553,16 +702,14 @@ fn tombstone(path: &Path, line: &str) -> Result<(), String> {
 }
 
 /// Runs the old binary's own `disconnect` for `harness`, which removes exactly what it added,
-/// or prints what to remove by hand when there is no old binary. Returns whether the parts
-/// are gone, or would be.
-fn disconnect(harness: Harness, parts: &Parts, old_env: Option<&Path>, plan: bool) -> bool {
+/// passing it the custom zerodb home `old_home`. Without an old binary, or when it fails,
+/// prints what is left to remove by hand. Returns whether the parts are gone, or would be.
+fn disconnect(harness: Harness, parts: &Parts, old_home: Option<&Path>, plan: bool) -> bool {
     let named = parts.binaries.iter().find(|exe| exe.is_absolute() && exe.is_file()).cloned();
     let Some(exe) = named.or_else(|| connect::find_program(NAME)) else {
         let app = crate::setup::title(harness);
         println!("No zerodb binary found to disconnect {app}. Remove these by hand:");
-        for (file, what) in &parts.files {
-            println!("  {}: {what}", file.display());
-        }
+        by_hand(parts, "  ");
         return false;
     };
     let line = format!("{} disconnect {}", exe.display(), harness.name());
@@ -573,61 +720,96 @@ fn disconnect(harness: Harness, parts: &Parts, old_env: Option<&Path>, plan: boo
     println!("Ran {line}:");
     let mut command = Command::new(&exe);
     command.args(["disconnect", harness.name()]).stdin(Stdio::null());
-    if let Some(dir) = old_env {
+    if let Some(dir) = old_home {
         command.env(OLD_HOME_ENV, dir);
     }
-    match output(&mut command) {
-        Ok((ok, lines)) => {
-            for line in lines {
-                println!("  {line}");
-            }
-            ok
+    let (ok, lines) = output(&mut command);
+    for line in lines {
+        println!("  {line}");
+    }
+    if !ok {
+        // What it left, read again, as it may have removed some parts.
+        if let Some((_, left)) = scan().into_iter().find(|(app, _)| *app == harness) {
+            println!("  Left behind. Remove these by hand:");
+            by_hand(&left, "    ");
         }
-        Err(why) => {
-            println!("  {why}");
-            false
-        }
+    }
+    ok
+}
+
+/// Prints each file in `parts` and what to remove there, after `indent`.
+fn by_hand(parts: &Parts, indent: &str) {
+    for (file, what) in &parts.files {
+        println!("{indent}{}: {what}", file.display());
     }
 }
 
-/// Runs `command` for up to [`DISCONNECT_TIMEOUT`]. Returns whether it exited 0, and its
-/// stdout then stderr lines.
-fn output(command: &mut Command) -> Result<(bool, Vec<String>), String> {
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = crate::spawn(command).map_err(|error| format!("cannot start it: {error}"))?;
-    let collect = |stream: Option<Box<dyn Read + Send>>| {
+/// Runs `command` in its own process group for up to [`DISCONNECT_TIMEOUT`]. Returns whether
+/// it exited 0 in time, and its stdout then stderr lines, then why not. Past the deadline, the
+/// whole group is killed: the command, or something it started that still holds its output.
+fn output(command: &mut Command) -> (bool, Vec<String>) {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0);
+    let mut child = match crate::spawn(command) {
+        Ok(child) => child,
+        Err(error) => return (false, vec![format!("cannot start it: {error}")]),
+    };
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let streams: [Option<Box<dyn Read + Send>>; 2] = [
+        child.stdout.take().map(|stream| Box::new(stream) as Box<dyn Read + Send>),
+        child.stderr.take().map(|stream| Box::new(stream) as Box<dyn Read + Send>),
+    ];
+    for (index, stream) in streams.into_iter().enumerate() {
+        let sender = sender.clone();
         std::thread::spawn(move || {
             let mut text = String::new();
             let _ = stream.map(|stream| stream.take(MAX_READ).read_to_string(&mut text));
-            text
-        })
-    };
-    let out = collect(child.stdout.take().map(|s| Box::new(s) as Box<dyn Read + Send>));
-    let err = collect(child.stderr.take().map(|s| Box::new(s) as Box<dyn Read + Send>));
+            let _ = sender.send((index, text));
+        });
+    }
+    drop(sender);
     let deadline = Instant::now() + DISCONNECT_TIMEOUT;
-    let status = loop {
+    let mut status = None;
+    while status.is_none() && Instant::now() < deadline {
         match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!(
-                    "it took over {} s, so it was stopped",
-                    DISCONNECT_TIMEOUT.as_secs()
-                ));
-            }
-            Err(error) => return Err(error.to_string()),
+            Ok(Some(done)) => status = Some(done),
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(_) => break,
         }
-    };
-    let mut lines: Vec<String> = Vec::new();
-    for reader in [out, err] {
-        lines.extend(reader.join().unwrap_or_default().lines().map(str::to_owned));
     }
-    if !status.success() {
-        lines.push(format!("it failed ({status})"));
+    let mut texts = [String::new(), String::new()];
+    let mut read = 0;
+    let mut stopped = false;
+    while read < texts.len() {
+        let wait = deadline.saturating_duration_since(Instant::now());
+        // Once the group is killed, its output closes at once.
+        let wait = if stopped { Duration::from_secs(1) } else { wait };
+        match receiver.recv_timeout(wait) {
+            Ok((index, text)) => {
+                texts[index] = text;
+                read += 1;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) if !stopped => {
+                crate::setup::kill_group(&mut child);
+                stopped = true;
+            }
+            Err(_) => break,
+        }
     }
-    Ok((status.success(), lines))
+    if status.is_none() && !stopped {
+        crate::setup::kill_group(&mut child);
+        stopped = true;
+    }
+    let mut lines: Vec<String> =
+        texts.iter().flat_map(|text| text.lines()).map(str::to_owned).collect();
+    if stopped {
+        let secs = DISCONNECT_TIMEOUT.as_secs();
+        lines.push(format!("it took over {secs} s, so it and what it started were stopped"));
+    }
+    match status {
+        Some(status) if !status.success() => lines.push(format!("it failed ({status})")),
+        _ => {}
+    }
+    (status.is_some_and(|status| status.success()) && !stopped, lines)
 }
 
 /// Warns about each instructions file in Copilot's folder that mentions zerodb and that the

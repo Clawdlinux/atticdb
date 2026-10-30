@@ -570,7 +570,12 @@ impl Process {
 
     /// Waits up to 30 s for exit. Returns the status with everything printed.
     pub fn wait(&mut self) -> (ExitStatus, String) {
-        let deadline = Instant::now() + Duration::from_secs(30);
+        self.wait_up_to(Duration::from_secs(30))
+    }
+
+    /// Waits up to `limit` for exit. Returns the status with everything printed.
+    pub fn wait_up_to(&mut self, limit: Duration) -> (ExitStatus, String) {
+        let deadline = Instant::now() + limit;
         loop {
             if let Some(status) = self.child.try_wait().unwrap() {
                 // A fixed sleep lost stderr on a busy runner. Readers end at the pipes' EOF.

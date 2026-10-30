@@ -717,14 +717,24 @@ fn put(path: &Path, text: &str) {
 }
 
 /// zerodb's parts in the 4 apps' files under `home`, as the old binary wrote them, each
-/// running `exe`. Returns the files.
-fn old_parts(home: &Path, exe: &str) -> Vec<PathBuf> {
-    let entry =
-        |agent: &str| json!({"type": "stdio", "command": exe, "args": ["mcp", "--agent", agent]});
+/// running `exe`, and passing `zhome` as `ZERODB_HOME` when set. Returns the files.
+fn old_parts(home: &Path, exe: &str, zhome: Option<&str>) -> Vec<PathBuf> {
+    let env = |mut object: Value| {
+        if let Some(zhome) = zhome {
+            object["env"] = json!({"ZERODB_HOME": zhome});
+        }
+        object
+    };
+    let entry = |agent: &str| {
+        env(json!({"type": "stdio", "command": exe, "args": ["mcp", "--agent", agent]}))
+    };
+    let prefix = zhome.map(|zhome| format!("ZERODB_HOME='{zhome}' ")).unwrap_or_default();
     let hook = |harness: &str| {
-        let command = format!("'{exe}' hook session-start --harness {harness}");
+        let command = format!("{prefix}'{exe}' hook session-start --harness {harness}");
         json!({"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": command}]}]}})
     };
+    let codex_env =
+        zhome.map(|zhome| format!("env = {{ ZERODB_HOME = \"{zhome}\" }}\n")).unwrap_or_default();
     let copilot = home.join(".copilot");
     let mut settings = hook("claude-code");
     settings["permissions"] = json!({"allow": ["mcp__zerodb__memory_append"]});
@@ -735,7 +745,7 @@ fn old_parts(home: &Path, exe: &str) -> Vec<PathBuf> {
         (copilot.join("mcp-config.json"), json!({"mcpServers": {"zerodb": entry("copilot")}}).to_string()),
         (
             copilot.join("hooks/zerodb.json"),
-            json!({"version": 1, "hooks": {"sessionStart": [{"type": "command", "bash": bash}]}})
+            json!({"version": 1, "hooks": {"sessionStart": [env(json!({"type": "command", "bash": bash}))]}})
                 .to_string(),
         ),
         (
@@ -746,7 +756,7 @@ fn old_parts(home: &Path, exe: &str) -> Vec<PathBuf> {
         (home.join(".claude/settings.json"), settings.to_string()),
         (
             home.join(".codex/config.toml"),
-            format!("# {begin}\n[mcp_servers.zerodb]\ncommand = \"{exe}\"\nargs = [\"mcp\"]\n# zerodb:end\n"),
+            format!("# {begin}\n[mcp_servers.zerodb]\ncommand = \"{exe}\"\nargs = [\"mcp\"]\n{codex_env}# zerodb:end\n"),
         ),
         (home.join(".codex/hooks.json"), hook("codex").to_string()),
         (home.join(".codex/AGENTS.md"), format!("<!-- {begin} -->\nUse zerodb.\n<!-- zerodb:end -->\n")),
@@ -757,12 +767,20 @@ fn old_parts(home: &Path, exe: &str) -> Vec<PathBuf> {
     files.into_iter().map(|(path, _)| path).collect()
 }
 
-/// A fake old `zerodb` in the new directory `bin`. It appends its args to `bin/zerodb.argv`,
-/// prints 1 line and exits 0. Returns its path.
+/// A fake old `zerodb` in the new directory `bin`. It appends its args to `bin/zerodb.argv`
+/// and its `ZERODB_HOME` to `bin/zerodb.home`, prints 1 line and exits 0. With
+/// `FAKE_ZERODB=fails` it exits 1. With `FAKE_ZERODB=hangs` it leaves a `sleep 60` behind that
+/// holds its output. Returns its path.
 fn fake_zerodb(bin: &Path) -> PathBuf {
     std::fs::create_dir_all(bin).unwrap();
     let exe = bin.join("zerodb");
-    let script = "#!/bin/sh\necho \"$*\" >> \"$0.argv\"\necho \"zerodb: removed from $2\"\n";
+    let script =
+        "#!/bin/sh\necho \"$*\" >> \"$0.argv\"\necho \"${ZERODB_HOME:-none}\" >> \"$0.home\"\n\
+                  case \"$FAKE_ZERODB\" in\n\
+                  fails) echo \"zerodb: cannot remove from $2\"; exit 1;;\n\
+                  hangs) /bin/sleep 60 & ;;\n\
+                  esac\n\
+                  echo \"zerodb: removed from $2\"\n";
     std::fs::write(&exe, script).unwrap();
     support::chmod(&exe, 0o755);
     exe
@@ -809,6 +827,11 @@ fn migrate_moves_a_zerodb_install() {
         "no old binary",
         "hand-written instructions",
         "dry run",
+        "home from entries",
+        "entries disagree",
+        "shell and entries disagree",
+        "ZERODB_HOME and ATTICDB_HOME disagree",
+        "old binary fails",
     ];
     for case in rows {
         let dir = Dir::new();
@@ -853,16 +876,40 @@ fn migrate_moves_a_zerodb_install() {
                 old_store(&home, &custom, &[("ATTICDB_HOME", custom.to_str().unwrap())]);
                 env.push(("ZERODB_HOME", custom.to_str().unwrap().into()));
                 if case != "ZERODB_HOME" {
-                    old_parts(&home, exe.to_str().unwrap());
+                    old_parts(&home, exe.to_str().unwrap(), None);
                 }
             }
             "app parts" | "dry run" => {
                 old_store(&home, &old, &[]);
-                old_parts(&home, exe.to_str().unwrap());
+                old_parts(&home, exe.to_str().unwrap(), None);
             }
             "no old binary" => {
                 old_store(&home, &old, &[]);
-                old_parts(&home, dir.0.join("gone/zerodb").to_str().unwrap());
+                old_parts(&home, dir.0.join("gone/zerodb").to_str().unwrap(), None);
+            }
+            "home from entries" | "entries disagree" | "shell and entries disagree" => {
+                // The old binary wrote the home into every entry and hook. The shell has none.
+                old_store(&home, &custom, &[("ATTICDB_HOME", custom.to_str().unwrap())]);
+                old_parts(&home, exe.to_str().unwrap(), custom.to_str());
+                if case == "entries disagree" {
+                    let config = home.join(".codex/config.toml");
+                    let text = std::fs::read_to_string(&config).unwrap();
+                    std::fs::write(&config, text.replace(custom.to_str().unwrap(), "/elsewhere"))
+                        .unwrap();
+                }
+                if case == "shell and entries disagree" {
+                    env.push(("ZERODB_HOME", "/elsewhere".into()));
+                }
+            }
+            "ZERODB_HOME and ATTICDB_HOME disagree" => {
+                old_store(&home, &custom, &[("ATTICDB_HOME", custom.to_str().unwrap())]);
+                env.push(("ZERODB_HOME", custom.to_str().unwrap().into()));
+                env.push(("ATTICDB_HOME", attic.to_str().unwrap().into()));
+            }
+            "old binary fails" => {
+                old_store(&home, &old, &[]);
+                old_parts(&home, exe.to_str().unwrap(), None);
+                env.push(("FAKE_ZERODB", "fails".into()));
             }
             _ => put(&mine, "Save notes in ZeroDB.\n"),
         }
@@ -1008,7 +1055,7 @@ fn migrate_moves_a_zerodb_install() {
                     )
                 });
                 assert!(
-                    out.contains(&format!("{}Left a note at {o}.\nApplying:\n", ran.concat())),
+                    out.contains(&format!("Left a note at {o}.\n{}Applying:\n", ran.concat())),
                     "{case}: {out}"
                 );
                 let logged = std::fs::read_to_string(&argv).unwrap();
@@ -1072,6 +1119,75 @@ fn migrate_moves_a_zerodb_install() {
                     "{case}"
                 );
             }
+            "home from entries" => {
+                // The home the entries named stays, and the new entries pass it.
+                assert_eq!(code, Some(0), "{case}: {out}{err}");
+                let c = custom.display();
+                let kept = format!(
+                    "Renamed {c}/zerodb.json to atticdb.json.\nThe zerodb home at {c} stays \
+                     where it is.\nSet ATTICDB_HOME={c}.\n"
+                );
+                assert!(out.starts_with(&kept), "{case}: {out}");
+                assert!(
+                    out.contains("\n4 connected, 0 with skipped parts.\nChecks:\n"),
+                    "{case}: {out}"
+                );
+                let homes = std::fs::read_to_string(dir.0.join("old/zerodb.home")).unwrap();
+                assert_eq!(
+                    homes,
+                    format!("{c}\n").repeat(4),
+                    "{case}: the old binary got the home"
+                );
+                let entry = &read(&vscode_file(&home))["servers"]["atticdb"];
+                assert_eq!(entry["env"]["ATTICDB_HOME"], custom.to_str().unwrap(), "{case}");
+                let config = std::fs::read_to_string(home.join(".codex/config.toml")).unwrap();
+                assert!(
+                    config.contains(&format!("env = {{ ATTICDB_HOME = \"{c}\" }}")),
+                    "{case}: {config}"
+                );
+                assert!(!new.exists() && !old.exists(), "{case}: no default home, and no note");
+            }
+            "entries disagree"
+            | "shell and entries disagree"
+            | "ZERODB_HOME and ATTICDB_HOME disagree" => {
+                let (c, a) = (custom.display(), attic.display());
+                let codex = home.join(".codex/config.toml");
+                let why = match case {
+                    "entries disagree" => format!(
+                        "The zerodb entries name 2 homes: {c} in {}, and /elsewhere in {}. Point \
+                         them all at the home that holds your memory, by hand, then run `atticdb \
+                         migrate` again.",
+                        vscode_file(&home).display(),
+                        codex.display()
+                    ),
+                    "shell and entries disagree" => format!(
+                        "ZERODB_HOME is /elsewhere, but {} names {c}. Run `ZERODB_HOME={c} \
+                         atticdb migrate` instead.",
+                        vscode_file(&home).display()
+                    ),
+                    _ => format!(
+                        "The zerodb home {c} stays where it is, but ATTICDB_HOME is {a}. Run \
+                         `ATTICDB_HOME={c} atticdb migrate` instead."
+                    ),
+                };
+                let wanted = format!("atticdb: {why} Nothing changed.\n");
+                assert_eq!((code, out.as_str(), err), (Some(1), "", wanted), "{case}");
+                assert_eq!(tree(&dir.0), before, "{case}: nothing changed");
+            }
+            "old binary fails" => {
+                // It removed nothing, so every part is left to remove by hand.
+                assert_eq!(code, Some(1), "{case}: {out}{err}");
+                let v = vscode_file(&home);
+                let left = format!(
+                    "Ran {} disconnect vscode:\n  zerodb: cannot remove from vscode\n  it failed \
+                     (exit status: 1)\n  Left behind. Remove these by hand:\n    {}: the \
+                     \"zerodb\" entry in \"servers\"\n",
+                    exe.display(),
+                    v.display()
+                );
+                assert!(out.contains(&left), "{case}: {out}");
+                assert!(out.contains("\nApplying:\n"), "{case}: it still connects AtticDB: {out}");
+            }
             _ => {
                 assert_eq!(code, Some(0), "{case}: {out}{err}");
                 assert!(
@@ -1081,7 +1197,7 @@ fn migrate_moves_a_zerodb_install() {
                     "{case}: {out}"
                 );
                 let run = format!(
-                    "Would run {} disconnect codex.\nWould leave a note at {o}",
+                    "Would leave a note at {o} that says so.\nWould run {} disconnect vscode.\n",
                     exe.display()
                 );
                 assert!(out.contains(&run), "{case}: {out}");
@@ -1094,12 +1210,12 @@ fn migrate_moves_a_zerodb_install() {
 }
 
 /// Before the move, zerodb data stops the home commands with exit 2, so none makes a new,
-/// empty home: an old variable, the old default home, and a home with only the old config.
+/// empty home: each old variable, the old default home, and a home with only the old config.
 /// The hook prints `{}` and says why on stderr. Doctor fails on it. For the old home, setup's
 /// plan shows a stop line. Setup's plan and doctor name each file with zerodb parts.
 #[test]
 fn zerodb_data_stops_home_commands() {
-    for case in ["old variable", "old home", "half moved"] {
+    for case in ["old variable", "old token", "old home", "half moved"] {
         let dir = Dir::new();
         let home = dir.0.join("h");
         std::fs::create_dir(&home).unwrap();
@@ -1111,6 +1227,10 @@ fn zerodb_data_stops_home_commands() {
             "old variable" => (
                 vec![("ZERODB_HOME", "/elsewhere")],
                 "ZERODB_HOME was renamed to ATTICDB_HOME. Rename it and run again.".into(),
+            ),
+            "old token" => (
+                vec![("ZERODB_TOKEN", "old")],
+                "ZERODB_TOKEN was renamed to ATTICDB_TOKEN. Rename it and run again.".into(),
             ),
             "old home" => {
                 old_store(&home, &old, &[]);
@@ -1135,7 +1255,7 @@ fn zerodb_data_stops_home_commands() {
         assert_eq!(code, Some(1), "{case}: {err}");
         assert!(out.contains(&format!("\n  home: {why}\n")), "{case}: {out}");
         let (code, out, err) = setup(&home, &home, &path, &env, &["--dry-run", "--yes"], "");
-        if case == "old variable" {
+        if matches!(case, "old variable" | "old token") {
             assert_eq!((code, err), (Some(2), format!("atticdb: {why}\n")), "{case}: {out}");
         } else {
             assert_eq!(code, Some(1), "{case}: {err}");
@@ -1151,7 +1271,7 @@ fn zerodb_data_stops_home_commands() {
     let (path, _, _) = fakes(&dir.0);
     let _holders = Holders(vec![data_dir(&home)]);
     support::seed(&home, &["fact", "list", "--prefix", "user/"]);
-    let files = old_parts(&home, "/opt/old/zerodb");
+    let files = old_parts(&home, "/opt/old/zerodb", None);
     let found = |file: &PathBuf| {
         format!("  zerodb parts found in {}; run `atticdb migrate`\n", file.display())
     };
@@ -1163,4 +1283,39 @@ fn zerodb_data_stops_home_commands() {
         assert!(plan.contains(&found(file)), "setup: {}: {plan}", file.display());
         assert!(doctor.contains(&found(file)), "doctor: {}: {doctor}", file.display());
     }
+}
+
+/// The old binary's `disconnect` gets 30 s. One that leaves a `sleep 60` behind holding its
+/// output is stopped with all it started, so migrate goes on near 30 s, not 60.
+#[test]
+#[ignore = "waits out the 30 s limit on the old binary"]
+fn migrate_stops_an_old_binary_that_hangs() {
+    let dir = Dir::new();
+    let home = dir.0.join("h");
+    std::fs::create_dir(&home).unwrap();
+    let (path, _, _) = fakes(&dir.0);
+    let _holders = Holders(vec![data_dir(&home)]);
+    let exe = fake_zerodb(&dir.0.join("old"));
+    let vscode = vscode_file(&home);
+    let entry = json!({"type": "stdio", "command": exe, "args": ["mcp"]});
+    put(&vscode, &json!({"servers": {"zerodb": entry}}).to_string());
+    let started = Instant::now();
+    let mut command = support::command(env!("CARGO_BIN_EXE_atticdb"));
+    command.arg("migrate").current_dir(&home).env("HOME", &home).env("PATH", &path);
+    command.env("FAKE_ZERODB", "hangs").stdin(Stdio::null());
+    let mut process = Process::start(&mut command);
+    // Past the 30 s limit, then setup's checks.
+    let (status, _) = process.wait_up_to(Duration::from_secs(90));
+    let took = started.elapsed();
+    let (code, out, err) = (status.code(), process.stdout(), process.stderr());
+    assert!(
+        took > Duration::from_secs(29) && took < Duration::from_secs(45),
+        "{took:?}: {out}{err}"
+    );
+    assert_eq!(code, Some(1), "{out}{err}");
+    let stopped =
+        "  zerodb: removed from vscode\n  it took over 30 s, so it and what it started were \
+                   stopped\n  Left behind. Remove these by hand:\n";
+    assert!(out.contains(stopped), "{out}");
+    assert!(out.contains("\nApplying:\n"), "it still connects AtticDB: {out}");
 }

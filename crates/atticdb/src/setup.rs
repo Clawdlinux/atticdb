@@ -411,11 +411,7 @@ pub(crate) fn check_hook(harness: Harness, cwd: &Path, lookup: &Lookup) -> Resul
             Ok(Some(status)) => break status,
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
             Ok(None) => {
-                // The child isn't reaped yet, so its pid, the group's id, can't be reused.
-                let group = rustix::process::Pid::from_child(&child);
-                let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
-                let _ = child.kill();
-                let _ = child.wait();
+                kill_group(&mut child);
                 return Err(format!("no answer in {} s", HOOK_TIMEOUT.as_secs()));
             }
             Err(error) => return Err(error.to_string()),
@@ -428,6 +424,16 @@ pub(crate) fn check_hook(harness: Harness, cwd: &Path, lookup: &Lookup) -> Resul
     let out = out.map_err(|_| "it did not close its output".to_owned())?;
     serde_json::from_slice::<Value>(&out).map_err(|_| "it did not print JSON".to_owned())?;
     Ok(())
+}
+
+/// Kills the process group that `child` leads, as `process_group(0)` made it, so whatever it
+/// started goes too, then reaps `child`. A group's id is not reused while the group has
+/// members, so this is safe after `child` exited too.
+pub(crate) fn kill_group(child: &mut std::process::Child) {
+    let group = rustix::process::Pid::from_child(child);
+    let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Reads `fact_list` from the home `lookup` finds, as the hook does for a chat in `cwd`.

@@ -60,7 +60,7 @@ AtticDB was called zerodb until 2026-10-30. To keep your memory:
 4. Run `cargo uninstall zerodb`.
 
 `migrate` moves the zerodb home to the AtticDB home and renames its config. For each app with zerodb parts, it runs the old binary's own `disconnect`, then connects AtticDB as `atticdb setup --yes` does. It leaves a note at the old home's path, so an old binary that still runs fails instead of making a new, empty home.
-It never merges 2 homes, never moves a home set by `ZERODB_HOME`, and never edits your own instruction files. It says what to do by hand instead.
+It never merges 2 homes, never moves a home set by `ZERODB_HOME` or named in the old entries, and never edits your own instruction files. It says what to do by hand instead.
 Until you migrate, AtticDB commands stop with exit 2 when they find zerodb data or a `ZERODB_*` variable. Details: [Moving from zerodb](crates/atticdb/README.md#moving-from-zerodb).
 
 ## MCP
