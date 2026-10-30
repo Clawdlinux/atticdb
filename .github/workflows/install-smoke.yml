@@ -5,7 +5,7 @@ on:
   release:
     types: [published]
   # release.yml publishes with GITHUB_TOKEN, and such a release fires no release event.
-  # So this runs after a release.yml run that a tag push started.
+  # So this runs after a successful release.yml run from a tag push, the schedule or a dispatch.
   workflow_run:
     workflows: [release]
     types: [completed]
@@ -33,7 +33,8 @@ jobs:
   smoke:
     if: >-
       github.event_name != 'workflow_run' ||
-      (github.event.workflow_run.event == 'push' &&
+      (contains(fromJSON('["push", "schedule", "workflow_dispatch"]'),
+      github.event.workflow_run.event) &&
       github.event.workflow_run.conclusion == 'success')
     name: smoke ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -45,6 +46,7 @@ jobs:
     env:
       EVENT: ${{ github.event_name }}
       RELEASE_TAG: ${{ github.event.release.tag_name }}
+      RUN_EVENT: ${{ github.event.workflow_run.event }}
       RUN_TAG: ${{ github.event.workflow_run.head_branch }}
       INPUT_VERSION: ${{ inputs.version }}
       RELEASES: https://github.com/Clawdlinux/atticdb/releases
@@ -102,7 +104,14 @@ jobs:
           . "$SMOKE_LIB"
           case "$EVENT" in
             release) want=$RELEASE_TAG ;;
-            workflow_run) want=$RUN_TAG ;;
+            # A tag push names its tag. A scheduled or manual run ran on main, so test latest.
+            workflow_run)
+              if [ "$RUN_EVENT" = push ]; then
+                want=$RUN_TAG
+              else
+                want=
+              fi
+              ;;
             workflow_dispatch) want=$INPUT_VERSION ;;
             *) want= ;;
           esac
