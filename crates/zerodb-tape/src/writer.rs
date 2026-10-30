@@ -111,6 +111,12 @@ pub struct TapeOptions {
     pub publish_pause: Option<Arc<crate::sim::PublishPause>>,
 }
 
+/// The free-space floor used when [`TapeOptions::free_space_floor`] is `None`: the smaller
+/// of 1 GiB and 5% of `total_bytes`, the volume's size.
+pub fn default_free_space_floor(total_bytes: u64) -> u64 {
+    (total_bytes / 20).min(1 << 30)
+}
+
 impl Default for TapeOptions {
     fn default() -> Self {
         Self {
@@ -505,9 +511,9 @@ impl<S: StateMachine> WriterCore<S> {
         }
         let mut dir =
             DataDir::open(io.clone(), path, opts.server_address.as_deref(), opts.segment_size)?;
-        let free_space_floor = opts.free_space_floor.or_else(|| {
-            io.total_bytes(&dir.path).ok().map(|capacity| (capacity / 20).min(1 << 30))
-        });
+        let free_space_floor = opts
+            .free_space_floor
+            .or_else(|| io.total_bytes(&dir.path).ok().map(default_free_space_floor));
         let mut recovered = recover_with_budget(&mut dir, opts.segment_size, opts.lsn_index_bytes)?;
         if recovered.report.durable_lsn > dir.superblock() {
             dir.install_superblock(recovered.report.durable_lsn)?;
@@ -763,7 +769,7 @@ impl<S: StateMachine> WriterCore<S> {
                     Some(floor) => floor,
                     None => match self.reads.io.total_bytes(&self.reads.path) {
                         Ok(capacity) => {
-                            let floor = (capacity / 20).min(1 << 30);
+                            let floor = default_free_space_floor(capacity);
                             self.free_space_floor = Some(floor);
                             self.reads.floor.store(floor, Ordering::Release);
                             floor

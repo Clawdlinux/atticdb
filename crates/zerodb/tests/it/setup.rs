@@ -1,4 +1,4 @@
-use crate::support::{self, data_dir, fake_program, tree, Dir, Holders, Process};
+use crate::support::{self, data_dir, fake_program, tree, tree_outside, Dir, Holders, Process};
 use serde_json::{json, Value};
 use std::ffi::OsString;
 use std::fs::File;
@@ -43,8 +43,21 @@ fn setup(
     args: &[&str],
     stdin: &str,
 ) -> (Option<i32>, String, String) {
+    zerodb("setup", home, cwd, path, env, args, stdin)
+}
+
+/// [`setup`] for any `verb`.
+fn zerodb(
+    verb: &str,
+    home: &Path,
+    cwd: &Path,
+    path: &OsString,
+    env: &[(&str, &str)],
+    args: &[&str],
+    stdin: &str,
+) -> (Option<i32>, String, String) {
     let mut command = support::command(env!("CARGO_BIN_EXE_zerodb"));
-    command.arg("setup").args(args).current_dir(cwd).env("HOME", home).env("PATH", path);
+    command.arg(verb).args(args).current_dir(cwd).env("HOME", home).env("PATH", path);
     command.env_remove("ZERODB_TOKEN").env_remove("ZERODB_SETUP_INTERACTIVE");
     command.envs(env.iter().copied()).stdin(Stdio::piped());
     let mut process = Process::start(&mut command);
@@ -408,4 +421,159 @@ fn setup_store_check_waits_for_a_starting_server() {
     assert_eq!(code, Some(0), "{out}{err}");
     assert!(out.contains("\n  Codex: ok\n"), "{out}");
     assert!(took >= Duration::from_secs(8), "answered only by the late server: {took:?}");
+}
+
+/// A zerodb binary that doesn't exist.
+const OLD: &str = "/old/zerodb";
+
+/// A case, `HOME`, `ZERODB_HOME`, `PATH`, the args, the exit code, and text stdout or stderr
+/// shows.
+type DoctorRow<'a> =
+    (&'a str, &'a Path, Option<&'a Path>, &'a OsString, &'a [&'a str], i32, String);
+
+/// `zerodb doctor` on a home that setup connected to all 4 fake apps, then with 1 thing
+/// wrong per row. A failed check exits 1. A warning, or an app not found, exits 0. It runs
+/// no harness program, and writes nothing but the server's own files in `data/`.
+#[test]
+fn doctor_checks_an_install_and_writes_nothing() {
+    let dir = Dir::new();
+    let (path, claude_log, codex_log) = fakes(&dir.0);
+    let (home, bare) = (dir.0.join("h"), dir.0.join("n"));
+    let no_apps = OsString::from(dir.0.join("empty"));
+    for made in [&home, &bare, &dir.0.join("empty")] {
+        std::fs::create_dir(made).unwrap();
+    }
+    let synced = dir.0.join("Dropbox/zerodb");
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&synced).unwrap();
+    let _holders = Holders(vec![data_dir(&home), synced.join("data")]);
+    let (code, out, err) = setup(&home, &dir.0, &path, &[], &["--yes"], "");
+    assert_eq!(code, Some(0), "{out}{err}");
+    let (claude_calls, codex_calls) = (calls(&claude_log), calls(&codex_log));
+    let exe = std::fs::canonicalize(env!("CARGO_BIN_EXE_zerodb")).unwrap();
+    let (vscode, agents) = (vscode_file(&home), home.join(".codex/AGENTS.md"));
+    let zerodb_home = data_dir(&home).parent().unwrap().to_owned();
+    let (z, v, n) = (zerodb_home.display(), vscode.display(), data_dir(&bare));
+    let n = n.parent().unwrap().display().to_string();
+    let uid = rustix::process::geteuid().as_raw();
+    let fix = |name: &str| format!("run zerodb setup --harness {name}, or zerodb connect {name}");
+    let (shared_hook, version) =
+        (home.join(".copilot/hooks/zerodb.json"), env!("CARGO_PKG_VERSION"));
+    let sandbox = "Sandboxes:\n  Agents in a sandbox need read and write access to";
+    let unset =
+        format!("Home:\n  {n} (ZERODB_HOME is not set): not set up yet, run zerodb setup\n");
+    let unset = format!("{unset}{sandbox} {n}.\n");
+    let healthy = format!("zerodb:\n  version {version}, {}: ok\nHome:\n  {z} (", exe.display());
+    let healthy = format!("{healthy}ZERODB_HOME is not set): ok\n");
+    let guide =
+        format!("\nCodex:\n  parts: 1 would change, {}\n    {}", fix("codex"), agents.display());
+    let guide = format!("{guide}: add the zerodb guide\n  binary: ok\n  hook: ok\n");
+    let hook = shared_hook.display();
+    let (settings, toml) = (home.join(".claude/settings.json"), home.join(".codex/config.toml"));
+    let gone =
+        |file: &Path| format!("    {} runs /old/zerodb, which no longer exists\n", file.display());
+    let stale = [
+        format!("VS Code:\n  parts: 2 would change, {}\n", fix("vscode")),
+        format!("    {v}: update the MCP entry\n    {hook}: update the sessionStart hook\n"),
+        format!("  binary: stale, {}\n{}", fix("vscode"), gone(&vscode)),
+        format!("    {hook} runs /bin/sh, not this zerodb, {}\n", exe.display()),
+        // The hook would change, so it isn't taken as left out.
+        format!("Claude Code:\n  parts: 1 would change, {}\n", fix("claude-code")),
+        format!("    {}: update the SessionStart hook\n", settings.display()),
+        format!("  binary: stale, {}\n{}", fix("claude-code"), gone(&settings)),
+        format!("Codex:\n  parts: 1 would change, {}\n", fix("codex")),
+        format!("    {}: update the MCP entry\n", toml.display()),
+        format!("  binary: stale, {}\n{}  hook: ok\n{sandbox}", fix("codex"), gone(&toml)),
+    ];
+    let mode =
+        format!("  {z} (ZERODB_HOME is not set): {z} must be a directory owned by uid {uid}");
+    let mode = format!("{mode}, mode 0700 or stricter, found mode 0755 owned by uid {uid}\n");
+    let (moved, bad) = (Some(synced.as_path()), dir.0.join("bad"));
+    let config = format!("\nServer and store: config {}/zerodb.json: invalid JSON", bad.display());
+    let moved_ok = format!("  {} (set by ZERODB_HOME): ok\n", synced.display());
+    let both = ["--harness", "copilot,bogus"];
+    let stale_apps = ["--harness", "codex,vscode,claude-code"];
+    let rows: [DoctorRow<'_>; 8] = [
+        ("not set up", &bare, None, &no_apps, &[], 0, unset),
+        ("healthy", &home, None, &path, &[], 0, healthy),
+        ("part would change", &home, None, &path, &[], 1, guide),
+        ("stale binary", &home, None, &path, &stale_apps, 1, stale.concat()),
+        ("home 0755", &home, None, &path, &[], 1, mode),
+        ("unknown harness", &home, None, &path, &both, 2, "usage:".into()),
+        ("synced folder", &bare, moved, &no_apps, &[], 0, moved_ok),
+        ("bad config", &bare, Some(&bad), &no_apps, &[], 1, config),
+    ];
+    let shared = &shared_hook;
+    for (case, row_home, moved, path, args, wanted, said) in rows {
+        let files = [&agents, &vscode, shared, &settings, &toml];
+        let saved = files.map(|file| std::fs::read(file).unwrap());
+        match case {
+            "part would change" => std::fs::remove_file(&agents).unwrap(),
+            // A binary that is gone, and one that exists but isn't this one.
+            "stale binary" => {
+                let mut config = read(&vscode);
+                config["servers"]["zerodb"]["command"] = json!(OLD);
+                std::fs::write(&vscode, config.to_string()).unwrap();
+                let exe = exe.to_str().unwrap();
+                for (file, other) in [(shared, "/bin/sh"), (&settings, OLD), (&toml, OLD)] {
+                    let text = std::fs::read_to_string(file).unwrap();
+                    std::fs::write(file, text.replace(exe, other)).unwrap();
+                }
+            }
+            "bad config" => {
+                std::fs::DirBuilder::new().mode(0o700).create(&bad).unwrap();
+                std::fs::write(bad.join("zerodb.json"), "{").unwrap();
+                support::chmod(&bad.join("zerodb.json"), 0o600);
+            }
+            "home 0755" => support::chmod(&zerodb_home, 0o755),
+            _ => {}
+        }
+        let data = moved.map_or_else(|| data_dir(row_home), |moved| moved.join("data"));
+        let own = |home: &Path| tree_outside(home, Some(&data));
+        let before = own(row_home);
+        let moved = moved.map(|moved| ("ZERODB_HOME", moved.to_str().unwrap()));
+        let env: Vec<_> = moved.into_iter().collect();
+        let (code, out, err) = zerodb("doctor", row_home, &dir.0, path, &env, args, "");
+        assert_eq!(code, Some(wanted), "{case}: {out}{err}");
+        assert!(out.contains(&said) || err.contains(&said), "{case}: {out}{err}");
+        assert_eq!(own(row_home), before, "{case}: nothing written");
+        assert_eq!(out.contains(sandbox), wanted != 2, "{case}: {out}");
+        match case {
+            "not set up" => assert!(tree(&bare).is_empty(), "{case}: no home made"),
+            "healthy" => {
+                for app in ["Copilot CLI", "VS Code", "Claude Code", "Codex"] {
+                    let ok = format!("\n{app}:\n  parts: ok\n  binary: ok\n  hook: ok\n");
+                    assert!(out.contains(&ok), "{case}: {app}: {out}");
+                }
+                let lines: Vec<&str> = out.lines().collect();
+                assert!(lines[4].starts_with("  free space: "), "{case}: {out}");
+                assert!(lines[4].contains(" free, the floor is "), "{case}: {out}");
+                assert!(lines[5].starts_with("  filesystem: "), "{case}: {out}");
+                assert!(lines[5].ends_with(": ok"), "{case}: {out}");
+                assert_eq!(lines[6..8], ["  synced folder: ok", "Server and store: ok"]);
+            }
+            "stale binary" => assert!(!out.contains("Copilot CLI"), "{case}: {out}"),
+            "home 0755" => {
+                assert!(out.contains("\nServer and store: skipped, fix the home first\n"));
+                assert!(!out.contains("Codex"), "{case}: {out}");
+                let mode = std::fs::metadata(&zerodb_home).unwrap().permissions();
+                assert_eq!(std::os::unix::fs::PermissionsExt::mode(&mode) & 0o777, 0o755);
+                support::chmod(&zerodb_home, 0o700);
+            }
+            "synced folder" => {
+                let warned = "\n  synced folder: warning: the home is in Dropbox, which may copy \
+                              the store while it is written. Keep the home outside synced \
+                              folders, with ZERODB_HOME\nServer and store: ok\n";
+                assert!(out.contains(warned), "{case}: {out}");
+                assert!(out.contains("\nCodex: not found\nSandboxes:\n"), "{case}: {out}");
+                assert!(tree(&bare).is_empty(), "{case}: HOME untouched");
+            }
+            _ => {}
+        }
+        for (file, bytes) in files.into_iter().zip(saved) {
+            std::fs::write(file, bytes).unwrap();
+        }
+    }
+    assert_eq!((calls(&claude_log), calls(&codex_log)), (claude_calls, codex_calls), "no runs");
+    let others = dir.0.join("other");
+    assert!(!others.join("copilot.argv").exists() && !others.join("code.argv").exists());
 }

@@ -7,6 +7,7 @@ pub mod api;
 pub mod auth;
 pub mod config;
 pub mod connect;
+pub mod doctor;
 #[cfg(feature = "fault-inject")]
 pub mod fault;
 pub mod home;
