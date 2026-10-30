@@ -4,7 +4,10 @@ Can an agent use AtticDB memory once `atticdb setup` has wired it in? The method
 
 ## What was run
 
-- AtticDB `784fd39` (#114) for the first pass and `5a7ac71` (#121) for the second. Both runs used `~/.cargo/bin/atticdb` built from that commit.
+These runs predate the rename to AtticDB (D89). At the pinned commits the project was called zerodb: the binary was `~/.cargo/bin/zerodb`, the harness flag was `--zerodb`, the env vars were `ZERODB_*`, the MCP server was `zerodb`, and the CSV column was `zerodb_calls`. This page uses the current names. To rerun at those commits, use the old names.
+
+
+- AtticDB `784fd39` (#114) for the first pass and `5a7ac71` (#121) for the second. Both runs used the binary built from that commit.
 - Claude Code 2.1.310 and Codex 0.147.0, each on its default model, logged in only in its eval config dir.
 - Command: `python3 -m research.setup_eval run --harness <h> --scenarios S1,S2,S3,S4,B1,B2 --runs <n>`.
 - Billed sessions: 33 of the 36 approved.
