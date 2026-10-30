@@ -348,6 +348,14 @@ fn fs_type(path: &Path) -> Option<String> {
         0xff53_4d42 => "cifs".into(),
         0xfe53_4d42 => "smb2".into(),
         0x6573_5546 => "fuse".into(),
+        // Local filesystems, from linux/magic.h. ext2, ext3 and ext4 share 1 magic.
+        0xef53 => "ext4".into(),
+        0x5846_5342 => "xfs".into(),
+        0x9123_683e => "btrfs".into(),
+        0xf2f5_2010 => "f2fs".into(),
+        0x2fc1_2fc1 => "zfs".into(),
+        0x0102_1994 => "tmpfs".into(),
+        0x794c_7630 => "overlayfs".into(),
         magic => format!("type {magic:#x}"),
     })
 }
@@ -403,7 +411,7 @@ mod tests {
         for name in ["nfs", "smbfs", "cifs", "smb2", "fuse", "macfuse", "osxfuse"] {
             assert!(remote(name), "{name}");
         }
-        for name in ["apfs", "hfs", "ext4", "btrfs", "type 0xef53"] {
+        for name in ["apfs", "hfs", "ext4", "btrfs", "xfs", "tmpfs", "type 0x1234"] {
             assert!(!remote(name), "{name}");
         }
     }
