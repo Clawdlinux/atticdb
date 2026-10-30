@@ -134,7 +134,8 @@ main() {
     # removes it.
     mkdir -p "$dir"
     dest="$dir/atticdb"
-    part="$dir/.atticdb.part.$$"
+    # mktemp makes a new 0600 file, so a link planted at a guessable name can't redirect cp.
+    part=$(mktemp "$dir/.atticdb.part.XXXXXX") || fail "cannot create a temp file in $dir"
     cp "$tmp/x/atticdb" "$part"
     chmod 755 "$part"
     "$part" --version >/dev/null 2>&1 ||
@@ -160,8 +161,9 @@ main() {
             ;;
         *)
             say "warning: $dir is not on PATH. Add it in your shell's rc file:"
-            # shellcheck disable=SC2016 # $PATH is meant to print as is.
-            printf '  export PATH="%s:$PATH"\n' "$dir"
+            # Single quotes keep $, `, " and \ in the dir literal. Each ' becomes '\''.
+            quoted=$(printf '%s' "$dir" | sed "s/'/'\\\\''/g")
+            printf "  export PATH='%s':\"\$PATH\"\n" "$quoted"
             if [ -n "$found" ]; then
                 say "warning: atticdb on PATH is $found, not the one just installed."
             fi

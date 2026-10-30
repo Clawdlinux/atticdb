@@ -133,7 +133,7 @@ def test_latest(server, dirs):
     assert requests == [f"/releases/latest/download/{TARBALL}",
                         "/releases/latest/download/SHA256SUMS"]
     # The install dir is not on PATH, so it prints the line to add.
-    assert f'  export PATH="{dirs[1]}:$PATH"\n' in result.stdout
+    assert f"""  export PATH='{dirs[1]}':"$PATH"\n""" in result.stdout
 
 
 @pytest.mark.parametrize("version", ["9.9.9", "v9.9.9"])
@@ -187,6 +187,21 @@ def test_reinstall_replaces_the_file(server, dirs):
     (bin_dir / "atticdb").chmod(0o700)
     assert_installed(dirs, install(dirs, base))
     assert_installed(dirs, install(dirs, base))
+
+
+def test_printed_export_line_keeps_an_odd_dir_literal(server, dirs, tmp_path):
+    root, base, _ = server
+    publish(root / "releases/latest/download")
+    odd = tmp_path / "a $x `b` \"c\" \\d 'e'"
+    result = install(dirs, base, ATTICDB_INSTALL_DIR=str(odd))
+    assert result.returncode == 0, result.stderr
+    assert (odd / "atticdb").read_bytes() == FAKE
+    lines = [line for line in result.stdout.splitlines() if line.startswith("  export PATH=")]
+    assert len(lines) == 1, result.stdout
+    out = subprocess.run(["sh", "-c", f'{lines[0]}\nprintf %s "$PATH"'],
+                         env={"PATH": SYSTEM_PATH, "x": "EXPANDED"}, capture_output=True,
+                         text=True, timeout=10, check=True).stdout
+    assert out == f"{odd}:{SYSTEM_PATH}"
 
 
 def test_on_path_and_shadowed(server, dirs, tmp_path):

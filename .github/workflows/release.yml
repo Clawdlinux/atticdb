@@ -171,7 +171,7 @@ jobs:
 
           ```sh
           curl -fsSL https://github.com/Clawdlinux/atticdb/releases/latest/download/install.sh | sh
-          # If the installer printed an export PATH=... line, run that line first.
+          export PATH="$HOME/.local/bin:$PATH"   # needed only if the installer said it isn't on PATH
           atticdb setup
           ```
 
