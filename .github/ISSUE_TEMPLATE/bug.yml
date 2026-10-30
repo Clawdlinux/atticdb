@@ -29,7 +29,7 @@ body:
     id: version
     attributes:
       label: Version
-      description: Output of `atticdb --version`, the first line of `atticdb doctor`, or the commit you built from.
+      description: Output of `atticdb --version`, the version line of `atticdb doctor`, or the commit you built from.
     validations:
       required: true
   - type: dropdown
