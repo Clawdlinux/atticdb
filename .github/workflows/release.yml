@@ -21,13 +21,15 @@ on:
         default: false
 permissions:
   contents: read
-# Runs that may publish share 1 group and never cancel, so 2 never publish at once. A queued
-# run computes its version after the run before it has tagged. Other runs group by ref.
+# Runs that may publish share 1 group and never cancel, so 2 never publish at once. Queued
+# publishing runs wait their turn. Each computes its version after the run before it has tagged.
+# Other runs group by ref. queue: max rules out cancel-in-progress, so pull request runs queue too.
 concurrency:
   group: >-
     ${{ (github.event_name == 'schedule' || github.event_name == 'push' || inputs.publish)
     && 'release' || format('release-{0}', github.ref) }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: false
+  queue: max
 env:
   CARGO_TERM_COLOR: always
 jobs:
@@ -54,11 +56,30 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           PUBLISH_INPUT: ${{ inputs.publish }}
+          # Reads releases, to resume a run that tagged but did not publish.
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           semver='^v[0-9]+\.[0-9]+\.[0-9]+$'
           # Release tags, highest first. Other v* tags are ignored.
           tags() {
             git tag --list 'v*' --sort=-v:refname | grep -E "$semver" || true
+          }
+          # The highest release tag below $1.
+          below() {
+            tags | awk -v tag="$1" 'found { print; exit } $0 == tag { found = 1 }'
+          }
+          # Prints published, draft or missing for the release of tag $1.
+          release_state() {
+            local out
+            if out=$(gh release view "$1" --json isDraft --jq .isDraft 2>&1); then
+              if [ "$out" = true ]; then echo draft; else echo published; fi
+            elif [ "$out" = "release not found" ]; then
+              echo missing
+            else
+              echo "::error::gh release view $1 failed: $out" >&2
+              return 1
+            fi
           }
           cargo=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)
           if [ -z "$cargo" ]; then
@@ -77,20 +98,30 @@ jobs:
             publish=true
             tag=$REF_NAME
             # The highest release tag below this one.
-            previous=$(tags | awk -v tag="$tag" 'found { print; exit } $0 == tag { found = 1 }')
+            previous=$(below "$tag")
           elif [ "$EVENT" = schedule ] || [ "$PUBLISH_INPUT" = true ]; then
             if [ "$REF" != "refs/heads/$DEFAULT_BRANCH" ]; then
               echo "::error::releases publish from $DEFAULT_BRANCH only, not $REF"
               exit 1
             fi
             latest=$(tags | sed -n 1p)
+            # A run that tagged HEAD but failed before publishing left the tag behind. Resume it.
+            state=""
+            if [ -n "$latest" ] && [ "$(git rev-parse "$latest^{commit}")" = "$(git rev-parse HEAD)" ]; then
+              state=$(release_state "$latest")
+            fi
             if [ -n "$latest" ]; then
               count=$(git rev-list --count "$latest..HEAD")
             else
               count=$(git rev-list --count HEAD)
             fi
             latest=${latest:-v0.0.0}
-            if [ "$count" -eq 0 ]; then
+            if [ "$state" = missing ] || [ "$state" = draft ]; then
+              publish=true
+              tag=$latest
+              previous=$(below "$tag")
+              echo "resuming $tag: it is on HEAD and its release is $state"
+            elif [ "$count" -eq 0 ]; then
               echo "::notice::no commits since $latest, no release"
             else
               IFS=. read -r major minor _ <<< "${latest#v}"
@@ -241,19 +272,24 @@ jobs:
           sha256sum atticdb-*.tar.gz install.sh > SHA256SUMS
           cat SHA256SUMS
       # A scheduled or manual release tags the commit it built. The API creates the tag, so the
-      # job needs no git credentials. A tag made with GITHUB_TOKEN starts no other run.
+      # job needs no git credentials. A tag made with GITHUB_TOKEN starts no other run. A re-run
+      # keeps a tag that an earlier attempt put on the same commit.
       - name: Tag the built commit
         if: github.event_name != 'push'
         run: |
-          set +e
-          git ls-remote --exit-code origin "refs/tags/$TAG" > /dev/null
-          found=$?
-          set -e
-          case "$found" in
-            0) echo "::error::tag $TAG already exists, not publishing"; exit 1 ;;
-            2) ;;
-            *) echo "::error::could not list the tags on origin"; exit 1 ;;
-          esac
+          remote=$(git ls-remote origin "refs/tags/$TAG" "refs/tags/$TAG^{}")
+          # An annotated tag lists its commit on the ^{} line. A lightweight tag has 1 line.
+          on=$(printf '%s\n' "$remote" | awk -v ref="refs/tags/$TAG" '
+            $2 == ref "^{}" { peeled = $1 } $2 == ref { direct = $1 }
+            END { print (peeled != "" ? peeled : direct) }')
+          if [ "$on" = "$SHA" ]; then
+            echo "tag $TAG is already on $SHA, keeping it"
+            exit 0
+          fi
+          if [ -n "$on" ]; then
+            echo "::error::tag $TAG is on $on, not on the built commit $SHA"
+            exit 1
+          fi
           object=$(gh api "repos/$GH_REPO/git/tags" -f tag="$TAG" -f message="AtticDB $VERSION" \
             -f object="$SHA" -f type=commit --jq .sha)
           gh api "repos/$GH_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$object" --silent
@@ -280,4 +316,10 @@ jobs:
             } >> notes.md
           fi
           cat notes.md
+          # gh uploads to a draft, then publishes it. A failed attempt can leave the draft.
+          # Delete it and keep the tag, so this attempt starts clean.
+          if [ "$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null)" = true ]; then
+            echo "deleting the draft release $TAG left by an earlier attempt"
+            gh release delete "$TAG" --yes
+          fi
           gh release create "$TAG" --verify-tag --title "AtticDB $TAG" --notes-file notes.md dist/*
