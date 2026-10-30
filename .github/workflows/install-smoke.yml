@@ -1,0 +1,258 @@
+name: install-smoke
+# Installs the live release on a fresh Linux or macOS runner, as a new user would, then uses it.
+# It never checks out the repo. The user has curl and nothing else.
+on:
+  release:
+    types: [published]
+  # release.yml publishes with GITHUB_TOKEN, and such a release fires no release event.
+  # So this runs after a release.yml run that a tag push started.
+  workflow_run:
+    workflows: [release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release to install, such as 0.1.0. Empty means latest."
+        required: false
+        default: ""
+  schedule:
+    # Wednesdays at 04:37 UTC.
+    - cron: "37 4 * * 3"
+  pull_request:
+    paths:
+      - .github/workflows/install-smoke.yml
+permissions:
+  contents: read
+concurrency:
+  group: install-smoke-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+defaults:
+  run:
+    shell: bash
+jobs:
+  smoke:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.conclusion == 'success')
+    name: smoke ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    env:
+      EVENT: ${{ github.event_name }}
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+      RUN_TAG: ${{ github.event.workflow_run.head_branch }}
+      INPUT_VERSION: ${{ inputs.version }}
+      RELEASES: https://github.com/Clawdlinux/atticdb/releases
+    steps:
+      # A short path: macOS allows 104 bytes for a socket path.
+      - name: Make a fresh home
+        run: |
+          # The checks use jq outside the fresh home. Runner images have it, so this is a fallback.
+          if ! command -v jq >/dev/null; then
+            sudo apt-get update -q
+            sudo apt-get install -y -q jq
+          fi
+          dir=$(mktemp -d /tmp/s.XXXX)
+          # macOS /tmp is a symlink. The binary records real paths.
+          dir=$(cd "$dir" && pwd -P)
+          home="$dir/h"
+          mkdir -m 700 "$home" "$home/proj"
+          case "$(uname -s)" in
+            Darwin)
+              data="$home/Library/Application Support/atticdb/data"
+              code="$home/Library/Application Support/Code/User"
+              ;;
+            *)
+              data="$home/.local/share/atticdb/data"
+              code="$home/.config/Code/User"
+              ;;
+          esac
+          cat > "$dir/lib.sh" <<'EOF'
+          # u <seconds> <command> [args]: runs a command as the new user. The environment
+          # holds only HOME and PATH, and SIGALRM kills the command after <seconds>.
+          u() {
+              secs=$1
+              shift
+              # shellcheck disable=SC2016 # perl code, not shell
+              env -i HOME="$SMOKE_HOME" PATH="$SMOKE_HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+                  perl -e 'alarm shift; exec { $ARGV[0] } @ARGV or die "cannot run $ARGV[0]: $!\n"' \
+                  "$secs" "$@"
+          }
+          EOF
+          {
+            echo "SMOKE_DIR=$dir"
+            echo "SMOKE_LIB=$dir/lib.sh"
+            echo "SMOKE_HOME=$home"
+            echo "SMOKE_PROJ=$home/proj"
+            echo "SMOKE_DATA=$data"
+            echo "SMOKE_CODE=$code"
+          } >> "$GITHUB_ENV"
+          echo "home: $home"
+
+      - name: Install with curl | sh
+        run: |
+          # shellcheck source=/dev/null
+          . "$SMOKE_LIB"
+          case "$EVENT" in
+            release) want=$RELEASE_TAG ;;
+            workflow_run) want=$RUN_TAG ;;
+            workflow_dispatch) want=$INPUT_VERSION ;;
+            *) want= ;;
+          esac
+          cd "$SMOKE_HOME"
+          # pipefail, so a failed download fails the step. sh alone would run an empty script.
+          # The inner bash expands $1.
+          # shellcheck disable=SC2016
+          install='set -o pipefail; curl -fsSL "$1" | sh'
+          if [ -n "$want" ]; then
+            want=${want#v}
+            out=$(u 120 env ATTICDB_VERSION="$want" bash -c "$install" sh "$RELEASES/latest/download/install.sh")
+          else
+            # The tag that latest names, to check --version against.
+            tag=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$RELEASES/latest")
+            want=${tag##*/tag/v}
+            if [ "$want" = "$tag" ] || [ -z "$want" ]; then
+              echo "::error::cannot read the latest tag from $tag"
+              exit 1
+            fi
+            out=$(u 120 bash -c "$install" sh "$RELEASES/latest/download/install.sh")
+          fi
+          echo "$out"
+          case "$out" in
+            *warning:*) echo "::error::the installer warned"; exit 1 ;;
+          esac
+          found=$(u 10 sh -c 'command -v atticdb')
+          if [ "$found" != "$SMOKE_HOME/.local/bin/atticdb" ]; then
+            echo "::error::atticdb on PATH is '$found', want $SMOKE_HOME/.local/bin/atticdb"
+            exit 1
+          fi
+          got=$(u 10 atticdb --version)
+          if [ "$got" != "atticdb $want" ]; then
+            echo "::error::atticdb --version printed '$got', want 'atticdb $want'"
+            exit 1
+          fi
+          echo "$got"
+
+      - name: First use
+        run: |
+          # shellcheck source=/dev/null
+          . "$SMOKE_LIB"
+          cd "$SMOKE_PROJ"
+          # The first command makes the home and starts the server.
+          if ! u 30 atticdb append --content "smoke note" > "$SMOKE_DIR/append.out" 2> "$SMOKE_DIR/append.err"; then
+            cat "$SMOKE_DIR/append.out" "$SMOKE_DIR/append.err"
+            echo "::error::the first append failed"
+            exit 1
+          fi
+          echo "::group::stderr of the first append"
+          cat "$SMOKE_DIR/append.err"
+          echo "::endgroup::"
+          jq -e '.committed == true' "$SMOKE_DIR/append.out"
+          u 30 atticdb fact set --key user/smoke --content ok | jq -e '.committed == true'
+          u 30 atticdb search --query smoke | jq -e 'any(.hits[]; .content == "smoke note")'
+          u 30 atticdb fact get --key user/smoke | jq -e '.fact.content == "ok"'
+          u 30 atticdb recent --n 1 | jq -e '.turns | length == 1 and .[0].content == "smoke note"'
+
+      # VS Code counts as installed when its user profile dir exists.
+      - name: Set up VS Code and run doctor
+        run: |
+          # shellcheck source=/dev/null
+          . "$SMOKE_LIB"
+          cd "$SMOKE_PROJ"
+          mkdir -p "$SMOKE_CODE"
+          u 60 atticdb setup --yes --harness vscode
+          jq -e --arg exe "$SMOKE_HOME/.local/bin/atticdb" \
+            '.servers.atticdb.type == "stdio" and .servers.atticdb.command == $exe' "$SMOKE_CODE/mcp.json"
+          jq -e '.hooks.sessionStart[0].bash | endswith(" hook session-start")' \
+            "$SMOKE_HOME/.copilot/hooks/atticdb.json"
+          grep -q 'atticdb' "$SMOKE_HOME/.copilot/instructions/atticdb.instructions.md"
+          if ! u 60 atticdb doctor > "$SMOKE_DIR/doctor.out"; then
+            cat "$SMOKE_DIR/doctor.out"
+            echo "::error::atticdb doctor failed"
+            exit 1
+          fi
+          cat "$SMOKE_DIR/doctor.out"
+          # The VS Code section, up to the next unindented line.
+          vscode=$(awk '/^VS Code:/ { on = 1; next } /^[^ ]/ { on = 0 } on' "$SMOKE_DIR/doctor.out")
+          for check in parts binary hook; do
+            if ! printf '%s\n' "$vscode" | grep -qx "  $check: ok"; then
+              echo "::error::doctor did not report VS Code $check: ok"
+              exit 1
+            fi
+          done
+
+      # Runs what VS Code would: the command, args and env of the mcp.json entry.
+      - name: MCP round trip
+        run: |
+          # shellcheck source=/dev/null
+          . "$SMOKE_LIB"
+          cd "$SMOKE_PROJ"
+          entry=$(jq -c '.servers.atticdb' "$SMOKE_CODE/mcp.json")
+          echo "entry: $entry"
+          set --
+          while IFS= read -r pair; do set -- "$@" "$pair"; done < <(jq -r '.env // {} | to_entries[] | "\(.key)=\(.value)"' <<< "$entry")
+          set -- "$@" "$(jq -r '.command' <<< "$entry")"
+          while IFS= read -r arg; do set -- "$@" "$arg"; done < <(jq -r '.args[]' <<< "$entry")
+          # The adapter exits when stdin closes, after answering each request.
+          printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"install-smoke","version":"1"}}}' \
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+            '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"memory_search","arguments":{"query":"smoke"}}}' \
+            '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"fact_get","arguments":{"key":"user/smoke"}}}' |
+            u 30 env "$@" > "$SMOKE_DIR/mcp.out"
+          cat "$SMOKE_DIR/mcp.out"
+          jq -se '
+            (map(.id) == [1, 2, 3, 4]) and
+            (.[0].result.serverInfo.name == "atticdb") and
+            ([.[1].result.tools[].name] | sort ==
+              ["fact_get", "fact_list", "fact_set", "memory_append", "memory_recent", "memory_search"]) and
+            (.[2].result.isError != true) and
+            (.[2].result.content[0].text | contains("smoke note")) and
+            (any(.[2].result.structuredContent.hits[]; .content == "smoke note")) and
+            (.[3].result.isError != true) and
+            (.[3].result.content[0].text == "ok")
+          ' "$SMOKE_DIR/mcp.out"
+
+      # Runs the sessionStart hook as Copilot would, with its JSON on stdin.
+      - name: Session-start hook
+        run: |
+          # shellcheck source=/dev/null
+          . "$SMOKE_LIB"
+          hook=$(jq -c '.hooks.sessionStart[0]' "$SMOKE_HOME/.copilot/hooks/atticdb.json")
+          echo "hook: $hook"
+          set --
+          while IFS= read -r pair; do set -- "$@" "$pair"; done < <(jq -r '.env // {} | to_entries[] | "\(.key)=\(.value)"' <<< "$hook")
+          jq -nc --arg cwd "$SMOKE_PROJ" '{cwd: $cwd}' |
+            u 10 env "$@" bash -c "$(jq -r '.bash' <<< "$hook")" > "$SMOKE_DIR/hook.out"
+          cat "$SMOKE_DIR/hook.out"
+          jq -e '.additionalContext | contains("AtticDB memory") and contains("smoke note")
+            and contains("user/smoke: ok")' "$SMOKE_DIR/hook.out"
+
+      - name: Server log
+        if: failure()
+        run: tail -n 50 "$SMOKE_DATA/serve.log" || true
+
+      # Stops the server the first command started, by the pid in its LOCK, never by name.
+      - name: Clean up
+        if: always()
+        run: |
+          [ -n "${SMOKE_DIR:-}" ] || exit 0
+          lock="$SMOKE_DATA/LOCK"
+          pid=$(sed -n 's/^pid=\([0-9][0-9]*\) .*/\1/p' "$lock" 2>/dev/null || true)
+          # A stale LOCK may name a pid that another program now has.
+          if [ -n "$pid" ] && ps -p "$pid" -o comm= | grep -q atticdb && kill "$pid"; then
+            for _ in $(seq 50); do
+              kill -0 "$pid" 2>/dev/null || break
+              sleep 0.2
+            done
+            if kill -0 "$pid" 2>/dev/null; then
+              echo "::warning::server $pid did not stop in 10 s"
+            fi
+          fi
+          rm -rf "$SMOKE_DIR"
