@@ -1,1 +1,1 @@
-"""Research code. Nothing here ships with zerodb."""
+"""Research code. Nothing here ships with atticdb."""

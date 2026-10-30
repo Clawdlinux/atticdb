@@ -10,8 +10,8 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIXTURES = os.path.join(os.path.dirname(HERE), "fixtures")
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
-# CI points ZERODB_BIN at the binary it built, as for the Python client tests.
-ZERODB = os.path.abspath(os.environ.get("ZERODB_BIN") or os.path.join(REPO_ROOT, "target", "debug", "zerodb"))
+# CI points ATTICDB_BIN at the binary it built, as for the Python client tests.
+ATTICDB = os.path.abspath(os.environ.get("ATTICDB_BIN") or os.path.join(REPO_ROOT, "target", "debug", "atticdb"))
 
 
 def install_stubs(bin_dir) -> None:
@@ -37,20 +37,20 @@ def fake_home(monkeypatch, tmp_path, make_eval_dirs: bool = True) -> dict:
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
     monkeypatch.setenv("STUB_LOG", str(log))
-    # The real zerodb setup reads harness files through these, so they point into the fake home.
+    # The real AtticDB setup reads harness files through these, so they point into the fake home.
     for name, rel in (("XDG_CONFIG_HOME", ".config"), ("XDG_DATA_HOME", ".local/share"),
                       ("XDG_STATE_HOME", ".local/state"), ("XDG_CACHE_HOME", ".cache"), ("COPILOT_HOME", ".copilot")):
         monkeypatch.setenv(name, str(home / rel))
     for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL",
                  "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "OPENAI_API_KEY", "CODEX_API_KEY",
-                 "OPENAI_BASE_URL", "OPENAI_ORG_ID", "CLAUDE_CODE_USE_FOUNDRY", "ZERODB_HOME", "ZERODB_TOKEN",
+                 "OPENAI_BASE_URL", "OPENAI_ORG_ID", "CLAUDE_CODE_USE_FOUNDRY", "ATTICDB_HOME", "ATTICDB_TOKEN", "ZERODB_HOME", "ZERODB_TOKEN",
                  "CLAUDE_CONFIG_DIR", "CODEX_HOME", "STUB_REPLAY",
                  "STUB_SLEEP", "STUB_LOGGED_OUT", "STUB_EXIT", "STUB_STDERR", "STUB_EXIT_AFTER"):
         monkeypatch.delenv(name, raising=False)
     for name in [k for k in os.environ if k.startswith("ANTHROPIC_FOUNDRY_")]:
         monkeypatch.delenv(name)
-    claude_dir = home / ".cache" / "zerodb-setup-eval" / "claude"
-    codex_dir = home / ".cache" / "zerodb-setup-eval" / "codex"
+    claude_dir = home / ".cache" / "atticdb-setup-eval" / "claude"
+    codex_dir = home / ".cache" / "atticdb-setup-eval" / "codex"
     if make_eval_dirs:
         claude_dir.mkdir(parents=True)
         codex_dir.mkdir(parents=True)

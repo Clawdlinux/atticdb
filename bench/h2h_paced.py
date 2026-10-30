@@ -1,10 +1,10 @@
 """Durable appends, 1 in flight per writer. With think, each writer first sleeps a uniform 0 to 2x.
 
 1 process per writer, 1 raw socket each, the same client for every system.
-Speaks RESP (RPUSH) to Redis-family servers and HTTP (POST /v1/append) to zerodb.
-Usage: h2h_paced.py resp|zerodb <unix socket> <writers> <requests per writer> <bytes> <think ms>
+Speaks RESP (RPUSH) to Redis-family servers and HTTP (POST /v1/append) to atticdb.
+Usage: h2h_paced.py resp|atticdb <unix socket> <writers> <requests per writer> <bytes> <think ms>
 Think 0 is a closed loop.
-zerodb reads its token from ZERODB_TOKEN.
+atticdb reads its token from ATTICDB_TOKEN.
 """
 
 import json
@@ -23,12 +23,12 @@ def resp_request(writer, i, body):
     return b"*3\r\n" + b"".join(b"$%d\r\n%s\r\n" % (len(p), p) for p in parts)
 
 
-def zerodb_request(writer, i, body):
+def atticdb_request(writer, i, body):
     turn = {"role": "user", "content": body.decode()}
     run = os.environ["H2H_RUN"]
     payload = json.dumps({"agent": "paced", "session": f"s{writer}",
                           "idem_key": f"{run}-{writer}-{i}", "turns": [turn]}).encode()
-    head = (f"POST /v1/append HTTP/1.1\r\nAuthorization: Bearer {os.environ['ZERODB_TOKEN']}\r\n"
+    head = (f"POST /v1/append HTTP/1.1\r\nAuthorization: Bearer {os.environ['ATTICDB_TOKEN']}\r\n"
             f"Content-Length: {len(payload)}\r\n\r\n")
     return head.encode() + payload
 
@@ -62,7 +62,7 @@ def read_http(conn, buf):
 
 
 def writer(proto, path, index, requests, size, think):
-    request, read = (resp_request, read_resp) if proto == "resp" else (zerodb_request, read_http)
+    request, read = (resp_request, read_resp) if proto == "resp" else (atticdb_request, read_http)
     conn = socket.socket(socket.AF_UNIX)
     conn.connect(path)
     body, buf, samples = b"x" * size, b"", []

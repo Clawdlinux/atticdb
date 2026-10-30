@@ -51,7 +51,7 @@ cargo --version
 ## Method
 
 ```sh
-cargo bench -p zerodb-tape --bench append -- --noplot
+cargo bench -p atticdb-tape --bench append -- --noplot
 ```
 
 The recorded run had no concurrent test workload.
@@ -108,10 +108,10 @@ The following review validation completed on 2026-10-18.
 | `cargo check --lib --no-default-features` | Passed. Production builds without simulation access. |
 | `cargo test --workspace` | Passed. 500 seeds. Stress ignored in debug. |
 | `cargo test --workspace --release` | Passed. 500 seeds and 20,000 appends across 16 threads. |
-| `ZERODB_SIM_SEEDS=10000 cargo test -p zerodb-tape --release --features sim --test sim -- --nocapture` | Passed. Seeds 0 through 9,999. |
+| `ATTICDB_SIM_SEEDS=10000 cargo test -p atticdb-tape --release --features sim --test sim -- --nocapture` | Passed. Seeds 0 through 9,999. |
 | `cargo test --doc` | Passed. Private implementation import paths fail to compile as expected. |
 | `cargo bench --bench append --no-run` | Passed. Benchmark compiles against the narrowed API. |
-| `cargo bench -p zerodb-tape --bench append -- --noplot` | Passed before review at `822cf91`. All 6 cases recorded above. |
+| `cargo bench -p atticdb-tape --bench append -- --noplot` | Passed before review at `822cf91`. All 6 cases recorded above. |
 
 The final validation chain exited with status 0.
 The required commands were rerun after the short-session fix at `c9d1909`.
@@ -129,8 +129,8 @@ These tests reject partial uncertain transactions and changed uncertain content.
 Replay commands:
 
 ```sh
-ZERODB_SIM_SEED=42 cargo test -p zerodb-tape --release --features sim --test sim
-ZERODB_SIM_SEEDS=10000 cargo test -p zerodb-tape --release --features sim --test sim
+ATTICDB_SIM_SEED=42 cargo test -p atticdb-tape --release --features sim --test sim
+ATTICDB_SIM_SEEDS=10000 cargo test -p atticdb-tape --release --features sim --test sim
 cargo test --release --test stress
 ```
 
@@ -153,11 +153,11 @@ That includes 536 simulation-only helper lines and 191 embedded unit-test lines.
 Production remains below the M1 budget of 3,000.
 
 ```sh
-wc -l crates/zerodb-tape/src/*.rs
+wc -l crates/atticdb-tape/src/*.rs
 python3 - <<'PY'
 from pathlib import Path
 total = 0
-for path in Path("crates/zerodb-tape/src").glob("*.rs"):
+for path in Path("crates/atticdb-tape/src").glob("*.rs"):
     if path.name != "sim.rs":
         total += len(path.read_text().split("#[cfg(test)]")[0].splitlines())
 print(total)
@@ -364,8 +364,8 @@ Prepare stages sequence metadata. Sync and publication precede releasing that op
 Checkpoint retry entries persist it, while full replay reconstructs it from committed turns.
 Older derived checkpoint records without receipts fall back to replay. The tape format is unchanged.
 
-C5's regression previously observed `zerodb-writer` writing periodic superblocks.
-It now requires `zerodb-superblock`.
+C5's regression previously observed `atticdb-writer` writing periodic superblocks.
+It now requires `atticdb-superblock`.
 The helper samples only the published durable boundary.
 Open still installs synchronously. Shutdown joins the helper before its final synchronous install.
 Metadata failures poison later requests, without invalidating earlier durable acknowledgements.
@@ -556,12 +556,12 @@ CI now runs the default 500 engine seeds in release mode on Linux and macOS.
 | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | Passed |
 | `cargo test --workspace` | Passed. Default 500 M1 seeds. Release-only stress ignored. |
 | `cargo test --workspace --release` | Passed. Default 500 M1 seeds and release stress. |
-| `ZERODB_SIM_SEEDS=2000 cargo test -p zerodb-tape --release --features sim --test sim` | Passed. Seeds 0 through 1,999. |
-| `ZERODB_SIM_SEEDS=2000 cargo test -p zerodb-core --release --features sim --test engine_sim` | Passed. Seeds 0 through 1,999. All 4 tests passed. |
-| `cargo check -p zerodb-core --lib --no-default-features` | Passed. Exposed a deterministic-only method warning, fixed in `a139813`. |
-| `cargo clippy -p zerodb-core --lib --no-default-features -- -D warnings` | Passed after that feature-gating fix. |
-| `cargo bench -p zerodb-core --bench g1 --no-run --quiet` | Passed |
-| `cargo bench -p zerodb-tape --bench append --no-run --quiet` | Passed |
+| `ATTICDB_SIM_SEEDS=2000 cargo test -p atticdb-tape --release --features sim --test sim` | Passed. Seeds 0 through 1,999. |
+| `ATTICDB_SIM_SEEDS=2000 cargo test -p atticdb-core --release --features sim --test engine_sim` | Passed. Seeds 0 through 1,999. All 4 tests passed. |
+| `cargo check -p atticdb-core --lib --no-default-features` | Passed. Exposed a deterministic-only method warning, fixed in `a139813`. |
+| `cargo clippy -p atticdb-core --lib --no-default-features -- -D warnings` | Passed after that feature-gating fix. |
+| `cargo bench -p atticdb-core --bench g1 --no-run --quiet` | Passed |
+| `cargo bench -p atticdb-tape --bench append --no-run --quiet` | Passed |
 | `G1_TURNS=192000 G1_REPS=3 G1_HISTORY=0 ./bench/g1.sh` | Passed after each ordered stage, including the entropy follow-up. |
 | `G1_TURNS=1000000 G1_REPS=3 G1_HISTORY=1 ./bench/g1.sh` | Passed. All 9 timed phases, reopen checks, and history checks completed. Local performance verdict: FAIL. |
 
@@ -640,7 +640,7 @@ Seeded workloads exercise both directions: checkpoint inside writer step, and wr
 Mutation command, with the revision guard temporarily removed:
 
 ```sh
-ZERODB_SIM_SEEDS=300 cargo test -p zerodb-core --release --features sim --test engine_sim
+ATTICDB_SIM_SEEDS=300 cargo test -p atticdb-core --release --features sim --test engine_sim
 ```
 
 The dedicated regression failed, returning sequences `[1, 2]` instead of `[1, 2, 3]`.
@@ -844,9 +844,9 @@ The restored revision guard is present. No mutation is included in the commits.
 | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | Passed |
 | `cargo test --workspace` | Passed. 500 default M1 seeds; release-only stress ignored. |
 | `cargo test --workspace --release` | Passed. 500 default M1 seeds and release stress. |
-| `ZERODB_SIM_SEEDS=2000 cargo test -p zerodb-tape --release --features sim --test sim` | Passed |
-| `ZERODB_SIM_SEEDS=2000 cargo test -p zerodb-core --release --features sim --test engine_sim` | Passed. All 7 tests. |
-| `cargo clippy -p zerodb-core --lib --no-default-features -- -D warnings` | Passed |
+| `ATTICDB_SIM_SEEDS=2000 cargo test -p atticdb-tape --release --features sim --test sim` | Passed |
+| `ATTICDB_SIM_SEEDS=2000 cargo test -p atticdb-core --release --features sim --test engine_sim` | Passed. All 7 tests. |
+| `cargo clippy -p atticdb-core --lib --no-default-features -- -D warnings` | Passed |
 
 # S1 frame v2 (macOS)
 
@@ -927,10 +927,10 @@ The 10,000-seed runs cover seeds 0 through 9,999. CI now sets 2,000 seeds explic
 | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | Passed |
 | `cargo test --workspace` | Passed |
 | `cargo test --workspace --release` | Passed |
-| `ZERODB_SIM_SEEDS=2000 cargo test -p zerodb-tape --release --features sim --test sim` | Passed. 2,000 seeds. |
-| `ZERODB_SIM_SEEDS=2000 cargo test -p zerodb-core --release --features sim --test engine_sim` | Passed. 2,000 seeds. All 7 tests passed. |
-| `ZERODB_SIM_SEEDS=10000 cargo test -p zerodb-tape --release --features sim --test sim` | Passed. 10,000 seeds. 105.41 seconds. |
-| `ZERODB_SIM_SEEDS=10000 cargo test -p zerodb-core --release --features sim --test engine_sim` | Passed. 10,000 seeds. All 7 tests passed. 877.31 seconds. |
+| `ATTICDB_SIM_SEEDS=2000 cargo test -p atticdb-tape --release --features sim --test sim` | Passed. 2,000 seeds. |
+| `ATTICDB_SIM_SEEDS=2000 cargo test -p atticdb-core --release --features sim --test engine_sim` | Passed. 2,000 seeds. All 7 tests passed. |
+| `ATTICDB_SIM_SEEDS=10000 cargo test -p atticdb-tape --release --features sim --test sim` | Passed. 10,000 seeds. 105.41 seconds. |
+| `ATTICDB_SIM_SEEDS=10000 cargo test -p atticdb-core --release --features sim --test engine_sim` | Passed. 10,000 seeds. All 7 tests passed. 877.31 seconds. |
 
 Tape seeds exercise stale footers, corrupt lengths and corruption proofs within and across segments.
 They also cover damaged footer kinds, zeroed footers, reply-only sync steps and reordered same-group tails.
@@ -1069,12 +1069,12 @@ The release workspace run includes the real-filesystem stress test skipped by th
 | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | Passed |
 | `cargo test --workspace` | Passed |
 | `cargo test --workspace --release` | Passed |
-| `ZERODB_SIM_SEEDS=2000 cargo test -p zerodb-tape --release --features sim --test sim` | Passed. 2,000 seeds. |
-| `ZERODB_SIM_SEEDS=2000 cargo test -p zerodb-core --release --features sim --test engine_sim` | Passed. 2,000 seeds. All 7 tests passed. |
+| `ATTICDB_SIM_SEEDS=2000 cargo test -p atticdb-tape --release --features sim --test sim` | Passed. 2,000 seeds. |
+| `ATTICDB_SIM_SEEDS=2000 cargo test -p atticdb-core --release --features sim --test engine_sim` | Passed. 2,000 seeds. All 7 tests passed. |
 
 The prior S1 10,000-seed measurements remain historical. This review pass required 2,000 seeds per sim.
 Linux NVMe, nightly LazyFS and later fact/forget workloads remain unmeasured here.
-| `cargo bench -p zerodb-core --bench g1 --no-run --quiet` | Passed |
+| `cargo bench -p atticdb-core --bench g1 --no-run --quiet` | Passed |
 | `G1_TURNS=208000 G1_REPS=3 G1_REPLAY_PROBE=1 ./bench/g1.sh` | Passed. Three alternating probes per checkpoint setting. |
 | `G1_TURNS=1000000 G1_REPS=3 G1_HISTORY=1 G1_REPLAY_PROBE=0 G1_CHECKPOINT_MIB=64 ./bench/g1.sh` | Passed. All 9 timed phases, reopen checks, and history checks. Median target PASS. |
 
@@ -1133,9 +1133,9 @@ Validation completed before committing the fix:
 | `cargo fmt --all --check` | Passed |
 | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | Passed |
 | `cargo test --workspace --release` | Passed |
-| `ZERODB_SIM_SEEDS=2000 cargo test -p zerodb-tape --release --features sim --test sim` | Passed. 18.37 seconds. |
-| `ZERODB_SIM_SEEDS=2000 cargo test -p zerodb-core --release --features sim --test engine_sim` | Passed. All 7 tests, 122.45 seconds. |
-| `cargo clippy -p zerodb-core --lib --no-default-features -- -D warnings` | Passed |
+| `ATTICDB_SIM_SEEDS=2000 cargo test -p atticdb-tape --release --features sim --test sim` | Passed. 18.37 seconds. |
+| `ATTICDB_SIM_SEEDS=2000 cargo test -p atticdb-core --release --features sim --test engine_sim` | Passed. All 7 tests, 122.45 seconds. |
+| `cargo clippy -p atticdb-core --lib --no-default-features -- -D warnings` | Passed |
 
 ## S1 index eviction A/B (macOS)
 
@@ -1423,7 +1423,7 @@ Hashing once gives the most: 6.5% to 8% on NVMe, with p99 27% to 29% lower at 64
 Reply wakeups cut writer futex calls 9x and writer CPU per append about 27%. NVMe throughput gains only 1% to 3%: groups get smaller, so `fdatasync` calls rise, and the load client shares the 8 vCPUs. On Premium SSD v2 they add 7% at 16 writers.
 `pwrite` halves write syscalls for 1% to 2%. So syscalls are not the bottleneck, and coalescing a group into 1 write is deferred.
 No change regresses p99 on Premium SSD v2. Its 64-writer runs were noisy for every system.
-Redis is still 10% to 21% ahead on NVMe at 64 and 128 writers. On Premium SSD v2 zerodb leads, because each Redis ack pays 2 device round trips.
+Redis is still 10% to 21% ahead on NVMe at 64 and 128 writers. On Premium SSD v2 AtticDB leads, because each Redis ack pays 2 device round trips.
 VM time was about 20 minutes for the first NVMe session and about 18 for the second plus Premium SSD v2, roughly $0.55 in all.
 
 ## Client on its own vCPUs (2026-10-24)
@@ -1431,7 +1431,7 @@ VM time was about 20 minutes for the first NVMe session and about 18 for the sec
 Azure Standard_L16s_v3, centralindia zone 3, local NVMe, ext4. `bench/h2h.sh` at `daa2f25` on `main`'s server code, 256-byte durable appends, no think, 5 reps.
 The server always ran on vCPUs 0-7. The client ran on 0-7 (shared) or 8-15 (split). The 2 configs alternated in random order each rep.
 
-| Writers | Client vCPUs | zerodb turns/s | Redis turns/s | zerodb p99.9 µs | Redis p99.9 µs | zerodb / Redis, per rep |
+| Writers | Client vCPUs | AtticDB turns/s | Redis turns/s | AtticDB p99.9 µs | Redis p99.9 µs | AtticDB / Redis, per rep |
 |---|---|---|---|---|---|---|
 | 16 | shared | 39,740 | 27,779 | 1,071 | 1,711 | 1.43 (1.05-1.45) |
 | 16 | split | 43,731 | 27,930 | 1,015 | 1,636 | 1.54 (1.19-1.65) |
@@ -1440,8 +1440,8 @@ The server always ran on vCPUs 0-7. The client ran on 0-7 (shared) or 8-15 (spli
 | 128 | shared | 65,608 | 74,435 | 10,096 | 3,553 | 0.88 (0.80-0.90) |
 | 128 | split | 82,395 | 93,000 | 9,844 | 3,306 | 0.88 (0.83-0.91) |
 
-Split over shared, median of per-rep ratios: zerodb 1.11, 1.19 and 1.28 at 16, 64 and 128 writers. Redis 1.03, 1.24 and 1.27.
-A shared client costs both servers about a fifth of their throughput at 64 and 128 writers. It does not explain zerodb's gap to Redis, which holds at 0.88 at 128 writers.
+Split over shared, median of per-rep ratios: AtticDB 1.11, 1.19 and 1.28 at 16, 64 and 128 writers. Redis 1.03, 1.24 and 1.27.
+A shared client costs both servers about a fifth of their throughput at 64 and 128 writers. It does not explain AtticDB's gap to Redis, which holds at 0.88 at 128 writers.
 The p99.9 gap at 128 writers, about 10 ms against 3.5 ms, is also server-side.
 Absolute numbers moved 25% while the per-rep ratio held, which is why `h2h.sh` now reports it.
 Redis at 16 writers is lower here than on the L8s_v3 runs, 28k against 43k. We haven't looked into why. These rows are not comparable with the L8s_v3 tables above.
@@ -1487,7 +1487,7 @@ The longest-group gauges found the p99.9 stall at 128 writers: the checkpoint sn
 | 128 | 20.5 → 5.2 ms | 22.2 → 5.7 ms | 9,953 → 6,995 | 24,678 → 13,234 | 1.007 (0.995-1.008) |
 
 At 128 writers p99.9 fell 30% and max 46%. At 64 writers p99.9 is noise. Per-rep ranges overlap: 2,663 to 4,481 µs before and 2,297 to 4,939 after. The worst 64-writer max came in a rep whose longest write stage was 5.5 ms, so that stall wasn't in the write stage. An earlier run recorded a 26 ms `fdatasync`.
-In this session zerodb's throughput ratio to Redis was 1.12 at 64 writers and 1.00 at 128. Redis varied from 58K to 72K turns/s at 64 writers across reps.
+In this session AtticDB's throughput ratio to Redis was 1.12 at 64 writers and 1.00 at 128. Redis varied from 58K to 72K turns/s at 64 writers across reps.
 VM time across these sessions was about 26 minutes, roughly $0.35. 10 of those minutes were a VM waiting for SSH after the allowed source IP changed. The run script now updates the rule before it starts the VM.
 
 ## Checkpoint writeback bursts (2026-10-25)
@@ -1519,7 +1519,7 @@ Per 4 MiB swapped 1 long stall for several shorter ones, and at 64 writers that 
 | 64 | 3,453 → 1,791 | 1,306 → 1,310 | 5.0 → 0.8 ms | 0.999 (0.997-1.006) | 2,284 |
 | 128 | 7,020 → 3,382 | 2,463 → 2,419 | 5.8 → 1.2 ms | 0.998 (0.993-1.013) | 3,888 |
 
-zerodb's p99.9 and p99 are now below Redis's at 64 and 128 writers in this session. Max latency did not improve: 9.9 to 12.3 ms for zerodb, 11.0 to 15.2 ms for Redis. A few tape syncs of 10 ms or more fell outside both windows. Their source is not known.
+AtticDB's p99.9 and p99 are now below Redis's at 64 and 128 writers in this session. Max latency did not improve: 9.9 to 12.3 ms for AtticDB, 11.0 to 15.2 ms for Redis. A few tape syncs of 10 ms or more fell outside both windows. Their source is not known.
 VM time across these 5 sessions was about 24 minutes, roughly $0.32.
 
 ## Where the remaining max latency comes from (2026-10-25)
@@ -1547,8 +1547,8 @@ The runs had about 3 and 6 checkpoints, at about 160K appends each. 192 is 3 × 
 - #66 adds syncs only inside `save`, after the snapshot's lock is released, on a file only that save writes. Page locations in it are published after the file and manifest are synced. A failed sync takes the same cleanup path a failed write always took.
 - #63's range relies on the only production insert keying entries by `entry.age()` (`dedup.rs`). A mutant that skips one entry past the watermark fails 2 integration tests and the engine sim.
 - On Linux, with `557bb89`:
-  - `zerodb-core` integration tests: 12 of 12 runs passed.
-  - `zerodb-tape` integration tests: 5 of 5 runs passed.
+  - `atticdb-core` integration tests: 12 of 12 runs passed.
+  - `atticdb-tape` integration tests: 5 of 5 runs passed.
   - `engine_sim` and the tape sim on 3,000 fresh seeds, from 896,821,577,000: both passed.
   - The nightly deep run on `f1338da` passed: 3 power-loss runs and 20,000 sim seeds per sim.
 

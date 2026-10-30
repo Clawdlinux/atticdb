@@ -26,7 +26,7 @@ Each row is the data path for 1 read of stored context. "Hop" means a process, p
 | llama.cpp server ([README](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md)) | 1 slot's KV as a file | `POST /slots/{id}?action=restore` ← file in `--slot-save-path` ← local fs | A plain file | Shipped |
 | LMCache local disk or remote connector ([`RemoteConnector`](https://github.com/LMCache/LMCache/blob/dev/lmcache/v1/storage_backend/connector/base_connector.py)) | KV chunks | GPU ← host RAM ← backend (`exists`, `get`, `put`, `list`, batched variants) | Backend decides | Shipped. Backends include Redis, Mooncake, 3FS, S3, Azure and local fs |
 | Postgres + Git + SQLite (Yash Agarwal's team, field input below) | Global memory in Postgres. Per-project memory as Markdown in the repo | Agent tool → Postgres. Files → Git → indexer → SQLite | Yes | In production for 1 team |
-| zerodb today | Turns, facts, retry keys | Agent → MCP or HTTP on a local socket → connection thread → engine index → `Tape::read` → page cache or NVMe. Reads skip the writer | Yes. Writes sync before ack | Shipped |
+| AtticDB today | Turns, facts, retry keys | Agent → MCP or HTTP on a local socket → connection thread → engine index → `Tape::read` → page cache or NVMe. Reads skip the writer | Yes. Writes sync before ack | Shipped |
 
 What the prior art says:
 - **Every KV system treats KV as a cache.** It's evictable and recomputable, and losing it costs a recompute, not data. Some backends are durable anyway, like Ceph objects. Durability there is the backend's property, not something the engine relies on.
@@ -104,7 +104,7 @@ Smallest first.
 | NIXL backend plugin | A C++ plugin, as nixl#1753 does for `rados-nkv` | GPU-direct reads | Yes |
 | vLLM KV connector directly | Tied to vLLM internals | vLLM only | Yes |
 
-LMCache already ships a local-disk backend. On 1 machine, zerodb's connector adds only tenancy, forget and quotas. That's real for a shared box, but thin for 1 user. It's another reason to wait for a user.
+LMCache already ships a local-disk backend. On 1 machine, AtticDB's connector adds only tenancy, forget and quotas. That's real for a shared box, but thin for 1 user. It's another reason to wait for a user.
 
 ## Compression per class
 
@@ -116,19 +116,19 @@ LMCache already ships a local-disk backend. On 1 machine, zerodb's connector add
 
 ## Branch-aware memory
 
-Field input, from a call with Yash Agarwal (2026-10-26). His team keeps global memory in Postgres. Per-project memory lives as Markdown in the repo, versioned by Git. A deterministic indexer loads it into SQLite for SQL queries. His concern: zerodb has 1 linear log per tenant. It has no branches, no merge and no diff, so agents on several branches step on each other.
+Field input, from a call with Yash Agarwal (2026-10-26). His team keeps global memory in Postgres. Per-project memory lives as Markdown in the repo, versioned by Git. A deterministic indexer loads it into SQLite for SQL queries. His concern: AtticDB has 1 linear log per tenant. It has no branches, no merge and no diff, so agents on several branches step on each other.
 
 | Option | Review flow | Merge conflicts | Query after compaction | Forget (I10) | Cost |
 |---|---|---|---|---|---|
-| 1. zerodb branches: a branch is a named pointer to a manifest, merges are 3-way | New. We'd rebuild PR review | We define merge for facts and turns. Hard | Yes | Covered | Large. It rebuilds Git |
-| 2. zerodb indexes repo memory files per branch. Git stays the source of truth | Git's, unchanged | Git's, unchanged | Yes, via zerodb queries | Hides index entries. Git history still holds the bytes. That's the user's repo, so it's out of scope | Small. An indexer keyed by repo, branch, path and blob sha |
+| 1. AtticDB branches: a branch is a named pointer to a manifest, merges are 3-way | New. We'd rebuild PR review | We define merge for facts and turns. Hard | Yes | Covered | Large. It rebuilds Git |
+| 2. AtticDB indexes repo memory files per branch. Git stays the source of truth | Git's, unchanged | Git's, unchanged | Yes, via AtticDB queries | Hides index entries. Git history still holds the bytes. That's the user's repo, so it's out of scope | Small. An indexer keyed by repo, branch, path and blob sha |
 | 3. Sessions and facts tagged by branch, no merge | None | None. But memory doesn't follow a merged branch | Yes, per branch | Covered | Tiny |
 
 Recommendation: option 2, with option 3's tag as a free first step. Capture hooks (#72) already know the working directory, so they can record the branch on each session. The indexer comes after. It matches how teams already work, and it doesn't compete with Git.
 
 ## Verdict
 
-| Context type | Feasible in zerodb? | Path | Gate |
+| Context type | Feasible in AtticDB? | Path | Gate |
 |---|---|---|---|
 | Turns, facts | Yes | Shipped | None |
 | Links | Yes | #73, C-links | None |

@@ -1,6 +1,6 @@
 # Agents in sandboxes and microVMs
 
-Run `zerodb serve` on the host or in a sidecar. Never run it inside a disposable sandbox.
+Run `atticdb serve` on the host or in a sidecar. Never run it inside a disposable sandbox.
 By default the harness outside the sandbox holds memory, and sandboxed code gets no access (D79).
 This guide is for agents inside sandboxes that reach it through its Unix socket.
 A token grants its whole tenant. Use these recipes only for code you trust with that tenant, or give each sandbox a tenant of its own.
@@ -8,15 +8,15 @@ There is no container image yet.
 
 ## Give the socket its own directory
 
-The default socket is `<data_dir>/zerodb.sock`.
+The default socket is `<data_dir>/atticdb.sock`.
 Do not mount the data directory into a sandbox. It holds the tape, indexes, `LOCK` and `serve.log`.
 Anyone who can read those files skips token auth.
 Put the socket in a directory of its own and share only that directory:
 
 ```sh
-install -d -o zerodb -g agents -m 0750 /run/zerodb
-zerodb serve --config /etc/zerodb/zerodb.json --data-dir /var/lib/zerodb \
-  --listen none --unix-socket /run/zerodb/zerodb.sock --unix-socket-group agents
+install -d -o atticdb -g agents -m 0750 /run/atticdb
+atticdb serve --config /etc/atticdb/atticdb.json --data-dir /var/lib/atticdb \
+  --listen none --unix-socket /run/atticdb/atticdb.sock --unix-socket-group agents
 ```
 
 The socket's directory must be owned by the server's user and not writable by group or others.
@@ -46,7 +46,7 @@ Source: [vsock.md](https://github.com/firecracker-microvm/firecracker/blob/main/
 If the VM's `uds_path` is `/srv/vm1/v.sock`:
 
 ```sh
-ln -s /run/zerodb/zerodb.sock /srv/vm1/v.sock_5252
+ln -s /run/atticdb/atticdb.sock /srv/vm1/v.sock_5252
 ```
 
 One server serves every VM that has such a symlink.
@@ -64,10 +64,10 @@ Per VM, before you start its jailer:
 
 ```sh
 root=/srv/jailer/firecracker/vm1/root
-mkdir -p "$root/zerodb"
-mount --bind /run/zerodb "$root/zerodb"
-mount -o remount,bind,ro "$root/zerodb"
-ln -s /zerodb/zerodb.sock "$root/v.sock_5252"   # the VM's uds_path is /v.sock
+mkdir -p "$root/atticdb"
+mount --bind /run/atticdb "$root/atticdb"
+mount -o remount,bind,ro "$root/atticdb"
+ln -s /atticdb/atticdb.sock "$root/v.sock_5252"   # the VM's uds_path is /v.sock
 ```
 
 - Start the server with `--unix-socket-group <gid>`.
@@ -79,14 +79,14 @@ ln -s /zerodb/zerodb.sock "$root/v.sock_5252"   # the VM's uds_path is /v.sock
 
 The Python client speaks vsock directly: `Client("vsock://2:5252", token)`.
 
-`zerodb mcp` has no vsock support, because std Rust has no `AF_VSOCK`. Bridge it with `socat` 1.7.4 or later:
+`atticdb mcp` has no vsock support, because std Rust has no `AF_VSOCK`. Bridge it with `socat` 1.7.4 or later:
 
 ```sh
-socat UNIX-LISTEN:/run/zerodb.sock,fork VSOCK-CONNECT:2:5252 &
-ZERODB_TOKEN=... zerodb mcp --url unix:///run/zerodb.sock
+socat UNIX-LISTEN:/run/atticdb.sock,fork VSOCK-CONNECT:2:5252 &
+ATTICDB_TOKEN=... atticdb mcp --url unix:///run/atticdb.sock
 ```
 
-With `--url`, `zerodb mcp` never starts a server and skips the `LOCK` instance check.
+With `--url`, `atticdb mcp` never starts a server and skips the `LOCK` instance check.
 `--token-file <path>` also works. The file must be 0600 and owned by the user.
 
 ## Containers (runc)
@@ -94,8 +94,8 @@ With `--url`, `zerodb mcp` never starts a server and skips the `LOCK` instance c
 A container shares the host kernel. Mount the socket directory read-only and use `unix://`:
 
 ```sh
-docker run -v /run/zerodb:/run/zerodb:ro --user <agent uid> --group-add <agents gid> <your agent image>
-# inside: zerodb mcp --url unix:///run/zerodb/zerodb.sock
+docker run -v /run/atticdb:/run/atticdb:ro --user <agent uid> --group-add <agents gid> <your agent image>
+# inside: atticdb mcp --url unix:///run/atticdb/atticdb.sock
 ```
 
 Run the process with its own uid and the socket group.
@@ -115,10 +115,10 @@ We have not tested a working path for Kata yet.
 
 ## Durability
 
-zerodb is only as durable as the storage under it. That is why it runs outside the sandbox.
+AtticDB is only as durable as the storage under it. That is why it runs outside the sandbox.
 
 - Firecracker's block `cache_type` defaults to `Unsafe`. It does not advertise flush to the guest.
-  A host power loss can drop writes zerodb inside the guest already acknowledged.
+  A host power loss can drop writes AtticDB inside the guest already acknowledged.
   If it must run inside, use `Writeback`, which `fsync`s the backing file on flush.
   Source: [block-caching.md](https://github.com/firecracker-microvm/firecracker/blob/main/docs/api_requests/block-caching.md).
 - gVisor's default is `--overlay2=root:self`. Root filesystem writes go to a tmpfs overlay, not to the host files.

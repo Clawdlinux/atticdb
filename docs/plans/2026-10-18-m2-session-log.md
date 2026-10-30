@@ -1,4 +1,4 @@
-# zerodb M2: session log. Implementation plan
+# AtticDB M2: session log. Implementation plan
 
 > For agents: subagent-driven development. One implementer per group, then spec review, then quality review. TDD for every task.
 
@@ -6,7 +6,7 @@
 
 **Design refs:** `docs/design/0001-architecture.md` sections Data model, Operations, Writer thread (publish step, N5), Session index, Visibility, Memory bounds. Decisions D2, D16, D19, D20, D28, D29, D38, D44, D49, D51.
 
-**Crates:** M1's `zerodb-tape` gains two small hooks. New crate `crates/zerodb-core` holds the engine. No new third-party deps.
+**Crates:** M1's `atticdb-tape` gains two small hooks. New crate `crates/atticdb-core` holds the engine. No new third-party deps.
 
 **Budget:** about 2K production lines for M2.
 
@@ -49,7 +49,7 @@ pub enum Prepare { Write, Reject(WriteError), Reply(Committed) }
 
 ### E1. Turn payload codec
 
-- `crates/zerodb-core/src/turn.rs`. Versioned binary layout, little-endian: `u8 version | agent_id(len-prefixed utf8, max 255) | session_id(len-prefixed, max 255) | u64 seq | u8 role | meta(len-prefixed, max 64 KiB) | content(len-prefixed, max 4 MiB) | u8 trust | idem_key?(len-prefixed, max 128)`.
+- `crates/atticdb-core/src/turn.rs`. Versioned binary layout, little-endian: `u8 version | agent_id(len-prefixed utf8, max 255) | session_id(len-prefixed, max 255) | u64 seq | u8 role | meta(len-prefixed, max 64 KiB) | content(len-prefixed, max 4 MiB) | u8 trust | idem_key?(len-prefixed, max 128)`.
 - `role`: system, user, assistant, tool. `trust`: trusted, untrusted.
 - Seq is written as 0 by the caller and set by `prepare`.
 - Tests: round trip (proptest), every length limit rejected, garbage never panics.
@@ -62,7 +62,7 @@ pub enum Prepare { Write, Reject(WriteError), Reply(Committed) }
 
 ### E3. Session index
 
-- `crates/zerodb-core/src/session.rs`. Session key `(tenant_id, agent, session)` maps to `SessionEntry { next_seq, pages }`.
+- `crates/atticdb-core/src/session.rs`. Session key `(tenant_id, agent, session)` maps to `SessionEntry { next_seq, pages }`.
 - Pages hold `u64 lsn` slots, geometric sizes 16, 64, 256, 1024, 4096. Seq to slot by arithmetic. Locations resolve through LSN (D16), using the tape's existing LSN map.
 - `window(last = N)` and `window(since = seq, limit)` read slots then `Tape::read(lsn)`. Cost O(returned).
 - Global hot-page budget (default 256 MiB). Over budget, least recently used session pages are dropped from RAM and reloaded from the checkpoint plus replay. M2 may implement reload as "rebuild that session's pages by scanning its checkpointed page file", see E5.
@@ -110,7 +110,7 @@ impl Engine {
 
 ### F2. G1 harness
 
-- `crates/zerodb-core/benches/g1.rs` plus `bench/g1.sh`: 1M turns, mixed sizes, 16 writers, concurrent `window` readers. Compare durable-ack p99 against the M1 bare baseline with the same record sizes and batching.
+- `crates/atticdb-core/benches/g1.rs` plus `bench/g1.sh`: 1M turns, mixed sizes, 16 writers, concurrent `window` readers. Compare durable-ack p99 against the M1 bare baseline with the same record sizes and batching.
 - Run on macOS now and record. The real G1 verdict needs Linux with NVMe; RESULTS.md says so plainly.
 
 ---

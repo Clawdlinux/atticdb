@@ -3,11 +3,11 @@
 Installed under both names. It appends each call's argv to $STUB_LOG, then:
 
 - `claude auth status`, `codex login status`: exit 0, or 1 with STUB_LOGGED_OUT=1.
-- `claude mcp add|remove -s user zerodb ...`: edits `$CLAUDE_CONFIG_DIR/.claude.json`.
-- `codex mcp get zerodb --json`: prints the `mcp_servers.zerodb` table of `$CODEX_HOME/config.toml`.
+- `claude mcp add|remove -s user atticdb ...`: edits `$CLAUDE_CONFIG_DIR/.claude.json`.
+- `codex mcp get atticdb --json`: prints the `mcp_servers.atticdb` table of `$CODEX_HOME/config.toml`.
 - `claude -p <prompt> ...`, `codex exec ... <prompt>`: an agent. With STUB_REPLAY=<file> it
-  prints the file. Otherwise it acts on the prompt for real through the zerodb that setup
-  wired in: it runs the SessionStart hook from the config, calls the zerodb CLI as the MCP
+  prints the file. Otherwise it acts on the prompt for real through the atticdb that setup
+  wired in: it runs the SessionStart hook from the config, calls the atticdb CLI as the MCP
   entry would, edits calc.py, and prints a stream in the agent's own JSONL shape.
 """
 
@@ -30,7 +30,7 @@ def log():
     if path:
         with open(path, "a") as f:
             f.write(json.dumps({"prog": PROG, "argv": ARGS, "cwd": os.getcwd(),
-                                "zerodb_home": bool(os.environ.get("ZERODB_HOME")),
+                                "atticdb_home": bool(os.environ.get("ATTICDB_HOME")),
                                 "api_keys": sorted(k for k in os.environ
                                                    if k in ACCOUNT_ENV or k.startswith("ANTHROPIC_FOUNDRY_")),
                                 "git_env": sorted(k for k in os.environ if k.startswith("GIT_")),
@@ -60,7 +60,7 @@ def claude_state():
 
 def claude_mcp():
     state = read_json(claude_state(), {})
-    if ARGS[:5] == ["mcp", "add", "-s", "user", "zerodb"]:
+    if ARGS[:5] == ["mcp", "add", "-s", "user", "atticdb"]:
         rest, env = ARGS[5:], {}
         while rest and rest[0] == "-e":
             key, _, value = rest[1].partition("=")
@@ -68,9 +68,9 @@ def claude_mcp():
             rest = rest[2:]
         assert rest[0] == "--", rest
         entry = {"type": "stdio", "command": rest[1], "args": rest[2:], "env": env}
-        state.setdefault("mcpServers", {})["zerodb"] = entry
-    elif ARGS[:5] == ["mcp", "remove", "-s", "user", "zerodb"]:
-        state.get("mcpServers", {}).pop("zerodb", None)
+        state.setdefault("mcpServers", {})["atticdb"] = entry
+    elif ARGS[:5] == ["mcp", "remove", "-s", "user", "atticdb"]:
+        state.get("mcpServers", {}).pop("atticdb", None)
     else:
         sys.exit(2)
     write_json(claude_state(), state)
@@ -79,7 +79,7 @@ def claude_mcp():
 def codex_server():
     try:
         with open(os.path.join(os.environ["CODEX_HOME"], "config.toml"), "rb") as f:
-            return tomllib.load(f).get("mcp_servers", {}).get("zerodb")
+            return tomllib.load(f).get("mcp_servers", {}).get("atticdb")
     except FileNotFoundError:
         return None
 
@@ -87,7 +87,7 @@ def codex_server():
 def hook_context(settings):
     for group in read_json(settings, {}).get("hooks", {}).get("SessionStart", []):
         for hook in group.get("hooks", []):
-            if "zerodb" in hook.get("command", ""):
+            if "atticdb" in hook.get("command", ""):
                 stdin = json.dumps({"cwd": os.getcwd(), "hook_event_name": "SessionStart"})
                 out = subprocess.run(["sh", "-c", hook["command"]], input=stdin, capture_output=True,
                                      text=True, timeout=15).stdout
@@ -95,8 +95,8 @@ def hook_context(settings):
     return ""
 
 
-def zerodb(server, *args):
-    """Runs a zerodb shell verb as the MCP entry would: its binary, agent and env."""
+def atticdb(server, *args):
+    """Runs an atticdb shell verb as the MCP entry would: its binary, agent and env."""
     exe, agent = server["command"], server["args"][server["args"].index("--agent") + 1]
     env = dict(os.environ, **server.get("env", {}))
     out = subprocess.run([exe, *args, "--agent", agent], env=env, capture_output=True, text=True,
@@ -110,19 +110,19 @@ def act(prompt, server, context):
         return [], ("Run `cargo nextest run`." if "nextest" in context else "Run `python -m pytest`.")
     if "drop Redis" in prompt:
         args = {"query": "Redis"}
-        hits = zerodb(server, "search", "--query", "Redis")
+        hits = atticdb(server, "search", "--query", "Redis")
         if "round trips" in hits:
             return [("memory_search", args)], "Its 2 extra round trips per append broke the 1 ms p99 budget."
         return [("memory_search", args)], "I found no record of why Redis was dropped."
     if prompt.startswith("Remember"):
         args = {"key": "repo/evalrepo/node-version", "content": "Always pin Node 22."}
-        zerodb(server, "fact", "set", "--key", args["key"], "--content", args["content"])
+        atticdb(server, "fact", "set", "--key", args["key"], "--content", args["content"])
         return [("fact_set", args)], "Saved: always pin Node 22 in this repo."
     if "add(a, b)" in prompt:
         with open("calc.py", "a") as f:
             f.write('\n\ndef add(a, b):\n    """a plus b."""\n    return a + b\n')
         args = {"content": "Added add(a, b) to calc.py; it returns a + b."}
-        zerodb(server, "append", "--content", args["content"])
+        atticdb(server, "append", "--content", args["content"])
         return [("memory_append", args)], "Added `add(a, b)` to calc.py."
     return [], "I am a stub."
 
@@ -131,7 +131,7 @@ def claude_events(calls, reply):
     yield {"type": "system", "subtype": "init", "session_id": "s1", "tools": []}
     for i, (name, args) in enumerate(calls):
         yield {"type": "assistant", "message": {"role": "assistant", "content": [
-            {"type": "tool_use", "id": f"toolu_{i}", "name": f"mcp__zerodb__{name}", "input": args}]}}
+            {"type": "tool_use", "id": f"toolu_{i}", "name": f"mcp__atticdb__{name}", "input": args}]}}
         yield {"type": "user", "message": {"role": "user", "content": [
             {"type": "tool_result", "tool_use_id": f"toolu_{i}", "content": "ok"}]}}
     yield {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": reply}]}}
@@ -145,7 +145,7 @@ def codex_events(calls, reply):
     yield {"type": "thread.started", "thread_id": "t1"}
     yield {"type": "turn.started"}
     for i, (name, args) in enumerate(calls):
-        item = {"id": f"item_{i}", "type": "mcp_tool_call", "server": "zerodb", "tool": name,
+        item = {"id": f"item_{i}", "type": "mcp_tool_call", "server": "atticdb", "tool": name,
                 "arguments": args, "status": "in_progress"}
         yield {"type": "item.started", "item": item}
         yield {"type": "item.completed", "item": dict(item, status="completed", result={"content": []})}
@@ -166,7 +166,7 @@ def agent(prompt):
             sys.stdout.write(f.read())
         return
     if PROG == "claude":
-        server = read_json(claude_state(), {}).get("mcpServers", {}).get("zerodb")
+        server = read_json(claude_state(), {}).get("mcpServers", {}).get("atticdb")
         context = hook_context(os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "settings.json"))
     else:
         server = codex_server()
@@ -188,13 +188,13 @@ def main():
         sys.exit(1 if os.environ.get("STUB_LOGGED_OUT") else 0)
     if PROG == "claude" and ARGS[:1] == ["mcp"]:
         return claude_mcp()
-    if PROG == "codex" and ARGS == ["mcp", "get", "zerodb", "--json"]:
+    if PROG == "codex" and ARGS == ["mcp", "get", "atticdb", "--json"]:
         server = codex_server()
         if server is None:
             sys.exit(1)
         transport = {"type": "stdio", "command": server["command"], "args": server.get("args", []),
                      "env": server.get("env")}
-        print(json.dumps({"name": "zerodb", "enabled": True, "transport": transport}))
+        print(json.dumps({"name": "atticdb", "enabled": True, "transport": transport}))
         return
     if PROG == "claude" and ARGS[:1] == ["-p"]:
         return agent(ARGS[1])

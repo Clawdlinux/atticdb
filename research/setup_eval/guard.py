@@ -1,15 +1,15 @@
-"""Safety checks: the eval config dirs, every child's env, the real zerodb home, and redaction.
+"""Safety checks: the eval config dirs, every child's env, the real atticdb home, and redaction.
 
 The eval must never touch the user's own Claude Code, Codex or Copilot config, or the
-user's own zerodb store. So:
+user's own atticdb store. So:
 
 - `check_config_dirs` refuses eval dirs that are, or lie in, `~/.claude*`, `~/.codex` or
   `~/.copilot`, through any symlink. Each existing such entry is compared by file identity
   and ancestry, both ways. An entry that can't be inspected is refused.
-- `check_env` refuses to start a child whose env has no `ZERODB_HOME` under the run's root,
+- `check_env` refuses to start a child whose env has no `ATTICDB_HOME` under the run's root,
   after both resolve.
 - `snapshot` records the size and mtime of each file in the real home's `data/`, and in
-  `$ZERODB_HOME/data` when the parent env sets it. `config_snapshot` records the names, sizes
+  `$ATTICDB_HOME/data` when the parent env sets it. `config_snapshot` records the names, sizes
   and mtimes at the top level of `~/.claude*`, `~/.codex` and `~/.copilot`. Both only stat,
   and never open a file.
 """
@@ -21,8 +21,8 @@ import re
 import stat
 import sys
 
-EVAL_DIR = os.path.join(".cache", "zerodb-setup-eval")
-HOME_ENV = "ZERODB_HOME"
+EVAL_DIR = os.path.join(".cache", "atticdb-setup-eval")
+HOME_ENV = "ATTICDB_HOME"
 
 
 class Refused(Exception):
@@ -30,7 +30,7 @@ class Refused(Exception):
 
 
 class UnsafeEnv(Refused):
-    """A child env without `ZERODB_HOME` under the run root. The child is not started."""
+    """A child env without `ATTICDB_HOME` under the run root. The child is not started."""
 
 
 def user_home(environ=None) -> str:
@@ -153,7 +153,7 @@ def check_config_dirs(claude_dir: str, codex_dir: str, home: str) -> None:
 
 
 def check_env(env: dict, root: str) -> None:
-    """Raises UnsafeEnv unless `env` sets `ZERODB_HOME` to an absolute path strictly under
+    """Raises UnsafeEnv unless `env` sets `ATTICDB_HOME` to an absolute path strictly under
     `root`, after both resolve. An explicit raise, not `assert`, so `python -O` keeps it."""
     home = env.get(HOME_ENV, "")
     if not home or not os.path.isabs(home):
@@ -167,14 +167,14 @@ def check_env(env: dict, root: str) -> None:
 
 
 def real_data_dir(environ=None) -> str:
-    """The default zerodb home's `data/`, as zerodb picks it with no `ZERODB_HOME`."""
+    """The default atticdb home's `data/`, as atticdb picks it with no `ATTICDB_HOME`."""
     environ = os.environ if environ is None else environ
     home = user_home(environ)
     if sys.platform == "darwin":
-        return os.path.join(home, "Library", "Application Support", "zerodb", "data")
+        return os.path.join(home, "Library", "Application Support", "atticdb", "data")
     xdg = environ.get("XDG_DATA_HOME", "")
     base = xdg if os.path.isabs(xdg) else os.path.join(home, ".local", "share")
-    return os.path.join(base, "zerodb", "data")
+    return os.path.join(base, "atticdb", "data")
 
 
 def snapshot(data_dir: str) -> dict[str, tuple[int, int]]:
@@ -195,16 +195,16 @@ def snapshot(data_dir: str) -> dict[str, tuple[int, int]]:
 
 
 def watched_data_dirs(environ=None) -> list[tuple[str, str]]:
-    """The zerodb data dirs a batch must leave alone, as (label, path): the default home's,
-    and `$ZERODB_HOME/data` when the parent env sets an absolute `ZERODB_HOME`. The label
+    """The atticdb data dirs a batch must leave alone, as (label, path): the default home's,
+    and `$ATTICDB_HOME/data` when the parent env sets an absolute `ATTICDB_HOME`. The label
     never holds the env value."""
     environ = os.environ if environ is None else environ
-    dirs = [("the real zerodb home's data dir", real_data_dir(environ))]
+    dirs = [("the real atticdb home's data dir", real_data_dir(environ))]
     parent = environ.get(HOME_ENV, "")
     if os.path.isabs(parent):
         data = os.path.join(parent, "data")
         if os.path.realpath(data) != os.path.realpath(dirs[0][1]):
-            dirs.append(("$ZERODB_HOME/data of the parent env", data))
+            dirs.append(("$ATTICDB_HOME/data of the parent env", data))
     return dirs
 
 

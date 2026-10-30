@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds LazyFS at a pinned commit into $1, with one addition: statfs.
-# Without statfs, FUSE reports 0 free bytes, so zerodb's disk-full floor makes it read-only.
+# Without statfs, FUSE reports 0 free bytes, so AtticDB's disk-full floor makes it read-only.
 # Needs g++, cmake, libfuse3-dev and git.
 set -euo pipefail
 DIR=${1:?usage: build-lazyfs.sh <dir>}
@@ -16,7 +16,7 @@ cat >>lazyfs/src/lazyfs.cpp <<'EOF'
 
 #include <sys/statvfs.h>
 
-// Added by zerodb's build-lazyfs.sh: the backing filesystem's space.
+// Added by atticdb's build-lazyfs.sh: the backing filesystem's space.
 int lazyfs::LazyFS::lfs_statfs (const char* path, struct statvfs* stbuf) {
     return statvfs (path, stbuf) == -1 ? -errno : 0;
 }

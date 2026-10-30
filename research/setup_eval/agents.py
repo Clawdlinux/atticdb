@@ -7,13 +7,13 @@ import os
 HARNESSES = ("claude-code", "codex")
 
 # Eval-only overrides, listed in the results.
-CLAUDE_ALLOWED = "mcp__zerodb__fact_set"
-CODEX_APPROVE = 'mcp_servers.zerodb.tools.fact_set.approval_mode="approve"'
+CLAUDE_ALLOWED = "mcp__atticdb__fact_set"
+CODEX_APPROVE = 'mcp_servers.atticdb.tools.fact_set.approval_mode="approve"'
 OVERRIDES = {
     "claude-code": [f"--allowedTools={CLAUDE_ALLOWED}: fact_set runs without asking, as nobody can answer a prompt",
                     "--permission-mode acceptEdits: file edits run without asking, so S4 tests memory, "
                     "not the permission prompt"],
-    "codex": ["--dangerously-bypass-hook-trust: the zerodb hook runs without a stored approval",
+    "codex": ["--dangerously-bypass-hook-trust: the atticdb hook runs without a stored approval",
               f"-c '{CODEX_APPROVE}': fact_set runs without asking",
               "--sandbox workspace-write: a fresh Codex config has no trust entry for the fixture, so "
               "Codex 0.147 would pick read-only. This keeps the plan's default workspace-write sandbox, which "
@@ -22,15 +22,16 @@ OVERRIDES = {
 
 AGENT_TIMEOUT = 300.0
 SETUP_TIMEOUT = 120.0
-ZERODB_TIMEOUT = 30.0
+ATTICDB_TIMEOUT = 30.0
 GIT_TIMEOUT = 30.0
 HOOK_TIMEOUT = 15.0
 CHECK_TIMEOUT = 20.0
 
-# Never passed on: a token or another home would point the children at the user's store, and
-# an inherited GIT_DIR, GIT_WORK_TREE or GIT_INDEX_FILE would point git at a real repo. The
-# harness's own git steps get their GIT_* vars back through `extra`.
-DROPPED_PREFIXES = ("ZERODB_", "GIT_")
+# Never passed on: a token or another home would point the children at the user's store, an
+# old ZERODB_* name would stop every atticdb child at its legacy guard, and an inherited
+# GIT_DIR, GIT_WORK_TREE or GIT_INDEX_FILE would point git at a real repo. The harness's own
+# git steps get their GIT_* vars back through `extra`.
+DROPPED_PREFIXES = ("ATTICDB_", "ZERODB_", "GIT_")
 DROPPED = {"CLAUDE_CONFIG_DIR", "CODEX_HOME"}
 # Credentials, and the switches that pick another provider or endpoint. Dropped unless
 # --keep-api-keys, so runs use the logins in the eval dirs and nothing else.
@@ -64,21 +65,21 @@ def login_hint(harness: str, claude_dir: str, codex_dir: str) -> str:
     return f"CODEX_HOME={codex_dir} codex login"
 
 
-def setup_argv(zerodb: str, harness: str) -> list[str]:
+def setup_argv(atticdb: str, harness: str) -> list[str]:
     # 1 harness at a time: connect vscode and copilot must never run.
     if harness not in HARNESSES:
         raise ValueError(f"unknown harness {harness!r}")
-    return [zerodb, "setup", "--yes", "--harness", harness]
+    return [atticdb, "setup", "--yes", "--harness", harness]
 
 
-def disconnect_argv(zerodb: str, harness: str) -> list[str]:
+def disconnect_argv(atticdb: str, harness: str) -> list[str]:
     if harness not in HARNESSES:
         raise ValueError(f"unknown harness {harness!r}")
-    return [zerodb, "disconnect", harness]
+    return [atticdb, "disconnect", harness]
 
 
-def hook_argv(zerodb: str, harness: str) -> list[str]:
-    return [zerodb, "hook", "session-start", "--harness", harness]
+def hook_argv(atticdb: str, harness: str) -> list[str]:
+    return [atticdb, "hook", "session-start", "--harness", harness]
 
 
 def stripped_keys(base: dict, keep_api_keys: bool = False) -> list[str]:
@@ -93,13 +94,13 @@ def account_names() -> str:
     return ", ".join(list(ACCOUNT_ENV) + [f"{p}*" for p in ACCOUNT_PREFIXES])
 
 
-def child_env(base: dict, *, home: str, zerodb_home: str, claude_dir: str, codex_dir: str,
+def child_env(base: dict, *, home: str, atticdb_home: str, claude_dir: str, codex_dir: str,
               extra: dict | None = None, keep_api_keys: bool = False) -> dict:
-    """`base` without any `ZERODB_*`, `GIT_*`, `CLAUDE_CONFIG_DIR` or `CODEX_HOME`, and without
+    """`base` without any `ATTICDB_*`, `ZERODB_*`, `GIT_*`, `CLAUDE_CONFIG_DIR` or `CODEX_HOME`, and without
     the credential and provider vars unless `keep_api_keys`, then the run's own, then `extra`."""
     dropped = DROPPED | set(stripped_keys(base, keep_api_keys))
     env = {k: v for k, v in base.items() if k not in dropped and not k.startswith(DROPPED_PREFIXES)}
-    env.update({"HOME": home, "ZERODB_HOME": zerodb_home, "CLAUDE_CONFIG_DIR": claude_dir,
+    env.update({"HOME": home, "ATTICDB_HOME": atticdb_home, "CLAUDE_CONFIG_DIR": claude_dir,
                 "CODEX_HOME": codex_dir})
     env.update(extra or {})
     return env

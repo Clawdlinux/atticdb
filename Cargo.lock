@@ -30,6 +30,39 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
+name = "atticdb"
+version = "0.0.1"
+dependencies = [
+ "atticdb-core",
+ "atticdb-tape",
+ "blake3",
+ "httparse",
+ "proptest",
+ "rustix",
+ "serde_json",
+]
+
+[[package]]
+name = "atticdb-core"
+version = "0.0.1"
+dependencies = [
+ "atticdb-tape",
+ "blake3",
+ "proptest",
+]
+
+[[package]]
+name = "atticdb-tape"
+version = "0.0.1"
+dependencies = [
+ "atticdb-tape",
+ "crc32c",
+ "criterion",
+ "proptest",
+ "rustix",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -607,39 +640,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
-]
-
-[[package]]
-name = "zerodb"
-version = "0.0.1"
-dependencies = [
- "blake3",
- "httparse",
- "proptest",
- "rustix",
- "serde_json",
- "zerodb-core",
- "zerodb-tape",
-]
-
-[[package]]
-name = "zerodb-core"
-version = "0.0.1"
-dependencies = [
- "blake3",
- "proptest",
- "zerodb-tape",
-]
-
-[[package]]
-name = "zerodb-tape"
-version = "0.0.1"
-dependencies = [
- "crc32c",
- "criterion",
- "proptest",
- "rustix",
- "zerodb-tape",
 ]
 
 [[package]]

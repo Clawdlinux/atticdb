@@ -8,8 +8,8 @@ import pathlib
 import statistics
 
 HERE = pathlib.Path(__file__).parent
-SYSTEMS = ["zerodb", "redis", "valkey", "dicedb", "sqlite"]
-COLORS = {"zerodb": "#e4572e", "redis": "#5b6c8f", "valkey": "#8aa1c7",
+SYSTEMS = ["atticdb", "redis", "valkey", "dicedb", "sqlite"]
+COLORS = {"atticdb": "#e4572e", "redis": "#5b6c8f", "valkey": "#8aa1c7",
           "dicedb": "#b8c4dd", "sqlite": "#76b041"}
 DISKS = [("premium-v2", "Premium SSD v2"), ("nvme", "Local NVMe")]
 METRICS = [(0, "Durable acks per second (higher is better)"),

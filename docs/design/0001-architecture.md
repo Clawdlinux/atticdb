@@ -1,4 +1,4 @@
-# 0001: zerodb architecture (historical)
+# 0001: AtticDB architecture (historical)
 
 Scope superseded by [0003: slim v0.1](0003-slim-v0.1.md).
 Its frame v2 and recovery rules replace the storage fields below.
@@ -45,7 +45,7 @@ Second idea, gated on an experiment: assemble context in a prefix-stable order s
 - **Turn.** `{tenant, agent, session, seq, role, content, meta, vector?}`. `seq` dense per session, assigned by the writer at write time.
 - **Fact.** `{tenant, agent?, key, content, meta, event_time?, source_refs, vector?}`. Key uniqueness is per `(tenant, agent)` or per tenant when `agent` is absent. Never per session. Supersession follows LSN order only. `valid_from` is the commit time. `event_time` is stored but never decides supersession. Forgetting the current fact leaves the key with no current value. The previous fact does not come back.
 - **Cache entry.** `{tenant, namespace, key, value, expires_at?}`. `expires_at` is absolute wall-clock time. Cache records are not part of provenance chains. They carry a CRC but a zero chain field.
-- **Trust label.** Every turn and fact carries `trust: trusted | untrusted`. With auth on, the token decides the maximum trust a writer may assert. `window` always returns every turn in seq order with its `trust` label. Trust filtering applies only to recall: `search` and `assemble` exclude `untrusted` records written by other agents unless the caller sets `include_untrusted`. A caller always recalls its own agent's untrusted writes. This is the poisoning defense: web content and tool output from one agent never reach another agent's recall by default. Promoting a record to `trusted` appends a new `trust_change` record that references it and is chained like any other write. `zerodb init` generates an owner token that may write `trusted`.
+- **Trust label.** Every turn and fact carries `trust: trusted | untrusted`. With auth on, the token decides the maximum trust a writer may assert. `window` always returns every turn in seq order with its `trust` label. Trust filtering applies only to recall: `search` and `assemble` exclude `untrusted` records written by other agents unless the caller sets `include_untrusted`. A caller always recalls its own agent's untrusted writes. This is the poisoning defense: web content and tool output from one agent never reach another agent's recall by default. Promoting a record to `trusted` appends a new `trust_change` record that references it and is chained like any other write. `atticdb init` generates an owner token that may write `trusted`.
 - **Retention.** `retain_for` set per tenant or per agent. A record is expired when `commit_time + retain_for` passed at the time of the read, using the policy record in force at the record's LSN, so lengthening a policy never revives records. Expired turns show in `window` as `{seq, expired: true}`. Compaction removes them, the same path as forget.
 - **Commit time.** `max(previous_commit_time + 1ns, wall clock)`. Monotonic, so `as_of` by time maps cleanly to an LSN.
 
@@ -119,7 +119,7 @@ Publish runs on the writer thread before the ack and does three O(1) installs: t
   Recovery and clean shutdown also install the durable boundary, without the periodic time limit.
 - An acked batch is synced, and sync persists every earlier write to the same file. So a torn frame before an acked frame is impossible unless synced data was damaged.
 - Recovery rule:
-  - Frames at or below the superblock LSN must all be valid. Any bad frame, an end-of-data marker, or a MANIFEST segment missing from disk before the superblock LSN stops the open with `CorruptionDetected` and the LSN. `zerodb repair` is an explicit offline command.
+  - Frames at or below the superblock LSN must all be valid. Any bad frame, an end-of-data marker, or a MANIFEST segment missing from disk before the superblock LSN stops the open with `CorruptionDetected` and the LSN. `atticdb repair` is an explicit offline command.
   - Above the superblock LSN, recovery truncates at the first bad frame or the first transaction without a footer. It reports the truncated LSN range and byte count loudly in the open result and logs.
   - Damage above the last superblock install can be indistinguishable from a torn tail.
     Deferred installation enlarges the rewrite and damage-detection window above the last completed superblock.
@@ -262,7 +262,7 @@ Events are emitted after commit, carry an LSN, and go to a bounded per-subscribe
 - HTTP/JSON server binds `127.0.0.1` by default.
 - Auth is on by default. API tokens in config map to a tenant, optionally an agent, and a maximum trust level. Tenant and agent come from the token, never from the request body.
 - `--insecure-no-auth` is for local dev only. It requires a loopback bind and rejects requests whose `Host` or `Origin` is not loopback, which blocks DNS rebinding from browsers.
-- MCP stdio adapter. If the data dir lock is held, it connects to the running server over HTTP (`ZERODB_URL` or the address recorded in `LOCK`) with a token from `ZERODB_TOKEN`. Otherwise it fails with a clear message. It never opens the data dir directly. MCP writes are `untrusted` unless the token allows more.
+- MCP stdio adapter. If the data dir lock is held, it connects to the running server over HTTP (`ATTICDB_URL` or the address recorded in `LOCK`) with a token from `ATTICDB_TOKEN`. Otherwise it fails with a clear message. It never opens the data dir directly. MCP writes are `untrusted` unless the token allows more.
 - MCP scope comes from adapter config, never from tool arguments. Tools: `memory_append`, `memory_window`, `memory_search`, `fact_put`, `fact_get`, `cache_get`, `cache_set`. `forget` is off unless enabled in config. Durability is fixed to `durable`.
 
 ## Deterministic simulation
@@ -331,7 +331,7 @@ Rust std `sync_data` already issues `F_FULLFSYNC` on macOS.
 
 ## Evaluation contract
 
-Every published number pins the dataset, its revision, models, judge, top-k and token budget, zerodb version, and hardware, and ships raw outputs in `bench/`. Storage latency is reported apart from embedding and answer generation. Baselines always include a plain markdown wiki and SQLite, because users report those beat memory frameworks.
+Every published number pins the dataset, its revision, models, judge, top-k and token budget, AtticDB version, and hardware, and ships raw outputs in `bench/`. Storage latency is reported apart from embedding and answer generation. Baselines always include a plain markdown wiki and SQLite, because users report those beat memory frameworks.
 
 ## Milestone carry items from review
 

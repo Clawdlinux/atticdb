@@ -3,7 +3,7 @@
 LazyFS keeps unsynced writes in its own memory, so killing it loses them as a power
 cut does. Each round mounts LazyFS, checks every write known to be durable, appends
 from several writers, then cuts power: at a chosen syscall, or at a random moment.
-After each cut, `zerodb verify` runs on the raw directory LazyFS left behind.
+After each cut, `atticdb verify` runs on the raw directory LazyFS left behind.
 
     python3 tests/crash/power_loss.py --lazyfs <lazyfs checkout> [--rounds N] [--seed S]
 
@@ -23,7 +23,7 @@ import threading
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "clients", "python"))
-from zerodb_client import Client, Error  # noqa: E402
+from atticdb_client import Client, Error  # noqa: E402
 
 TOKEN = "token-a-0123456789abcdefghijklmnopqrstuv"
 WRITERS = 8
@@ -48,7 +48,7 @@ def wait(check, what, timeout=60.0):
 
 
 class Rig:
-    """LazyFS over `root`, mounted at `mnt`, and zerodb serving from `mnt/d`."""
+    """LazyFS over `root`, mounted at `mnt`, and atticdb serving from `mnt/d`."""
 
     def __init__(self, args):
         self.args, w = args, args.work
@@ -77,14 +77,14 @@ class Rig:
             [self.args.bin, "serve", "--config", f"{w}/c.json", "--data-dir", f"{self.mnt}/d",
              "--listen", "none", "--unix-socket", self.sock],
             stdin=subprocess.DEVNULL, stdout=log, stderr=log)
-        wait(lambda: self.db.poll() is not None or os.path.exists(self.sock), "zerodb socket")
-        assert self.db.poll() is None, f"zerodb exited: {open(f'{w}/serve.log').read()[-500:]}"
+        wait(lambda: self.db.poll() is not None or os.path.exists(self.sock), "atticdb socket")
+        assert self.db.poll() is None, f"atticdb exited: {open(f'{w}/serve.log').read()[-500:]}"
 
     def client(self):
         return Client(f"unix://{self.sock}", TOKEN, retry_deadline=5.0)
 
     def cut(self, rng):
-        """Kills LazyFS, then zerodb. Returns the cut that happened."""
+        """Kills LazyFS, then atticdb. Returns the cut that happened."""
         cut = ("random",)
         if rng.random() < 0.5:
             timing, op, src, dst = rng.choice(CUTS)
@@ -163,10 +163,10 @@ def check(client, attempted, durable, committed):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--lazyfs", required=True)
-    p.add_argument("--bin", default="target/release/zerodb")
+    p.add_argument("--bin", default="target/release/atticdb")
     p.add_argument("--work", default="target/power-loss")
-    p.add_argument("--rounds", type=int, default=int(os.environ.get("ZERODB_CRASH_ROUNDS") or 20))
-    p.add_argument("--seed", type=int, default=int(os.environ.get("ZERODB_CRASH_SEED") or time.time_ns() % 2**32))
+    p.add_argument("--rounds", type=int, default=int(os.environ.get("ATTICDB_CRASH_ROUNDS") or 20))
+    p.add_argument("--seed", type=int, default=int(os.environ.get("ATTICDB_CRASH_SEED") or time.time_ns() % 2**32))
     args = p.parse_args()
     if args.rounds < 1:
         p.error("--rounds must be at least 1")

@@ -1,6 +1,6 @@
 # setup_eval
 
-Does `zerodb setup` make agents use memory, with the user-level files exactly as shipped?
+Does `atticdb setup` make agents use memory, with the user-level files exactly as shipped?
 This harness runs Claude Code and Codex headless on a small fixture repo and checks.
 It is the headless eval of Task 7 in the setup plan.
 
@@ -13,8 +13,8 @@ Python 3, standard library only. Tests use pytest and stub agents.
 
 The eval uses 2 config dirs of its own:
 
-- `~/.cache/zerodb-setup-eval/claude`, as `CLAUDE_CONFIG_DIR`.
-- `~/.cache/zerodb-setup-eval/codex`, as `CODEX_HOME`.
+- `~/.cache/atticdb-setup-eval/claude`, as `CLAUDE_CONFIG_DIR`.
+- `~/.cache/atticdb-setup-eval/codex`, as `CODEX_HOME`.
 
 They must hold no other hooks, plugins, MCP servers or instructions.
 The harness refuses to run if either one is, or lies in, `~/.claude*`, `~/.codex` or `~/.copilot`, through any symlink.
@@ -23,15 +23,15 @@ If the home can't be listed, or an entry can't be inspected, it refuses.
 
 Each run gets a new temp root with:
 
-- its own zerodb home, `<root>/zh`, as `ZERODB_HOME`;
+- its own AtticDB home, `<root>/zh`, as `ATTICDB_HOME`;
 - a new fixture repo, `<root>/evalrepo`: a `calc.py` with 1 function, a README with no hint of the answers, and 1 commit.
 
-Then it seeds the store, and runs `zerodb disconnect <h>` and `zerodb setup --yes --harness <h>`.
+Then it seeds the store, and runs `atticdb disconnect <h>` and `atticdb setup --yes --harness <h>`.
 `HOME` stays the real one, so setup edits only the eval config dirs.
 It names 1 harness at a time, so `connect vscode` and `connect copilot` never run.
-After the agent, it runs `zerodb disconnect <h>`, stops the zerodb server the run started, and deletes the root.
+After the agent, it runs `atticdb disconnect <h>`, stops the AtticDB server the run started, and deletes the root.
 
-Every child gets the inherited env without `ZERODB_*`, `GIT_*`, `CLAUDE_CONFIG_DIR` and `CODEX_HOME`, then the run's own values.
+Every child gets the inherited env without `ATTICDB_*`, `GIT_*`, `CLAUDE_CONFIG_DIR` and `CODEX_HOME`, then the run's own values.
 Dropping `GIT_*` keeps an inherited `GIT_DIR`, `GIT_WORK_TREE` or `GIT_INDEX_FILE` from pointing the fixture's git steps at a real repo.
 It also drops the credential and provider vars, so runs use the logins in the eval dirs and nothing else:
 
@@ -39,14 +39,14 @@ It also drops the credential and provider vars, so runs use the logins in the ev
 - provider and endpoint switches: `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`, every `ANTHROPIC_FOUNDRY_*` var, `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `OPENAI_ORG_ID`.
 
 `--keep-api-keys` passes them all on.
-The harness refuses to start any child whose `ZERODB_HOME` is not under its run root, after both resolve, so a link that points out is refused.
+The harness refuses to start any child whose `ATTICDB_HOME` is not under its run root, after both resolve, so a link that points out is refused.
 The harness's own git calls then get their own `GIT_*` vars, which skip the user's git config.
 
-The real zerodb home and the user's own agent config are never used.
+The real AtticDB home and the user's own agent config are never used.
 Before and after a batch, the harness records, by stat only:
 
-- the size and mtime of each file in the default zerodb home's `data/` dir. On macOS that is `~/Library/Application Support/zerodb/data`. On Linux it is `$XDG_DATA_HOME/zerodb/data`, else `~/.local/share/zerodb/data`;
-- the same for `$ZERODB_HOME/data`, when the parent env sets `ZERODB_HOME`;
+- the size and mtime of each file in the default AtticDB home's `data/` dir. On macOS that is `~/Library/Application Support/atticdb/data`. On Linux it is `$XDG_DATA_HOME/atticdb/data`, else `~/.local/share/atticdb/data`;
+- the same for `$ATTICDB_HOME/data`, when the parent env sets `ATTICDB_HOME`;
 - the names, sizes and mtimes at the top level of each `~/.claude*` entry, `~/.claude.json` included, `~/.codex` and `~/.copilot`. A symlink records its own stat and its target's.
 
 It never opens a file, and lists no dir below the top level.
@@ -55,22 +55,22 @@ If anything changed, it prints a warning. That is not a failure, as another sess
 ## Log in once
 
 ```sh
-mkdir -p ~/.cache/zerodb-setup-eval/claude ~/.cache/zerodb-setup-eval/codex
-CLAUDE_CONFIG_DIR=~/.cache/zerodb-setup-eval/claude claude auth login
-CODEX_HOME=~/.cache/zerodb-setup-eval/codex codex login
+mkdir -p ~/.cache/atticdb-setup-eval/claude ~/.cache/atticdb-setup-eval/codex
+CLAUDE_CONFIG_DIR=~/.cache/atticdb-setup-eval/claude claude auth login
+CODEX_HOME=~/.cache/atticdb-setup-eval/codex codex login
 ```
 
 ## Run
 
 ```sh
-cargo build -p zerodb
+cargo build -p atticdb
 python3 -m research.setup_eval check
-python3 -m research.setup_eval run --zerodb target/debug/zerodb --dry-run
-python3 -m research.setup_eval run --harness both --scenarios S1,S2,S3,S4,B1,B2 --runs 1 --zerodb target/debug/zerodb
+python3 -m research.setup_eval run --atticdb target/debug/atticdb --dry-run
+python3 -m research.setup_eval run --harness both --scenarios S1,S2,S3,S4,B1,B2 --runs 1 --atticdb target/debug/atticdb
 python3 -m pytest research/setup_eval/tests
 ```
 
-The end-to-end test runs the real zerodb with stub agents, in a fake home. `XDG_*` and `COPILOT_HOME` point into it, so setup can't read the user's harness files. It uses `$ZERODB_BIN`, else `target/debug/zerodb`, and is skipped when neither exists.
+The end-to-end test runs the real AtticDB with stub agents, in a fake home. `XDG_*` and `COPILOT_HOME` point into it, so setup can't read the user's harness files. It uses `$ATTICDB_BIN`, else `target/debug/atticdb`, and is skipped when neither exists.
 
 `check` runs `claude auth status` and `codex login status` on the eval dirs, 20 s each.
 It prints only whether each is logged in, never their output.
@@ -84,7 +84,7 @@ It also names the credential and provider vars it strips. It starts nothing and 
 | `--harness` | `both` | `claude-code`, `codex` or `both` |
 | `--scenarios` | `S1,S2,S3,S4,B1,B2` | a comma list |
 | `--runs` | 1 | runs per harness and scenario |
-| `--zerodb` | | the zerodb binary to set up and seed with |
+| `--atticdb` | | the AtticDB binary to set up and seed with |
 | `--out` | `research/setup_eval/results/<date>.csv` | rows are appended |
 | `--dry-run` | off | print the plan, run nothing |
 | `--keep-api-keys` | off | pass the credential and provider vars on, so runs may use another account or endpoint |
@@ -111,10 +111,10 @@ Every text match ignores case and is a plain substring match:
 - S1: `nextest` in the reply.
 - S2: `round trip`, `round-trip`, `roundtrip` or `p99` in the reply.
 - S3: a block line `- <key>: ...` holds `22`, for a key the agent set under `repo/evalrepo/`.
-- S4: an added line of `git diff <first commit> -- calc.py` holds `def add(a, b)`. The `memory_append` has no `session`, or an empty or null one, as zerodb reads those as none. The first 60 characters of the note, with whitespace collapsed, appear in the block.
+- S4: an added line of `git diff <first commit> -- calc.py` holds `def add(a, b)`. The `memory_append` has no `session`, or an empty or null one, as AtticDB reads those as none. The first 60 characters of the note, with whitespace collapsed, appear in the block.
 
-For S3 and S4, the next block is what `zerodb hook session-start --harness <h>` prints after the agent.
-It gets `{"cwd": "<fixture>", "hook_event_name": "SessionStart"}` on stdin and the run's `ZERODB_HOME`.
+For S3 and S4, the next block is what `atticdb hook session-start --harness <h>` prints after the agent.
+It gets `{"cwd": "<fixture>", "hook_event_name": "SessionStart"}` on stdin and the run's `ATTICDB_HOME`.
 
 A pass also needs the agent to finish cleanly: exit 0 within the timeout, a final reply, and no error it reported.
 Unparsed lines that don't stop the final reply from being found count only toward `parse_ok`.
@@ -125,7 +125,7 @@ If setup exits other than 0, the agent does not run, and the run fails. The note
 Claude Code, from the fixture repo, with a 300 s timeout:
 
 ```sh
-claude -p <prompt> --output-format stream-json --verbose --permission-mode acceptEdits --allowedTools=mcp__zerodb__fact_set
+claude -p <prompt> --output-format stream-json --verbose --permission-mode acceptEdits --allowedTools=mcp__atticdb__fact_set
 ```
 
 `--allowedTools` takes a list. So the prompt comes right after `-p`, and the flag uses the `=` form, last.
@@ -134,7 +134,7 @@ claude -p <prompt> --output-format stream-json --verbose --permission-mode accep
 Codex:
 
 ```sh
-codex exec --json --dangerously-bypass-hook-trust -c 'mcp_servers.zerodb.tools.fact_set.approval_mode="approve"' --sandbox workspace-write --skip-git-repo-check <prompt>
+codex exec --json --dangerously-bypass-hook-trust -c 'mcp_servers.atticdb.tools.fact_set.approval_mode="approve"' --sandbox workspace-write --skip-git-repo-check <prompt>
 ```
 
 Codex runs in the `workspace-write` sandbox, named explicitly.
@@ -144,7 +144,7 @@ Each agent runs in its own process group. On timeout the group is killed.
 
 Eval-only overrides, which the results must list:
 
-- Claude Code: `--allowedTools=mcp__zerodb__fact_set`, as nobody can answer a prompt.
+- Claude Code: `--allowedTools=mcp__atticdb__fact_set`, as nobody can answer a prompt.
 - Claude Code: `--permission-mode acceptEdits`, so S4 tests memory, not the permission prompt for the edit.
 - Codex: `--dangerously-bypass-hook-trust`, and `-c` to approve `fact_set`.
 - Codex: `--sandbox workspace-write`, as a fresh config without a trust entry would get read-only. It is the plan's default sandbox, named explicitly.
@@ -160,7 +160,7 @@ An event of an unknown type counts as unknown. Neither stops the parse.
 - Claude Code: `tool_use` blocks in `assistant` messages, and the final `result` event with `result`, `usage` and `num_turns`.
 - Codex: `mcp_tool_call` items with `server` and `tool`, the last `agent_message` item, and `usage` from each `turn.completed`. Older `{"msg": ...}` events are read too.
 
-Tool calls keep the bare zerodb tool name, such as `fact_set`.
+Tool calls keep the bare AtticDB tool name, such as `fact_set`.
 `input_tokens` counts every prompt token, cache reads and writes included. `cache_read_tokens` is the part read from the cache.
 Turns are Claude's `num_turns`, and Codex's count of `turn.completed`. They do not compare across harnesses.
 
@@ -168,7 +168,7 @@ Turns are Claude's `num_turns`, and Codex's count of `turn.completed`. They do n
 
 Rows are appended to the CSV as each run ends, so a stopped batch keeps what finished.
 
-Columns: date, harness, scenario, run, pass, zerodb_calls (JSON of name to count), input_tokens, output_tokens, cache_read_tokens, turns, wall_s, setup_exit, parse_ok, notes.
+Columns: date, harness, scenario, run, pass, atticdb_calls (JSON of name to count), input_tokens, output_tokens, cache_read_tokens, turns, wall_s, setup_exit, parse_ok, notes.
 
 The notes hold the first 200 characters of the reply, never the whole reply.
 Before that, anything shaped like a token is replaced by `[redacted]`, and paths from the env by labels such as `<root>`.

@@ -1,9 +1,9 @@
 """One eval run, and a batch of them.
 
-Each run gets a temp root with its own zerodb home (`<root>/zh`) and fixture repo
-(`<root>/evalrepo`). It seeds the store, runs `zerodb setup` for 1 harness against the eval
+Each run gets a temp root with its own atticdb home (`<root>/zh`) and fixture repo
+(`<root>/evalrepo`). It seeds the store, runs `atticdb setup` for 1 harness against the eval
 config dirs, runs the agent headless, judges the result, then disconnects the harness, stops
-the zerodb server the run started, and deletes the root.
+the atticdb server the run started, and deletes the root.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ class HarnessError(Exception):
 
 @dataclass
 class Config:
-    zerodb: str
+    atticdb: str
     home: str  # the real HOME
     claude_dir: str
     codex_dir: str
@@ -64,7 +64,7 @@ def hook_input(repo: str) -> bytes:
 def plan(cfg: Config, harness: str, scenario: Scenario, root: str) -> dict[str, list[Step]]:
     """Every command of 1 run, by phase. A dry run prints these; a real run runs them."""
     zh, repo = paths(root)
-    z, git = cfg.zerodb, agents.git_env()
+    z, git = cfg.atticdb, agents.git_env()
     steps = {
         "fixture": [
             Step("fixture", ["git", "init", "-q"], repo, agents.GIT_TIMEOUT, git),
@@ -73,7 +73,7 @@ def plan(cfg: Config, harness: str, scenario: Scenario, root: str) -> dict[str, 
                  agents.GIT_TIMEOUT, git),
             Step("fixture", ["git", "update-ref", BASE_REF, "HEAD"], repo, agents.GIT_TIMEOUT, git),
         ],
-        "seed": [Step("seed", [z] + args, repo, agents.ZERODB_TIMEOUT) for args in seed_commands(scenario)],
+        "seed": [Step("seed", [z] + args, repo, agents.ATTICDB_TIMEOUT) for args in seed_commands(scenario)],
         "setup": [
             Step("setup", agents.disconnect_argv(z, harness), repo, agents.SETUP_TIMEOUT),
             Step("setup", agents.setup_argv(z, harness), repo, agents.SETUP_TIMEOUT),
@@ -93,7 +93,7 @@ def plan(cfg: Config, harness: str, scenario: Scenario, root: str) -> dict[str, 
 
 def env_for(cfg: Config, root: str, step: Step) -> dict:
     zh, _ = paths(root)
-    return agents.child_env(cfg.base_env, home=cfg.home, zerodb_home=zh, claude_dir=cfg.claude_dir,
+    return agents.child_env(cfg.base_env, home=cfg.home, atticdb_home=zh, claude_dir=cfg.claude_dir,
                             codex_dir=cfg.codex_dir, extra=step.extra_env, keep_api_keys=cfg.keep_api_keys)
 
 
@@ -107,7 +107,7 @@ def describe(cfg: Config, harness: str, scenario: Scenario, root: str = "<root>"
             stdin = " <stdin: hook JSON>" if step.stdin is not None else ""
             lines.append(f"  [{phase}] cd {step.cwd} && {shlex.join(step.argv)}{stdin}")
             lines.append(f"      timeout {step.timeout:g} s; env: base{extra}")
-    lines.append(f"  stop the zerodb server named in {zh}/data/LOCK, then delete {root}")
+    lines.append(f"  stop the atticdb server named in {zh}/data/LOCK, then delete {root}")
     return lines
 
 
@@ -161,7 +161,7 @@ def hook_block(stdout: bytes) -> str:
 
 
 def stop_server(cfg: Config, runner: Runner, root: str) -> str | None:
-    """Stops the zerodb server named in the run's `LOCK`, if it is this run's server. Returns a
+    """Stops the atticdb server named in the run's `LOCK`, if it is this run's server. Returns a
     problem for the notes, or None."""
     data = os.path.join(paths(root)[0], "data")
     try:
@@ -189,7 +189,7 @@ def stop_server(cfg: Config, runner: Runner, root: str) -> str | None:
             if not _alive(pid):
                 return None
             time.sleep(0.05)
-    return "the zerodb server did not stop"
+    return "the atticdb server did not stop"
 
 
 def _alive(pid: int) -> bool:
@@ -209,7 +209,7 @@ def make_root(cfg: Config) -> str:
     if longest > SUN_PATH_BYTES:
         shutil.rmtree(root, ignore_errors=True)
         raise guard.Refused(f"the temp dir {cfg.tmp_parent or tempfile.gettempdir()} is too long for "
-                            "the zerodb socket path. Set TMPDIR to a shorter dir")
+                            "the atticdb socket path. Set TMPDIR to a shorter dir")
     return root
 
 
@@ -233,7 +233,7 @@ def run_one(cfg: Config, runner: Runner, harness: str, scenario: Scenario, index
     steps = plan(cfg, harness, scenario, root)
     setup_tried = False
     redact_paths = {root: "<root>", os.path.realpath(root): "<root>", cfg.claude_dir: "<claude-dir>",
-                    cfg.codex_dir: "<codex-dir>", cfg.zerodb: "<zerodb>", cfg.home: "~"}
+                    cfg.codex_dir: "<codex-dir>", cfg.atticdb: "<atticdb>", cfg.home: "~"}
     try:
         os.makedirs(repo)
         with open(os.path.join(repo, "calc.py"), "w") as f:

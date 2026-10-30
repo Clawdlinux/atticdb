@@ -48,7 +48,7 @@ def test_refuses_an_eval_dir_that_links_to_claude(home):
 def test_refuses_an_eval_root_that_links_into_codex(home):
     os.makedirs(os.path.join(home, ".codex", "x"))
     os.makedirs(os.path.join(home, ".cache"))
-    os.symlink(os.path.join(home, ".codex", "x"), os.path.join(home, ".cache", "zerodb-setup-eval"))
+    os.symlink(os.path.join(home, ".codex", "x"), os.path.join(home, ".cache", "atticdb-setup-eval"))
     claude, codex = guard.eval_dirs(home)
     with pytest.raises(guard.Refused):
         guard.check_config_dirs(claude, codex, home)
@@ -67,9 +67,9 @@ def test_refuses_home_relative_and_shared(home):
 def test_check_env(tmp_path):
     root = str(tmp_path / "r")
     os.makedirs(root)
-    guard.check_env({"ZERODB_HOME": os.path.join(root, "zh")}, root)
-    for env in ({}, {"ZERODB_HOME": ""}, {"ZERODB_HOME": "zh"}, {"ZERODB_HOME": str(tmp_path / "other")},
-                {"ZERODB_HOME": root + "-sibling/zh"}):
+    guard.check_env({"ATTICDB_HOME": os.path.join(root, "zh")}, root)
+    for env in ({}, {"ATTICDB_HOME": ""}, {"ATTICDB_HOME": "zh"}, {"ATTICDB_HOME": str(tmp_path / "other")},
+                {"ATTICDB_HOME": root + "-sibling/zh"}):
         with pytest.raises(guard.UnsafeEnv):
             guard.check_env(env, root)
 
@@ -82,17 +82,17 @@ def test_runner_refuses_before_starting_anything(monkeypatch, tmp_path):
     with pytest.raises(guard.UnsafeEnv):
         runner.run(["claude", "auth", "status"], env=dict(os.environ), root=str(root), cwd=str(root), timeout=5)
     assert runner.children == 0 and stub_calls(paths["log"]) == []
-    env = dict(os.environ, ZERODB_HOME=str(root / "zh"))
+    env = dict(os.environ, ATTICDB_HOME=str(root / "zh"))
     r = runner.run(["claude", "auth", "status"], env=env, root=str(root), cwd=str(root), timeout=20)
     assert r.code == 0 and runner.children == 1
-    assert stub_calls(paths["log"])[0]["zerodb_home"]
+    assert stub_calls(paths["log"])[0]["atticdb_home"]
 
 
 def test_runner_kills_on_timeout(monkeypatch, tmp_path):
     fake_home(monkeypatch, tmp_path)
     root = tmp_path / "root"
     root.mkdir()
-    env = dict(os.environ, ZERODB_HOME=str(root / "zh"), STUB_SLEEP="30")
+    env = dict(os.environ, ATTICDB_HOME=str(root / "zh"), STUB_SLEEP="30")
     r = Runner().run(["claude", "-p", "x"], env=env, root=str(root), cwd=str(root), timeout=1)
     assert r.timed_out and r.code is None and r.wall_s < 15
 
@@ -100,10 +100,10 @@ def test_runner_kills_on_timeout(monkeypatch, tmp_path):
 def test_real_data_dir_follows_home():
     env = {"HOME": "/h", "XDG_DATA_HOME": "/x"}
     if sys.platform == "darwin":
-        assert guard.real_data_dir(env) == "/h/Library/Application Support/zerodb/data"
+        assert guard.real_data_dir(env) == "/h/Library/Application Support/atticdb/data"
     else:
-        assert guard.real_data_dir(env) == "/x/zerodb/data"
-        assert guard.real_data_dir({"HOME": "/h", "XDG_DATA_HOME": "rel"}) == "/h/.local/share/zerodb/data"
+        assert guard.real_data_dir(env) == "/x/atticdb/data"
+        assert guard.real_data_dir({"HOME": "/h", "XDG_DATA_HOME": "rel"}) == "/h/.local/share/atticdb/data"
 
 
 def test_snapshot_stats_without_opening(tmp_path, monkeypatch):
@@ -201,17 +201,17 @@ def test_check_env_resolves_links_first(tmp_path):
     outside.mkdir()
     os.symlink(outside, root / "zh")
     with pytest.raises(guard.UnsafeEnv):
-        guard.check_env({"ZERODB_HOME": str(root / "zh")}, str(root))
+        guard.check_env({"ATTICDB_HOME": str(root / "zh")}, str(root))
     os.symlink(outside, root / "link")
     with pytest.raises(guard.UnsafeEnv):
-        guard.check_env({"ZERODB_HOME": str(root / "link" / "zh")}, str(root))
+        guard.check_env({"ATTICDB_HOME": str(root / "link" / "zh")}, str(root))
     with pytest.raises(guard.UnsafeEnv):
-        guard.check_env({"ZERODB_HOME": str(root)}, str(root))
+        guard.check_env({"ATTICDB_HOME": str(root)}, str(root))
     (root / "real").mkdir()
-    guard.check_env({"ZERODB_HOME": str(root / "real" / "zh")}, str(root))
+    guard.check_env({"ATTICDB_HOME": str(root / "real" / "zh")}, str(root))
     # A root reached through a link still holds its own home.
     os.symlink(root, tmp_path / "alias")
-    guard.check_env({"ZERODB_HOME": str(tmp_path / "alias" / "real" / "zh")}, str(root))
+    guard.check_env({"ATTICDB_HOME": str(tmp_path / "alias" / "real" / "zh")}, str(root))
 
 
 def test_config_snapshot_stats_the_top_level_without_opening(home, monkeypatch, tmp_path):
@@ -248,14 +248,14 @@ def test_config_snapshot_stats_the_top_level_without_opening(home, monkeypatch, 
     assert not any("ignored" in c or "unrelated" in c for c in changed)
 
 
-def test_watched_data_dirs_add_the_parent_zerodb_home():
+def test_watched_data_dirs_add_the_parent_atticdb_home():
     env = {"HOME": "/h"}
-    assert [label for label, _ in guard.watched_data_dirs(env)] == ["the real zerodb home's data dir"]
-    dirs = guard.watched_data_dirs(dict(env, ZERODB_HOME="/z/home"))
-    assert dirs[1] == ("$ZERODB_HOME/data of the parent env", "/z/home/data")
+    assert [label for label, _ in guard.watched_data_dirs(env)] == ["the real atticdb home's data dir"]
+    dirs = guard.watched_data_dirs(dict(env, ATTICDB_HOME="/z/home"))
+    assert dirs[1] == ("$ATTICDB_HOME/data of the parent env", "/z/home/data")
     assert "/z/home" not in dirs[1][0], "the label holds no env value"
-    assert len(guard.watched_data_dirs(dict(env, ZERODB_HOME="rel"))) == 1
-    assert len(guard.watched_data_dirs(dict(env, ZERODB_HOME=""))) == 1
+    assert len(guard.watched_data_dirs(dict(env, ATTICDB_HOME="rel"))) == 1
+    assert len(guard.watched_data_dirs(dict(env, ATTICDB_HOME=""))) == 1
 
 
 def test_config_snapshot_sees_writes_behind_a_link(home, tmp_path):

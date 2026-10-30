@@ -9,7 +9,7 @@ from collections import defaultdict
 
 from .harness import RunResult
 
-COLUMNS = ["date", "harness", "scenario", "run", "pass", "zerodb_calls", "input_tokens", "output_tokens",
+COLUMNS = ["date", "harness", "scenario", "run", "pass", "atticdb_calls", "input_tokens", "output_tokens",
            "cache_read_tokens", "turns", "wall_s", "setup_exit", "parse_ok", "notes"]
 
 
@@ -25,7 +25,7 @@ def row(date: str, res: RunResult) -> dict:
         "scenario": res.scenario,
         "run": res.run,
         "pass": int(res.passed),
-        "zerodb_calls": json.dumps(o.counts(), separators=(",", ":")),
+        "atticdb_calls": json.dumps(o.counts(), separators=(",", ":")),
         "input_tokens": _cell(o.input_tokens),
         "output_tokens": _cell(o.output_tokens),
         "cache_read_tokens": _cell(o.cache_read_tokens),
@@ -51,13 +51,13 @@ def append(path: str, rows: list[dict]) -> None:
 
 
 def summary(results: list[RunResult]) -> list[str]:
-    """A table per harness: passes over runs per scenario, and the zerodb calls in all."""
+    """A table per harness: passes over runs per scenario, and the atticdb calls in all."""
     lines = []
     by = defaultdict(lambda: defaultdict(list))
     for r in results:
         by[r.harness][r.scenario].append(r)
     for harness in sorted(by):
-        lines += ["", f"{harness}", "", "| Scenario | Pass | zerodb calls | Errors |", "|---|---|---|---|"]
+        lines += ["", f"{harness}", "", "| Scenario | Pass | atticdb calls | Errors |", "|---|---|---|---|"]
         for scenario in sorted(by[harness]):
             rs = by[harness][scenario]
             calls = sum(sum(r.outcome.counts().values()) for r in rs)

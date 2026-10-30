@@ -24,7 +24,7 @@ class Result:
 
 class Runner:
     """Starts children. Counts each one, so the summary can say how many ran and that every
-    one had `ZERODB_HOME` under its run root."""
+    one had `ATTICDB_HOME` under its run root."""
 
     def __init__(self) -> None:
         self.children = 0
@@ -62,7 +62,7 @@ class Runner:
             raise
         finally:
             # Anything the child left in its group, such as an MCP adapter, goes too. A server
-            # zerodb started sits in its own group and is stopped through its LOCK file.
+            # AtticDB started sits in its own group and is stopped through its LOCK file.
             _kill_group(p.pid)
         wall = time.monotonic() - start
         return Result(None if timed_out else p.returncode, out, err, wall, timed_out)

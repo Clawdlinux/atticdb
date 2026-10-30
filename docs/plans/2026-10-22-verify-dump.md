@@ -26,13 +26,13 @@ The scratch directory defaults to `<data_dir>.verify-<8 hex>`, mode 0700, on the
 
 I am choosing a copy over an in-memory dry-run `Io` because review found that would need an offline-open mode with no workers, a sparse overlay with a memory limit, and lock changes. The copy runs the exact production open, threads included. The cost is one directory's worth of time and space, or none where the filesystem clones.
 
-### D2. `zerodb verify --data-dir <dir> [--scratch <dir>]`
+### D2. `atticdb verify --data-dir <dir> [--scratch <dir>]`
 
 - Opens `Engine::open(copy, EngineOptions::default())`, the options `serve` uses.
 - Prints sorted `key=value` lines from the same code as `GET /v1/stats`. Factor the JSON out of `api::stats` into a function both use.
 - Exit codes: 0 opened, 1 the open failed or a checkpoint was rejected, 75 locked. A failed open names the first bad LSN; `recover --truncate-at` takes a transaction boundary below it.
 
-### D3. `zerodb dump --data-dir <dir> [--scratch <dir>] [--from <lsn>] [--limit <n>]`
+### D3. `atticdb dump --data-dir <dir> [--scratch <dir>] [--from <lsn>] [--limit <n>]`
 
 - Opens `Tape::open(StdIo, SystemClock, copy, TapeOptions::default())` and walks `scan(from)`.
 - One line per record: `lsn txn kind tenant bytes commit_time_ns`. Never content.
@@ -42,11 +42,11 @@ I am choosing a copy over an in-memory dry-run `Io` because review found that wo
 
 | Task | Change | Tests |
 |---|---|---|
-| T1 | Lock, copy and cleanup helper in `ops.rs`. `zerodb verify` and the shared stats JSON | Extend the `startup_checks` Recovers row (`tests/it/listen.rs`). Under the running server, `verify` exits 75. After the kill, `verify` exits 0 with `durable_lsn` equal to the last acked LSN. Every file under the data dir is byte-identical before and after, and no scratch directory is left behind |
-| T2 | `zerodb dump` | Same row: `dump --from <first acked lsn>` prints the acked records in LSN order, and `--limit 1` prints one |
+| T1 | Lock, copy and cleanup helper in `ops.rs`. `atticdb verify` and the shared stats JSON | Extend the `startup_checks` Recovers row (`tests/it/listen.rs`). Under the running server, `verify` exits 75. After the kill, `verify` exits 0 with `durable_lsn` equal to the last acked LSN. Every file under the data dir is byte-identical before and after, and no scratch directory is left behind |
+| T2 | `atticdb dump` | Same row: `dump --from <first acked lsn>` prints the acked records in LSN order, and `--limit 1` prints one |
 | T3 | Corruption | End of the same row, after the restarted server stops. Its open installed the superblock at its durable LSN (`writer.rs:399-401`), so LSN 1 is below it. Flip one payload byte of the first frame in `seg-0000000000000001.zdb`. `verify` exits 1 and names LSN 1 |
-| T4 | Docs: `crates/zerodb/README.md` and the top README list. #10 is covered by verify | |
+| T4 | Docs: `crates/atticdb/README.md` and the top README list. #10 is covered by verify | |
 
 ## Not in this plan
 
-Repair. `zerodb recover --truncate-at` already does that. verify names the first bad LSN, and recover names the nearest boundaries for an interior one.
+Repair. `atticdb recover --truncate-at` already does that. verify names the first bad LSN, and recover names the nearest boundaries for an interior one.

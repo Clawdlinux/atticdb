@@ -32,7 +32,7 @@ python3 -m pytest research/ctxcache/tests
 | `--seed` | 87 | the sample and bootstrap seed |
 | `--budgets` | `1k,2k,4k,8k,16k,32k,64k,128k` | token budgets. 1k is 1,000 tokens |
 | `--out` | `research/ctxcache/results` | where the CSV and markdown go |
-| `--cache-dir` | `~/.cache/zerodb-ctxcache` | downloaded rows. A path inside the repo is refused |
+| `--cache-dir` | `~/.cache/atticdb-ctxcache` | downloaded rows. A path inside the repo is refused |
 | `--sleep` | 1.6 | seconds between API calls |
 | `--max-requests`, `--deadline` | 2500, 5400 | caps on API calls and on seconds spent fetching |
 | `--offline` | off | use cached rows only |
@@ -273,7 +273,7 @@ So OpenHands takes 10 consecutive rows from each of 100 strata. The bootstrap re
 - [nebius/SWE-agent-trajectories](https://huggingface.co/datasets/nebius/SWE-agent-trajectories), by Nebius, CC-BY-4.0. The dataset card also asks users of the model outputs to follow the Llama 3.1 License.
 - [nebius/SWE-rebench-openhands-trajectories](https://huggingface.co/datasets/nebius/SWE-rebench-openhands-trajectories), by Nebius: Trofimova et al., "OpenHands Trajectories with Qwen3-Coder-480B-A35B-Instruct", Nebius blog, 2025. CC-BY-4.0.
 
-We changed nothing in the data. The results are aggregate counts derived from it. Rows are cached under `~/.cache/zerodb-ctxcache/` and never committed.
+We changed nothing in the data. The results are aggregate counts derived from it. Rows are cached under `~/.cache/atticdb-ctxcache/` and never committed.
 
 ## Tests
 
