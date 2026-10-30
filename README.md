@@ -1,7 +1,5 @@
 # AtticDB
 
-AtticDB was called zerodb until 2026-10-30. To move an existing install, see [Moving from zerodb](#moving-from-zerodb).
-
 Agent memory database in Rust. It stores turn history per session and keyed facts. A write is acked only after it is synced to disk.
 Status: early. Don't run it in production. Built so far: the tape, session engine, disk-full handling, server and facts (S1 to S4).
 
@@ -65,19 +63,6 @@ AtticDB does a few things on purpose. We add features when people ask for them.
 - Missing an app, a command or an API? [Open a feature request](https://github.com/Clawdlinux/atticdb/issues/new?template=feature.yml). Say what you're trying to do, not just the feature.
 - Something broke? [Open a bug](https://github.com/Clawdlinux/atticdb/issues/new?template=bug.yml) with the `atticdb doctor` output.
 - Someone asked already? Add a thumbs-up to that issue. We count those. Issues labeled `waiting-for-users` are ideas we parked until enough people want them.
-
-## Moving from zerodb
-
-AtticDB was called zerodb until 2026-10-30. To keep your memory:
-
-1. Install AtticDB with the installer in [Quick start](#quick-start), or with `cargo install --git https://github.com/Clawdlinux/atticdb atticdb --locked`.
-2. Quit the apps that use zerodb.
-3. Run `atticdb migrate --dry-run`, then `atticdb migrate`.
-4. Run `cargo uninstall zerodb`.
-
-`migrate` moves the zerodb home to the AtticDB home and renames its config. For each app with zerodb parts, it runs the old binary's own `disconnect`, then connects AtticDB as `atticdb setup --yes` does. It leaves a note at the old home's path, so an old binary that still runs fails instead of making a new, empty home.
-It never merges 2 homes, never moves a home set by `ZERODB_HOME` or named in the old entries, and never edits your own instruction files. It says what to do by hand instead.
-Until you migrate, AtticDB commands stop with exit 2 when they find zerodb data or a `ZERODB_*` variable. Details: [Moving from zerodb](crates/atticdb/README.md#moving-from-zerodb).
 
 ## MCP
 
