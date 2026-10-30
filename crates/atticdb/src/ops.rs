@@ -20,7 +20,7 @@ pub fn stats(socket: Option<&Path>, data_dir: Option<&Path>) -> u8 {
         (Some(path), _) => {
             launch::connect_unix(path, deadline).map_err(|e| format!("{}: {e}", path.display()))
         }
-        (None, Some(dir)) => launch::discover(dir, deadline),
+        (None, Some(dir)) => launch::discover(dir, deadline).map_err(|e| e.to_string()),
         (None, None) => Err("stats needs a socket or a data directory".into()),
     };
     let response = stream.and_then(|mut stream| {

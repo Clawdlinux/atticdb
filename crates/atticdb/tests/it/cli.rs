@@ -1,4 +1,4 @@
-use crate::support::{self, Dir};
+use crate::support::{self, atticdb, data_dir, Dir, Holders};
 use std::process::Stdio;
 
 /// `--version` and `-V` print the name and the crate version on stdout and exit 0. They take
@@ -22,4 +22,19 @@ fn version_flag() {
         assert_eq!(out.status.code(), Some(2), "{flag} extra");
         assert!(String::from_utf8_lossy(&out.stderr).contains("atticdb --version | -V"));
     }
+}
+
+/// A first `append` on a fresh home starts a server and succeeds. Waiting for it is the
+/// normal path, so stderr has no "no trusted server" line.
+#[test]
+fn first_run_is_quiet() {
+    let dir = Dir::new();
+    let home = dir.0.join("h");
+    std::fs::create_dir_all(&home).unwrap();
+    let _holders = Holders(vec![data_dir(&home)]);
+    let (code, out, err) = atticdb(&home, &home, &["append", "--content", "hi"], &[], b"", 0);
+    assert_eq!(code, Some(0), "{err}");
+    assert!(out.contains("\"committed\":true"), "{out}");
+    assert!(err.contains("atticdb: started server pid "), "{err}");
+    assert!(!err.contains("no trusted server"), "{err}");
 }

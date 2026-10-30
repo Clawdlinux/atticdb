@@ -63,6 +63,7 @@ pub struct Launch {
     child: Option<Child>,
     next_spawn: Instant,
     backoff: Duration,
+    /// The last reason `discover` gave, for the timeout error and to print each one once.
     refused: String,
     /// Set when the last `connect` hit a start failure that a retry within the same
     /// call cannot fix. The next call tries again.
@@ -128,11 +129,14 @@ impl Launch {
                     (self.backoff, self.refused) = (FIRST_BACKOFF, String::new());
                     return Ok((Box::new(stream), "localhost".into()));
                 }
-                Err(reason) if reason != self.refused => {
-                    eprintln!("atticdb: no trusted server: {reason}");
+                // A server that is not up yet is the normal first run, so it stays quiet.
+                Err(refusal) => {
+                    let reason = refusal.to_string();
+                    if matches!(refusal, Refusal::Untrusted(_)) && reason != self.refused {
+                        eprintln!("atticdb: no trusted server: {reason}");
+                    }
                     self.refused = reason;
                 }
-                Err(_) => {}
             }
             // A child that exited 75 lost the lock race, but the holder may be a poisoned
             // server shutting down. So spawn again, with backoff, until one is trusted.
@@ -142,7 +146,8 @@ impl Launch {
                 }
             }
             if Instant::now() >= deadline {
-                let message = format!("no trusted server in time, see {}", log.display());
+                let (why, log) = (&self.refused, log.display());
+                let message = format!("no trusted server in time ({why}), see {log}");
                 return Err(io::Error::new(ErrorKind::TimedOut, message));
             }
             std::thread::sleep(POLL);
@@ -254,69 +259,195 @@ pub(crate) fn connect_unix(path: &Path, deadline: Instant) -> io::Result<UnixStr
     Ok(UnixStream::from(socket))
 }
 
+/// Why [`discover`] found no server to trust.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Refusal {
+    /// No server is up yet: no `LOCK`, no address in it, or nothing listening on its socket.
+    NotRunning(String),
+    /// Something is there but failed a trust check, or another error got in the way.
+    Untrusted(String),
+}
+
+impl Refusal {
+    /// `NotRunning` when `error` is one of `kinds`, else `Untrusted`. Both carry `reason`.
+    fn of(error: &io::Error, kinds: &[ErrorKind], reason: String) -> Self {
+        if kinds.contains(&error.kind()) {
+            Self::NotRunning(reason)
+        } else {
+            Self::Untrusted(reason)
+        }
+    }
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotRunning(reason) | Self::Untrusted(reason) => f.write_str(reason),
+        }
+    }
+}
+
 /// A connection to the socket named in `LOCK`, if it is ours, under an owner-only parent,
 /// and answered `/healthz` on this connection with the instance id in `LOCK`. The token
 /// then goes over the same connection. Otherwise the reason, and no token was sent.
-pub(crate) fn discover(dir: &Path, deadline: Instant) -> Result<UnixStream, String> {
+pub(crate) fn discover(dir: &Path, deadline: Instant) -> Result<UnixStream, Refusal> {
+    const MISSING: &[ErrorKind] = &[ErrorKind::NotFound];
     let mut lock = String::new();
     crate::config::open_regular(OpenOptions::new().read(true), &dir.join("LOCK"))
         .and_then(|mut file| file.read_to_string(&mut lock))
-        .map_err(|e| format!("LOCK: {e}"))?;
+        .map_err(|e| Refusal::of(&e, MISSING, format!("LOCK: {e}")))?;
     // `pid=<pid> instance=<id> unix=<path> tcp=<addr>`. The path may hold spaces.
     let fields = lock.trim_end().rsplit_once(" tcp=").map(|(head, _)| head);
     let instance =
         fields.and_then(|head| head.split(' ').find_map(|field| field.strip_prefix("instance=")));
     let socket = fields.and_then(|head| head.split_once(" unix=")).map(|(_, path)| path);
     let (Some(instance), Some(socket)) = (instance, socket.map(Path::new)) else {
-        return Err("LOCK names no server".into());
+        return Err(Refusal::NotRunning("LOCK names no server".into()));
+    };
+    let missing = |error: io::Error| {
+        Refusal::of(&error, MISSING, format!("socket {}: {error}", socket.display()))
     };
     // Resolve symlinks first, so the checks below cover the directories actually used.
-    let parent = socket.parent().map(std::fs::canonicalize).transpose();
-    let parent = parent.map_err(|error| format!("socket {}: {error}", socket.display()))?;
+    let parent = socket.parent().map(std::fs::canonicalize).transpose().map_err(missing)?;
     let socket = parent.unwrap_or_default().join(socket.file_name().unwrap_or_default());
     let euid = rustix::process::geteuid().as_raw();
-    let meta = std::fs::symlink_metadata(&socket);
-    let meta = meta.map_err(|error| format!("socket {}: {error}", socket.display()))?;
+    let missing = |error: io::Error| {
+        Refusal::of(&error, MISSING, format!("socket {}: {error}", socket.display()))
+    };
+    let meta = std::fs::symlink_metadata(&socket).map_err(missing)?;
     if !meta.file_type().is_socket() || meta.uid() != euid {
-        return Err(format!(
+        return Err(Refusal::Untrusted(format!(
             "{} must be a socket owned by uid {euid}, found owner uid {}",
             socket.display(),
             meta.uid()
-        ));
+        )));
     }
     let mut dirs = socket.ancestors().skip(1);
-    crate::listen::owned_dir(dirs.next().unwrap_or(Path::new("/")), 0o022)?;
+    crate::listen::owned_dir(dirs.next().unwrap_or(Path::new("/")), 0o022)
+        .map_err(Refusal::Untrusted)?;
     // OpenSSH StrictModes: anyone who can rename a directory above the socket can swap it.
     for dir in dirs {
-        let meta = std::fs::metadata(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
+        let meta = std::fs::metadata(dir)
+            .map_err(|error| Refusal::Untrusted(format!("{}: {error}", dir.display())))?;
         let writable = meta.mode() & 0o022 != 0 && meta.mode() & 0o1000 == 0;
         if (meta.uid() != 0 && meta.uid() != euid) || writable {
-            return Err(format!(
+            return Err(Refusal::Untrusted(format!(
                 "{} must be owned by root or uid {euid} and not writable by group or others \
                  unless sticky, found mode {:04o} owned by uid {}",
                 dir.display(),
                 meta.mode() & 0o7777,
                 meta.uid()
-            ));
+            )));
         }
     }
-    let fail = |error: io::Error| format!("{}: {error}", socket.display());
-    let mut stream = connect_unix(&socket, deadline).map_err(fail)?;
+    // A refused connect means a stale socket that nobody listens on. A server binds and
+    // listens before it links the socket here, so a starting server never refuses.
+    let idle = [ErrorKind::ConnectionRefused, ErrorKind::NotFound];
+    let fail = |error: &io::Error| format!("{}: {error}", socket.display());
+    let mut stream =
+        connect_unix(&socket, deadline).map_err(|e| Refusal::of(&e, &idle, fail(&e)))?;
     let headers = [("Host", "localhost"), ("Connection", "keep-alive")];
     let deadline = deadline.min(Instant::now() + PROBE_TIMEOUT);
     let response = http::exchange(&mut stream, "GET", "/healthz", &headers, &[], deadline, 4096);
-    let response = response.map_err(fail)?;
+    let response = response.map_err(|error| Refusal::Untrusted(fail(&error)))?;
     let health: Value = serde_json::from_slice(&response.body).unwrap_or_default();
     if matches!(response.status, 200 | 503) && health["instance"] == instance {
         Ok(stream)
     } else {
-        Err(format!("{} is not instance {instance} from LOCK", socket.display()))
+        Err(Refusal::Untrusted(format!(
+            "{} is not instance {instance} from LOCK",
+            socket.display()
+        )))
     }
 }
 
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
+    use super::Refusal;
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    use std::os::unix::net::UnixListener;
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, Instant};
+
+    /// A private 0700 directory under `/tmp`, short enough for a socket path. Removed on drop.
+    struct Temp(PathBuf);
+
+    impl Temp {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let next = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let name = format!("atticdb-unit-{}-{next}", std::process::id());
+            // The real path, since `discover` resolves the socket's parent.
+            let path = std::fs::canonicalize("/tmp").unwrap().join(name);
+            std::fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn lock(dir: &Path, socket: &Path) {
+        let text = format!("pid=1 instance=0123 unix={} tcp=none\n", socket.display());
+        std::fs::write(dir.join("LOCK"), text).unwrap();
+    }
+
+    fn discover(dir: &Path) -> Refusal {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        super::discover(dir, deadline).unwrap_err()
+    }
+
+    /// Only "no server is up yet" is `NotRunning`. A failed trust check is `Untrusted`.
+    #[test]
+    fn discover_tells_a_missing_server_from_an_untrusted_one() {
+        let temp = Temp::new();
+        let dir = &temp.0;
+        let refusal = discover(dir);
+        assert!(
+            matches!(&refusal, Refusal::NotRunning(r) if r.starts_with("LOCK: ")),
+            "{refusal:?}"
+        );
+
+        std::fs::write(dir.join("LOCK"), "pid=1\n").unwrap();
+        assert_eq!(discover(dir), Refusal::NotRunning("LOCK names no server".into()));
+
+        let socket = dir.join("s");
+        lock(dir, &socket);
+        let refusal = discover(dir);
+        assert!(
+            matches!(&refusal, Refusal::NotRunning(r) if r.starts_with("socket ")),
+            "{refusal:?}"
+        );
+
+        // A stale socket: the file is there but nobody listens, so a connect is refused.
+        drop(UnixListener::bind(&socket).unwrap());
+        assert!(matches!(discover(dir), Refusal::NotRunning(_)), "{:?}", discover(dir));
+        std::fs::remove_file(&socket).unwrap();
+
+        // Something that is not a socket.
+        std::fs::write(&socket, "").unwrap();
+        let refusal = discover(dir);
+        assert!(
+            matches!(&refusal, Refusal::Untrusted(r) if r.contains("must be a socket")),
+            "{refusal:?}"
+        );
+        std::fs::remove_file(&socket).unwrap();
+
+        // Our socket, live, but in a directory others may write to.
+        let open = dir.join("g");
+        std::fs::DirBuilder::new().mode(0o700).create(&open).unwrap();
+        let socket = open.join("s");
+        let _listener = UnixListener::bind(&socket).unwrap();
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o770)).unwrap();
+        lock(dir, &socket);
+        let refusal = discover(dir);
+        let reason = "not writable by group or others";
+        assert!(matches!(&refusal, Refusal::Untrusted(r) if r.contains(reason)), "{refusal:?}");
+    }
 
     #[test]
     fn http_connects_only_to_loopback_addresses() {
