@@ -66,6 +66,9 @@ jobs:
       VERSION: ${{ needs.version.outputs.version }}
       # Keeps macOS tar from adding ._ files for extended attributes.
       COPYFILE_DISABLE: "1"
+      # The profile keeps debug = 1 for local builds. Shipped binaries drop the DWARF and keep
+      # symbols, so backtraces still name functions.
+      CARGO_PROFILE_RELEASE_STRIP: debuginfo
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -106,6 +109,9 @@ jobs:
               case "$info" in
                 *"statically linked"* | *"static-pie linked"*) ;;
                 *) echo "::error::$bin is not statically linked"; exit 1 ;;
+              esac
+              case "$info" in
+                *"with debug_info"*) echo "::error::$bin still has debug info"; exit 1 ;;
               esac
               ;;
           esac

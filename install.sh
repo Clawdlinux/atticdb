@@ -128,16 +128,17 @@ main() {
     mkdir "$tmp/x"
     tar -xzf "$tmp/$file" -C "$tmp/x" || fail "cannot extract $file"
     [ -f "$tmp/x/atticdb" ] || fail "$file has no atticdb binary"
-    chmod 755 "$tmp/x/atticdb"
-    "$tmp/x/atticdb" --version >/dev/null 2>&1 ||
-        fail "the downloaded atticdb does not run on this machine. Nothing was installed."
 
-    # Copy beside the target, then rename over it, so the swap is atomic.
+    # Copy beside the target, then rename over it, so the swap is atomic. The copy runs once
+    # first, from the install dir, since TMPDIR may be mounted noexec. On failure the trap
+    # removes it.
     mkdir -p "$dir"
     dest="$dir/atticdb"
     part="$dir/.atticdb.part.$$"
     cp "$tmp/x/atticdb" "$part"
     chmod 755 "$part"
+    "$part" --version >/dev/null 2>&1 ||
+        fail "the downloaded atticdb did not run from $dir. Nothing was installed."
     mv -f "$part" "$dest"
     part=''
 
@@ -146,7 +147,8 @@ main() {
     found=$(command -v atticdb 2>/dev/null || true)
     case ":${PATH:-}:" in
         *":$dir:"* | *":$dir/:"*)
-            if [ -n "$found" ] && [ "$found" != "$dest" ]; then
+            # dash prints $dir//atticdb for a PATH entry with a trailing slash.
+            if [ -n "$found" ] && [ "$found" != "$dest" ] && [ "$found" != "$dir//atticdb" ]; then
                 say "warning: $found comes first on PATH, so atticdb runs that one."
                 say "Remove it, or put $dir earlier on PATH."
             fi

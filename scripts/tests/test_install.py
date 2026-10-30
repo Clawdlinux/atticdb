@@ -9,6 +9,7 @@ import http.server
 import io
 import os
 import platform
+import shutil
 import subprocess
 import tarfile
 import threading
@@ -41,21 +42,21 @@ def host_target():
 TARBALL = f"atticdb-{host_target()}.tar.gz"
 
 
-def tarball():
+def tarball(script=FAKE):
     """A release tarball: a top-level atticdb that prints its version, plus a README."""
     out = io.BytesIO()
     with tarfile.open(fileobj=out, mode="w:gz") as tar:
-        for name, data, mode in (("atticdb", FAKE, 0o755), ("README.md", b"# AtticDB\n", 0o644)):
+        for name, data, mode in (("atticdb", script, 0o755), ("README.md", b"# AtticDB\n", 0o644)):
             info = tarfile.TarInfo(name)
             info.size, info.mode = len(data), mode
             tar.addfile(info, io.BytesIO(data))
     return out.getvalue()
 
 
-def publish(release_dir, sums=None):
+def publish(release_dir, sums=None, script=FAKE):
     """Writes the tarball and SHA256SUMS into release_dir, like the release workflow."""
     release_dir.mkdir(parents=True)
-    data = tarball()
+    data = tarball(script)
     (release_dir / TARBALL).write_bytes(data)
     if sums is None:
         sums = f"{hashlib.sha256(data).hexdigest()}  {TARBALL}\n"
@@ -93,14 +94,14 @@ def dirs(tmp_path):
     return home, tmp_path / "bin", tmp
 
 
-def install(dirs, base, path=SYSTEM_PATH, **env):
+def install(dirs, base, path=SYSTEM_PATH, shell="sh", **env):
     """Runs install.sh with a clean env. A None value leaves that variable unset."""
     home, bin_dir, tmp = dirs
     full = {"PATH": path, "HOME": str(home), "TMPDIR": str(tmp),
             "ATTICDB_INSTALL_DIR": str(bin_dir), "ATTICDB_DOWNLOAD_BASE": base}
     full.update(env)
     full = {key: value for key, value in full.items() if value is not None}
-    return subprocess.run(["sh", str(INSTALL)], env=full, capture_output=True, text=True,
+    return subprocess.run([shell, str(INSTALL)], env=full, capture_output=True, text=True,
                           timeout=60, check=False)
 
 
@@ -203,6 +204,27 @@ def test_on_path_and_shadowed(server, dirs, tmp_path):
     result = install(dirs, base, path=f"{other}:{bin_dir}:{SYSTEM_PATH}")
     assert_installed(dirs, result)
     assert f"warning: {other / 'atticdb'} comes first on PATH" in result.stdout
+
+
+# dash's command -v prints $dir//atticdb for the PATH entry $dir/. That is the same file.
+@pytest.mark.parametrize("shell", ["/bin/sh"] + [s for s in ("dash",) if shutil.which(s)])
+def test_trailing_slash_on_path_is_not_a_shadow(server, dirs, shell):
+    root, base, _ = server
+    publish(root / "releases/latest/download")
+    bin_dir = dirs[1]
+    result = install(dirs, base, path=f"{bin_dir}/:{SYSTEM_PATH}", shell=shell)
+    assert_installed(dirs, result)
+    assert "warning" not in result.stdout and "export PATH" not in result.stdout
+
+
+def test_binary_that_does_not_run_installs_nothing(server, dirs):
+    root, base, _ = server
+    publish(root / "releases/latest/download", script=b"#!/bin/sh\nexit 1\n")
+    result = install(dirs, base)
+    assert result.returncode == 1
+    assert f"the downloaded atticdb did not run from {dirs[1]}" in result.stderr
+    assert os.listdir(dirs[1]) == [], "the temp copy is removed"
+    assert os.listdir(dirs[2]) == [], "the temp dir is removed"
 
 
 def test_unsupported_platform_points_to_source(server, dirs, tmp_path):
