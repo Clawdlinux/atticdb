@@ -38,7 +38,12 @@ def rows(path) -> list[dict]:
 
 
 def test_full_batch_with_stub_agents(monkeypatch, tmp_path, short_tmp, capsys):
+    monkeypatch.setenv("ZERODB_HOME", "/old")
+    monkeypatch.setenv("ZERODB_TOKEN", "old")
     paths = fake_home(monkeypatch, tmp_path)
+    assert "ZERODB_HOME" not in os.environ and "ZERODB_TOKEN" not in os.environ
+    # An old token in the user's shell never reaches a child, so no atticdb child stops at its guard.
+    monkeypatch.setenv("ZERODB_TOKEN", "old")
     # A decoy repo that inherited git vars point at. No step may touch it.
     decoy = tmp_path / "decoy"
     subprocess.run(["git", "init", "-q", str(decoy)], check=True, timeout=30)
