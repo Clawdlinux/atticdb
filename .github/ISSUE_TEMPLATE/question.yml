@@ -1,0 +1,15 @@
+name: Question
+description: Ask how something works or whether AtticDB fits your use.
+labels: [question]
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: OS, apps, and what you tried. `atticdb doctor` output helps.

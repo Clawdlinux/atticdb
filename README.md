@@ -50,6 +50,14 @@ curl -s --unix-socket data/atticdb.sock -H "Authorization: Bearer $TOKEN" \
 
 That appends over TCP and reads over the Unix socket. A repeated `idem_key` returns `"deduplicated": true`. Facts live at `/v1/facts/put`, `get`, `list` and `delete`. Each key holds 1 current value, and a later put replaces it. With `"if_lsn": <lsn>`, a put writes only if the current value still has that LSN. A mismatch is 409 `conflict`.
 
+## Tell us what you need
+
+AtticDB does a few things on purpose. We add features when people ask for them.
+
+- Missing an app, a command or an API? [Open a feature request](https://github.com/Clawdlinux/atticdb/issues/new?template=feature.yml). Say what you're trying to do, not just the feature.
+- Something broke? [Open a bug](https://github.com/Clawdlinux/atticdb/issues/new?template=bug.yml) with the `atticdb doctor` output.
+- Someone asked already? Add a thumbs-up to that issue. We count those. Issues labeled `waiting-for-users` are ideas we parked until enough people want them.
+
 ## Moving from zerodb
 
 AtticDB was called zerodb until 2026-10-30. To keep your memory:

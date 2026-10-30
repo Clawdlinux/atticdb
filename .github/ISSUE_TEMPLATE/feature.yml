@@ -1,0 +1,30 @@
+name: Feature request
+description: Ask for something AtticDB doesn't do yet.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        We build what people ask for. If someone already asked, add a thumbs-up reaction to that issue instead. We count those.
+  - type: textarea
+    id: goal
+    attributes:
+      label: What are you trying to do
+      description: The job, not the feature. For example "my agent forgets which tests are flaky between chats".
+    validations:
+      required: true
+  - type: textarea
+    id: today
+    attributes:
+      label: What you do today
+      description: Your workaround, or what breaks without it.
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help
+      description: Optional. A command, an API, an app to connect, anything.
+  - type: input
+    id: apps
+    attributes:
+      label: Apps you use
+      placeholder: VS Code, Claude Code, Cursor, ...
