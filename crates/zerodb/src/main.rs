@@ -21,6 +21,7 @@ const USAGE: &str = "usage:
   zerodb dump --data-dir <dir> [--scratch <dir>] [--from <lsn>] [--limit <n>]
   zerodb mcp <connect>
   zerodb setup [--yes] [--harness <list>] [--no-hook] [--notes ask|auto] [--dry-run]
+  zerodb doctor [--harness <list>]
   zerodb connect <vscode|copilot> [--force] [--dry-run]
   zerodb connect <claude-code|codex> [--force] [--no-hook] [--notes ask|auto] [--dry-run]
   zerodb disconnect <vscode|copilot|claude-code|codex>
@@ -45,12 +46,13 @@ const USAGE: &str = "usage:
   3 when a write may or may not be saved.
   studio serves a read-only page on 127.0.0.1 and opens it. It runs until Ctrl-C.
   setup finds VS Code, Copilot CLI, Claude Code and Codex, asks which to connect, shows the
-  plan, then connects them and checks each. See zerodb setup --help.";
+  plan, then connects them and checks each. See zerodb setup --help.
+  doctor checks the install and writes nothing. See zerodb doctor --help.";
 
 /// Commands that use the home. A relative `ZERODB_HOME` fails them with exit 2, so none falls
 /// back to the default home. The hook prints `{}` for it, as for any error.
-const HOME_COMMANDS: [&str; 8] =
-    ["mcp", "connect", "setup", "studio", "append", "recent", "search", "fact"];
+const HOME_COMMANDS: [&str; 9] =
+    ["mcp", "connect", "setup", "doctor", "studio", "append", "recent", "search", "fact"];
 
 /// Flags of every command that talks to a server as a tenant. The first 5 pick the store.
 const CONNECT: [&str; 8] = [
@@ -111,6 +113,11 @@ fn main() -> ExitCode {
             }
             "setup" => flags(rest, &["--harness", "--notes"], &["--yes", "--no-hook", "--dry-run"])
                 .and_then(setup),
+            "doctor" if rest.iter().any(|arg| arg == "--help") => {
+                println!("{}", zerodb::doctor::USAGE);
+                Some(0)
+            }
+            "doctor" => flags(rest, &["--harness"], &[]).and_then(doctor),
             "disconnect" => match rest {
                 [name] => Harness::parse(name).map(zerodb::connect::disconnect),
                 _ => None,
@@ -212,6 +219,15 @@ fn setup(mut flags: HashMap<String, String>) -> Option<u8> {
         notes: notes(flags.remove("--notes"))?,
         dry_run: flags.contains_key("--dry-run"),
     }))
+}
+
+/// `zerodb doctor`.
+fn doctor(mut flags: HashMap<String, String>) -> Option<u8> {
+    let harnesses = match flags.remove("--harness") {
+        Some(list) => Some(zerodb::setup::apps(&list)?),
+        None => None,
+    };
+    Some(zerodb::doctor::run(harnesses))
 }
 
 fn report<T>(result: Result<T, impl std::fmt::Display>) -> Result<T, u8> {

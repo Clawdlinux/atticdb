@@ -13,8 +13,8 @@
 //! Codex keeps 1 approval per hook in `config.toml`. zerodb never writes those.
 
 use super::claude::{
-    add_hook, drop_hooks, edit_file, find_program, hook_args, hook_command, our_group, run,
-    shell_line, split, Edit, Part,
+    add_hook, drop_hooks, edit_file, find_program, hook_args, hook_binaries, hook_command,
+    our_group, run, shell_line, split, Edit, Part,
 };
 use super::{
     absolute_env, add_or_update, binary, delete, moved_home, planned, read, write, Harness, Line,
@@ -136,6 +136,30 @@ pub(super) fn connect(hook: bool, notes: Notes, mode: Mode) -> Report {
     lines.push(guide);
     warnings.extend(too_big);
     Report { lines, warnings, next, stopped: None, hook: hook_state, hooks_off: off }
+}
+
+/// The zerodb binaries that Codex's MCP entry and hook run, for [`super::binaries`]. The
+/// entry's `command` counts when it is a basic string, as zerodb writes it.
+pub(super) fn binaries() -> Vec<(PathBuf, String)> {
+    let mut found = Vec::new();
+    if let Ok(config) = config_file() {
+        let bytes = read(&config).ok().flatten().map(|(bytes, _)| bytes).unwrap_or_default();
+        let entries = std::str::from_utf8(&bytes).map_err(|_| String::new()).and_then(scan);
+        for entry in entries.unwrap_or_default() {
+            let Item::Key(path, value) = &entry.item else { continue };
+            if *path != ["mcp_servers", "zerodb", "command"] {
+                continue;
+            }
+            // zerodb escapes only `\` and `"`, the same in TOML and JSON.
+            let exe = serde_json::from_str::<String>(value).ok();
+            let exe = exe.filter(|exe| Path::new(exe).is_absolute());
+            found.extend(exe.map(|exe| (config.clone(), exe)));
+        }
+    }
+    if let Ok(hooks) = hooks_file() {
+        found.extend(hook_binaries(Harness::Codex, &hooks));
+    }
+    found
 }
 
 /// Checks that `codex mcp get zerodb --json`, which only reads config, shows zerodb's entry

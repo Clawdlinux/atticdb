@@ -1,4 +1,4 @@
-use crate::support::{self, data_dir, fake_program, tree, Dir, Holders, Process};
+use crate::support::{self, data_dir, fake_program, tree, tree_outside, Dir, Holders, Process};
 use serde_json::{json, Value};
 use std::ffi::OsString;
 use std::fs::File;
@@ -43,8 +43,21 @@ fn setup(
     args: &[&str],
     stdin: &str,
 ) -> (Option<i32>, String, String) {
+    zerodb("setup", home, cwd, path, env, args, stdin)
+}
+
+/// [`setup`] for any `verb`.
+fn zerodb(
+    verb: &str,
+    home: &Path,
+    cwd: &Path,
+    path: &OsString,
+    env: &[(&str, &str)],
+    args: &[&str],
+    stdin: &str,
+) -> (Option<i32>, String, String) {
     let mut command = support::command(env!("CARGO_BIN_EXE_zerodb"));
-    command.arg("setup").args(args).current_dir(cwd).env("HOME", home).env("PATH", path);
+    command.arg(verb).args(args).current_dir(cwd).env("HOME", home).env("PATH", path);
     command.env_remove("ZERODB_TOKEN").env_remove("ZERODB_SETUP_INTERACTIVE");
     command.envs(env.iter().copied()).stdin(Stdio::piped());
     let mut process = Process::start(&mut command);
@@ -408,4 +421,248 @@ fn setup_store_check_waits_for_a_starting_server() {
     assert_eq!(code, Some(0), "{out}{err}");
     assert!(out.contains("\n  Codex: ok\n"), "{out}");
     assert!(took >= Duration::from_secs(8), "answered only by the late server: {took:?}");
+}
+
+/// A zerodb binary that doesn't exist.
+const OLD: &str = "/old/zerodb";
+/// What doctor says about a home that isn't set up.
+const NOT_SET_UP: &str = "not set up yet, run zerodb setup\n";
+/// Codex's line when `codex mcp get zerodb --json` shows this zerodb.
+const GET_OK: &str = "  codex mcp get zerodb: ok\n";
+
+/// A case, `HOME`, `ZERODB_HOME`, `PATH`, the args, the exit code, and text stdout or stderr
+/// shows.
+type DoctorRow<'a> =
+    (&'a str, &'a Path, Option<&'a Path>, &'a OsString, &'a [&'a str], i32, String);
+
+/// `zerodb doctor` on a home that setup connected to all 4 fake apps, then with 1 thing
+/// wrong per row. A failed check, or a home that isn't set up, exits 1. A warning, or an app
+/// not found, exits 0. It runs only `codex mcp get`, and writes nothing in `HOME` or the home
+/// but the server's own files in `data/`.
+#[test]
+fn doctor_checks_an_install_and_writes_nothing() {
+    let dir = Dir::new();
+    let (path, claude_log, codex_log) = fakes(&dir.0);
+    let (home, bare) = (dir.0.join("h"), dir.0.join("n"));
+    let no_apps = OsString::from(dir.0.join("empty"));
+    for made in [&home, &bare, &dir.0.join("empty")] {
+        std::fs::create_dir(made).unwrap();
+    }
+    let synced = dir.0.join("Dropbox/zerodb");
+    let (empty_home, no_data, bad) = (dir.0.join("e"), dir.0.join("p"), dir.0.join("bad"));
+    for made in [&synced, &empty_home, &no_data.join("data"), &bad.join("data")] {
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(made).unwrap();
+    }
+    std::fs::remove_dir(no_data.join("data")).unwrap();
+    // A dangling zerodb.json link, and a data link to a real, empty dir.
+    let (config_link, data_link, real) = (dir.0.join("cl"), dir.0.join("dl"), dir.0.join("rd"));
+    for made in [&config_link.join("data"), &data_link, &real] {
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(made).unwrap();
+    }
+    std::os::unix::fs::symlink(dir.0.join("missing"), config_link.join("zerodb.json")).unwrap();
+    std::os::unix::fs::symlink(&real, data_link.join("data")).unwrap();
+    for config in [&no_data, &bad, &data_link].map(|home| home.join("zerodb.json")) {
+        std::fs::write(&config, "{").unwrap();
+        support::chmod(&config, 0o600);
+    }
+    let _holders = Holders(vec![data_dir(&home), synced.join("data")]);
+    let (code, out, err) = setup(&home, &dir.0, &path, &[], &["--yes"], "");
+    assert_eq!(code, Some(0), "{out}{err}");
+    // A read sets up the synced home.
+    let env = [("ZERODB_HOME", synced.to_str().unwrap())];
+    let list = ["list", "--prefix", "x"];
+    let (code, out, err) = zerodb("fact", &bare, &dir.0, &no_apps, &env, &list, "");
+    assert_eq!(code, Some(0), "{out}{err}");
+    let no_codex = std::env::join_paths([dir.0.join("claude"), dir.0.join("other")]).unwrap();
+    let link = dir.0.join("zerodb-link");
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_zerodb"), &link).unwrap();
+    let (claude_calls, codex_calls) = (calls(&claude_log), calls(&codex_log));
+    let exe = std::fs::canonicalize(env!("CARGO_BIN_EXE_zerodb")).unwrap();
+    let (vscode, agents) = (vscode_file(&home), home.join(".codex/AGENTS.md"));
+    let zerodb_home = data_dir(&home).parent().unwrap().to_owned();
+    let (z, v, n) = (zerodb_home.display(), vscode.display(), data_dir(&bare));
+    let n = n.parent().unwrap().display().to_string();
+    let uid = rustix::process::geteuid().as_raw();
+    let fix = |name: &str| format!("run zerodb setup --harness {name}, or zerodb connect {name}");
+    let (shared_hook, version) =
+        (home.join(".copilot/hooks/zerodb.json"), env!("CARGO_PKG_VERSION"));
+    let sandbox = "Sandboxes:\n  Agents in a sandbox need read and write access to";
+    let unset =
+        format!("Home:\n  {n} (ZERODB_HOME is not set): not set up yet, run zerodb setup\n");
+    let unset = format!("{unset}{sandbox} {n}.\n");
+    let healthy = format!("zerodb:\n  version {version}, {}: ok\nHome:\n  {z} (", exe.display());
+    let healthy = format!("{healthy}ZERODB_HOME is not set): ok\n");
+    let guide =
+        format!("\nCodex:\n  parts: 1 would change, {}\n    {}", fix("codex"), agents.display());
+    let guide = format!("{guide}: add the zerodb guide\n  binary: ok\n  hook: ok\n{GET_OK}");
+    let hook = shared_hook.display();
+    let (settings, toml) = (home.join(".claude/settings.json"), home.join(".codex/config.toml"));
+    let gone =
+        |file: &Path| format!("    {} runs /old/zerodb, which no longer exists\n", file.display());
+    let stale = [
+        format!("VS Code:\n  parts: 2 would change, {}\n", fix("vscode")),
+        format!("    {v}: update the MCP entry\n    {hook}: update the sessionStart hook\n"),
+        format!("  binary: stale, {}\n{}", fix("vscode"), gone(&vscode)),
+        format!("    {hook} runs /bin/sh, not this zerodb, {}\n", exe.display()),
+        // The hook would change, so it isn't taken as left out.
+        format!("Claude Code:\n  parts: 1 would change, {}\n", fix("claude-code")),
+        format!("    {}: update the SessionStart hook\n", settings.display()),
+        format!("  binary: stale, {}\n{}", fix("claude-code"), gone(&settings)),
+        format!("Codex:\n  parts: 1 would change, {}\n", fix("codex")),
+        format!("    {}: update the MCP entry\n", toml.display()),
+        format!("  binary: stale, {}\n{}  hook: ok\n", fix("codex"), gone(&toml)),
+        format!("  codex mcp get zerodb: codex mcp get zerodb --json does not show {}", json!(exe)),
+        format!(" mcp --agent codex\n{sandbox}"),
+    ];
+    let mode =
+        format!("  {z} (ZERODB_HOME is not set): {z} must be a directory owned by uid {uid}");
+    let mode = format!("{mode}, mode 0700 or stricter, found mode 0755 owned by uid {uid}\n");
+    let moved = Some(synced.as_path());
+    let config = format!("\nServer and store: config {}/zerodb.json: invalid JSON", bad.display());
+    let moved_ok = format!("  {} (set by ZERODB_HOME): ok\n", synced.display());
+    let moved_unset =
+        |home: &Path| format!("  {} (set by ZERODB_HOME): {NOT_SET_UP}", home.display());
+    let both = ["--harness", "copilot,bogus"];
+    let stale_apps = ["--harness", "codex,vscode,claude-code"];
+    let (codex, copilot) = (["--harness", "codex"], ["--harness", "copilot"]);
+    let get_failed = "\n  codex mcp get zerodb: codex mcp get zerodb --json failed";
+    let not_verified = "\n  hook: ok\n  codex mcp get zerodb: not verified: codex not found\n";
+    let off =
+        format!("\n  note: {} sets hooks = false in [features], so Codex runs", toml.display());
+    let linked = format!("Copilot CLI:\n  parts: 1 would change, {}\n    ", fix("copilot"));
+    let entry = home.join(".copilot/mcp-config.json");
+    let linked =
+        format!("{linked}{}: update the MCP entry\n  binary: ok\n  hook: ok\n", entry.display());
+    let odd = |home: &Path, name: &str, kind: &str| {
+        let path = home.join(name);
+        format!("{} is a symlink or not a {kind}; fix it by hand\n", path.display())
+    };
+    let config_odd = odd(&config_link, "zerodb.json", "regular file");
+    let data_odd = odd(&data_link, "data", "directory");
+    let rows: [DoctorRow<'_>; 16] = [
+        ("not set up", &bare, None, &no_apps, &[], 1, unset),
+        ("empty ZERODB_HOME", &bare, Some(&empty_home), &no_apps, &[], 1, moved_unset(&empty_home)),
+        ("no data dir", &bare, Some(&no_data), &no_apps, &[], 1, moved_unset(&no_data)),
+        ("config link", &bare, Some(&config_link), &no_apps, &[], 1, config_odd),
+        ("data link", &bare, Some(&data_link), &no_apps, &[], 1, data_odd),
+        ("healthy", &home, None, &path, &[], 0, healthy),
+        ("part would change", &home, None, &path, &[], 1, guide),
+        ("stale binary", &home, None, &path, &stale_apps, 1, stale.concat()),
+        ("home 0755", &home, None, &path, &[], 1, mode),
+        ("unknown harness", &home, None, &path, &both, 2, "usage:".into()),
+        ("synced folder", &bare, moved, &no_apps, &[], 0, moved_ok),
+        ("bad config", &bare, Some(&bad), &no_apps, &[], 1, config),
+        ("codex bad toml", &home, None, &path, &codex, 1, get_failed.into()),
+        ("codex not on PATH", &home, None, &no_codex, &codex, 0, not_verified.into()),
+        ("codex hooks off", &home, None, &path, &codex, 0, off),
+        ("symlinked binary", &home, None, &path, &copilot, 1, linked),
+    ];
+    let shared = &shared_hook;
+    for (case, row_home, moved, path, args, wanted, said) in rows {
+        let files = [&agents, &vscode, shared, &settings, &toml, &entry];
+        let saved = files.map(|file| std::fs::read(file).unwrap());
+        match case {
+            "part would change" => std::fs::remove_file(&agents).unwrap(),
+            // A binary that is gone, and one that exists but isn't this one.
+            "stale binary" => {
+                let mut config = read(&vscode);
+                config["servers"]["zerodb"]["command"] = json!(OLD);
+                std::fs::write(&vscode, config.to_string()).unwrap();
+                let exe = exe.to_str().unwrap();
+                for (file, other) in [(shared, "/bin/sh"), (&settings, OLD), (&toml, OLD)] {
+                    let text = std::fs::read_to_string(file).unwrap();
+                    std::fs::write(file, text.replace(exe, other)).unwrap();
+                }
+            }
+            // Valid for zerodb's scanner, but not TOML, so only codex finds it.
+            "codex bad toml" => {
+                std::fs::write(&toml, [b"model = ???\n", &saved[4][..]].concat()).unwrap()
+            }
+            "codex hooks off" => {
+                std::fs::write(&toml, [b"[features]\nhooks = false\n\n", &saved[4][..]].concat())
+                    .unwrap()
+            }
+            "symlinked binary" => {
+                let mut config = read(&entry);
+                config["mcpServers"]["zerodb"]["command"] = json!(link.to_str().unwrap());
+                std::fs::write(&entry, config.to_string()).unwrap();
+            }
+            "home 0755" => support::chmod(&zerodb_home, 0o755),
+            _ => {}
+        }
+        // HOME and the home it names, or ZERODB_HOME, each without the server's `data/`.
+        let mut homes = vec![(row_home.to_owned(), data_dir(row_home))];
+        homes.extend(moved.map(|moved| (moved.to_owned(), moved.join("data"))));
+        let own = || homes.iter().map(|(home, data)| tree_outside(home, Some(data))).collect();
+        let before: Vec<_> = own();
+        let moved = moved.map(|moved| ("ZERODB_HOME", moved.to_str().unwrap()));
+        let env: Vec<_> = moved.into_iter().collect();
+        let (code, out, err) = zerodb("doctor", row_home, &dir.0, path, &env, args, "");
+        assert_eq!(code, Some(wanted), "{case}: {out}{err}");
+        assert!(out.contains(&said) || err.contains(&said), "{case}: {out}{err}");
+        assert_eq!(own(), before, "{case}: nothing written");
+        assert_eq!(out.contains(sandbox), wanted != 2, "{case}: {out}");
+        match case {
+            "not set up" => assert!(tree(&bare).is_empty(), "{case}: no home made"),
+            "config link" | "data link" => {
+                let skipped = "\nServer and store: skipped, fix the home first\nSandboxes:\n";
+                assert!(out.contains(skipped), "{case}: {out}");
+                assert!(tree(&real).is_empty(), "{case}: nothing under the link");
+                let link = std::fs::read_link(data_link.join("data")).unwrap();
+                assert_eq!(link, real, "{case}: the data link stays");
+            }
+            "empty ZERODB_HOME" | "no data dir" => {
+                let skipped = "\nServer and store: skipped, set it up first\nSandboxes:\n";
+                assert!(out.contains(skipped), "{case}: {out}");
+                assert!(tree(&empty_home).is_empty(), "{case}: no config, token or data/");
+                assert!(!no_data.join("data").exists(), "{case}: no data/");
+            }
+            "codex bad toml" => assert!(!out.contains("Error loading"), "{case}: {out}"),
+            "codex hooks off" => {
+                let warned = "\n  hook: warning: Codex's hooks are off, so memory won't load at \
+                              chat start. Turn them on in [features] in config.toml: remove \
+                              hooks = false, or set hooks = true\n";
+                assert!(out.contains(warned), "{case}: {out}");
+                assert!(!out.contains("hook: ok"), "{case}: {out}");
+            }
+            "healthy" => {
+                for app in ["Copilot CLI", "VS Code", "Claude Code", "Codex"] {
+                    let get = if app == "Codex" { GET_OK } else { "" };
+                    let ok = format!("\n{app}:\n  parts: ok\n  binary: ok\n  hook: ok\n{get}");
+                    assert!(out.contains(&ok), "{case}: {app}: {out}");
+                }
+                let lines: Vec<&str> = out.lines().collect();
+                assert!(lines[4].starts_with("  free space: "), "{case}: {out}");
+                assert!(lines[4].contains(" free, the floor is "), "{case}: {out}");
+                assert!(lines[5].starts_with("  filesystem: "), "{case}: {out}");
+                assert!(lines[5].ends_with(": ok"), "{case}: {out}");
+                assert_eq!(lines[6..8], ["  synced folder: ok", "Server and store: ok"]);
+            }
+            "stale binary" => assert!(!out.contains("Copilot CLI"), "{case}: {out}"),
+            "home 0755" => {
+                assert!(out.contains("\nServer and store: skipped, fix the home first\n"));
+                assert!(!out.contains("Codex"), "{case}: {out}");
+                let mode = std::fs::metadata(&zerodb_home).unwrap().permissions();
+                assert_eq!(std::os::unix::fs::PermissionsExt::mode(&mode) & 0o777, 0o755);
+                support::chmod(&zerodb_home, 0o700);
+            }
+            "synced folder" => {
+                let warned = "\n  synced folder: warning: the home is in Dropbox, which may copy \
+                              the store while it is written. Keep the home outside synced \
+                              folders, with ZERODB_HOME\nServer and store: ok\n";
+                assert!(out.contains(warned), "{case}: {out}");
+                assert!(out.contains("\nCodex: not found\nSandboxes:\n"), "{case}: {out}");
+                assert!(tree(&bare).is_empty(), "{case}: HOME untouched");
+            }
+            _ => {}
+        }
+        for (file, bytes) in files.into_iter().zip(saved) {
+            std::fs::write(file, bytes).unwrap();
+        }
+    }
+    assert_eq!(calls(&claude_log), claude_calls, "claude never ran");
+    let gets = &calls(&codex_log)[codex_calls.len()..];
+    assert!(gets.iter().all(|args| *args == ["mcp", "get", "zerodb", "--json"]), "{gets:?}");
+    let others = dir.0.join("other");
+    assert!(!others.join("copilot.argv").exists() && !others.join("code.argv").exists());
 }

@@ -63,7 +63,7 @@ const CODEX_HOOKS_OFF: &str = "Codex: hooks are off ([features] hooks = false in
 const STORE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The order apps are listed and connected in: the Copilot ones, then Claude Code and Codex.
-const ORDER: [Harness; 4] =
+pub(crate) const ORDER: [Harness; 4] =
     [Harness::Copilot, Harness::Vscode, Harness::ClaudeCode, Harness::Codex];
 
 /// The apps in a comma list of `vscode`, `copilot`, `claude-code` and `codex`, in [`ORDER`].
@@ -77,7 +77,7 @@ pub fn apps(list: &str) -> Option<Vec<Harness>> {
 }
 
 /// The app's name in sentences.
-fn title(harness: Harness) -> &'static str {
+pub(crate) fn title(harness: Harness) -> &'static str {
     match harness {
         Harness::Vscode => "VS Code",
         Harness::Copilot => "Copilot CLI",
@@ -370,7 +370,7 @@ fn in_place(line: &Line) -> bool {
 /// Runs `zerodb hook session-start --harness <harness>` with the stdin that harness gives it
 /// for a chat in `cwd`. It must exit 0 within [`HOOK_TIMEOUT`] and print JSON. Its output,
 /// which holds memory, is never shown.
-fn check_hook(harness: Harness, cwd: &Path) -> Result<(), String> {
+pub(crate) fn check_hook(harness: Harness, cwd: &Path) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|error| format!("no zerodb binary: {error}"))?;
     // The harness sends `cwd` as a JSON string, which must be UTF-8.
     let cwd = cwd.to_str().ok_or("the current dir is not UTF-8, so it can't go in JSON")?;
@@ -423,7 +423,7 @@ fn check_hook(harness: Harness, cwd: &Path) -> Result<(), String> {
 }
 
 /// Reads `fact_list` from the home, as the hook does for a chat in `cwd`.
-fn check_store(cwd: &Path) -> Result<(), String> {
+pub(crate) fn check_store(cwd: &Path) -> Result<(), String> {
     let session = crate::home::repo(cwd).unwrap_or_else(|| "setup".into());
     let mut home = crate::mcp::HomeReader::new(&session, Instant::now() + STORE_TIMEOUT)?;
     home.read("setup", "fact_list", &json!({"prefix": "user/", "limit": 1})).map(drop)

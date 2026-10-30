@@ -114,7 +114,8 @@ pub struct Report {
     pub warnings: Vec<String>,
     /// What to do next, printed last. Empty in Plan mode.
     pub next: Vec<String>,
-    /// What the SessionStart hook part did, for Claude Code and Codex when it was asked for.
+    /// What the SessionStart hook part did: for Claude Code and Codex when it was asked for,
+    /// and the shared sessionStart hook for VS Code and Copilot CLI.
     pub hook: Option<State>,
     /// Whether the harness's config turns hooks off, so its hook never runs. Codex only.
     pub hooks_off: bool,
@@ -273,7 +274,7 @@ pub(crate) fn copilot_home() -> Result<PathBuf, String> {
 }
 
 /// The absolute path of the running binary, which must be UTF-8 to fit in JSON.
-fn binary() -> Result<String, String> {
+pub(crate) fn binary() -> Result<String, String> {
     let exe = std::env::current_exe().and_then(std::fs::canonicalize);
     let exe = exe.map_err(|error| format!("cannot find the zerodb binary: {error}"))?;
     exe.into_os_string().into_string().map_err(|_| "the zerodb binary's path must be UTF-8".into())
@@ -327,7 +328,7 @@ pub fn connect(harness: Harness, options: Options, mode: Mode) -> Report {
 
 /// [`connect`] for VS Code and Copilot CLI.
 fn connect_shared(harness: Harness, force: bool, mode: Mode) -> Report {
-    let mut lines = Vec::new();
+    let (mut lines, mut hook_state) = (Vec::new(), None);
     let result = (|| {
         let moved = moved_home(harness)?;
         if !force {
@@ -346,7 +347,9 @@ fn connect_shared(harness: Harness, force: bool, mode: Mode) -> Report {
         let guard = (!force).then_some(data.as_path());
         let entry = harness.entry(&exe, moved.as_deref());
         lines.push(edit(harness, Some(entry), guard, mode)?);
-        lines.push(set_hook(&exe, moved.as_deref(), mode)?);
+        let hook = set_hook(&exe, moved.as_deref(), mode)?;
+        hook_state = Some(hook.state);
+        lines.push(hook);
         lines.push(set_guide(mode)?);
         Ok::<_, String>(split)
     })();
@@ -355,7 +358,13 @@ fn connect_shared(harness: Harness, force: bool, mode: Mode) -> Report {
         Err(error) => Report::stopped(1, error),
     };
     report.lines = lines;
+    report.hook = hook_state;
     report
+}
+
+/// Whether `name` is an executable on `PATH`, as zerodb finds the harness programs.
+pub fn on_path(name: &str) -> bool {
+    claude::find_program(name).is_some()
 }
 
 /// Checks that `codex mcp get zerodb --json`, which only reads config, shows zerodb's entry.
@@ -678,15 +687,50 @@ fn set_hook(exe: &str, home: Option<&str>, mode: Mode) -> Result<Line, String> {
 /// Whether `bytes` are exactly the hook zerodb writes for some absolute binary path, with
 /// or without a `ZERODB_HOME`, so a hook from a moved or other zerodb binary counts too.
 fn ours(bytes: &[u8]) -> bool {
+    hook_exe(bytes).is_some()
+}
+
+/// The binary path in `bytes` when they are exactly the hook zerodb writes, by [`ours`].
+fn hook_exe(bytes: &[u8]) -> Option<String> {
     let hook: Value = serde_json::from_slice(bytes).unwrap_or_default();
     let command = &hook["hooks"]["sessionStart"][0];
     let bash = command["bash"].as_str().unwrap_or_default();
     let quoted = bash.strip_suffix(" hook session-start").and_then(|q| q.strip_prefix('\''));
     let exe = quoted.and_then(|q| q.strip_suffix('\'')).map(|q| q.replace(r"'\''", "'"));
-    let exe = exe.filter(|exe| Path::new(exe).is_absolute());
+    let exe = exe.filter(|exe| Path::new(exe).is_absolute())?;
     // Writing the hook again for that path and home must give the same bytes.
     let home = command["env"][HOME_ENV].as_str();
-    exe.and_then(|exe| hook_text(&exe, home).ok()).is_some_and(|text| text.as_bytes() == bytes)
+    let same = hook_text(&exe, home).is_ok_and(|text| text.as_bytes() == bytes);
+    same.then_some(exe)
+}
+
+/// The zerodb binaries that `harness`'s MCP entry and hook run: each file, with the absolute
+/// path it names. A missing or unreadable file names none. It only reads.
+pub fn binaries(harness: Harness) -> Vec<(PathBuf, String)> {
+    match harness {
+        Harness::ClaudeCode => claude::binaries(),
+        Harness::Codex => codex::binaries(),
+        Harness::Vscode | Harness::Copilot => {
+            let mut found = Vec::new();
+            if let Ok(path) = harness.file() {
+                let entry = load(&path)
+                    .ok()
+                    .and_then(|(_, root)| entry_exe(root.get(harness.section())?.get("zerodb")?));
+                found.extend(entry.map(|exe| (path, exe)));
+            }
+            if let Ok(path) = hook_file() {
+                let exe = read(&path).ok().flatten().and_then(|(bytes, _)| hook_exe(&bytes));
+                found.extend(exe.map(|exe| (path, exe)));
+            }
+            found
+        }
+    }
+}
+
+/// The program an MCP entry runs, when it is an absolute path.
+fn entry_exe(entry: &Value) -> Option<String> {
+    let command = entry["command"].as_str().filter(|command| Path::new(command).is_absolute());
+    command.map(str::to_owned)
 }
 
 /// Whether `harness`'s config has a zerodb entry. A config that is not plain JSON, such as

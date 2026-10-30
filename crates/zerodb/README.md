@@ -11,6 +11,7 @@ zerodb connect vscode                            # adds zerodb to VS Code's MCP 
 zerodb connect claude-code                       # adds zerodb to Claude Code, with its hook
 zerodb connect codex                             # adds zerodb to Codex, with its hook
 zerodb studio                                    # a read-only page about the store
+zerodb doctor                                    # checks the install and writes nothing
 zerodb verify --data-dir ./data                  # checks a stopped data dir on a copy
 zerodb recover --truncate-at <lsn> --data-dir ./data
 ```
@@ -73,6 +74,52 @@ The end of stdin exits 2. So do 3 answers it can't read.
 | 2 | A usage error, no terminal without `--yes`, or no answer. Also an app that stopped with exit 2 |
 
 `--dry-run` exits with the code of an app whose plan stopped. Else it exits 1 when a part would be skipped, else 0.
+
+## `zerodb doctor`
+
+```sh
+zerodb doctor                    # checks every app it finds
+zerodb doctor --harness codex    # checks only these apps, a comma list as in setup
+```
+
+It checks the install and writes nothing.
+Each check prints 1 line: `ok`, or the problem and what to do. They run in this order.
+
+- **zerodb:** the version and the path of this binary.
+- **Home:** the path, and whether `ZERODB_HOME` set it.
+  A missing home, or 1 without `zerodb.json` or `data/`, says to run `zerodb setup`. The server and app checks are then skipped.
+  Doctor never creates the home, its config, a token or `data/`.
+  `zerodb.json` must be a regular file and `data/` a directory, not symlinks. Else it fails and skips them too.
+  An existing home gets the owner and mode checks that setup uses, with the same message. If it fails them, the server and app checks are skipped.
+- **Free space:** the bytes free on the home's disk, against the store's floor. The floor is the smaller of 1 GiB and 5% of the disk.
+  Below the floor, writes stop, so the check fails. Below 2x the floor, it warns.
+- **Filesystem:** it warns on NFS, SMB, CIFS or FUSE. Locks and syncs may not hold there.
+- **Synced folder:** it warns when the home is in iCloud Drive, in `~/Library/CloudStorage`, or in a `Dropbox`, `OneDrive` or `Google Drive` folder.
+- **Server and store:** the store must answer `fact_list`. This reads as any zerodb read does.
+  So it may start the home's server, which writes its own files in `data/`.
+- **Each app:** the apps it finds, or those in `--harness`. An app that isn't found prints `not found`. That is not a failure.
+  - **parts:** a plan, as in `zerodb setup --dry-run`, must find every part in place. Else it lists each part that would change.
+    A missing Claude Code or Codex hook counts as left out on purpose, as with `--no-hook`. So do the rules `--notes ask` leaves out.
+  - **binary:** it fails when an entry or hook runs another zerodb binary, or one that no longer exists. That happens after an upgrade or a move.
+    A link to this binary counts as this binary.
+  - **hook:** when the hook is in place, it must print JSON within 5 s.
+    If `hooks = false` in `[features]` turns Codex's hooks off, it warns instead.
+  - **codex mcp get zerodb:** for Codex, `codex mcp get zerodb --json` must show the entry. It only reads config, and its output is never shown.
+    Codex parses all of `config.toml`, so this also catches TOML that isn't valid. Without `codex` on `PATH`, it says it can't check.
+
+  Notes the plan gives, such as another app on another home, print as `note:` lines.
+
+  The fix for parts and binary is `zerodb setup --harness <name>` or `zerodb connect <name>`.
+- **Sandboxes:** a note that agents in a sandbox need read and write access to the home. Doctor runs outside any sandbox, so it can't check one.
+
+Copilot CLI's sandbox needs the home in its read and write paths, or zerodb can't reach its memory there.
+In Copilot CLI, run `/sandbox`, and on the Filesystem tab add the home under User-configured paths as Read/Write: `~/Library/Application Support/zerodb` on macOS, `~/.local/share/zerodb` on Linux, or your `ZERODB_HOME`.
+
+| Exit code | Meaning |
+|---|---|
+| 0 | Every check is ok or warns. Apps that aren't found don't count |
+| 1 | A check failed, a part would change, or the home isn't set up |
+| 2 | A usage error, such as an unknown app name |
 
 ## `zerodb serve`
 

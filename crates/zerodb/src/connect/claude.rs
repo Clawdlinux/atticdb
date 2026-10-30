@@ -12,8 +12,8 @@
 //! identical part added by hand.
 
 use super::{
-    absolute_env, add_or_update, binary, entry_home, home_words, moved_home, planned, read,
-    refuse_flags, save, write, Harness, Line, Mode, Report, State, COPILOT_SHARED,
+    absolute_env, add_or_update, binary, entry_exe, entry_home, home_words, moved_home, planned,
+    read, refuse_flags, save, write, Harness, Line, Mode, Report, State, COPILOT_SHARED,
 };
 use crate::home::{user_home, HOME_ENV};
 use crate::jsonedit;
@@ -599,21 +599,51 @@ fn unquote(text: &str) -> Option<(String, &str)> {
 /// path and any home. The binary's file name doesn't count, as an install may name it
 /// `zerodb-0.1.0`.
 fn our_command(harness: Harness, command: &str) -> bool {
-    let parse = || {
-        let (home, rest) = match command.strip_prefix(&format!("{HOME_ENV}=")) {
-            Some(rest) => {
-                let (home, rest) = unquote(rest)?;
-                (Some(home), rest.strip_prefix(' ')?)
-            }
-            None => (None, command),
-        };
-        let (exe, rest) = unquote(rest)?;
-        // Writing the command again for that binary and home must give the same text.
-        let again = hook_command(harness, &exe, home.as_deref());
-        let args = hook_args(harness);
-        (Path::new(&exe).is_absolute() && rest == args && again == command).then_some(())
+    command_exe(harness, command).is_some()
+}
+
+/// The binary path in `command` when it is a hook command zerodb writes, by [`our_command`].
+fn command_exe(harness: Harness, command: &str) -> Option<String> {
+    let (home, rest) = match command.strip_prefix(&format!("{HOME_ENV}=")) {
+        Some(rest) => {
+            let (home, rest) = unquote(rest)?;
+            (Some(home), rest.strip_prefix(' ')?)
+        }
+        None => (None, command),
     };
-    parse().is_some()
+    let (exe, rest) = unquote(rest)?;
+    // Writing the command again for that binary and home must give the same text.
+    let again = hook_command(harness, &exe, home.as_deref());
+    let args = hook_args(harness);
+    (Path::new(&exe).is_absolute() && rest == args && again == command).then_some(exe)
+}
+
+/// The binaries that `harness`'s zerodb hook commands run in the strict JSON hooks file at
+/// `path`, each with `path`. A missing or unreadable file names none.
+pub(super) fn hook_binaries(harness: Harness, path: &Path) -> Vec<(PathBuf, String)> {
+    let Ok(Some((bytes, _))) = read(path) else { return Vec::new() };
+    let root: Value = serde_json::from_slice(&bytes).unwrap_or_default();
+    let groups = root["hooks"]["SessionStart"].as_array().cloned().unwrap_or_default();
+    let handlers =
+        groups.iter().flat_map(|group| group["hooks"].as_array().cloned().unwrap_or_default());
+    let exe = |handler: Value| {
+        let command = handler["command"].as_str().filter(|_| handler["type"] == "command")?;
+        command_exe(harness, command)
+    };
+    handlers.filter_map(exe).map(|exe| (path.to_owned(), exe)).collect()
+}
+
+/// The zerodb binaries that Claude Code's MCP entry and hook run, for [`super::binaries`].
+pub(super) fn binaries() -> Vec<(PathBuf, String)> {
+    let mut found = Vec::new();
+    if let Ok(state) = state_file() {
+        let exe = current(&state).ok().flatten().and_then(|entry| entry_exe(&entry));
+        found.extend(exe.map(|exe| (state, exe)));
+    }
+    if let Ok(settings) = settings_file() {
+        found.extend(hook_binaries(Harness::ClaudeCode, &settings));
+    }
+    found
 }
 
 /// Whether `group` is a SessionStart group whose every handler runs `harness`'s zerodb hook.
