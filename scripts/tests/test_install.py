@@ -227,6 +227,34 @@ def test_binary_that_does_not_run_installs_nothing(server, dirs):
     assert os.listdir(dirs[2]) == [], "the temp dir is removed"
 
 
+def test_directory_at_the_target_fails(server, dirs):
+    root, base, _ = server
+    publish(root / "releases/latest/download")
+    target = dirs[1] / "atticdb"
+    target.mkdir(parents=True)
+    (target / "keep").write_bytes(b"mine")
+    result = install(dirs, base)
+    assert result.returncode == 1, result.stdout
+    assert f"{target} is a directory. Move it away" in result.stderr
+    assert "installed" not in result.stdout
+    assert os.listdir(dirs[1]) == ["atticdb"], "no temp copy left"
+    assert os.listdir(target) == ["keep"] and (target / "keep").read_bytes() == b"mine"
+    assert os.listdir(dirs[2]) == [], "the temp dir is removed"
+
+
+def test_symlink_to_a_directory_at_the_target_fails(server, dirs, tmp_path):
+    root, base, _ = server
+    publish(root / "releases/latest/download")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    dirs[1].mkdir()
+    (dirs[1] / "atticdb").symlink_to(elsewhere)
+    result = install(dirs, base)
+    assert result.returncode == 1, result.stdout
+    assert "is a directory. Move it away" in result.stderr
+    assert os.listdir(dirs[1]) == ["atticdb"] and os.listdir(elsewhere) == []
+
+
 def test_unsupported_platform_points_to_source(server, dirs, tmp_path):
     _, base, requests = server
     fake = tmp_path / "fake"

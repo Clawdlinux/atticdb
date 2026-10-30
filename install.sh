@@ -139,10 +139,15 @@ main() {
     chmod 755 "$part"
     "$part" --version >/dev/null 2>&1 ||
         fail "the downloaded atticdb did not run from $dir. Nothing was installed."
+    # mv would put the file inside a directory, or a symlink to one, and report success.
+    if [ -d "$dest" ]; then
+        fail "$dest is a directory. Move it away and run the installer again. Nothing was installed."
+    fi
     mv -f "$part" "$dest"
     part=''
 
-    say "installed $("$dest" --version) at $dest"
+    installed=$("$dest" --version) || fail "$dest --version failed after the install."
+    say "installed $installed at $dest"
 
     found=$(command -v atticdb 2>/dev/null || true)
     case ":${PATH:-}:" in

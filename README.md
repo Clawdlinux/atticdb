@@ -24,6 +24,7 @@ The data directory must be mode `0700` (D75). Below a free-space floor AtticDB g
 
 ```sh
 curl -fsSL https://github.com/Clawdlinux/atticdb/releases/latest/download/install.sh | sh
+# If the installer printed an export PATH=... line, run that line first.
 atticdb setup --dry-run   # shows what it would change, writes nothing
 atticdb setup             # asks which apps, then wires them
 ```
