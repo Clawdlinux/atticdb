@@ -1,0 +1,5 @@
+date,harness,scenario,run,pass,atticdb_calls,input_tokens,output_tokens,cache_read_tokens,turns,wall_s,setup_exit,parse_ok,notes
+2026-10-31,codex,S2,1,1,"{""memory_search"":1}",61881,164,38400,1,13.3,0,1,"reply=Redis added two round trips per append, breaking the 1 ms p99 budget."
+2026-10-31,codex,S4,1,1,"{""fact_list"":2,""memory_append"":1}",165501,915,140544,1,29.3,0,1,"reply=Added `add(a, b)` to [calc.py](<root>/evalrepo/calc.py:1). Verified with `python3` assertions and `git diff --check`."
+2026-10-31,codex,S2,2,0,{},56557,300,36352,1,18.3,0,1,no memory_search call; reply lacks the reason; reply=I can’t find a recorded Redis decision—the project history only contains the initial commit.
+2026-10-31,codex,S4,2,0,{},120804,1313,113152,1,35.3,0,1,"no memory_append without session; reply=Added `add(a, b)` to [calc.py](<root>/evalrepo/calc.py:1). Verified with `python3` assertions."

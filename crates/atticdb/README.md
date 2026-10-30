@@ -506,7 +506,7 @@ At 4 s it prints `{}` and exits, whatever is blocking, stdin included. It always
 The stop cannot help if the harness stops reading the hook's output mid-line. That needs a stalled harness.
 
 ```text
-AtticDB memory for repo <repo> (facts under repo/<repo>/; snapshot at chat start; call memory_search or fact_list for more)
+AtticDB memory for repo <repo>, a snapshot from chat start: rules, facts under repo/<repo>/ and only the 5 newest notes. Older notes and decisions are not shown. Before saying why or when something was decided, call memory_search.
 Rules:
 - <key>: <content>
 This repo (<repo>):

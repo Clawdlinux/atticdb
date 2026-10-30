@@ -78,8 +78,24 @@ Turns are 1 per run, because `codex exec` reports 1 `turn.completed` per invocat
 - **S2, 0 of 2.** When a chat-start block is present, Codex answers from it and its priors, and never searches. Both runs made up a reason ("to keep the calculator stateless"). In B2, with an empty store and no block, it called `memory_search` once and `fact_list` twice in each run. The tables count all AtticDB calls.
 - **S4, 0 of 2.** Codex made the edit but never saved a summary note.
 
+## Codex, after the wording fix (#122, 2026-10-31)
+
+Only S2 and S4 were rerun, on Codex 0.147.0. 10 billed sessions. Rows: [`2026-10-31-122-codex.csv`](2026-10-31-122-codex.csv) (v1, 2 runs per cell) and [`2026-10-31-122-codex-v2.csv`](2026-10-31-122-codex-v2.csv) (v2, 3 runs per cell).
+
+- **v1:** the block header now says it holds only the 5 newest notes and to call `memory_search` for decisions. The guide says the same. S2 1 of 2, S4 1 of 2. The failed S2 run read git history instead of memory.
+- **v2, shipped:** the guide says to search before reading files or git history. It also makes `memory_append` the last step before the final reply.
+
+| Scenario | Before | v1 | v2 |
+|---|---|---|---|
+| S2 search | 0/2 | 1/2 | 3/3 |
+| S4 summary | 0/2 | 1/2 | 2/3 |
+
+The failed v2 S4 run made no AtticDB calls at all. A summary that never depends on the model needs a `Stop` hook. That is capture (#72), which waits for users to ask.
+
+The Claude Code rerun for these wording changes is still to do. Its eval login has to be renewed first.
+
 ## Takeaways
 
 - Claude Code with `atticdb setup`: memory works as designed for recall, search, save and summary.
-- Codex needs the guide in `AGENTS.md`, which #121 adds. It now saves rules. It doesn't yet search for history beyond the block, or save summaries without being asked.
+- Codex needs the guide in `AGENTS.md`, which #121 adds. It now saves rules. With the #122 wording it searches for history beyond the block, 3 of 3. It saves a summary note in 2 of 3 runs.
 - n is small: 1 or 2 runs per cell. These are behavior checks, not rates.

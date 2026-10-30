@@ -141,9 +141,11 @@ pub(crate) fn block_for(repo: &str, deadline: Instant) -> Result<Option<String>,
         lines.push(title);
         lines.extend(entries);
     }
+    // Codex read the old, shorter header as "this is all the memory there is" (#122).
     let header = format!(
-        "AtticDB memory for repo {repo} (facts under repo/{repo}/; snapshot at chat start; call \
-         memory_search or fact_list for more)"
+        "AtticDB memory for repo {repo}, a snapshot from chat start: rules, facts under \
+         repo/{repo}/ and only the {TURNS} newest notes. Older notes and decisions are not \
+         shown. Before saying why or when something was decided, call memory_search."
     );
     Ok((!lines.is_empty()).then(|| cap([header].into_iter().chain(lines))))
 }

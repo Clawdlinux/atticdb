@@ -88,8 +88,9 @@ fn session_start_prints_the_memory_block() {
     // A symlinked cwd names the repo it points into, as the adapter's `current_dir` does.
     std::os::unix::fs::symlink(home.join("app/src"), home.join("link")).unwrap();
     let block = format!(
-        "AtticDB memory for repo app (facts under repo/app/; snapshot at chat start; call \
-         memory_search or fact_list for more)\n\
+        "AtticDB memory for repo app, a snapshot from chat start: rules, facts under repo/app/ \
+         and only the 5 newest notes. Older notes and decisions are not shown. Before saying \
+         why or when something was decided, call memory_search.\n\
          Rules:\n- user/big-1: {}\n- user/big-2: {}\n\
          - user/style: short sentences\n- user/tabs: line 1 line 2\n\
          This repo (app):\n- repo/app/build: cargo build\n- repo/app/long: {}\n\

@@ -1,0 +1,7 @@
+date,harness,scenario,run,pass,atticdb_calls,input_tokens,output_tokens,cache_read_tokens,turns,wall_s,setup_exit,parse_ok,notes
+2026-10-31,codex,S2,1,1,"{""memory_search"":1}",60006,154,38400,1,7.2,0,1,reply=We dropped Redis because its two extra round trips per append broke the 1 ms p99 budget.
+2026-10-31,codex,S4,1,0,{},142031,1434,117248,1,36.0,0,1,"no memory_append without session; reply=Added `add(a, b)` to [calc.py](<root>/evalrepo/calc.py:1). Verified with `python3` compilation and assertions."
+2026-10-31,codex,S2,2,1,"{""memory_search"":1}",60078,161,38400,1,9.2,0,1,"reply=Redis added two round trips per append, breaking the 1 ms p99 budget."
+2026-10-31,codex,S4,2,1,"{""fact_list"":2,""memory_append"":1}",187649,1005,161792,1,23.2,0,1,"reply=Added `add(a, b)` to [calc.py](<root>/evalrepo/calc.py:6). Verified with `python3` assertions and `git diff --check`."
+2026-10-31,codex,S2,3,1,"{""memory_search"":1}",60059,162,38400,1,9.9,0,1,"reply=Redis added two round trips per append, breaking the 1 ms p99 budget."
+2026-10-31,codex,S4,3,1,"{""fact_list"":2,""memory_append"":1}",250266,1366,232192,1,47.4,0,1,"reply=Added `add(a, b)` to [calc.py](<root>/evalrepo/calc.py:1). Verified with `python3` assertions and `git diff --check`."
