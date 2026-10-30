@@ -95,6 +95,8 @@ jobs:
           echo "home: $home"
 
       - name: Install with curl | sh
+        # The alarm stops only the direct child. This bounds curl and sh too.
+        timeout-minutes: 3
         run: |
           # shellcheck source=/dev/null
           . "$SMOKE_LIB"
