@@ -568,6 +568,7 @@ fn launch_race_starts_one_server() {
     // Each row stops the server, then points `LOCK` at something a fresh adapter must not
     // trust. The adapter refuses it without sending the token, starts its own server, and
     // commits. `true` marks a fake listener the adapter probes, `false` one it never touches.
+    // An empty refusal marks a server that is just not running, which stderr must not report.
     type Setup = fn(&Path, &Path, &str) -> (Option<String>, Vec<(Seen, bool)>);
     let rows: &[(&str, Setup, &str)] = &[
         (
@@ -618,7 +619,7 @@ fn launch_race_starts_one_server() {
                 std::fs::write(staging.join("s"), "").unwrap();
                 (None, vec![])
             },
-            "Connection refused",
+            "",
         ),
     ];
     for (case, setup, refusal) in rows {
@@ -639,7 +640,11 @@ fn launch_race_starts_one_server() {
         mcp.handshake();
         appended(&mcp.call("memory_append", json!({"content": case})), case);
         let stderr = mcp.process.stderr();
-        assert!(stderr.contains(refusal), "{case}: {stderr}");
+        if refusal.is_empty() {
+            assert!(!stderr.contains("no trusted server"), "{case}: {stderr}");
+        } else {
+            assert!(stderr.contains(refusal), "{case}: {stderr}");
+        }
         assert_ne!(lock_field(&data, "instance="), old, "{case}: the adapter started a server");
         for (seen, probed) in fakes {
             let connections = seen.connections.load(Ordering::SeqCst);
