@@ -107,6 +107,10 @@ The build script pins LazyFS and adds `statfs`. Without it FUSE reports 0 free b
 LazyFS passes metadata calls such as `rename` straight to the disk below, so it cannot catch a missing directory sync. It has no `fallocate`, so segments use the zero-fill fallback there.
 The same nightly job runs both sims on 20,000 new seeds each night.
 
+## Install smoke
+
+The `install-smoke` workflow tests the live release on fresh Linux and macOS runners after each release and weekly.
+
 ## Before adding a test
 
 Look for an existing scenario that already drives the path. Extend it. If you add a test, check whether two old ones can now merge.
