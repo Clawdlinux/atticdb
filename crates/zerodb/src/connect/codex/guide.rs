@@ -64,8 +64,9 @@ fn rows(text: &str) -> Vec<Row<'_>> {
     while at < text.len() {
         let end = text[at..].find('\n').map_or(text.len(), |n| at + n + 1);
         let line = &text[at..end];
-        let line = line.strip_suffix('\n').unwrap_or(line);
-        rows.push(Row { span: at..end, text: line.strip_suffix('\r').unwrap_or(line) });
+        // Only a `\r\n` pair is a line end. A bare `\r` stays in the text.
+        let line = line.strip_suffix("\r\n").or_else(|| line.strip_suffix('\n')).unwrap_or(line);
+        rows.push(Row { span: at..end, text: line });
         at = end;
     }
     rows
@@ -106,15 +107,24 @@ fn plain(text: &str) -> (Vec<Row<'_>>, bool) {
     (plain, open.is_some())
 }
 
+/// What every zerodb begin line starts with, this version's or another's.
+const BEGIN_START: &str = "<!-- zerodb:begin";
+
 /// zerodb's block among the `rows` outside fenced code: from the start of its begin line to
 /// the end of its end line. Markers are lines that are exactly a begin line zerodb writes, or
-/// [`END`]. An error says how they don't pair up.
+/// [`END`]. A line that only looks like one, such as an indented marker, one with trailing
+/// spaces or another version's begin line, is an error, as is a pair that doesn't match up.
 fn find_block(rows: &[Row<'_>]) -> Result<Option<Range<usize>>, String> {
     let (mut begins, mut ends) = (Vec::new(), Vec::new());
     for row in rows {
         match row.text {
             BEGIN_LINE | BEGIN_ADDED => begins.push(row.span.clone()),
             END => ends.push(row.span.clone()),
+            text if text.trim().starts_with(BEGIN_START) || text.trim() == END => {
+                return Err(
+                    "it has a line that looks like a zerodb marker but isn't exactly one".into()
+                );
+            }
             _ => {}
         }
     }
@@ -146,21 +156,26 @@ fn eol(text: &str) -> &'static str {
     }
 }
 
-/// `text` without `block`, and without the blank line `connect` put before it. When nothing
-/// follows the block, the line end `connect` added before it goes too, so the file is back
-/// as it was.
-fn without(text: &str, block: &Range<usize>) -> String {
-    let (head, tail) = (&text[..block.start], &text[block.end..]);
-    let mut head = strip(head).filter(|shorter| shorter.ends_with('\n')).unwrap_or(head);
-    if text[block.clone()].starts_with(BEGIN_ADDED) && tail.is_empty() {
-        head = strip(head).unwrap_or(head);
+/// The line end of `block`'s begin line, which `connect` also put before the block.
+fn block_eol(block: &str) -> &'static str {
+    match block.split('\n').next() {
+        Some(begin) if begin.ends_with('\r') => "\r\n",
+        _ => "\n",
     }
-    format!("{head}{tail}")
 }
 
-/// `head` without its last line end, `\r\n` or `\n`.
-fn strip(head: &str) -> Option<&str> {
-    head.strip_suffix("\r\n").or_else(|| head.strip_suffix('\n'))
+/// `text` without `block`, and without the blank line `connect` put before it. When nothing
+/// follows the block, the line end `connect` added before it goes too, so the file is back
+/// as it was. Only the bytes `connect` inserted go: the block's own line end, after a line
+/// end of the file's.
+fn without(text: &str, block: &Range<usize>) -> String {
+    let (head, tail, ours) = (&text[..block.start], &text[block.end..], &text[block.clone()]);
+    let eol = block_eol(ours);
+    let mut head = head.strip_suffix(eol).filter(|shorter| shorter.ends_with('\n')).unwrap_or(head);
+    if ours.starts_with(BEGIN_ADDED) && tail.is_empty() {
+        head = head.strip_suffix(eol).unwrap_or(head);
+    }
+    format!("{head}{tail}")
 }
 
 /// How to remove zerodb's block from `shown` by hand.
@@ -208,10 +223,11 @@ pub(super) fn add(dir: &Path, mode: Mode) -> (Line, Option<String>) {
         };
         return (Line::new(State::Kept, said), None);
     }
-    let eol = eol(text);
     let (new, state) = match &found {
         Some(span) => {
-            let wanted = block(text[span.clone()].starts_with(BEGIN_ADDED), eol);
+            // The block keeps its own line ends, which may not be the file's first line's.
+            let ours = &text[span.clone()];
+            let wanted = block(ours.starts_with(BEGIN_ADDED), block_eol(ours));
             if text[span.clone()] == wanted {
                 (text.to_owned(), State::Unchanged)
             } else {
@@ -226,6 +242,7 @@ pub(super) fn add(dir: &Path, mode: Mode) -> (Line, Option<String>) {
             ))
         }
         None => {
+            let eol = eol(text);
             let added = !text.is_empty() && !text.ends_with('\n');
             let mut new = text.to_owned();
             if !text.is_empty() {
@@ -236,6 +253,13 @@ pub(super) fn add(dir: &Path, mode: Mode) -> (Line, Option<String>) {
             (new, add_or_update(false))
         }
     };
+    // zerodb must be able to read the file again, to update or remove its block.
+    if state != State::Unchanged && new.len() as u64 > MAX_READ {
+        return skipped(format!(
+            "{shown} would be over 1 MiB with zerodb's block, and zerodb reads at most 1 MiB. \
+             Nothing changed. {by_hand}"
+        ));
+    }
     let warning = (new.len() > CODEX_LIMIT).then(|| {
         format!(
             "{shown} is {} bytes, over 32 KiB. Codex may cut its instructions there, so zerodb's \
@@ -333,7 +357,7 @@ mod tests {
             (format!(" ```\n{block}\n   ```  \nZeroDB rules\n"), false, true),
             (format!("    ```\n{block}"), true, false),
             (format!("``` a`b\n{block}"), true, false),
-            (format!("x {BEGIN_LINE}\n<!-- zerodb:end --> \n"), false, true),
+            (format!("x {BEGIN_LINE}\n"), false, true),
         ];
         for (text, found, mentioned) in rows {
             let (rows, _) = plain(&text);

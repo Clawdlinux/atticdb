@@ -399,9 +399,10 @@ Codex 0.147 didn't pass MCP server instructions to the model in `codex exec`. So
 ```
 
 Codex reads `AGENTS.override.md` in the config dir when it holds more than whitespace, else `AGENTS.md`. It reads only that 1 file, so the block goes there.
-zerodb reads at most 1 MiB of it, and only a regular file. A symlink skips the part.
+zerodb reads at most 1 MiB of it, and only a regular file. A symlink skips the part. So does a file the block would take past 1 MiB, as zerodb couldn't read it again.
 The block goes after 1 blank line, with the same rules for CRLF and a missing final line end as `config.toml`. A missing file is created at mode 0600.
 A marker counts only as a whole line outside fenced code (```` ``` ```` or `~~~`). Marker lines that don't pair up skip the part.
+So does a line that only looks like a marker, such as an indented one, one with trailing spaces, or another version's begin line.
 A block that matches writes nothing. Another zerodb block is updated in place, with a backup.
 A file that mentions zerodb, in any case, outside the block and outside fenced code, is your own guide. zerodb doesn't write to it. The line says `kept` and names the file. It counts as in place.
 A fence that never closes skips the part, as a block after it would be code.

@@ -1261,9 +1261,11 @@ fn connect_codex_adds_its_parts() {
     // The guide goes in the file Codex reads: AGENTS.override.md when it holds more than
     // whitespace, else AGENTS.md. Markers and mentions in fenced code don't count. A file that
     // mentions zerodb is the user's own guide, kept as it is. An older block of zerodb's is
-    // updated in place. Malformed markers, a symlink, or a fence that never closes skip the
-    // part. --dry-run decides the same and writes nothing. A rerun writes nothing. disconnect
-    // gives each file back byte for byte, AGENTS.md too when Codex now reads the override.
+    // updated in place. Malformed markers, near misses such as an indented marker, a symlink,
+    // a fence that never closes, or a file the block would take past the 1 MiB read cap skip
+    // the part. --dry-run decides the same and writes nothing. A rerun writes nothing.
+    // disconnect gives each file back byte for byte, a bare CR at the end too, and AGENTS.md
+    // too when Codex now reads the override.
     let marks = |text: &str| format!("{CODEX_AGENTS}\n{text}");
     let (begin, end) = (
         "<!-- zerodb:begin v1. zerodb disconnect codex removes this block. -->",
@@ -1274,6 +1276,12 @@ fn connect_codex_adds_its_parts() {
         "its zerodb begin lines and lines <!-- zerodb:end --> don't pair up: each must come \
                  once, in that order";
     let big = format!("{CODEX_AGENTS}{}\n", "x".repeat(32 * 1024));
+    let near = "it has a line that looks like a zerodb marker but isn't exactly one";
+    let spaced = marks(&guide.replace(&format!("{end}\n"), &format!("{end}  \n")));
+    // No LF at all, so a reconnect can't take the CR and zerodb's LF for CRLF.
+    let bare_cr = "User text\r".to_owned();
+    let at_cap = format!("{CODEX_AGENTS}{}\n", "y".repeat((1 << 20) - CODEX_AGENTS.len() - 8));
+    let over_cap = "would be over 1 MiB with zerodb's block, and zerodb reads at most 1 MiB";
     // (case, AGENTS.override.md, AGENTS.md, what connect does, AGENTS.md after disconnect)
     let rows = [
         ("override", Some("Answer in French.\n"), marks(&guide), "added", CODEX_AGENTS.to_owned()),
@@ -1329,6 +1337,10 @@ fn connect_codex_adds_its_parts() {
             marks("```sh\ncargo test\n"),
         ),
         ("big", None, big.clone(), "added", big),
+        ("indented marker", None, marks(&format!("  {guide}")), near, marks(&format!("  {guide}"))),
+        ("trailing spaces", None, spaced.clone(), near, spaced),
+        ("bare CR", None, bare_cr.clone(), "added", bare_cr),
+        ("near cap", None, at_cap.clone(), over_cap, at_cap),
     ];
     for (row, (case, over, kept, does, left)) in rows.into_iter().enumerate() {
         let home = dir.0.join(format!("a{row}"));
@@ -1372,7 +1384,7 @@ fn connect_codex_adds_its_parts() {
                 format!("zerodb guide: kept, {shown} already mentions zerodb"),
                 0,
             ),
-            "is a symlink" | "has a code fence that never closes" => {
+            why if why == over_cap || why == "is a symlink" || why.starts_with("has a code") => {
                 (format!("{skipped} {does}"), format!("{skipped} {does}"), 1)
             }
             why => (
@@ -1393,7 +1405,12 @@ fn connect_codex_adds_its_parts() {
         assert!(line.starts_with(&said), "{case}: {out}");
         let too_big = " over 32 KiB. Codex may cut its instructions there";
         assert_eq!(out.contains(too_big), case == "big", "{case}: {out}");
+        // A file without a final LF gets one, and the begin line says so.
+        let added = "removes this block and the line end it added above.";
         let wanted = match does {
+            "added" if !original.ends_with('\n') => {
+                format!("{original}\n\n{}", guide.replacen("removes this block.", added, 1))
+            }
             "added" => format!("{original}\n{guide}"),
             "updated" => original.replace(&old, &guide),
             _ => original.clone(),
@@ -1427,7 +1444,7 @@ fn connect_codex_adds_its_parts() {
         assert_eq!(support::tree(&home), before, "{case}: a rerun writes nothing");
 
         let (status, out) = run(&home, None, &bin, &[], &["disconnect", "codex"]);
-        let malformed = code == 1 && case != "symlink" && case != "open fence";
+        let malformed = code == 1 && !matches!(case, "symlink" | "open fence" | "near cap");
         assert_eq!(status, Some(i32::from(malformed)), "{case}: {out}");
         let lines: Vec<&str> = out.lines().filter(|line| line.contains("zerodb guide")).collect();
         let removed = |path: &Path| format!("zerodb guide: removed ({}, backup: ", path.display());
