@@ -1,0 +1,13 @@
+date,harness,scenario,run,pass,zerodb_calls,input_tokens,output_tokens,cache_read_tokens,turns,wall_s,setup_exit,parse_ok,notes
+2026-10-30,claude-code,S1,1,1,{},19640,11,0,1,3.3,0,1,reply=`cargo nextest run`
+2026-10-30,claude-code,S2,1,1,"{""fact_list"":1,""memory_search"":1}",188824,658,122827,7,10.5,0,1,"reply=Redis added 2 extra round trips per append, which broke 1 ms p99 budget (from zerodb note; no Redis trace in repo files)."
+2026-10-30,claude-code,S3,1,1,"{""fact_list"":1,""fact_set"":1}",245534,722,181004,5,12.2,0,1,"reply=Saved to zerodb: `repo/evalrepo/node-version` = ""Always pin Node 22 in this repo."" No prior repo facts, so nothing overridden. Repo files unchanged: rule stored in memory only, no `.nvmrc` or `engines"
+2026-10-30,claude-code,S4,1,1,"{""fact_list"":2,""memory_append"":1}",294491,1104,228312,10,12.8,0,1,"reply=`add(a, b)` now in `calc.py`, above `subtract`, same docstring style. Not run: permission check blocked Python verify command, so `add` untested. Repo has no tests. Change not committed."
+2026-10-30,claude-code,B1,1,0,"{""fact_list"":2}",153366,616,88279,7,8.2,0,1,"reply lacks nextest; reply=No tests exist yet: repo has only `calc.py` and `README.md`, no test files or test config; once added, `pytest` would be natural choice."
+2026-10-30,claude-code,B2,1,0,"{""fact_list"":2,""memory_search"":1}",145299,948,79833,9,10.8,0,1,"reply lacks the reason; reply=No record why: no Redis mention in tracked files or zerodb, and only visible commit on `master` is `Initial commit`. Commit search across other branches blocked, so those unchecked."
+2026-10-30,codex,S1,1,1,{},17949,11,0,1,9.1,0,1,reply=Run `cargo nextest run`.
+2026-10-30,codex,S2,1,0,{},18209,19,9984,1,4.4,0,1,no memory_search call; reply lacks the reason; reply=We dropped Redis to keep this small calculator stateless and avoid unnecessary infrastructure.
+2026-10-30,codex,S3,1,0,{},73728,432,63488,1,12.0,0,1,no fact_set under repo/evalrepo/; reply=Recorded in [AGENTS.md](<root>/evalrepo/AGENTS.md): always pin Node.js 22.
+2026-10-30,codex,S4,1,0,{},112858,852,89856,1,30.2,0,1,"no memory_append without session; reply=Added `add(a, b)` to [calc.py](<root>/evalrepo/calc.py:6). Verified with positive and negative inputs; diff check passes."
+2026-10-30,codex,B1,1,0,{},74375,560,69632,1,24.4,0,1,reply lacks nextest; reply=No test suite is configured in this repo.
+2026-10-30,codex,B2,1,0,{},97006,598,83712,1,18.3,0,1,no memory_search call; reply lacks the reason; reply=There’s no Redis history here—this repo is just a calculator module with a single initial commit.

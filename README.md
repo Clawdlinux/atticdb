@@ -20,12 +20,15 @@ The data directory must be mode `0700` (D75). Below a free-space floor zerodb go
 
 ## Quick start
 
-For VS Code's Copilot chat or Copilot CLI, from a checkout:
+From a checkout:
 
 ```sh
 cargo install --path crates/zerodb --locked   # puts zerodb in ~/.cargo/bin
-zerodb connect vscode                         # or: zerodb connect copilot
+zerodb setup --dry-run                        # shows what it would change, writes nothing
+zerodb setup                                  # asks which apps, then wires them
 ```
+
+`setup` finds Copilot CLI, VS Code, Claude Code and Codex. It adds the MCP entry, a chat-start hook and the guide each app reads. Every edited file is backed up first. `zerodb disconnect <app>` removes exactly what it added. Codex runs a new hook only after you approve it once in Codex. [research/setup_eval/results](research/setup_eval/results/README.md) has the eval results.
 
 `connect` stores the installed binary's path in the entry. An entry that points into a checkout's `target/` breaks on `cargo clean`.
 
