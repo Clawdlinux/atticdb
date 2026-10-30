@@ -86,11 +86,24 @@ pub fn run(harnesses: Option<Vec<Harness>>) -> u8 {
         return 1;
     }
     // A home without its config or data dir isn't set up. Reading it would make them, with a
-    // new token, so the checks that read stop here.
-    let partial = ["zerodb.json", "data"].iter().any(|name| missing(&dir.join(name)));
+    // new token, so the checks that read stop here. So they do for a symlink in their place,
+    // which a read may not follow as doctor does.
+    let (mut partial, mut odd) = (false, Vec::new());
+    for (name, kind) in [("zerodb.json", "regular file"), ("data", "directory")] {
+        let path = dir.join(name);
+        match std::fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == ErrorKind::NotFound => partial = true,
+            Ok(meta) if meta.is_file() && name == "zerodb.json" => {}
+            Ok(meta) if meta.is_dir() && name == "data" => {}
+            _ => {
+                odd.push(format!("{} is a symlink or not a {kind}; fix it by hand", path.display()))
+            }
+        }
+    }
     let checked = crate::home::check_existing();
-    let home_ok = checked.is_ok();
+    let home_ok = checked.is_ok() && odd.is_empty();
     match checked {
+        Ok(()) if !odd.is_empty() => checks.line(&what, Err(odd.join("; "))),
         Ok(()) if partial => checks.line(&what, Err(NOT_SET_UP.into())),
         checked => checks.line(&what, checked),
     }

@@ -89,6 +89,7 @@ Each check prints 1 line: `ok`, or the problem and what to do. They run in this 
 - **Home:** the path, and whether `ZERODB_HOME` set it.
   A missing home, or 1 without `zerodb.json` or `data/`, says to run `zerodb setup`. The server and app checks are then skipped.
   Doctor never creates the home, its config, a token or `data/`.
+  `zerodb.json` must be a regular file and `data/` a directory, not symlinks. Else it fails and skips them too.
   An existing home gets the owner and mode checks that setup uses, with the same message. If it fails them, the server and app checks are skipped.
 - **Free space:** the bytes free on the home's disk, against the store's floor. The floor is the smaller of 1 GiB and 5% of the disk.
   Below the floor, writes stop, so the check fails. Below 2x the floor, it warns.

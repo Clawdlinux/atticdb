@@ -454,7 +454,14 @@ fn doctor_checks_an_install_and_writes_nothing() {
         std::fs::DirBuilder::new().recursive(true).mode(0o700).create(made).unwrap();
     }
     std::fs::remove_dir(no_data.join("data")).unwrap();
-    for config in [&no_data, &bad].map(|home| home.join("zerodb.json")) {
+    // A dangling zerodb.json link, and a data link to a real, empty dir.
+    let (config_link, data_link, real) = (dir.0.join("cl"), dir.0.join("dl"), dir.0.join("rd"));
+    for made in [&config_link.join("data"), &data_link, &real] {
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(made).unwrap();
+    }
+    std::os::unix::fs::symlink(dir.0.join("missing"), config_link.join("zerodb.json")).unwrap();
+    std::os::unix::fs::symlink(&real, data_link.join("data")).unwrap();
+    for config in [&no_data, &bad, &data_link].map(|home| home.join("zerodb.json")) {
         std::fs::write(&config, "{").unwrap();
         support::chmod(&config, 0o600);
     }
@@ -526,10 +533,18 @@ fn doctor_checks_an_install_and_writes_nothing() {
     let entry = home.join(".copilot/mcp-config.json");
     let linked =
         format!("{linked}{}: update the MCP entry\n  binary: ok\n  hook: ok\n", entry.display());
-    let rows: [DoctorRow<'_>; 14] = [
+    let odd = |home: &Path, name: &str, kind: &str| {
+        let path = home.join(name);
+        format!("{} is a symlink or not a {kind}; fix it by hand\n", path.display())
+    };
+    let config_odd = odd(&config_link, "zerodb.json", "regular file");
+    let data_odd = odd(&data_link, "data", "directory");
+    let rows: [DoctorRow<'_>; 16] = [
         ("not set up", &bare, None, &no_apps, &[], 1, unset),
         ("empty ZERODB_HOME", &bare, Some(&empty_home), &no_apps, &[], 1, moved_unset(&empty_home)),
         ("no data dir", &bare, Some(&no_data), &no_apps, &[], 1, moved_unset(&no_data)),
+        ("config link", &bare, Some(&config_link), &no_apps, &[], 1, config_odd),
+        ("data link", &bare, Some(&data_link), &no_apps, &[], 1, data_odd),
         ("healthy", &home, None, &path, &[], 0, healthy),
         ("part would change", &home, None, &path, &[], 1, guide),
         ("stale binary", &home, None, &path, &stale_apps, 1, stale.concat()),
@@ -589,6 +604,13 @@ fn doctor_checks_an_install_and_writes_nothing() {
         assert_eq!(out.contains(sandbox), wanted != 2, "{case}: {out}");
         match case {
             "not set up" => assert!(tree(&bare).is_empty(), "{case}: no home made"),
+            "config link" | "data link" => {
+                let skipped = "\nServer and store: skipped, fix the home first\nSandboxes:\n";
+                assert!(out.contains(skipped), "{case}: {out}");
+                assert!(tree(&real).is_empty(), "{case}: nothing under the link");
+                let link = std::fs::read_link(data_link.join("data")).unwrap();
+                assert_eq!(link, real, "{case}: the data link stays");
+            }
             "empty ZERODB_HOME" | "no data dir" => {
                 let skipped = "\nServer and store: skipped, set it up first\nSandboxes:\n";
                 assert!(out.contains(skipped), "{case}: {out}");
