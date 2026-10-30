@@ -18,6 +18,9 @@ and each app. The store check may start the home's server.
 
 Exit 0 when every check is ok or only warns, 1 when a check failed, 2 for a usage error.";
 
+/// What doctor says about a home that is missing, or lacks its config or data dir.
+const NOT_SET_UP: &str = "not set up yet, run zerodb setup";
+
 /// The options a Claude Code or Codex install may have been connected with, the defaults
 /// first. Parts are in place when any of them plans no change.
 const CHOSEN: [Options; 4] = [
@@ -76,22 +79,25 @@ pub fn run(harnesses: Option<Vec<Harness>>) -> u8 {
         _ => "ZERODB_HOME is not set",
     };
     let what = format!("{} ({set})", dir.display());
-    let home_ok = match std::fs::symlink_metadata(&dir) {
-        Err(error) if error.kind() == ErrorKind::NotFound => {
-            println!("  {what}: not set up yet, run zerodb setup");
-            sandboxes(Some(&dir));
-            return u8::from(checks.failed);
-        }
-        _ => {
-            let checked = crate::home::check_existing();
-            let ok = checked.is_ok();
-            checks.line(&what, checked);
-            ok
-        }
-    };
+    let missing = |path: &Path| matches!(std::fs::symlink_metadata(path), Err(error) if error.kind() == ErrorKind::NotFound);
+    if missing(&dir) {
+        checks.line(&what, Err(NOT_SET_UP.into()));
+        sandboxes(Some(&dir));
+        return 1;
+    }
+    // A home without its config or data dir isn't set up. Reading it would make them, with a
+    // new token, so the checks that read stop here.
+    let partial = ["zerodb.json", "data"].iter().any(|name| missing(&dir.join(name)));
+    let checked = crate::home::check_existing();
+    let home_ok = checked.is_ok();
+    match checked {
+        Ok(()) if partial => checks.line(&what, Err(NOT_SET_UP.into())),
+        checked => checks.line(&what, checked),
+    }
     disk(&mut checks, &dir);
-    if !home_ok {
-        println!("Server and store: skipped, fix the home first");
+    if !home_ok || partial {
+        let first = if home_ok { "set it up" } else { "fix the home" };
+        println!("Server and store: skipped, {first} first");
         sandboxes(Some(&dir));
         return 1;
     }
@@ -152,10 +158,28 @@ fn app(
             println!("    {stale}");
         }
     }
-    if plan.hook.is_some_and(connect::State::in_place) {
+    for warning in &plan.warnings {
+        println!("  note: {warning}");
+    }
+    if plan.hooks_off {
+        checks.warn("hook", HOOKS_OFF);
+    } else if plan.hook.is_some_and(connect::State::in_place) {
         checks.line("hook", cwd.clone().and_then(|cwd| check_hook(harness, &cwd)));
     }
+    if harness == Harness::Codex {
+        // It only reads config, and never shows codex's output, which may hold secrets.
+        let what = "codex mcp get zerodb";
+        if connect::on_path("codex") {
+            checks.line(what, connect::verify_codex());
+        } else {
+            println!("  {what}: not verified: codex not found");
+        }
+    }
 }
+
+/// What doctor says when Codex's config turns its hooks off.
+const HOOKS_OFF: &str = "Codex's hooks are off, so memory won't load at chat start. Turn them \
+                         on in [features] in config.toml: remove hooks = false, or set hooks = true";
 
 /// The plan for `harness`. For Claude Code and Codex, the first of [`CHOSEN`] that changes
 /// nothing, else the defaults' plan. A hook counts as left out on purpose only when it is
@@ -184,10 +208,13 @@ fn stale(harness: Harness, exe: &str) -> Vec<String> {
     let mut found = Vec::new();
     for (file, named) in connect::binaries(harness) {
         let file = file.display();
-        if !Path::new(&named).exists() {
-            found.push(format!("{file} runs {named}, which no longer exists"));
-        } else if named != exe {
-            found.push(format!("{file} runs {named}, not this zerodb, {exe}"));
+        // A link to this binary runs it too.
+        match std::fs::canonicalize(&named) {
+            Err(_) => found.push(format!("{file} runs {named}, which no longer exists")),
+            Ok(real) if real != Path::new(exe) => {
+                found.push(format!("{file} runs {named}, not this zerodb, {exe}"));
+            }
+            Ok(_) => {}
         }
     }
     found

@@ -362,6 +362,11 @@ fn connect_shared(harness: Harness, force: bool, mode: Mode) -> Report {
     report
 }
 
+/// Whether `name` is an executable on `PATH`, as zerodb finds the harness programs.
+pub fn on_path(name: &str) -> bool {
+    claude::find_program(name).is_some()
+}
+
 /// Checks that `codex mcp get zerodb --json`, which only reads config, shows zerodb's entry.
 /// `Ok` without running anything when `codex` is not on `PATH`.
 pub fn verify_codex() -> Result<(), String> {
