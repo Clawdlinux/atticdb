@@ -1,0 +1,180 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+  # Builds only. Publishing needs a tag push.
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - install.sh
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+env:
+  CARGO_TERM_COLOR: always
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - id: read
+        run: |
+          version=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)
+          if [ -z "$version" ]; then
+            echo "::error::no version in [workspace.package] of Cargo.toml"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      # Fails before any build when the tag and Cargo.toml disagree.
+      - if: github.ref_type == 'tag'
+        env:
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ steps.read.outputs.version }}
+        run: |
+          if [ "$TAG" != "v$VERSION" ]; then
+            echo "::error::tag $TAG does not match the workspace version $VERSION"
+            exit 1
+          fi
+
+  build:
+    needs: version
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.version.outputs.version }}
+      # Keeps macOS tar from adding ._ files for extended attributes.
+      COPYFILE_DISABLE: "1"
+      # The profile keeps debug = 1 for local builds. Shipped binaries drop the DWARF and keep
+      # symbols, so backtraces still name functions.
+      CARGO_PROFILE_RELEASE_STRIP: debuginfo
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      # Installs the toolchain and components from rust-toolchain.toml. No build cache, so a
+      # release never builds on a cache another run wrote.
+      - run: rustup toolchain install
+      - run: rustup target add "$TARGET"
+      # blake3 compiles C and assembly. cc would look for aarch64-linux-musl-gcc, which Ubuntu
+      # does not ship, so name musl-gcc for both targets.
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          echo "CC_$(echo "$TARGET" | tr - _)=musl-gcc" >> "$GITHUB_ENV"
+      - run: cargo build --locked --release -p atticdb --target "$TARGET"
+      - name: Smoke test
+        run: |
+          bin="target/$TARGET/release/atticdb"
+          info=$(file "$bin")
+          echo "$info"
+          case "$TARGET" in
+            x86_64-apple-darwin)
+              # Built on an arm64 runner. Check the arch, don't run it under Rosetta.
+              case "$info" in
+                *"Mach-O 64-bit executable x86_64"*) ;;
+                *) echo "::error::$bin is not an x86_64 Mach-O"; exit 1 ;;
+              esac
+              exit 0
+              ;;
+            aarch64-apple-darwin)
+              case "$info" in
+                *"Mach-O 64-bit executable arm64"*) ;;
+                *) echo "::error::$bin is not an arm64 Mach-O"; exit 1 ;;
+              esac
+              ;;
+            *-linux-musl)
+              case "$info" in
+                *"statically linked"* | *"static-pie linked"*) ;;
+                *) echo "::error::$bin is not statically linked"; exit 1 ;;
+              esac
+              case "$info" in
+                *"with debug_info"*) echo "::error::$bin still has debug info"; exit 1 ;;
+              esac
+              ;;
+          esac
+          got=$("$bin" --version)
+          if [ "$got" != "atticdb $VERSION" ]; then
+            echo "::error::$bin --version printed '$got', want 'atticdb $VERSION'"
+            exit 1
+          fi
+      - name: Package
+        run: |
+          stage=$(mktemp -d)
+          cp "target/$TARGET/release/atticdb" README.md LICENSE-APACHE LICENSE-MIT "$stage/"
+          mkdir dist
+          tar -czf "dist/atticdb-$TARGET.tar.gz" -C "$stage" atticdb README.md LICENSE-APACHE LICENSE-MIT
+          tar -tzvf "dist/atticdb-$TARGET.tar.gz"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: atticdb-${{ matrix.target }}
+          path: dist/atticdb-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
+  publish:
+    needs: [version, build]
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: atticdb-*
+          path: dist
+          merge-multiple: true
+      - name: Write SHA256SUMS
+        working-directory: dist
+        run: |
+          set -- atticdb-*.tar.gz
+          if [ "$#" -ne 4 ]; then
+            echo "::error::want 4 tarballs, found $*"
+            exit 1
+          fi
+          cp ../install.sh .
+          sha256sum atticdb-*.tar.gz install.sh > SHA256SUMS
+          cat SHA256SUMS
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          cat > notes.md <<'EOF'
+          Install on macOS or Linux:
+
+          ```sh
+          curl -fsSL https://github.com/Clawdlinux/atticdb/releases/latest/download/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"   # needed only if the installer said it isn't on PATH
+          atticdb setup
+          ```
+
+          Check the files against SHA256SUMS.
+          EOF
+          gh release create "$TAG" --verify-tag --title "AtticDB $TAG" --notes-file notes.md dist/*

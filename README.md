@@ -7,7 +7,7 @@ Status: early. Don't run it in production. Built so far: the tape, session engin
 
 ## Where to run it
 
-macOS and Linux only. Windows isn't supported. No release binaries yet, so install from source as below. Then `atticdb setup` connects it to VS Code, Copilot CLI, Claude Code and Codex.
+macOS and Linux only. Windows isn't supported. Release binaries cover macOS and Linux on x86_64 and arm64. The Linux ones are static, so any distro works. Then `atticdb setup` connects it to VS Code, Copilot CLI, Claude Code and Codex.
 
 Every write is acked only after `fdatasync`, so the disk under the data directory sets your write latency. Keep it on a local disk:
 
@@ -22,12 +22,20 @@ The data directory must be mode `0700` (D75). Below a free-space floor AtticDB g
 
 ## Quick start
 
-From a checkout:
+```sh
+curl -fsSL https://github.com/Clawdlinux/atticdb/releases/latest/download/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"   # needed only if the installer said it isn't on PATH
+atticdb setup --dry-run   # shows what it would change, writes nothing
+atticdb setup             # asks which apps, then wires them
+```
+
+The installer puts `atticdb` in `~/.local/bin` and checks the download against the release's `SHA256SUMS`. It never uses sudo or edits your shell files.
+Set `ATTICDB_VERSION=0.1.0` to pin a release, `ATTICDB_INSTALL_DIR` to install elsewhere, or `ATTICDB_DOWNLOAD_BASE` for a mirror.
+
+From source, with Rust installed:
 
 ```sh
-cargo install --path crates/atticdb --locked   # puts atticdb in ~/.cargo/bin
-atticdb setup --dry-run                        # shows what it would change, writes nothing
-atticdb setup                                  # asks which apps, then wires them
+cargo install --git https://github.com/Clawdlinux/atticdb atticdb --locked   # puts atticdb in ~/.cargo/bin
 ```
 
 `setup` finds Copilot CLI, VS Code, Claude Code and Codex. It adds the MCP entry, a chat-start hook and the guide each app reads. Every edited file is backed up first. `atticdb disconnect <app>` removes exactly what it added. Codex runs a new hook only after you approve it once in Codex. [research/setup_eval/results](research/setup_eval/results/README.md) has the eval results.
@@ -62,7 +70,7 @@ AtticDB does a few things on purpose. We add features when people ask for them.
 
 AtticDB was called zerodb until 2026-10-30. To keep your memory:
 
-1. Install AtticDB: `cargo install --path crates/atticdb --locked`.
+1. Install AtticDB with the installer in [Quick start](#quick-start), or with `cargo install --git https://github.com/Clawdlinux/atticdb atticdb --locked`.
 2. Quit the apps that use zerodb.
 3. Run `atticdb migrate --dry-run`, then `atticdb migrate`.
 4. Run `cargo uninstall zerodb`.

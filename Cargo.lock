@@ -31,7 +31,7 @@ checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
 name = "atticdb"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "atticdb-core",
  "atticdb-tape",
@@ -44,7 +44,7 @@ dependencies = [
 
 [[package]]
 name = "atticdb-core"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "atticdb-tape",
  "blake3",
@@ -53,7 +53,7 @@ dependencies = [
 
 [[package]]
 name = "atticdb-tape"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "atticdb-tape",
  "crc32c",

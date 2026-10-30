@@ -45,3 +45,7 @@ jobs:
       - run: python3 -m pytest research/ctxcache/tests
       # Stub agents only, never a real model. The end-to-end test runs the binary built above.
       - run: ATTICDB_BIN=target/release/atticdb python3 -m pytest research/setup_eval/tests
+      # install.sh against fake releases on 127.0.0.1. It never touches the real HOME.
+      - run: python3 -m pytest scripts/tests
+      - if: runner.os == 'Linux'
+        run: shellcheck install.sh
