@@ -832,6 +832,8 @@ fn migrate_moves_a_zerodb_install() {
         "shell and entries disagree",
         "ZERODB_HOME and ATTICDB_HOME disagree",
         "old binary fails",
+        "stale ZERODB_HOME",
+        "entry names a deleted dir",
     ];
     for case in rows {
         let dir = Dir::new();
@@ -905,6 +907,17 @@ fn migrate_moves_a_zerodb_install() {
                 old_store(&home, &custom, &[("ATTICDB_HOME", custom.to_str().unwrap())]);
                 env.push(("ZERODB_HOME", custom.to_str().unwrap().into()));
                 env.push(("ATTICDB_HOME", attic.to_str().unwrap().into()));
+            }
+            "stale ZERODB_HOME" | "entry names a deleted dir" => {
+                // A name for a home that is gone, while the data sits at the old default home.
+                old_store(&home, &old, &[]);
+                let gone = dir.0.join("gone");
+                let named =
+                    (case != "stale ZERODB_HOME").then(|| gone.to_str().unwrap().to_owned());
+                old_parts(&home, exe.to_str().unwrap(), named.as_deref());
+                if named.is_none() {
+                    env.push(("ZERODB_HOME", gone.to_str().unwrap().into()));
+                }
             }
             "old binary fails" => {
                 old_store(&home, &old, &[]);
@@ -1173,6 +1186,21 @@ fn migrate_moves_a_zerodb_install() {
                 let wanted = format!("atticdb: {why} Nothing changed.\n");
                 assert_eq!((code, out.as_str(), err), (Some(1), "", wanted), "{case}");
                 assert_eq!(tree(&dir.0), before, "{case}: nothing changed");
+            }
+            "stale ZERODB_HOME" | "entry names a deleted dir" => {
+                let from = match case {
+                    "stale ZERODB_HOME" => "ZERODB_HOME".to_owned(),
+                    _ => vscode_file(&home).display().to_string(),
+                };
+                let wanted = format!(
+                    "atticdb: {from} names the zerodb home {}, which doesn't exist, but {o} still \
+                     holds zerodb data. Fix or unset that name, then run `atticdb migrate` again. \
+                     Nothing changed.\n",
+                    dir.0.join("gone").display()
+                );
+                assert_eq!((code, out.as_str(), err), (Some(1), "", wanted), "{case}");
+                assert_eq!(tree(&dir.0), before, "{case}: nothing changed");
+                assert!(!new.exists() && !argv.exists(), "{case}: no new home, no disconnect");
             }
             "old binary fails" => {
                 // It removed nothing, so every part is left to remove by hand.

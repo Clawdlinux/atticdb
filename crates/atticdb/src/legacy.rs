@@ -446,7 +446,18 @@ fn run(plan: bool) -> Result<u8, (u8, String)> {
             println!("Set {HOME_ENV}={}.", dir.display());
             (acted, kept) = (true, Some(dir.clone()));
         }
-        Some((dir, from)) => println!("No zerodb home found at {} ({from}).", dir.display()),
+        // A stale name must not hide the data at the old default home.
+        Some((dir, from)) if old.is_dir() => {
+            return Err(stop(format!(
+                "{from} names the zerodb home {}, which doesn't exist, but {} still holds zerodb \
+                 data. Fix or unset that name, then run `atticdb migrate` again. Nothing changed.",
+                dir.display(),
+                old.display()
+            )));
+        }
+        Some((dir, from)) => {
+            println!("No zerodb home found at {}, which {from} names.", dir.display());
+        }
         None => match old_kind(&old) {
             Old::Moved => {
                 println!(
@@ -519,8 +530,15 @@ fn run(plan: bool) -> Result<u8, (u8, String)> {
         return Ok(u8::from(failed));
     }
     // Setup reads the home that stays put, so the new entries pass it as ATTICDB_HOME, else
-    // the one AtticDB reads, without the guards, as old variables may still be set here.
-    let lookup = Lookup::given(env_home.or(kept));
+    // the one AtticDB reads, without the guards, as old variables may still be set here. So
+    // the home guards run here: setup must never make a home beside old data.
+    let home = env_home.or(kept);
+    let checked = match &home {
+        Some(dir) => check_home(dir, false),
+        None => crate::home::default_dir(crate::home::NAME).and_then(|dir| check_home(&dir, true)),
+    };
+    checked.map_err(stop)?;
+    let lookup = Lookup::given(home);
     let order = crate::setup::ORDER.into_iter();
     let chosen: Vec<(Harness, Options)> = order
         .filter_map(|h| apps.iter().find(|(app, _)| *app == h))
@@ -569,9 +587,7 @@ fn custom_home(
             ));
         }
         (Some(shell), _) => Some((shell.to_owned(), OLD_HOME_ENV.to_owned())),
-        (None, Some((home, file))) if home.is_absolute() => {
-            Some((home, format!("named in {file}")))
-        }
+        (None, Some((home, file))) if home.is_absolute() => Some((home, file)),
         (None, Some((home, file))) => {
             return Err(format!(
                 "{file} names {OLD_HOME_ENV} {}, which isn't absolute. Fix it by hand. {unchanged}",
