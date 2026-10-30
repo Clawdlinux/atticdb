@@ -818,7 +818,7 @@ fn migrate_moves_a_zerodb_install() {
         let (old, data) = (old_home(&home), data_dir(&home));
         let new = data.parent().unwrap().to_owned();
         let (custom, attic) = (dir.0.join("custom"), dir.0.join("attic"));
-        let homes = [&data, &old, &custom, &attic];
+        let homes = [&new, &old, &custom, &attic];
         let _holders = Holders(homes.map(|home| home.join("data")).into());
         let exe = fake_zerodb(&dir.0.join("old"));
         let argv = dir.0.join("old/zerodb.argv");

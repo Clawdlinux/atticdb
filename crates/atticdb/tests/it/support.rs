@@ -743,14 +743,56 @@ pub fn kill_holder(data: &Path) -> bool {
     true
 }
 
-/// Stops the servers of these data directories, also when a test fails.
+/// The pid in `data`'s `LOCK`.
+fn lock_pid(data: &Path) -> Option<i32> {
+    let lock = std::fs::read_to_string(data.join("LOCK")).ok()?;
+    lock.strip_prefix("pid=")?.split(' ').next()?.parse().ok()
+}
+
+/// Whether `pid`'s command line runs `atticdb serve` on the data directory `data`.
+fn serves(pid: i32, data: &Path) -> bool {
+    let out = Command::new("/bin/ps").args(["-o", "command=", "-p", &pid.to_string()]).output();
+    out.is_ok_and(|out| {
+        let line = String::from_utf8_lossy(&out.stdout);
+        line.contains("atticdb serve ") && line.contains(&format!("--data-dir {} ", data.display()))
+    })
+}
+
+/// How long no lock may be held before [`stop_servers`] counts the servers as stopped.
+const SETTLE: Duration = Duration::from_millis(500);
+
+/// Stops the home servers of the data directories `dirs`: each one named in a `LOCK`, and only
+/// when its command line runs `atticdb serve` on that directory. A server that another
+/// process started may take the lock just after, so it watches until no lock was held for
+/// [`SETTLE`], for up to 15 s.
+pub fn stop_servers(dirs: &[PathBuf]) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut free_since = Instant::now();
+    while Instant::now() < deadline {
+        let mut held = false;
+        for data in dirs.iter().filter(|data| locked(data)) {
+            held = true;
+            let pid = lock_pid(data).filter(|pid| serves(*pid, data));
+            if let Some(target) = pid.and_then(rustix::process::Pid::from_raw) {
+                let _ = rustix::process::kill_process(target, rustix::process::Signal::KILL);
+            }
+        }
+        if held {
+            free_since = Instant::now();
+        } else if free_since.elapsed() >= SETTLE {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Stops the home servers of these data directories at the end of a test, also when it
+/// fails, by [`stop_servers`].
 pub struct Holders(pub Vec<PathBuf>);
 
 impl Drop for Holders {
     fn drop(&mut self) {
-        for data in &self.0 {
-            kill_holder(data);
-        }
+        stop_servers(&self.0);
     }
 }
 
