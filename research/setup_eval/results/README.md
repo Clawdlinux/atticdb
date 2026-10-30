@@ -72,7 +72,7 @@ Turns are 1 per run, because `codex exec` reports 1 `turn.completed` per invocat
 **What the guide fixed:** S3 went from 0 of 1 to 2 of 2. Codex now saves a stated rule with `fact_set`.
 
 **Still open** (#122):
-- **S2, 0 of 2.** When a chat-start block is present, Codex answers from it and its priors, and never searches. Both runs made up a reason ("to keep the calculator stateless"). In B2, with an empty store and no block, it called `memory_search` 3 times.
+- **S2, 0 of 2.** When a chat-start block is present, Codex answers from it and its priors, and never searches. Both runs made up a reason ("to keep the calculator stateless"). In B2, with an empty store and no block, it called `memory_search` once and `fact_list` twice in each run. The tables count all zerodb calls.
 - **S4, 0 of 2.** Codex made the edit but never saved a summary note.
 
 ## Takeaways
