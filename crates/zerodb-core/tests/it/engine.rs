@@ -738,6 +738,79 @@ fn replay_spills_by_dirty_capacity_not_clean_resident_pages() {
     assert_eq!(newest[0].content, 1299u64.to_le_bytes());
 }
 
+/// Retry-keyed appends `from..from + n`, spread over writer threads. Key `i` goes to session
+/// `s{i % 16}`.
+fn fill_retry_keys(engine: &Engine, from: usize, n: usize) {
+    const THREADS: usize = 16;
+    std::thread::scope(|threads| {
+        for thread in 0..THREADS {
+            threads.spawn(move || {
+                let session = scope(&format!("s{thread}"));
+                for i in (from..from + n).filter(|i| i % THREADS == thread) {
+                    engine.append(&session, vec![turn(i as u64)], Some(&i.to_string())).unwrap();
+                }
+            });
+        }
+    });
+}
+
+#[test]
+#[ignore = "slow: fills a 1M-key dedup window and reaches a full snapshot, run it with --release"]
+fn checkpoint_lock_hold_with_a_full_dedup_window() {
+    const WINDOW: usize = 1_000_000;
+    const DELTA: usize = 160_000;
+    let disk = Arc::new(SimDisk::new(69));
+    let opts = EngineOptions {
+        dedup_per_tenant: WINDOW,
+        dedup_global: WINDOW,
+        tape: TapeOptions::default(),
+        ..options()
+    };
+    let engine = open(disk.clone(), opts.clone());
+    fill_retry_keys(&engine, 0, WINDOW);
+    engine.checkpoint().unwrap();
+    drop(engine);
+    // Each phase reopens, so the metric's maximum covers only that phase's snapshots.
+    let engine = open(disk.clone(), opts.clone());
+    let mut next = WINDOW;
+    for _ in 0..7 {
+        fill_retry_keys(&engine, next, DELTA);
+        next += DELTA;
+        engine.checkpoint().unwrap();
+    }
+    let deltas = engine.metrics().unwrap();
+    assert_eq!(deltas.checkpoint_files, 8);
+    assert_eq!(deltas.dedup_entries, WINDOW);
+    drop(engine);
+    let engine = open(disk.clone(), opts.clone());
+    fill_retry_keys(&engine, next, DELTA);
+    next += DELTA;
+    engine.checkpoint().unwrap();
+    let full = engine.metrics().unwrap();
+    assert_eq!(full.checkpoint_files, 1, "the ninth checkpoint compacts the chain");
+    eprintln!(
+        "checkpoint lock hold, {WINDOW}-key window: delta_max_us={:.1} full_us={:.1} \
+         delta_state_max_us={:.1} full_state_us={:.1}",
+        deltas.checkpoint_snapshot_lock_ns as f64 / 1e3,
+        full.checkpoint_snapshot_lock_ns as f64 / 1e3,
+        deltas.checkpoint_state_lock_ns as f64 / 1e3,
+        full.checkpoint_state_lock_ns as f64 / 1e3,
+    );
+    drop(engine);
+    // The full snapshot alone rebuilds the window.
+    let engine = open(disk, opts);
+    let metrics = engine.metrics().unwrap();
+    assert_eq!((metrics.replayed_records, metrics.checkpoint_warnings), (0, 0));
+    assert_eq!(metrics.dedup_entries, WINDOW);
+    let retry = |i: usize| {
+        let session = scope(&format!("s{}", i % 16));
+        engine.append(&session, vec![turn(i as u64)], Some(&i.to_string())).unwrap()
+    };
+    assert!(retry(next - 1).deduplicated, "the newest key is in the window");
+    assert!(retry(next - WINDOW / 2).deduplicated, "a key mid-window is in the window");
+    assert!(!retry(0).deduplicated, "the oldest key was evicted");
+}
+
 #[test]
 fn failed_sync_with_a_full_dedup_window_cannot_checkpoint_tentative_eviction() {
     let disk = Arc::new(SimDisk::new(17));
