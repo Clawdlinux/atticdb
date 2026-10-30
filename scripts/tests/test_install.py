@@ -222,7 +222,7 @@ def test_on_path_and_shadowed(server, dirs, tmp_path):
 
 
 # dash's command -v prints $dir//atticdb for the PATH entry $dir/. That is the same file.
-@pytest.mark.parametrize("shell", ["/bin/sh"] + [s for s in ("dash",) if shutil.which(s)])
+@pytest.mark.parametrize("shell", ["/bin/sh"] + [p for p in (shutil.which("dash"),) if p])
 def test_trailing_slash_on_path_is_not_a_shadow(server, dirs, shell):
     root, base, _ = server
     publish(root / "releases/latest/download")
