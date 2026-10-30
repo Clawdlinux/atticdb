@@ -324,7 +324,7 @@ Then start a new Claude Code session.
 
 ### Codex
 
-`zerodb connect codex [--force] [--no-hook] [--notes ask|auto] [--dry-run]` creates the home, then adds 2 parts.
+`zerodb connect codex [--force] [--no-hook] [--notes ask|auto] [--dry-run]` creates the home, then adds 3 parts.
 `zerodb disconnect codex` removes them.
 `--force` changes nothing for Codex, as zerodb never edits a `zerodb` server it didn't write.
 The config dir is `$CODEX_HOME` when set, else `~/.codex`.
@@ -334,6 +334,7 @@ A relative `CODEX_HOME` fails both verbs with exit 2 before any change. `codex` 
 |---|---|---|
 | MCP entry | a block at the end of `<config dir>/config.toml` | the block below |
 | Hook | `hooks.SessionStart` in `<config dir>/hooks.json` | `{"hooks": [{"type": "command", "command": "'<binary>' hook session-start --harness codex", "timeout": 5, "statusMessage": "Loading zerodb memory", "additionalContextLimit": 24000}]}` |
+| Guide | a block in `<config dir>/AGENTS.md`, or `AGENTS.override.md` | the guide block below |
 
 ```toml
 # zerodb:begin v1. zerodb disconnect codex removes this block.
@@ -387,7 +388,27 @@ Codex runs a new hook only after you approve it once in Codex. `connect` says so
 Codex keeps 1 approval per hook in `config.toml`, keyed by the hook's position. zerodb doesn't write those.
 When groups follow zerodb's, removing or replacing it moves them up, so Codex may ask to approve them again. Both verbs say so whenever that change was saved, even if a zerodb handler in a mixed group is left to remove by hand.
 `hooks = false` in `[features]` turns hooks off. `connect` warns when it finds that line.
-Codex reads the MCP server's instructions, so `AGENTS.md` isn't touched.
+
+Codex 0.147 didn't pass MCP server instructions to the model in `codex exec`. So the guide goes in AGENTS.md, where Codex reads the user's own instructions:
+
+```markdown
+<!-- zerodb:begin v1. zerodb disconnect codex removes this block. -->
+## zerodb memory
+<the MCP server's instructions>
+<!-- zerodb:end -->
+```
+
+Codex reads `AGENTS.override.md` in the config dir when it holds more than whitespace, else `AGENTS.md`. It reads only that 1 file, so the block goes there.
+zerodb reads at most 1 MiB of it, and only a regular file. A symlink skips the part. So does a file the block would take past 1 MiB, as zerodb couldn't read it again.
+The block goes after 1 blank line, with the same rules for CRLF and a missing final line end as `config.toml`. A missing file is created at mode 0600.
+A marker counts only as a whole line outside fenced code (```` ``` ```` or `~~~`). Marker lines that don't pair up skip the part.
+So does a line that only looks like a marker, such as an indented one, one with trailing spaces, or another version's begin line.
+A block that matches writes nothing. Another zerodb block is updated in place, with a backup.
+A file that mentions zerodb, in any case, outside the block and outside fenced code, is your own guide. zerodb doesn't write to it. The line says `kept` and names the file. It counts as in place.
+A fence that never closes skips the part, as a block after it would be code.
+When the file ends up over 32 KiB, `connect` warns. Codex may cut its instructions there.
+`--no-hook` and `--notes ask` don't change the guide. With `--notes ask`, Codex asks before each `memory_append`.
+`disconnect` removes the block and the blank line before it from both files, with a backup. Every other byte stays.
 
 Each part prints 1 line, and the exit code works as for Claude Code. Then open Codex.
 

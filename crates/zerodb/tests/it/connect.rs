@@ -1054,11 +1054,16 @@ const CODEX_HOOKS: &str = r#"{
 }
 "#;
 
+/// A global AGENTS.md as people keep it.
+const CODEX_AGENTS: &str = "# Working agreements\n\n- Run `cargo test` before you commit.\n- Keep \
+                            PRs small.\n";
+
 /// `connect codex` puts the MCP block at the end of `config.toml`, checks it with
-/// `codex mcp get zerodb --json`, and appends the SessionStart hook to `hooks.json`, in
-/// `$CODEX_HOME` or `~/.codex`. A rerun writes nothing and runs no codex. `disconnect`
-/// leaves hand-kept files byte for byte as they were, CRLF ones too. `--notes ask` leaves out
-/// the `memory_append` approval, and `--no-hook` the hook. A zerodb server outside the block
+/// `codex mcp get zerodb --json`, appends the SessionStart hook to `hooks.json`, and appends
+/// the guide to the `AGENTS.md` Codex reads, in `$CODEX_HOME` or `~/.codex`. A rerun writes
+/// nothing and runs no codex. `disconnect` leaves hand-kept files byte for byte as they were,
+/// CRLF ones too. `--notes ask` leaves out the `memory_append` approval, and `--no-hook` the
+/// hook. Neither changes the guide. A zerodb server outside the block
 /// is never edited, even with `--force`. A failed read-back puts the file back. Malformed
 /// markers skip the part. The other part still applies, and the exit code is 1.
 #[test]
@@ -1101,6 +1106,12 @@ fn connect_codex_adds_its_parts() {
         lines.push("# zerodb:end".into());
         lines.iter().map(|line| format!("{line}\n")).collect::<String>()
     };
+    // The guide's block, from its spec: the MCP server's instructions between 2 markers.
+    let guide = format!(
+        "<!-- zerodb:begin v1. zerodb disconnect codex removes this block. -->\n## zerodb \
+         memory\n{}\n<!-- zerodb:end -->\n",
+        zerodb::mcp::INSTRUCTIONS
+    );
     let quoted = format!("'{}'", exe.replace('\'', r"'\''"));
     let command = format!("{quoted} hook session-start --harness codex");
     let group = |command: &str| {
@@ -1118,23 +1129,27 @@ fn connect_codex_adds_its_parts() {
                     SessionStart hooks after zerodb's again.";
 
     let crlf = CODEX_CONFIG.replace('\n', "\r\n");
+    let crlf_agents = CODEX_AGENTS.replace('\n', "\r\n");
     let rows = [
-        ("fresh", false, None),
-        ("CODEX_HOME", true, None),
-        ("hand-kept", true, Some(CODEX_CONFIG)),
-        ("CRLF", true, Some(crlf.as_str())),
-        ("no final newline", true, Some(CODEX_CONFIG.trim_end())),
+        ("fresh", false, None, ""),
+        ("CODEX_HOME", true, None, ""),
+        ("hand-kept", true, Some(CODEX_CONFIG), CODEX_AGENTS),
+        ("CRLF", true, Some(crlf.as_str()), crlf_agents.as_str()),
+        ("no final newline", true, Some(CODEX_CONFIG.trim_end()), CODEX_AGENTS.trim_end()),
     ];
-    for (row, (case, moved, kept)) in rows.into_iter().enumerate() {
+    for (row, (case, moved, kept, agents_kept)) in rows.into_iter().enumerate() {
         let home = dir.0.join(format!("h{row}"));
         let codex_dir = if moved { home.join("c") } else { home.join(".codex") };
         let (config, hooks) = (codex_dir.join("config.toml"), codex_dir.join("hooks.json"));
+        let agents = codex_dir.join("AGENTS.md");
         if let Some(kept) = kept {
             std::fs::create_dir_all(&codex_dir).unwrap();
             std::fs::write(&config, kept).unwrap();
             std::fs::write(&hooks, CODEX_HOOKS).unwrap();
+            std::fs::write(&agents, agents_kept).unwrap();
             chmod(&config, 0o644);
             chmod(&hooks, 0o644);
+            chmod(&agents, 0o644);
         }
         let codex = moved.then_some(codex_dir.as_path());
         let connect =
@@ -1144,7 +1159,7 @@ fn connect_codex_adds_its_parts() {
         let eol = if case == "CRLF" { "\r\n" } else { "\n" };
         // A file without a final line end gets one, and the block's first line says so.
         let added = "removes this block and the line end it added above.";
-        let with = |block: &str| match original {
+        let with = |original: &str, block: &str| match original {
             "" => block.to_owned(),
             original if original.ends_with('\n') => {
                 format!("{original}{eol}{}", block.replace('\n', eol))
@@ -1154,6 +1169,7 @@ fn connect_codex_adds_its_parts() {
             }
         };
         let (at, shown) = (config.display().to_string(), hooks.display().to_string());
+        let read_by_codex = agents.display().to_string();
         let start = calls().len();
 
         let (code, out) = connect(&[]);
@@ -1171,16 +1187,20 @@ fn connect_codex_adds_its_parts() {
         assert_eq!(lines[0], format!("MCP entry: added ({at}{saved})"), "{case}");
         let saved = backup(lines[1], CODEX_HOOKS);
         assert_eq!(lines[1], format!("SessionStart hook: added ({shown}{saved})"), "{case}");
-        assert_eq!(lines[2..], [approve], "{case}");
+        let saved = backup(lines[2], agents_kept);
+        assert_eq!(lines[2], format!("zerodb guide: added ({read_by_codex}{saved})"), "{case}");
+        assert_eq!(lines[3..], [approve], "{case}");
         assert_eq!(calls()[start..], *std::slice::from_ref(&get), "{case}: read back");
-        assert_eq!(text(&config), with(&block(None, true)), "{case}");
+        assert_eq!(text(&config), with(original, &block(None, true)), "{case}");
+        assert_eq!(text(&agents), with(agents_kept, &guide), "{case}: the guide");
         let mut wanted: Value = serde_json::from_str(kept.map_or("{}", |_| CODEX_HOOKS)).unwrap();
         let mut list = wanted["hooks"]["SessionStart"].as_array().cloned().unwrap_or_default();
         list.push(group(&command));
         wanted["hooks"]["SessionStart"] = json!(list);
         assert_eq!(read(&hooks), wanted, "{case}: appended last");
         let wanted_mode = if kept.is_some() { 0o644 } else { 0o600 };
-        assert_eq!((perms(&config), perms(&hooks)), (wanted_mode, wanted_mode), "{case}");
+        let modes = (perms(&config), perms(&hooks), perms(&agents));
+        assert_eq!(modes, (wanted_mode, wanted_mode, wanted_mode), "{case}");
         if kept.is_none() {
             assert_eq!(perms(&codex_dir), 0o700, "{case}: a new config dir is private");
         }
@@ -1188,17 +1208,22 @@ fn connect_codex_adds_its_parts() {
         let now = || (files(&codex_dir), calls().len());
         let before = now();
         let (code, out) = connect(&[]);
-        let unchanged =
-            format!("MCP entry: unchanged ({at})\nSessionStart hook: unchanged ({shown})\n");
+        let unchanged = format!(
+            "MCP entry: unchanged ({at})\nSessionStart hook: unchanged ({shown})\nzerodb guide: \
+             unchanged ({read_by_codex})\n"
+        );
         assert_eq!((code, out), (Some(0), unchanged), "{case}");
         assert_eq!(now(), before, "{case}: nothing written, no backup, no codex");
 
         let (code, out) = connect(&["--notes", "ask"]);
         assert_eq!(code, Some(0), "{case}: {out}");
         assert!(out.starts_with(&format!("MCP entry: updated ({at}, backup: ")), "{case}: {out}");
-        let hook = format!("\nSessionStart hook: unchanged ({shown})\n");
+        let hook = format!(
+            "\nSessionStart hook: unchanged ({shown})\nzerodb guide: unchanged ({read_by_codex})\n"
+        );
         assert!(out.ends_with(&hook), "{case}: {out}");
-        assert_eq!(text(&config), with(&block(None, false)), "{case}: --notes ask");
+        assert_eq!(text(&config), with(original, &block(None, false)), "{case}: --notes ask");
+        assert_eq!(text(&agents), with(agents_kept, &guide), "{case}: --notes ask, same guide");
         assert_eq!(calls()[before.1..], *std::slice::from_ref(&get), "{case}: read back");
 
         let (code, out) = disconnect();
@@ -1207,9 +1232,12 @@ fn connect_codex_adds_its_parts() {
         assert!(lines[0].starts_with(&format!("MCP entry: removed ({at}, backup: ")), "{out}");
         let removed = format!("SessionStart hook: removed ({shown}, backup: ");
         assert!(lines[1].starts_with(&removed), "{case}: {out}");
-        assert_eq!(lines.len(), 2, "{case}: no note, as no group followed zerodb's: {out}");
+        let removed = format!("zerodb guide: removed ({read_by_codex}, backup: ");
+        assert!(lines[2].starts_with(&removed), "{case}: {out}");
+        assert_eq!(lines.len(), 3, "{case}: no note, as no group followed zerodb's: {out}");
         let check = |when: &str| {
             assert_eq!(text(&config), original, "{case} {when}");
+            assert_eq!(text(&agents), agents_kept, "{case} {when}: AGENTS.md");
             match kept {
                 Some(_) => assert_eq!(text(&hooks), CODEX_HOOKS, "{case} {when}"),
                 None => {
@@ -1221,10 +1249,232 @@ fn connect_codex_adds_its_parts() {
 
         let (code, out) = connect(&["--no-hook"]);
         assert_eq!(code, Some(0), "{case}: {out}");
-        assert!(out.starts_with("MCP entry: added (") && out.lines().count() == 1, "{out}");
-        assert_eq!(text(&config), with(&block(None, true)), "{case}: --no-hook");
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(lines[0].starts_with("MCP entry: added (") && lines.len() == 2, "{out}");
+        assert!(lines[1].starts_with("zerodb guide: added ("), "{case}: {out}");
+        assert_eq!(text(&config), with(original, &block(None, true)), "{case}: --no-hook");
+        assert_eq!(text(&agents), with(agents_kept, &guide), "{case}: --no-hook");
         assert_eq!(disconnect().0, Some(0), "{case}");
         check("--no-hook disconnect");
+    }
+
+    // The guide goes in the file Codex reads: AGENTS.override.md when it holds more than
+    // whitespace, else AGENTS.md. Markers and mentions in fenced code don't count. A file that
+    // mentions zerodb is the user's own guide, kept as it is. An older block of zerodb's is
+    // updated in place. Malformed markers, near misses such as an indented marker, a symlink,
+    // a fence that never closes, or a file the block would take past the 1 MiB read cap skip
+    // the part. --dry-run decides the same and writes nothing. A rerun writes nothing.
+    // disconnect gives each file back byte for byte, a bare CR at the end too, and AGENTS.md
+    // too when Codex now reads the override.
+    let marks = |text: &str| format!("{CODEX_AGENTS}\n{text}");
+    let (begin, end) = (
+        "<!-- zerodb:begin v1. zerodb disconnect codex removes this block. -->",
+        "<!-- zerodb:end -->",
+    );
+    let old = guide.replace(zerodb::mcp::INSTRUCTIONS, "Old text.");
+    let pairs =
+        "its zerodb begin lines and lines <!-- zerodb:end --> don't pair up: each must come \
+                 once, in that order";
+    let big = format!("{CODEX_AGENTS}{}\n", "x".repeat(32 * 1024));
+    let near = "it has a line that looks like a zerodb marker but isn't exactly one";
+    let spaced = marks(&guide.replace(&format!("{end}\n"), &format!("{end}  \n")));
+    // No LF at all, so a reconnect can't take the CR and zerodb's LF for CRLF.
+    let bare_cr = "User text\r".to_owned();
+    let at_cap = format!("{CODEX_AGENTS}{}\n", "y".repeat((1 << 20) - CODEX_AGENTS.len() - 8));
+    let over_cap = "would be over 1 MiB with zerodb's block, and zerodb reads at most 1 MiB";
+    // (case, AGENTS.override.md, AGENTS.md, what connect does, AGENTS.md after disconnect)
+    let rows = [
+        ("override", Some("Answer in French.\n"), marks(&guide), "added", CODEX_AGENTS.to_owned()),
+        ("empty override", Some(" \n"), CODEX_AGENTS.into(), "added", CODEX_AGENTS.into()),
+        (
+            "fenced markers",
+            None,
+            format!("{CODEX_AGENTS}\n```markdown\n{guide}Ask zerodb first.\n```\n"),
+            "added",
+            format!("{CODEX_AGENTS}\n```markdown\n{guide}Ask zerodb first.\n```\n"),
+        ),
+        (
+            "old block",
+            None,
+            marks(&format!("{old}\n## Later\n")),
+            "updated",
+            format!("{CODEX_AGENTS}\n## Later\n"),
+        ),
+        (
+            "own guide",
+            None,
+            marks("Search ZeroDB first.\n"),
+            "kept",
+            marks("Search ZeroDB first.\n"),
+        ),
+        (
+            "end only",
+            None,
+            marks(&format!("{end}\n")),
+            "it has a line <!-- zerodb:end --> without a zerodb begin line",
+            marks(&format!("{end}\n")),
+        ),
+        (
+            "begin only",
+            None,
+            marks(&format!("{begin}\n")),
+            "it has a zerodb begin line without a line <!-- zerodb:end -->",
+            marks(&format!("{begin}\n")),
+        ),
+        (
+            "2 begins",
+            None,
+            marks(&format!("{begin}\n{guide}")),
+            pairs,
+            marks(&format!("{begin}\n{guide}")),
+        ),
+        ("symlink", None, CODEX_AGENTS.into(), "is a symlink", CODEX_AGENTS.into()),
+        (
+            "open fence",
+            None,
+            marks("```sh\ncargo test\n"),
+            "has a code fence that never closes",
+            marks("```sh\ncargo test\n"),
+        ),
+        ("big", None, big.clone(), "added", big),
+        ("indented marker", None, marks(&format!("  {guide}")), near, marks(&format!("  {guide}"))),
+        ("trailing spaces", None, spaced.clone(), near, spaced),
+        ("bare CR", None, bare_cr.clone(), "added", bare_cr),
+        ("near cap", None, at_cap.clone(), over_cap, at_cap),
+        // Only spaces and tabs may follow a closing fence, so U+00A0 leaves it open.
+        (
+            "nbsp fence",
+            None,
+            marks(&format!("```markdown\n{guide}```\u{a0}\n")),
+            "has a code fence that never closes",
+            marks(&format!("```markdown\n{guide}```\u{a0}\n")),
+        ),
+    ];
+    for (row, (case, over, kept, does, left)) in rows.into_iter().enumerate() {
+        let home = dir.0.join(format!("a{row}"));
+        let codex_dir = home.join(".codex");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        let (overrides, agents) =
+            (codex_dir.join("AGENTS.override.md"), codex_dir.join("AGENTS.md"));
+        if let Some(over) = over {
+            std::fs::write(&overrides, over).unwrap();
+        }
+        if case == "symlink" {
+            std::fs::write(codex_dir.join("mine.md"), &kept).unwrap();
+            std::os::unix::fs::symlink("mine.md", &agents).unwrap();
+        } else {
+            std::fs::write(&agents, &kept).unwrap();
+        }
+        let target = if case == "override" { &overrides } else { &agents };
+        let shown = target.display();
+        let original = std::fs::read_to_string(target).unwrap();
+        let connect = |args: &[&str]| {
+            run(&home, None, &bin, &[], &[&["connect", "codex", "--no-hook"], args].concat())
+        };
+        let guide_line = |out: &str| {
+            let line = out
+                .lines()
+                .find(|line| line.contains("zerodb guide") || line.contains("user's guide"));
+            line.unwrap_or_default().to_owned()
+        };
+        let skipped = format!("zerodb guide: skipped, {shown}");
+        let (plan, said, code) = match does {
+            "added" | "updated" => {
+                let verb = if does == "added" { "add" } else { "update" };
+                (
+                    format!("{shown}: {verb} the zerodb guide"),
+                    format!("zerodb guide: {does} ({shown}, backup: "),
+                    0,
+                )
+            }
+            "kept" => (
+                format!("{shown}: keep the user's guide, which mentions zerodb"),
+                format!("zerodb guide: kept, {shown} already mentions zerodb"),
+                0,
+            ),
+            why if why == over_cap || why == "is a symlink" || why.starts_with("has a code") => {
+                (format!("{skipped} {does}"), format!("{skipped} {does}"), 1)
+            }
+            why => (
+                format!("{skipped}: {why}. Nothing changed."),
+                format!("{skipped}: {why}. Nothing changed."),
+                1,
+            ),
+        };
+        let before = support::tree(&home);
+        let (status, out) = connect(&["--dry-run"]);
+        assert_eq!(status, Some(code), "{case}: plan: {out}");
+        assert!(guide_line(&out).starts_with(&plan), "{case}: plan: {out}");
+        assert_eq!(support::tree(&home), before, "{case}: the plan wrote nothing");
+
+        let (status, out) = connect(&[]);
+        assert_eq!(status, Some(code), "{case}: {out}");
+        let line = guide_line(&out);
+        assert!(line.starts_with(&said), "{case}: {out}");
+        let too_big = " over 32 KiB. Codex may cut its instructions there";
+        assert_eq!(out.contains(too_big), case == "big", "{case}: {out}");
+        // A file without a final LF gets one, and the begin line says so.
+        let added = "removes this block and the line end it added above.";
+        let wanted = match does {
+            "added" if !original.ends_with('\n') => {
+                format!("{original}\n\n{}", guide.replacen("removes this block.", added, 1))
+            }
+            "added" => format!("{original}\n{guide}"),
+            "updated" => original.replace(&old, &guide),
+            _ => original.clone(),
+        };
+        assert_eq!(text(target), wanted, "{case}");
+        if matches!(does, "added" | "updated") {
+            let backup = line[said.len()..].trim_end_matches(')');
+            assert_eq!(text(Path::new(backup)), original, "{case}: backup");
+        }
+        if case == "override" || case == "empty override" {
+            let other = if case == "override" { &agents } else { &overrides };
+            assert_eq!(
+                text(other),
+                if case == "override" { kept.clone() } else { " \n".into() },
+                "{case}"
+            );
+        }
+        if case == "symlink" {
+            assert!(std::fs::symlink_metadata(&agents).unwrap().is_symlink(), "{case}");
+            assert_eq!(text(&codex_dir.join("mine.md")), kept, "{case}");
+        }
+
+        let before = support::tree(&home);
+        let (status, out) = connect(&[]);
+        assert_eq!(status, Some(code), "{case}: again: {out}");
+        if code == 0 && does != "kept" {
+            assert_eq!(guide_line(&out), format!("zerodb guide: unchanged ({shown})"), "{case}");
+            let (_, out) = connect(&["--dry-run"]);
+            assert_eq!(guide_line(&out), format!("{shown}: zerodb guide unchanged"), "{case}");
+        }
+        assert_eq!(support::tree(&home), before, "{case}: a rerun writes nothing");
+
+        let (status, out) = run(&home, None, &bin, &[], &["disconnect", "codex"]);
+        let malformed =
+            code == 1 && !matches!(case, "symlink" | "open fence" | "near cap" | "nbsp fence");
+        assert_eq!(status, Some(i32::from(malformed)), "{case}: {out}");
+        let lines: Vec<&str> = out.lines().filter(|line| line.contains("zerodb guide")).collect();
+        let removed = |path: &Path| format!("zerodb guide: removed ({}, backup: ", path.display());
+        match case {
+            "override" => {
+                assert!(lines.len() == 2 && lines[0].starts_with(&removed(&overrides)), "{out}");
+                assert!(lines[1].starts_with(&removed(&agents)), "{case}: {out}");
+                assert_eq!(text(&overrides), original, "{case}");
+            }
+            _ if matches!(does, "added" | "updated") => {
+                assert!(lines.len() == 1 && lines[0].starts_with(&removed(&agents)), "{out}");
+            }
+            "symlink" => {
+                let alone =
+                    format!("zerodb guide: left {shown} alone, as it is a symlink. If it holds");
+                assert!(lines.len() == 1 && lines[0].starts_with(&alone), "{case}: {out}");
+            }
+            _ if malformed => assert!(lines.len() == 1 && lines[0].starts_with(&said), "{out}"),
+            _ => assert_eq!(lines, [format!("zerodb guide: not found ({shown})")], "{case}"),
+        }
+        assert_eq!(text(&agents), left, "{case}: disconnect");
     }
 
     // Under ZERODB_HOME, the block passes it in env, as a TOML string with `\` and `"`
@@ -1494,8 +1744,11 @@ fn connect_codex_adds_its_parts() {
     let (code, out) = run(&home, None, &empty, &[], &["connect", "codex", "--no-hook"]);
     assert_eq!(code, Some(0), "{out}");
     let config = home.join(".codex/config.toml");
-    let said =
-        format!("MCP entry: added ({}), not verified: codex is not on PATH\n", config.display());
+    let said = format!(
+        "MCP entry: added ({}), not verified: codex is not on PATH\nzerodb guide: added ({})\n",
+        config.display(),
+        home.join(".codex/AGENTS.md").display()
+    );
     assert_eq!(out, said);
     assert_eq!((text(&config), calls().len()), (block(None, true), start));
 
@@ -1530,8 +1783,11 @@ fn connect_codex_adds_its_parts() {
             assert_eq!(cwd.lines().last(), codex_dir_real.to_str(), "{mode}: codex's cwd");
             assert!(out.contains("\nSessionStart hook: added ("), "{mode}: {out}");
             let names: Vec<String> = files(&codex_dir).into_keys().collect();
-            let left =
-                if kept.is_some() { &["config.toml", "hooks.json"][..] } else { &["hooks.json"] };
+            let left = if kept.is_some() {
+                &["AGENTS.md", "config.toml", "hooks.json"][..]
+            } else {
+                &["AGENTS.md", "hooks.json"]
+            };
             assert_eq!(names, left, "{mode}: no backup left");
             match kept {
                 Some(kept) => {

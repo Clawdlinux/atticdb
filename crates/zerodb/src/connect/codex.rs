@@ -1,13 +1,16 @@
-//! Codex's 2 parts, in `$CODEX_HOME`, else `~/.codex`:
+//! Codex's 3 parts, in `$CODEX_HOME`, else `~/.codex`:
 //!
 //! - The MCP entry with its tool approvals: a block between 2 marker lines at the end of
 //!   `config.toml`. `codex mcp add` can't set approvals, so zerodb writes the block itself.
 //!   Then `codex mcp get zerodb --json`, which only prints config, must show it.
 //! - The SessionStart hook, a group in `hooks.SessionStart` of `hooks.json`, edited by
 //!   [`crate::jsonedit`] and found by its content, as for Claude Code.
+//! - The guide: the MCP server's instructions as a block in `AGENTS.md`, or in
+//!   `AGENTS.override.md` when Codex reads that instead. Codex 0.147 didn't pass MCP server
+//!   instructions to the model in `codex exec`, so the guide goes where Codex reads the
+//!   user's own. See [`guide`].
 //!
-//! Codex reads the MCP server's instructions, so `AGENTS.md` isn't touched. Codex keeps 1
-//! approval per hook in `config.toml`. zerodb never writes those.
+//! Codex keeps 1 approval per hook in `config.toml`. zerodb never writes those.
 
 use super::claude::{
     add_hook, drop_hooks, edit_file, find_program, hook_args, hook_command, our_group, run,
@@ -25,6 +28,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use zerodb_tape::{Io, StdIo};
 
+mod guide;
 mod scan;
 use scan::{scan, Entry, Item};
 
@@ -79,8 +83,8 @@ fn hooks_file() -> Result<PathBuf, String> {
     Ok(codex_home()?.join("hooks.json"))
 }
 
-/// Adds the MCP block for `notes`, and the hook when `hook`. It stops with exit code 2 for a
-/// relative `CODEX_HOME`. In Plan mode, it writes nothing and runs no `codex`.
+/// Adds the MCP block for `notes`, the hook when `hook`, and the guide. It stops with exit
+/// code 2 for a relative `CODEX_HOME`. In Plan mode, it writes nothing and runs no `codex`.
 pub(super) fn connect(hook: bool, notes: Notes, mode: Mode) -> Report {
     if let Err(error) = check_codex_env() {
         return Report::stopped(2, error);
@@ -88,15 +92,16 @@ pub(super) fn connect(hook: bool, notes: Notes, mode: Mode) -> Report {
     let prepared = (|| {
         let home = moved_home(Harness::Codex)?;
         let exe = binary()?;
-        let config = config_file()?;
+        let dir = codex_home()?;
+        let config = dir.join("config.toml");
         let warnings = split(Harness::Codex, home.as_deref());
         match mode {
             Mode::Apply => drop(crate::home::ensure()?),
             Mode::Plan => crate::home::check_existing()?,
         }
-        Ok::<_, String>((home, exe, config, warnings))
+        Ok::<_, String>((home, exe, dir, config, warnings))
     })();
-    let (home, exe, config, mut warnings) = match prepared {
+    let (home, exe, dir, config, mut warnings) = match prepared {
         Ok(prepared) => prepared,
         Err(error) => return Report::stopped(1, error),
     };
@@ -127,6 +132,9 @@ pub(super) fn connect(hook: bool, notes: Notes, mode: Mode) -> Report {
             next.extend(moved.then(|| POSITION.to_owned()));
         }
     }
+    let (guide, too_big) = guide::add(&dir, mode);
+    lines.push(guide);
+    warnings.extend(too_big);
     Report { lines, warnings, next, stopped: None, hook: hook_state, hooks_off: off }
 }
 
@@ -140,20 +148,21 @@ pub(super) fn verify() -> Result<(), String> {
     check(&codex, config.parent().unwrap_or(Path::new("/")), &exe, home.as_deref())
 }
 
-/// Removes zerodb's MCP block and every hook group that runs zerodb's hook. Returns the exit
-/// code: 2 for a relative `CODEX_HOME`.
+/// Removes zerodb's MCP block, every hook group that runs zerodb's hook, and the guide's
+/// block. Returns the exit code: 2 for a relative `CODEX_HOME`.
 pub(super) fn disconnect() -> u8 {
     if let Err(error) = check_codex_env() {
         eprintln!("zerodb: {error}");
         return 2;
     }
-    let config = match config_file() {
-        Ok(config) => config,
+    let dir = match codex_home() {
+        Ok(dir) => dir,
         Err(error) => {
             eprintln!("zerodb: {error}");
             return 1;
         }
     };
+    let config = dir.join("config.toml");
     let (tracked, hooks) = (Tracked::default(), hooks_file());
     let drop = |text: &str| track(text, drop_hooks(Harness::Codex, text), &tracked);
     let by_hand = format!(
@@ -163,6 +172,7 @@ pub(super) fn disconnect() -> u8 {
     let parts = [Part { name: "SessionStart hook", by_hand, edit: &drop }];
     let mut lines = vec![drop_block(&config).unwrap_or_else(|line| line)];
     lines.extend(edit_file(hooks.clone(), NO_HOOKS, &parts, Mode::Apply));
+    lines.extend(guide::remove(&dir));
     // A removal that left another zerodb handler to do by hand still moved the groups after it.
     let next = saved(&hooks, &tracked).filter(|moved| *moved).map(|_| POSITION.to_owned());
     Report { lines, next: next.into_iter().collect(), ..Report::default() }.print()

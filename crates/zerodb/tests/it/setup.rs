@@ -62,7 +62,8 @@ fn read(path: &Path) -> Value {
 /// With all 4 apps found, `--dry-run` prints 1 line per file and part and writes nothing, nor
 /// runs any harness program. `--yes` connects all 4 in order, with `claude mcp add` once and
 /// `codex mcp get` only, then checks each: parts in place, the hook answers, the store
-/// answers. A rerun changes nothing and says so. A Claude part that can't be applied is
+/// answers. Codex's guide goes in its AGENTS.md. A rerun changes nothing and says so, the
+/// guide included. A Claude part that can't be applied is
 /// skipped, and the exit code is 1.
 #[test]
 fn setup_plans_then_connects_every_app_it_finds() {
@@ -77,6 +78,7 @@ fn setup_plans_then_connects_every_app_it_finds() {
     let (copilot, vscode) = (home.join(".copilot"), vscode_file(&home));
     let (state, settings) = (home.join(".claude.json"), home.join(".claude/settings.json"));
     let (config, hooks) = (home.join(".codex/config.toml"), home.join(".codex/hooks.json"));
+    let agents = home.join(".codex/AGENTS.md");
     let (c, v, h) = (copilot.display(), vscode.display(), home.display());
 
     let (code, out, err) = run(&["--dry-run", "--yes"]);
@@ -91,7 +93,8 @@ fn setup_plans_then_connects_every_app_it_finds() {
          {h}/.claude/settings.json: add the SessionStart hook\n  \
          {h}/.claude/settings.json: add the allow rules\n\
          Codex:\n  {h}/.codex/config.toml: add the MCP entry\n  \
-         {h}/.codex/hooks.json: add the SessionStart hook\n\
+         {h}/.codex/hooks.json: add the SessionStart hook\n  \
+         {h}/.codex/AGENTS.md: add the zerodb guide\n\
          Dry run: nothing was written.\n"
     );
     assert_eq!(out, plan);
@@ -130,18 +133,20 @@ fn setup_plans_then_connects_every_app_it_finds() {
     let block = std::fs::read_to_string(&config).unwrap();
     assert!(block.contains("[mcp_servers.zerodb.tools.memory_append]"), "{block}");
     assert_eq!(read(&hooks)["hooks"]["SessionStart"].as_array().unwrap().len(), 1);
+    let guide = std::fs::read_to_string(&agents).unwrap();
+    assert!(guide.contains(&format!("## zerodb memory\n{}\n", zerodb::mcp::INSTRUCTIONS)));
     let add = ["mcp", "add", "-s", "user", "zerodb", "--", &exe, "mcp", "--agent", "claude-code"];
     assert_eq!(calls(&claude_log), [add.map(String::from).to_vec()]);
     // Once after the write, once in the checks. Never a command that changes anything.
     let get = ["mcp", "get", "zerodb", "--json"].map(String::from).to_vec();
     assert_eq!(calls(&codex_log), [get.clone(), get.clone()]);
 
-    let files = [&vscode, &state, &settings, &config, &hooks];
+    let files = [&vscode, &state, &settings, &config, &hooks, &agents];
     let before = (files.map(|file| std::fs::read(file).unwrap()), tree(&copilot));
     let (code, out, err) = run(&["--yes"]);
     assert_eq!(code, Some(0), "{out}{err}");
     let plan = out.split("Applying:\n").next().unwrap();
-    assert_eq!(plan.lines().filter(|line| line.ends_with(" unchanged")).count(), 9, "{out}");
+    assert_eq!(plan.lines().filter(|line| line.ends_with(" unchanged")).count(), 10, "{out}");
     for line in out.lines() {
         let changed = [": add the ", ": update the ", "added", "updated", "connected zerodb to"];
         let changed = [&changed[..], &["removed", "skipped,", "backup"]].concat();
@@ -197,7 +202,7 @@ fn setup_asks_and_stops_without_answers() {
     let dry_both = [&dry[..], &["claude-code,codex"]].concat();
     let codex_home = [("CODEX_HOME", "rel")];
     let skipped = "\n  SessionStart hook: skipped, ";
-    let rows: [Row<'_>; 16] = [
+    let rows: [Row<'_>; 17] = [
         ("claude-code and codex", &[], &terminal, &path, "claude-code,codex\n\nn\ny\n", 0, ""),
         ("declined", &[], &terminal, &path, "codex\nn\n\nno\n", 0, "N] Nothing changed.\n"),
         ("not a terminal", &[], &[], &path, "claude-code\n\n\ny\n", 2, needs),
@@ -211,6 +216,8 @@ fn setup_asks_and_stops_without_answers() {
         // The MCP entry is in place, but not the hook, so there is nothing to approve.
         ("Codex hook skipped", &codex, &[], &path, "", 1, "\n  SessionStart hook: skipped, "),
         ("Codex hooks off", &codex, &[], &path, "", 0, "\n  Codex: ok\n"),
+        // The user's AGENTS.md mentions zerodb, so it is kept, and counts as in place.
+        ("Codex own guide", &codex, &[], &path, "", 0, "\n  Codex: ok\n"),
         ("help", &["--yes", "--help"], &[], &path, "", 0, "\n  --dry-run         print the plan"),
         // A dry run exits as its plan would: 1 for a skipped part, else an app's stopped code.
         ("dry run skips", &dry_claude, &[], &path, "", 1, skipped),
@@ -237,6 +244,12 @@ fn setup_asks_and_stops_without_answers() {
         if case == "Codex hooks off" {
             std::fs::create_dir_all(&codex_dir).unwrap();
             std::fs::write(codex_dir.join("config.toml"), "[features]\nhooks = false\n").unwrap();
+        }
+        let agents = codex_dir.join("AGENTS.md");
+        let agents_kept = "Search zerodb before you start.\n";
+        if case == "Codex own guide" {
+            std::fs::create_dir_all(&codex_dir).unwrap();
+            std::fs::write(&agents, agents_kept).unwrap();
         }
         if case == "dry run skips" {
             std::fs::create_dir_all(home.join(".claude")).unwrap();
@@ -268,6 +281,17 @@ fn setup_asks_and_stops_without_answers() {
             assert!(out.contains("\n  Copilot CLI: ok\n"), "{case}: {out}");
             assert_eq!(std::fs::read_to_string(guides.join("x.instructions.md")).unwrap(), guide);
             assert!(!guides.join("zerodb.instructions.md").exists(), "{case}");
+            continue;
+        }
+        if case == "Codex own guide" {
+            let (plan, applying) = out.split_once("Applying:\n").unwrap();
+            let shown = agents.display();
+            let keep = format!("\n  {shown}: keep the user's guide, which mentions zerodb\n");
+            assert!(plan.contains(&keep), "{case}: {out}");
+            let kept = format!("\n  zerodb guide: kept, {shown} already mentions zerodb\n");
+            assert!(applying.contains(&kept), "{case}: {out}");
+            assert!(out.contains("\n1 connected, 0 with skipped parts.\n"), "{case}: {out}");
+            assert_eq!(std::fs::read_to_string(&agents).unwrap(), agents_kept, "{case}");
             continue;
         }
         if case.starts_with("Codex hook") {
