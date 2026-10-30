@@ -1,12 +1,17 @@
 use crate::support::{self, atticdb, data_dir, Dir, Holders};
 use std::process::Stdio;
 
-/// `--version` and `-V` print the name and the crate version on stdout and exit 0. They take
-/// no other args. The home is never read, so a relative `ATTICDB_HOME` does not matter.
+/// `--version` and `-V` print the name and the version on stdout and exit 0. They take no
+/// other args. The home is never read, so a relative `ATTICDB_HOME` does not matter. A source
+/// build prints the crate version plus `+dev`. A release build prints `ATTICDB_RELEASE_VERSION`.
 #[test]
 fn version_flag() {
     let dir = Dir::new();
-    let want = format!("atticdb {}\n", env!("CARGO_PKG_VERSION"));
+    let want = match option_env!("ATTICDB_RELEASE_VERSION").filter(|v| !v.is_empty()) {
+        Some(release) => format!("atticdb {release}\n"),
+        None => format!("atticdb {}+dev\n", env!("CARGO_PKG_VERSION")),
+    };
+    assert_eq!(format!("atticdb {}\n", atticdb::VERSION), want);
     for flag in ["--version", "-V"] {
         let mut command = support::command(env!("CARGO_BIN_EXE_atticdb"));
         command.arg(flag).current_dir(&dir.0).env("HOME", dir.0.join("h"));

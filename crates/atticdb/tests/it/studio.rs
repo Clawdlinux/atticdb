@@ -377,7 +377,7 @@ fn studio_forwards_reads_and_refuses_the_rest() {
     let reply = studio.get("/api/block?repo=app", true);
     let expected = json!({"repo": "app", "block": block, "chars": chars, "max": 6000});
     assert_eq!((reply.status, reply.json()), (200, expected));
-    let version = env!("CARGO_PKG_VERSION");
+    let version = atticdb::VERSION;
     let info = json!({"version": version, "tenant": "me", "store": "home", "home": data.parent()});
     assert_eq!(studio.get("/api/info", true).json(), info);
 

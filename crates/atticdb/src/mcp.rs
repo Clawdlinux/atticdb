@@ -398,7 +398,7 @@ impl Adapter {
                 json!({
                     "protocolVersion": version,
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "atticdb", "version": env!("CARGO_PKG_VERSION")},
+                    "serverInfo": {"name": "atticdb", "version": crate::VERSION},
                     "instructions": INSTRUCTIONS,
                 })
             }

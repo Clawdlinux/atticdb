@@ -67,7 +67,7 @@ impl Checks {
 pub fn run(harnesses: Option<Vec<Harness>>) -> u8 {
     let mut checks = Checks::default();
     println!("atticdb:");
-    let (version, exe) = (env!("CARGO_PKG_VERSION"), connect::binary());
+    let (version, exe) = (crate::VERSION, connect::binary());
     match &exe {
         Ok(exe) => checks.line(&format!("version {version}, {exe}"), Ok(())),
         Err(why) => checks.line(&format!("version {version}"), Err(why.clone())),

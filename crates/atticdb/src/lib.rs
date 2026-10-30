@@ -27,6 +27,14 @@ pub mod studio;
 
 use std::io::Read;
 
+/// The version this binary reports. Release builds set `ATTICDB_RELEASE_VERSION` from the git
+/// tag at compile time. Main is protected, so no bot commits a bump to Cargo.toml. Any other
+/// build reports the Cargo.toml version plus `+dev`.
+pub const VERSION: &str = match option_env!("ATTICDB_RELEASE_VERSION") {
+    Some(version) if !version.is_empty() => version,
+    _ => concat!(env!("CARGO_PKG_VERSION"), "+dev"),
+};
+
 /// Spawns `command`, retrying up to 10 times, 20 ms apart, while Linux says the program is
 /// busy (ETXTBSY). That happens while the file is open for writing, for example while it is
 /// being updated, or in tests that just wrote a fake program while another thread forked.

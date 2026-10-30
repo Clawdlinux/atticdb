@@ -28,6 +28,7 @@ atticdb setup             # asks which apps, then wires them
 ```
 
 The installer puts `atticdb` in `~/.local/bin` and checks the download against the release's `SHA256SUMS`. It never uses sudo or edits your shell files.
+Releases ship monthly, and the latest is the default.
 Set `ATTICDB_VERSION=0.1.0` to pin a release, `ATTICDB_INSTALL_DIR` to install elsewhere, or `ATTICDB_DOWNLOAD_BASE` for a mirror.
 
 From source, with Rust installed:

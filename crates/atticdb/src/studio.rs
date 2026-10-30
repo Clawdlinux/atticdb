@@ -325,7 +325,7 @@ impl Studio {
             StoreKind::Url => "url",
         };
         let home = self.home.as_ref().map(|home| home.to_string_lossy());
-        let version = env!("CARGO_PKG_VERSION");
+        let version = crate::VERSION;
         json!({"version": version, "tenant": self.tenant, "store": store, "home": home})
     }
 
