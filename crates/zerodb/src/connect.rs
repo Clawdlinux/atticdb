@@ -310,8 +310,9 @@ pub fn detect(harness: Harness) -> bool {
 /// its allow rules for `notes`. An entry that differs is replaced only with `force`.
 ///
 /// Codex: adds its MCP entry and tool approvals for `notes`, as a block at the end of its
-/// `config.toml`, and unless `hook` is false its SessionStart hook. A `zerodb` server that
-/// zerodb didn't write is never edited, so `force` doesn't apply.
+/// `config.toml`, unless `hook` is false its SessionStart hook, and its guide, a block in the
+/// `AGENTS.md` Codex reads. A `zerodb` server that zerodb didn't write is never edited, so
+/// `force` doesn't apply.
 ///
 /// For Claude Code and Codex, a part that can't be applied is skipped, with what to do by
 /// hand, and the others still apply.
@@ -880,18 +881,27 @@ fn remove_guide() -> Result<String, String> {
 /// The file's bytes and mode, or `None` when it is missing. A symlink is refused, because
 /// the rename would replace it with a regular file.
 fn read(path: &Path) -> Result<Option<Saved>, String> {
+    read_up_to(path, u64::MAX)
+}
+
+/// [`read`], refusing a file over `max` bytes.
+fn read_up_to(path: &Path, max: u64) -> Result<Option<Saved>, String> {
     match std::fs::symlink_metadata(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.to_string()),
         Ok(meta) if meta.is_symlink() => return Err("is a symlink".into()),
         Ok(_) => {}
     }
-    let mut file = crate::config::open_regular(OpenOptions::new().read(true), path)
+    let file = crate::config::open_regular(OpenOptions::new().read(true), path)
         .map_err(|error| format!("cannot read: {error}"))?;
     let mode = file.metadata().map_err(|error| format!("cannot read: {error}"))?.permissions();
     let mut bytes = Vec::new();
-    std::io::Read::read_to_end(&mut file, &mut bytes)
+    file.take(max.saturating_add(1))
+        .read_to_end(&mut bytes)
         .map_err(|error| format!("cannot read: {error}"))?;
+    if bytes.len() as u64 > max {
+        return Err(format!("is larger than {max} bytes"));
+    }
     Ok(Some((bytes, mode.mode() & 0o777)))
 }
 
