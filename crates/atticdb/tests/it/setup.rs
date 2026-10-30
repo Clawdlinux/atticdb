@@ -490,8 +490,7 @@ fn doctor_checks_an_install_and_writes_nothing() {
     let n = n.parent().unwrap().display().to_string();
     let uid = rustix::process::geteuid().as_raw();
     let fix = |name: &str| format!("run atticdb setup --harness {name}, or atticdb connect {name}");
-    let (shared_hook, version) =
-        (home.join(".copilot/hooks/atticdb.json"), env!("CARGO_PKG_VERSION"));
+    let (shared_hook, version) = (home.join(".copilot/hooks/atticdb.json"), atticdb::VERSION);
     let sandbox = "Sandboxes:\n  Agents in a sandbox need read and write access to";
     let unset =
         format!("Home:\n  {n} (ATTICDB_HOME is not set): not set up yet, run atticdb setup\n");

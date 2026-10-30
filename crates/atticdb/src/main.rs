@@ -84,7 +84,7 @@ fn main() -> ExitCode {
     let code = match args.split_first() {
         Some((command, rest)) => match command.as_str() {
             "--version" | "-V" if rest.is_empty() => {
-                println!("atticdb {}", env!("CARGO_PKG_VERSION"));
+                println!("atticdb {}", atticdb::VERSION);
                 Some(0)
             }
             "init" => flags(rest, &["--config", "--tenant"], &[]).and_then(init),

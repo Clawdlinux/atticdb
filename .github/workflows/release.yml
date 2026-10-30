@@ -1,48 +1,116 @@
 name: release
 on:
+  # A hand-pushed vX.Y.Z tag publishes that version, such as a patch release.
   push:
     tags: ["v*"]
-  # Builds only. Publishing needs a tag push.
+  # Builds only.
   pull_request:
     paths:
       - .github/workflows/release.yml
       - install.sh
+  # 06:00 UTC on the 1st of each month. Publishes the next minor version when main has new
+  # commits since the latest tag.
+  schedule:
+    - cron: "0 6 1 * *"
+  # Builds only, unless publish is set. Then it publishes the next minor version off-cycle.
   workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish the next minor version now"
+        type: boolean
+        default: false
 permissions:
   contents: read
+# Runs that may publish share 1 group and never cancel, so 2 never publish at once. A queued
+# run computes its version after the run before it has tagged. Other runs group by ref.
 concurrency:
-  group: release-${{ github.ref }}
+  group: >-
+    ${{ (github.event_name == 'schedule' || github.event_name == 'push' || inputs.publish)
+    && 'release' || format('release-{0}', github.ref) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 env:
   CARGO_TERM_COLOR: always
 jobs:
+  # Decides whether this run publishes, and the version the binaries print. The version comes
+  # from the tag, not Cargo.toml. Main is protected, so no bot can commit a version bump.
   version:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      version: ${{ steps.read.outputs.version }}
+      publish: ${{ steps.plan.outputs.publish }}
+      tag: ${{ steps.plan.outputs.tag }}
+      version: ${{ steps.plan.outputs.version }}
+      previous: ${{ steps.plan.outputs.previous }}
     steps:
+      # All history and tags, to find the latest tag and count the commits since.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - id: read
+          fetch-depth: 0
+      - id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          PUBLISH_INPUT: ${{ inputs.publish }}
         run: |
-          version=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)
-          if [ -z "$version" ]; then
+          semver='^v[0-9]+\.[0-9]+\.[0-9]+$'
+          # Release tags, highest first. Other v* tags are ignored.
+          tags() {
+            git tag --list 'v*' --sort=-v:refname | grep -E "$semver" || true
+          }
+          cargo=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)
+          if [ -z "$cargo" ]; then
             echo "::error::no version in [workspace.package] of Cargo.toml"
             exit 1
           fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-      # Fails before any build when the tag and Cargo.toml disagree.
-      - if: github.ref_type == 'tag'
-        env:
-          TAG: ${{ github.ref_name }}
-          VERSION: ${{ steps.read.outputs.version }}
-        run: |
-          if [ "$TAG" != "v$VERSION" ]; then
-            echo "::error::tag $TAG does not match the workspace version $VERSION"
-            exit 1
+          publish=false
+          tag=""
+          version="$cargo+ci"
+          previous=""
+          if [ "$EVENT" = push ]; then
+            if ! printf '%s\n' "$REF_NAME" | grep -Eq "$semver"; then
+              echo "::error::tag $REF_NAME is not vX.Y.Z"
+              exit 1
+            fi
+            publish=true
+            tag=$REF_NAME
+            # The highest release tag below this one.
+            previous=$(tags | awk -v tag="$tag" 'found { print; exit } $0 == tag { found = 1 }')
+          elif [ "$EVENT" = schedule ] || [ "$PUBLISH_INPUT" = true ]; then
+            if [ "$REF" != "refs/heads/$DEFAULT_BRANCH" ]; then
+              echo "::error::releases publish from $DEFAULT_BRANCH only, not $REF"
+              exit 1
+            fi
+            latest=$(tags | sed -n 1p)
+            if [ -n "$latest" ]; then
+              count=$(git rev-list --count "$latest..HEAD")
+            else
+              count=$(git rev-list --count HEAD)
+            fi
+            latest=${latest:-v0.0.0}
+            if [ "$count" -eq 0 ]; then
+              echo "::notice::no commits since $latest, no release"
+            else
+              IFS=. read -r major minor _ <<< "${latest#v}"
+              publish=true
+              tag="v$major.$((10#$minor + 1)).0"
+              if [ "$latest" != v0.0.0 ]; then
+                previous=$latest
+              fi
+              echo "releasing $tag, as $latest..HEAD has $count commits"
+            fi
           fi
+          if [ -n "$tag" ]; then
+            version=${tag#v}
+          fi
+          {
+            echo "publish=$publish"
+            echo "tag=$tag"
+            echo "version=$version"
+            echo "previous=$previous"
+          } | tee -a "$GITHUB_OUTPUT"
 
   build:
     needs: version
@@ -64,12 +132,15 @@ jobs:
     env:
       TARGET: ${{ matrix.target }}
       VERSION: ${{ needs.version.outputs.version }}
+      # The binary prints this version. Cargo rebuilds when it changes.
+      ATTICDB_RELEASE_VERSION: ${{ needs.version.outputs.version }}
       # Keeps macOS tar from adding ._ files for extended attributes.
       COPYFILE_DISABLE: "1"
       # The profile keeps debug = 1 for local builds. Shipped binaries drop the DWARF and keep
       # symbols, so backtraces still name functions.
       CARGO_PROFILE_RELEASE_STRIP: debuginfo
     steps:
+      # Every job checks out github.sha, the commit the publish job tags.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
@@ -135,15 +206,24 @@ jobs:
 
   publish:
     needs: [version, build]
-    if: github.event_name == 'push' && github.ref_type == 'tag'
+    if: needs.version.outputs.publish == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ needs.version.outputs.tag }}
+      VERSION: ${{ needs.version.outputs.version }}
+      PREVIOUS: ${{ needs.version.outputs.previous }}
+      SHA: ${{ github.sha }}
     steps:
+      # All history, for the list of changes since the previous tag.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: atticdb-*
@@ -160,11 +240,25 @@ jobs:
           cp ../install.sh .
           sha256sum atticdb-*.tar.gz install.sh > SHA256SUMS
           cat SHA256SUMS
+      # A scheduled or manual release tags the commit it built. The API creates the tag, so the
+      # job needs no git credentials. A tag made with GITHUB_TOKEN starts no other run.
+      - name: Tag the built commit
+        if: github.event_name != 'push'
+        run: |
+          set +e
+          git ls-remote --exit-code origin "refs/tags/$TAG" > /dev/null
+          found=$?
+          set -e
+          case "$found" in
+            0) echo "::error::tag $TAG already exists, not publishing"; exit 1 ;;
+            2) ;;
+            *) echo "::error::could not list the tags on origin"; exit 1 ;;
+          esac
+          object=$(gh api "repos/$GH_REPO/git/tags" -f tag="$TAG" -f message="AtticDB $VERSION" \
+            -f object="$SHA" -f type=commit --jq .sha)
+          gh api "repos/$GH_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$object" --silent
+          echo "tagged $SHA as $TAG"
       - name: Create the release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
         run: |
           cat > notes.md <<'EOF'
           Install on macOS or Linux:
@@ -177,4 +271,13 @@ jobs:
 
           Check the files against SHA256SUMS.
           EOF
+          if [ -n "$PREVIOUS" ]; then
+            {
+              echo
+              echo "Changes since $PREVIOUS:"
+              echo
+              git log --format='- %s' "$PREVIOUS..$SHA"
+            } >> notes.md
+          fi
+          cat notes.md
           gh release create "$TAG" --verify-tag --title "AtticDB $TAG" --notes-file notes.md dist/*
