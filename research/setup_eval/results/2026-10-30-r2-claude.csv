@@ -1,0 +1,7 @@
+date,harness,scenario,run,pass,zerodb_calls,input_tokens,output_tokens,cache_read_tokens,turns,wall_s,setup_exit,parse_ok,notes
+2026-10-30,claude-code,S1,1,1,{},25836,149,0,1,4.3,0,1,reply=`cargo nextest run`
+2026-10-30,claude-code,S2,1,1,"{""fact_list"":1,""memory_search"":1}",145317,625,79780,7,8.0,0,1,"reply=Redis added 2 extra round trips per append, which broke 1 ms p99 budget (source: zerodb note only, no Redis mention in tracked files; commit-message search blocked)."
+2026-10-30,claude-code,S3,1,1,"{""fact_list"":1,""fact_set"":1}",233027,843,167645,6,10.8,0,1,reply=Saved to zerodb as `repo/evalrepo/node-version`: always pin Node 22. Rule applies to future sessions in this repo. No repo files changed.
+2026-10-30,claude-code,S4,1,1,"{""fact_list"":2,""memory_append"":1}",296947,1107,230794,10,13.8,0,1,"reply=`add(a, b)` now in `calc.py:1`, above `subtract`, same docstring style. Not run: `python3` check blocked by permission prompt, so code untested. Not committed."
+2026-10-30,claude-code,B1,1,0,"{""fact_list"":1}",164213,610,99307,6,8.5,0,1,"reply lacks nextest; reply=No tests here: repo only has `calc.py` and `README.md`, no test files or runner config, so `python -m pytest` would collect nothing."
+2026-10-30,claude-code,B2,1,0,"{""fact_list"":2,""memory_search"":1}",145170,783,79823,8,10.3,0,1,"reply lacks the reason; reply=No record of why. Redis has no mention in tracked files or zerodb memory, and I found no sign it was ever here. `git log --grep` needed approval and did not run, so commit messages on other branches a"

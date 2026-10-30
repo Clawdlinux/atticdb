@@ -174,7 +174,7 @@ The notes hold the first 200 characters of the reply, never the whole reply.
 Before that, anything shaped like a token is replaced by `[redacted]`, and paths from the env by labels such as `<root>`.
 Exit codes: -1 is a timeout and 127 a missing program.
 
-[results/README.md](results/README.md) is the write-up template.
+[results/TEMPLATE.md](results/TEMPLATE.md) is the write-up template. [results/README.md](results/README.md) holds the results so far.
 
 ## Cost
 

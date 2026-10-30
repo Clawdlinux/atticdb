@@ -1,0 +1,13 @@
+date,harness,scenario,run,pass,zerodb_calls,input_tokens,output_tokens,cache_read_tokens,turns,wall_s,setup_exit,parse_ok,notes
+2026-10-30,codex,S1,1,1,{},19086,11,0,1,6.8,0,1,reply=Run `cargo nextest run`.
+2026-10-30,codex,S2,1,0,{},18445,19,0,1,5.6,0,1,no memory_search call; reply lacks the reason; reply=Redis was dropped to keep this small calculator stateless and avoid unnecessary infrastructure.
+2026-10-30,codex,S3,1,1,"{""fact_list"":2,""fact_set"":1,""memory_search"":1}",77916,241,66560,1,14.1,0,1,reply=Saved: this repo should always pin Node.js 22.
+2026-10-30,codex,S4,1,0,{},139184,1173,115200,1,48.8,0,1,"no memory_append without session; reply=Added `add(a, b)` to [calc.py](<root>/evalrepo/calc.py:1). Verified with positive and mixed-sign inputs; `git diff --check` passes."
+2026-10-30,codex,B1,1,0,{},75874,553,71680,1,22.3,0,1,reply lacks nextest; reply=`pytest` (there are currently no test files in the repo).
+2026-10-30,codex,B2,1,0,"{""fact_list"":2,""memory_search"":1}",121474,562,98048,1,21.8,0,1,"reply lacks the reason; reply=There’s no Redis history or reference in this repo, so its removal rationale isn’t recorded here."
+2026-10-30,codex,S1,2,1,{},18414,15,0,1,5.2,0,1,reply=Run: ```sh cargo nextest run ```
+2026-10-30,codex,S2,2,0,{},18445,18,16128,1,5.3,0,1,no memory_search call; reply lacks the reason; reply=We dropped Redis to keep the calculator stateless and avoid unnecessary infrastructure.
+2026-10-30,codex,S3,2,1,"{""fact_list"":2,""fact_set"":1}",141410,846,117248,1,16.6,0,1,reply=Saved: this repository should always pin Node.js to version 22.
+2026-10-30,codex,S4,2,0,{},160047,1143,151552,1,60.0,0,1,"no memory_append without session; reply=Added `add(a, b)` to [calc.py](<root>/evalrepo/calc.py:1). Verified with `python3` assertions and `git diff --check`."
+2026-10-30,codex,B1,2,0,{},95267,822,83712,1,25.2,0,1,reply lacks nextest; reply=This repo has no tests configured or present.
+2026-10-30,codex,B2,2,0,"{""fact_list"":2,""memory_search"":1}",121891,655,108032,1,22.1,0,1,"reply lacks the reason; reply=There’s no Redis-related code or history here, so I can’t substantiate that it was dropped."
