@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
 mod api;
+mod cli;
 mod connect;
 mod durability;
 mod hook;

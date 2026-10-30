@@ -79,7 +79,7 @@ The end of stdin exits 2. So do 3 answers it can't read.
 
 AtticDB was called zerodb until 2026-10-30. To keep your memory:
 
-1. Install AtticDB: `cargo install --path crates/atticdb --locked`.
+1. Install AtticDB with the installer in the [top README](../../README.md#quick-start), or with `cargo install --git https://github.com/Clawdlinux/atticdb atticdb --locked`.
 2. Quit the apps that use zerodb.
 3. Run `atticdb migrate --dry-run`, then `atticdb migrate`.
 4. Run `cargo uninstall zerodb`.
@@ -314,7 +314,7 @@ Both harnesses share the hook, which reads 1 home, so their entries must pass th
 `connect` refuses a home that differs from the other connected harness's, and changes nothing.
 The message names that harness and both homes. No `env` means the default home.
 `--force` goes ahead, then says which harness still uses the other home.
-Install it with `cargo install --path crates/atticdb --locked` first. An entry that points into `target/` breaks on `cargo clean`.
+Install it first, with the installer in the [top README](../../README.md#quick-start) or `cargo install --git https://github.com/Clawdlinux/atticdb atticdb --locked`. An entry that points into `target/` breaks on `cargo clean`.
 Neither entry passes `--session`, so the session is the repo the client works in. That is the session the hook reads.
 VS Code reports its workspace folders as roots, and the first one names the session.
 Copilot's agent host and Copilot CLI start the adapter in the working folder, which names it.

@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 const USAGE: &str = "usage:
+  atticdb --version | -V
   atticdb init --config <path> --tenant <name>
   atticdb serve --config <path> [--data-dir <dir>] [--listen <addr>|none] [--unix-socket <path>]
                [--unix-socket-group <gid or name>] [--exit-on-poison] [--log-requests]
@@ -82,6 +83,10 @@ fn main() -> ExitCode {
     }
     let code = match args.split_first() {
         Some((command, rest)) => match command.as_str() {
+            "--version" | "-V" if rest.is_empty() => {
+                println!("atticdb {}", env!("CARGO_PKG_VERSION"));
+                Some(0)
+            }
             "init" => flags(rest, &["--config", "--tenant"], &[]).and_then(init),
             "serve" => flags(
                 rest,
