@@ -58,10 +58,14 @@ jobs:
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo clippy --locked -p atticdb-sys -p atticdb-tape -p atticdb-core --all-targets -- -D warnings
-      - run: cargo test --locked -p atticdb-sys -p atticdb-tape -p atticdb-core
-      - run: cargo test --locked -p atticdb-tape --release --features sim --test sim
+      - run: cargo test --locked -p atticdb-sys -p atticdb-tape
+      - if: ${{ !cancelled() }}
+        run: cargo test --locked -p atticdb-tape --release --features sim --test sim
         env:
           ATTICDB_SIM_SEEDS: "2000"
-      - run: cargo test --locked -p atticdb-core --release --features sim --test engine_sim
+      - if: ${{ !cancelled() }}
+        run: cargo test --locked -p atticdb-core --no-fail-fast
+      - if: ${{ !cancelled() }}
+        run: cargo test --locked -p atticdb-core --release --features sim --test engine_sim
         env:
           ATTICDB_SIM_SEEDS: "2000"
