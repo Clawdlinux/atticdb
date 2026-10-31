@@ -1,0 +1,84 @@
+.tableRegion {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+.table {
+  --table-bg: var(--bg);
+  --table-ink: var(--ink);
+  --table-tone: var(--surface);
+  --table-tone-ink: var(--ink);
+  width: 100%;
+  min-width: 44rem;
+  border-collapse: collapse;
+  font-size: var(--step-body);
+  font-variant-numeric: tabular-nums lining-nums;
+  text-align: left;
+}
+
+.tableWide {
+  min-width: 78rem;
+}
+
+@media (min-width: 48rem) and (max-width: 79.99rem) {
+  .tableWide th,
+  .tableWide td {
+    min-width: 8.4rem;
+    padding-inline: 0.875rem;
+  }
+}
+
+.onBone {
+  --table-bg: var(--field-1);
+  --table-ink: var(--field-1-ink);
+  --table-tone: var(--surface);
+  --table-tone-ink: var(--ink);
+  color: var(--field-1-ink);
+}
+
+.table caption {
+  margin-bottom: 0.875rem;
+  font-family: var(--font-text), Georgia, serif;
+  font-size: var(--step-lead);
+  font-weight: 500;
+  line-height: 1.25;
+  text-align: left;
+}
+
+.table th,
+.table td {
+  padding: 0.75rem 0.75rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--table-ink) 18%, var(--table-bg));
+  vertical-align: top;
+}
+
+.table thead th,
+.table thead td {
+  padding-bottom: 0.875rem;
+  border-bottom: 2px solid var(--table-ink);
+  font-weight: 500;
+}
+
+.table th:first-child,
+.table thead td:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--table-bg);
+  font-weight: 500;
+}
+
+.table th.atticCol,
+.table td.atticCol,
+.table tr.atticRow th,
+.table tr.atticRow td,
+.table tr.atticRow th:first-child {
+  background: var(--table-tone);
+  color: var(--table-tone-ink);
+}
+
+.table th.num,
+.table td.num {
+  text-align: right;
+  white-space: nowrap;
+}

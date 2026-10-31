@@ -1,0 +1,208 @@
+.hero {
+  --step-display: clamp(3.5rem, 12.2vw, 12rem);
+  padding-block: 0.75rem 2.25rem;
+}
+
+.title {
+  font-size: var(--step-display);
+  line-height: 0.88;
+  letter-spacing: -0.02em;
+  text-wrap: nowrap;
+}
+
+.line {
+  display: block;
+  overflow: hidden;
+  padding-bottom: 0.08em;
+  margin-bottom: -0.08em;
+}
+
+.rise {
+  display: block;
+  white-space: nowrap;
+}
+
+.lead {
+  max-width: 52ch;
+  margin-top: 2rem;
+  font-size: var(--step-lead);
+  line-height: 1.35;
+}
+
+.sectionTitle {
+  margin-bottom: 2rem;
+}
+
+.splitSection,
+.splitInner {
+  display: grid;
+  gap: 2rem;
+}
+
+.splitSection {
+  padding-block: var(--space-section);
+}
+
+.methodGrid {
+  display: grid;
+  gap: 1.25rem;
+  padding: 0;
+  list-style: none;
+}
+
+.methodItem {
+  max-width: 56ch;
+  line-height: 1.45;
+}
+
+.diskSection {
+  display: grid;
+  gap: 2.5rem;
+  padding-block: var(--space-section);
+}
+
+.diskSection .sectionTitle {
+  margin-bottom: 0;
+}
+
+.chartBlock {
+  padding: 1.75rem 1.5rem 1.25rem;
+  background: var(--surface);
+}
+
+.tableBlock {
+  min-width: 0;
+}
+
+.tableCaption {
+  margin-bottom: 0.875rem;
+  font-family: var(--font-text), Georgia, serif;
+  font-size: var(--step-lead);
+  font-weight: 500;
+  line-height: 1.25;
+}
+
+.summaryGrid {
+  display: grid;
+  gap: 1.25rem;
+}
+
+.summaryText {
+  max-width: 56ch;
+  line-height: 1.45;
+}
+
+.loseSection {
+  padding-block: var(--space-section);
+  background: var(--field-1);
+  color: var(--field-1-ink);
+}
+
+.loseSection :focus-visible {
+  outline-color: var(--field-1-ink);
+}
+
+.loseList {
+  display: grid;
+  gap: 1.25rem;
+  padding: 0;
+  list-style: none;
+}
+
+.loseItem {
+  max-width: 56ch;
+  font-size: var(--step-lead);
+  line-height: 1.35;
+}
+
+.linksList {
+  display: grid;
+  gap: 1rem;
+  padding: 0;
+  list-style: none;
+}
+
+.linkItem {
+  font-size: var(--step-lead);
+  line-height: 1.35;
+}
+
+.artifactLink {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  font-weight: 500;
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+  transition:
+    color 160ms ease-out,
+    opacity 160ms ease-out;
+}
+
+.artifactLink:hover {
+  color: var(--accent);
+  opacity: 0.9;
+}
+
+@keyframes line-up {
+  to {
+    transform: none;
+  }
+}
+
+@keyframes fade-up {
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  :global(.js) .rise {
+    transform: translateY(105%);
+    animation: line-up 850ms var(--ease-out) forwards;
+    animation-delay: calc(var(--i, 0) * 110ms + 120ms);
+  }
+
+  :global(.js) .lead {
+    opacity: 0;
+    transform: translateY(14px);
+    animation: fade-up 600ms var(--ease-out) 520ms forwards;
+  }
+}
+
+@media (min-width: 64rem) {
+  .splitSection,
+  .splitInner {
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+    column-gap: 2rem;
+    align-items: start;
+  }
+
+  .splitHead {
+    grid-column: 1 / 6;
+  }
+
+  .splitHead .sectionTitle {
+    margin-bottom: 0;
+  }
+
+  .splitBody {
+    grid-column: 6 / 13;
+  }
+
+  .methodGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1.25rem 2rem;
+  }
+
+  .summaryGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1.25rem 2.5rem;
+  }
+
+  .linksList {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1rem 2rem;
+  }
+}
