@@ -27,11 +27,10 @@ GIT_TIMEOUT = 30.0
 HOOK_TIMEOUT = 15.0
 CHECK_TIMEOUT = 20.0
 
-# Never passed on: a token or another home would point the children at the user's store, an
-# old ZERODB_* name would stop every atticdb child at its legacy guard, and an inherited
-# GIT_DIR, GIT_WORK_TREE or GIT_INDEX_FILE would point git at a real repo. The harness's own
-# git steps get their GIT_* vars back through `extra`.
-DROPPED_PREFIXES = ("ATTICDB_", "ZERODB_", "GIT_")
+# Never passed on. A token or another home would point the children at the user's store.
+# An inherited GIT_DIR, GIT_WORK_TREE or GIT_INDEX_FILE would point git at a real repo.
+# The harness's own git steps get their GIT_* vars back through `extra`.
+DROPPED_PREFIXES = ("ATTICDB_", "GIT_")
 DROPPED = {"CLAUDE_CONFIG_DIR", "CODEX_HOME"}
 # Credentials, and the switches that pick another provider or endpoint. Dropped unless
 # --keep-api-keys, so runs use the logins in the eval dirs and nothing else.
@@ -96,8 +95,9 @@ def account_names() -> str:
 
 def child_env(base: dict, *, home: str, atticdb_home: str, claude_dir: str, codex_dir: str,
               extra: dict | None = None, keep_api_keys: bool = False) -> dict:
-    """`base` without any `ATTICDB_*`, `ZERODB_*`, `GIT_*`, `CLAUDE_CONFIG_DIR` or `CODEX_HOME`, and without
-    the credential and provider vars unless `keep_api_keys`, then the run's own, then `extra`."""
+    """`base` without any `ATTICDB_*`, `GIT_*`, `CLAUDE_CONFIG_DIR` or `CODEX_HOME`.
+    The credential and provider vars go too, unless `keep_api_keys`.
+    Then it adds the run's own vars, then `extra`."""
     dropped = DROPPED | set(stripped_keys(base, keep_api_keys))
     env = {k: v for k, v in base.items() if k not in dropped and not k.startswith(DROPPED_PREFIXES)}
     env.update({"HOME": home, "ATTICDB_HOME": atticdb_home, "CLAUDE_CONFIG_DIR": claude_dir,

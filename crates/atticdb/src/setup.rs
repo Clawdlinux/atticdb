@@ -130,7 +130,7 @@ pub fn run(flags: Flags) -> u8 {
         }
     }
     let chosen: Vec<(Harness, Options)> = harnesses.iter().map(|h| (*h, options)).collect();
-    apply(&chosen, Vec::new(), &Lookup::ENV)
+    apply(&chosen)
 }
 
 /// Asks on stdout and reads the answers from stdin.
@@ -268,9 +268,6 @@ fn show_plan(harnesses: &[Harness], options: Options) -> u8 {
     for &harness in harnesses {
         let report = connect::connect(harness, options, Mode::Plan);
         show(harness, &report, &mut shown, "stopped");
-        for found in crate::legacy::found_lines(harness) {
-            println!("  {found}");
-        }
         reports.push(report);
         if harness == Harness::Vscode {
             let dir = connect::copilot_home().map(|dir| dir.display().to_string());
@@ -298,14 +295,14 @@ fn code(reports: &[Report]) -> u8 {
     stopped.unwrap_or_else(|| u8::from(reports.iter().any(Report::skipped)))
 }
 
-/// Connects each app with its options in turn, on the home `lookup` finds, past any that
-/// fails, then checks each one and prints what to do next, then `more`. Returns the exit
-/// code: the highest an app stopped with, else 1 when a part was skipped or a check failed.
-pub(crate) fn apply(chosen: &[(Harness, Options)], more: Vec<String>, lookup: &Lookup) -> u8 {
+/// Connects each app with its options in turn, past any that fails. Then it checks each one
+/// and prints what to do next. Returns the highest exit code an app stopped with. Else it
+/// returns 1 when a part was skipped or a check failed.
+fn apply(chosen: &[(Harness, Options)]) -> u8 {
     println!("Applying:");
     let mut reports = Vec::new();
     for &(harness, options) in chosen {
-        let report = connect::connect_in(harness, options, Mode::Apply, lookup);
+        let report = connect::connect(harness, options, Mode::Apply);
         show(harness, &report, &mut Vec::new(), "failed");
         reports.push((harness, options, report));
     }
@@ -319,13 +316,13 @@ pub(crate) fn apply(chosen: &[(Harness, Options)], more: Vec<String>, lookup: &L
     for (harness, options, report) in reports.iter().filter(|(.., r)| r.stopped.is_none()) {
         let (harness, options, mut failed) = (*harness, *options, Vec::new());
         // The parts are in place when a plan now finds nothing to change.
-        let plan = connect::connect_in(harness, options, Mode::Plan, lookup);
+        let plan = connect::connect(harness, options, Mode::Plan);
         for line in plan.lines.iter().filter(|line| !in_place(line)) {
             failed.push(format!("not in place: {}", line.text));
         }
         failed.extend(plan.stopped.map(|(_, error)| error));
         if harness == Harness::Codex {
-            failed.extend(connect::verify_codex_in(lookup).err());
+            failed.extend(connect::verify_codex().err());
             if plan.hooks_off {
                 next.push(CODEX_HOOKS_OFF.into());
             } else if plan.hook.is_some_and(State::in_place) {
@@ -340,10 +337,10 @@ pub(crate) fn apply(chosen: &[(Harness, Options)], more: Vec<String>, lookup: &L
         // Codex on Windows has no hook to check.
         let codex_hook = !(cfg!(windows) && harness == Harness::Codex);
         if (options.hook && codex_hook) || matches!(harness, Harness::Vscode | Harness::Copilot) {
-            let hook = cwd.clone().and_then(|cwd| check_hook(harness, &cwd, lookup));
+            let hook = cwd.clone().and_then(|cwd| check_hook(harness, &cwd));
             failed.extend(hook.err().map(|why| format!("hook: {why}")));
         }
-        let checked = || cwd.clone().and_then(|cwd| check_store(&cwd, lookup));
+        let checked = || cwd.clone().and_then(|cwd| check_store(&cwd));
         let store = store.get_or_insert_with(checked);
         failed.extend(store.clone().err().map(|why| format!("store: {why}")));
         if failed.is_empty() {
@@ -364,7 +361,6 @@ pub(crate) fn apply(chosen: &[(Harness, Options)], more: Vec<String>, lookup: &L
     if connected.contains(&Harness::Vscode) {
         next.push("VS Code: reload the window to load atticdb.".into());
     }
-    next.extend(more);
     if !next.is_empty() {
         println!("Next:");
         for step in next {
@@ -381,9 +377,9 @@ fn in_place(line: &Line) -> bool {
 }
 
 /// Runs `atticdb hook session-start --harness <harness>` with the stdin that harness gives it
-/// for a chat in `cwd`, on the home `lookup` finds. It must exit 0 within [`HOOK_TIMEOUT`] and
-/// print JSON. Its output, which holds memory, is never shown.
-pub(crate) fn check_hook(harness: Harness, cwd: &Path, lookup: &Lookup) -> Result<(), String> {
+/// for a chat in `cwd`. It must exit 0 within [`HOOK_TIMEOUT`] and print JSON. Its output,
+/// which holds memory, is never shown.
+pub(crate) fn check_hook(harness: Harness, cwd: &Path) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|error| format!("no atticdb binary: {error}"))?;
     // The harness sends `cwd` as a JSON string, which must be UTF-8.
     let cwd = cwd.to_str().ok_or("the current dir is not UTF-8, so it can't go in JSON")?;
@@ -395,7 +391,6 @@ pub(crate) fn check_hook(harness: Harness, cwd: &Path, lookup: &Lookup) -> Resul
     };
     let mut command = Command::new(exe);
     command.args(["hook", "session-start", "--harness", harness.name()]);
-    lookup.pass(&mut command);
     command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
     // Its own group, so a timeout kills whatever it started too.
     #[cfg(unix)]
@@ -455,10 +450,10 @@ pub(crate) fn kill_group(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
-/// Reads `fact_list` from the home `lookup` finds, as the hook does for a chat in `cwd`.
-pub(crate) fn check_store(cwd: &Path, lookup: &Lookup) -> Result<(), String> {
+/// Reads `fact_list` from the home, as the hook does for a chat in `cwd`.
+pub(crate) fn check_store(cwd: &Path) -> Result<(), String> {
     let session = crate::home::repo(cwd).unwrap_or_else(|| "setup".into());
     let deadline = Instant::now() + STORE_TIMEOUT;
-    let mut home = crate::mcp::HomeReader::in_home(&session, deadline, lookup)?;
+    let mut home = crate::mcp::HomeReader::in_home(&session, deadline, &Lookup::ENV)?;
     home.read("setup", "fact_list", &json!({"prefix": "user/", "limit": 1})).map(drop)
 }

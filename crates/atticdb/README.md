@@ -75,35 +75,6 @@ The end of stdin exits 2. So do 3 answers it can't read.
 
 `--dry-run` exits with the code of an app whose plan stopped. Else it exits 1 when a part would be skipped, else 0.
 
-## Moving from zerodb
-
-AtticDB was called zerodb until 2026-10-30. To keep your memory:
-
-1. Install AtticDB with the installer in the [top README](../../README.md#quick-start), or with `cargo install --git https://github.com/Clawdlinux/atticdb atticdb --locked`.
-2. Quit the apps that use zerodb.
-3. Run `atticdb migrate --dry-run`, then `atticdb migrate`.
-4. Run `cargo uninstall zerodb`.
-
-`atticdb migrate [--dry-run]` takes these steps:
-
-1. It finds the old home: `ZERODB_HOME` when set, else the `ZERODB_HOME` the old entries and hooks pass, else the old default path, such as `~/Library/Application Support/zerodb`. When the entries name 2 homes, or another home than `ZERODB_HOME`, it stops with exit 1 and says what to run instead.
-2. A server that holds the old home's `data/LOCK` stops it, with exit 1. It names the pid to stop.
-3. It renames the old default home to the AtticDB home: `ATTICDB_HOME` when set, else the new default path. It first writes `MOVED_FROM_ZERODB` in the old home, holding its path. That file moves with it and stays. Then it renames `zerodb.json` to `atticdb.json` and removes the stale `data/zerodb.sock`. It syncs the directories, as creating a home does.
-4. It writes a 0600 file at the old default path that says where the home went. An old binary that still runs then fails, instead of making a new, empty home.
-5. For each app with zerodb parts, in the order VS Code, Copilot CLI, Claude Code and Codex, it runs the old binary's `disconnect <app>`, with a 30 s limit for it and all it starts. The old binary is the one the old entry or hook runs, else `zerodb` on `PATH`. Without one, or when it fails, it lists the files and parts left to remove by hand.
-6. It connects the apps that had zerodb parts, as `atticdb setup --yes` does. Claude Code or Codex without a zerodb hook gets none. A home that stays where it is goes in the new entries as `ATTICDB_HOME`.
-
-A second run finishes a run that stopped, and says when the move is done. A home with `MOVED_FROM_ZERODB` and no note at the old path gets the note. A home without it never does. `--dry-run` prints the same steps and writes nothing.
-It never merges 2 homes: when both exist, it stops with exit 1. It never moves a home set by `ZERODB_HOME`, or named in the old entries. It renames that home's config and says to set `ATTICDB_HOME`. When `ATTICDB_HOME` names another home, it stops with exit 1. It never edits your own instruction files. It warns about a Copilot `*.instructions.md` file that mentions zerodb.
-Exit 0 when everything is done or there is nothing to do, 1 when a step stopped, 2 for a usage error.
-
-Until you migrate, AtticDB refuses to make a new home beside zerodb data:
-
-- `ZERODB_HOME` or `ZERODB_TOKEN` set without its `ATTICDB_*` name stops the home commands with exit 2.
-- An old default home, with no AtticDB home, stops them too. So does a home with `zerodb.json` and no `atticdb.json`.
-- The hook prints `{}` and says why on stderr. `doctor` reports a failure. For zerodb data, setup's plan shows a stop line instead of exit 2.
-- `setup`'s plan and `doctor` name each app file with zerodb parts.
-
 ## `atticdb doctor`
 
 ```sh

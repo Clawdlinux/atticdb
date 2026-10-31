@@ -50,7 +50,7 @@ def test_setup_names_1_harness_only():
 
 def test_child_env_drops_the_users_atticdb_and_config_vars():
     base = {"PATH": "/bin", "ATTICDB_TOKEN": "t", "ATTICDB_HOME": "/real", "CLAUDE_CONFIG_DIR": "/c",
-            "CODEX_HOME": "/x", "ATTICDB_SETUP_INTERACTIVE": "1", "ZERODB_TOKEN": "z", "ZERODB_HOME": "/old"}
+            "CODEX_HOME": "/x", "ATTICDB_SETUP_INTERACTIVE": "1"}
     env = agents.child_env(base, home="/h", atticdb_home="/r/zh", claude_dir="/e/claude", codex_dir="/e/codex")
     assert env == {"PATH": "/bin", "HOME": "/h", "ATTICDB_HOME": "/r/zh", "CLAUDE_CONFIG_DIR": "/e/claude",
                    "CODEX_HOME": "/e/codex"}

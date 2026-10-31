@@ -15,12 +15,10 @@ use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant};
 
 /// Variables that could lead a test to a real home. No spawn inherits them.
-pub(crate) const HOME_VARS: [&str; 10] = [
+pub(crate) const HOME_VARS: [&str; 8] = [
     "HOME",
     "ATTICDB_HOME",
     "ATTICDB_TOKEN",
-    "ZERODB_HOME",
-    "ZERODB_TOKEN",
     "XDG_DATA_HOME",
     "XDG_CONFIG_HOME",
     "COPILOT_HOME",
