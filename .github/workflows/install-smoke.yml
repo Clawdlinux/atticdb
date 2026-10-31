@@ -318,6 +318,11 @@ jobs:
           $line = Get-Content $sums | Where-Object { $_ -like "*  $env:ZIP" } | Select-Object -First 1
           $sha = if ($line -match '^([0-9a-f]{64})  ') { $Matches[1] } else { '' }
           if (-not $sha) {
+            # Only v0.1.0 predates Windows support. Any later release must ship the zip.
+            if ($want -ne '0.1.0') {
+              Write-Output "::error::release v$want has no $env:ZIP in SHA256SUMS"
+              exit 1
+            }
             Write-Output "::notice::release v$want has no $env:ZIP, so the Windows smoke test is skipped. Releases from v0.2.0 on have it."
             Add-Content -Path $env:GITHUB_OUTPUT -Value 'skip=true'
             exit 0
