@@ -3,9 +3,9 @@
 //! the harness adds to the chat. The block's text depends only on the repo name and memory,
 //! so the prompt prefix stays the same.
 
+use crate::client::{HomeReader, DEFAULT_AGENT};
 use crate::connect::Harness;
 use crate::home::Lookup;
-use crate::mcp::{HomeReader, DEFAULT_AGENT};
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::path::Path;

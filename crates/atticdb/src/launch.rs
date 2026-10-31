@@ -226,7 +226,7 @@ impl Launch {
         }
         let child = command
             .args(["--listen", "none", "--exit-on-poison"])
-            .env_remove(crate::mcp::TOKEN_ENV)
+            .env_remove(crate::client::TOKEN_ENV)
             // Every path it gets is absolute, so it need not pin the first chat's folder.
             .current_dir("/")
             .stdin(Stdio::null())
@@ -257,7 +257,7 @@ impl Launch {
         command.arg("serve").arg("--config").arg(config).arg("--data-dir").arg(dir);
         command
             .args(["--listen", "127.0.0.1:0", "--exit-on-poison"])
-            .env_remove(crate::mcp::TOKEN_ENV)
+            .env_remove(crate::client::TOKEN_ENV)
             // Every path it gets is absolute, so it need not pin the first chat's folder.
             .current_dir(crate::platform::root_dir())
             .stdin(Stdio::null())
