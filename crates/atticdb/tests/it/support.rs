@@ -63,14 +63,12 @@ pub fn fake_program(bin: &Path, name: &str) {
     chmod(&program, 0o755);
 }
 
-/// Variables that point AtticDB at a home or at harness files, the real `HOME` included, and
-/// the old names that stop it. No spawn inherits them, so a developer's own exports can't
-/// lead a test to a real home. A test that needs one sets it.
-const HOME_VARS: [&str; 9] = [
+/// Variables that point AtticDB at a home or at harness files, the real `HOME` included. No
+/// spawn inherits them, so a developer's own exports can't lead a test to a real home. A test
+/// that needs one sets it.
+const HOME_VARS: [&str; 7] = [
     "HOME",
     "ATTICDB_HOME",
-    "ZERODB_HOME",
-    "ZERODB_TOKEN",
     "XDG_DATA_HOME",
     "XDG_CONFIG_HOME",
     "COPILOT_HOME",

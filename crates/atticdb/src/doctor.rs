@@ -3,7 +3,6 @@
 //! The parts check is [`connect::connect`] in [`Mode::Plan`], the code that writes.
 
 use crate::connect::{self, Harness, Mode, Notes, Options, Report};
-use crate::home::Lookup;
 use crate::setup::{check_hook, check_store, title, ORDER};
 use atticdb_tape::{Io, StdIo};
 use std::io::ErrorKind;
@@ -48,12 +47,6 @@ impl Checks {
                 self.failed = true;
             }
         }
-    }
-
-    /// Prints `  <text>` and counts a failure.
-    fn fail(&mut self, text: &str) {
-        println!("  {text}");
-        self.failed = true;
     }
 
     /// Prints `  <what>: warning: <why>`. A warning is not a failure.
@@ -122,7 +115,7 @@ pub fn run(harnesses: Option<Vec<Harness>>) -> u8 {
         return 1;
     }
     let cwd = std::env::current_dir().map_err(|error| format!("no current dir: {error}"));
-    match cwd.clone().and_then(|cwd| check_store(&cwd, &Lookup::ENV)) {
+    match cwd.clone().and_then(|cwd| check_store(&cwd)) {
         Ok(()) => println!("Server and store: ok"),
         Err(why) => {
             println!("Server and store: {why}");
@@ -166,9 +159,6 @@ fn app(
             }
         }
     }
-    for found in crate::legacy::found_lines(harness) {
-        checks.fail(&found);
-    }
     let stale = match exe {
         Ok(exe) => stale(harness, exe),
         Err(why) => vec![why.clone()],
@@ -187,7 +177,7 @@ fn app(
     if plan.hooks_off {
         checks.warn("hook", HOOKS_OFF);
     } else if plan.hook.is_some_and(connect::State::in_place) {
-        let hook = cwd.clone().and_then(|cwd| check_hook(harness, &cwd, &Lookup::ENV));
+        let hook = cwd.clone().and_then(|cwd| check_hook(harness, &cwd));
         checks.line("hook", hook);
     }
     if harness == Harness::Codex {

@@ -113,80 +113,35 @@ pub fn dir() -> Result<PathBuf, String> {
     Lookup::ENV.dir()
 }
 
-/// How to find the home. Commands read `ATTICDB_HOME` and run the legacy guards, by
-/// [`Lookup::ENV`]. `atticdb migrate` passes the home it resolved and skips the guards, as old
-/// names may still be set in its environment.
+/// How to find the home. Commands read `ATTICDB_HOME`, by [`Lookup::ENV`]. The hook's
+/// `--home` names it instead, by [`Lookup::home`].
 #[derive(Clone, Debug)]
 pub struct Lookup {
-    /// `None` reads `ATTICDB_HOME`. `Some` stands for its value, `Some(None)` for unset.
-    given: Option<Option<PathBuf>>,
-    /// Whether [`crate::legacy`]'s guards run.
-    guards: bool,
+    /// `None` reads `ATTICDB_HOME`. `Some` stands for its value.
+    given: Option<PathBuf>,
 }
 
 impl Lookup {
-    /// The home the environment names, with the legacy guards.
-    pub const ENV: Self = Self { given: None, guards: true };
+    /// The home the environment names.
+    pub const ENV: Self = Self { given: None };
 
-    /// The home `dir` names as `ATTICDB_HOME` would, the default home for `None`, without
-    /// the legacy guards.
-    #[cfg(unix)]
-    pub(crate) fn given(dir: Option<PathBuf>) -> Self {
-        Self { given: Some(dir), guards: false }
-    }
-
-    /// The home `dir`, as if `ATTICDB_HOME` named it, with the legacy guards.
+    /// The home `dir`, as if `ATTICDB_HOME` named it.
     pub(crate) fn home(dir: PathBuf) -> Self {
-        Self { given: Some(Some(dir)), guards: true }
+        Self { given: Some(dir) }
     }
 
-    /// `ATTICDB_HOME` as [`env_dir`] reads it, or as given.
-    pub(crate) fn env_dir(&self) -> Result<Option<PathBuf>, String> {
-        match &self.given {
-            Some(dir) => Ok(dir.clone()),
-            None => env_dir(),
-        }
-    }
-
-    /// The home directory: [`Self::env_dir`] when set, else [`default_dir`]. With the guards,
-    /// it refuses by [`crate::legacy::check_home`] when data from before the rename is in the
-    /// way, so nothing makes a new home beside it.
+    /// The home directory: the given one or [`env_dir`] when set, else [`default_dir`].
     pub fn dir(&self) -> Result<PathBuf, String> {
-        if self.guards {
-            crate::legacy::check_env()?;
-        }
-        let (dir, default) = match self.env_dir()? {
-            Some(dir) => (dir, false),
-            None => (default_dir(NAME)?, true),
+        let dir = match &self.given {
+            Some(dir) => dir.clone(),
+            None => match env_dir()? {
+                Some(dir) => dir,
+                None => default_dir(NAME)?,
+            },
         };
-        if self.guards {
-            crate::legacy::check_home(&dir, default)?;
-        }
         #[cfg(windows)]
         crate::platform::check_in_profile(&dir, "home")?;
         Ok(dir)
-    }
-
-    /// Gives a child `atticdb` this home: `ATTICDB_HOME` when given, and without the old
-    /// names when the guards are off, so the child finds the same home.
-    pub(crate) fn pass(&self, command: &mut std::process::Command) {
-        match &self.given {
-            Some(Some(dir)) => drop(command.env(HOME_ENV, dir)),
-            Some(None) => drop(command.env_remove(HOME_ENV)),
-            None => {}
-        }
-        if !self.guards {
-            crate::legacy::clear_env(command);
-        }
-    }
-}
-
-/// The home directory as [`dir`] finds it, without its checks, and whether it is the default.
-#[cfg(unix)]
-pub(crate) fn unchecked_dir() -> Result<(PathBuf, bool), String> {
-    match env_dir()? {
-        Some(dir) => Ok((dir, false)),
-        None => Ok((default_dir(NAME)?, true)),
     }
 }
 
@@ -263,16 +218,6 @@ impl Lookup {
         }
         Ok(())
     }
-}
-
-/// Syncs the existing home `dir` and its ancestors as [`ensure`] does, after it was moved or
-/// a file in it was renamed.
-#[cfg(unix)]
-pub(crate) fn sync(dir: &Path) -> Result<(), String> {
-    let home = user_home().ok().filter(|home| dir.starts_with(home));
-    let data = dir.join("data");
-    let deepest = if data.is_dir() { data } else { dir.to_owned() };
-    sync_dirs(dir, &deepest, home.as_deref().and_then(Path::parent), None)
 }
 
 /// Syncs `data/`, the home and its ancestors, deepest first, so their entries survive a
