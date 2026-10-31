@@ -304,6 +304,13 @@ impl StoreFlags {
         if url.is_none() && data_dir.is_none() {
             return Err("set --url, or --data-dir or a config with data_dir".into());
         }
+        // Someone who can write there could name a server of theirs in `LOCK`.
+        #[cfg(windows)]
+        for (path, what) in [(&config_path, "config"), (&data_dir, "data dir")] {
+            if let Some(path) = path {
+                crate::platform::check_in_profile(path, what)?;
+            }
+        }
         let launch = Launch::new(url, data_dir, config_path, unix_socket);
         #[cfg(windows)]
         let launch = launch.with_token(token.clone());

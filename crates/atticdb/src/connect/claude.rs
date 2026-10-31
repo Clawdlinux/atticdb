@@ -472,15 +472,20 @@ pub(crate) fn find_program(name: &str) -> Option<PathBuf> {
     })
 }
 
-/// The first `name`, `name.exe` or `name.cmd` on `PATH` that is a regular file. Relative
-/// `PATH` entries are skipped. npm installs `claude` and `codex` as `.cmd` shims.
+/// The first program called `name` on `PATH`, by [`find_in`].
 // TODO(#137): part 3 checks how Claude Code and Codex install on Windows.
 #[cfg(windows)]
 pub(crate) fn find_program(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    let dirs = std::env::split_paths(&path).filter(|dir| dir.is_absolute());
-    let names = [name.to_owned(), format!("{name}.exe"), format!("{name}.cmd")];
-    dirs.flat_map(|dir| names.iter().map(move |name| dir.join(name)).collect::<Vec<_>>())
+    find_in(name, &std::env::var_os("PATH")?)
+}
+
+/// The first `name.exe`, `name.cmd` or `name.bat` in the `PATH` value `path`, folder by
+/// folder. Relative entries are skipped. The bare name never counts. npm puts an sh script
+/// by that name beside its `.cmd` shim, and Windows cannot start it.
+#[cfg(any(windows, test))]
+fn find_in(name: &str, path: &std::ffi::OsStr) -> Option<PathBuf> {
+    let dirs = std::env::split_paths(path).filter(|dir| dir.is_absolute());
+    dirs.flat_map(|dir| ["exe", "cmd", "bat"].map(|ext| dir.join(format!("{name}.{ext}"))))
         .find(|program| std::fs::metadata(program).is_ok_and(|meta| meta.is_file()))
 }
 
@@ -916,4 +921,28 @@ pub(super) fn edit_file(
         }
     };
     parts.iter().zip(done).map(line).collect()
+}
+
+#[cfg(test)]
+mod find_tests {
+    #![allow(clippy::unwrap_used)]
+
+    /// npm's layout: an sh script `claude` and a `claude.cmd` shim.
+    #[test]
+    fn find_in_skips_the_bare_name() {
+        let dir = std::env::temp_dir().join(format!("atticdb-find-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = std::env::join_paths([&dir]).unwrap();
+        std::fs::write(dir.join("claude"), "#!/bin/sh\n").unwrap();
+        assert_eq!(super::find_in("claude", &path), None);
+        std::fs::write(dir.join("claude.bat"), "").unwrap();
+        assert_eq!(super::find_in("claude", &path), Some(dir.join("claude.bat")));
+        std::fs::write(dir.join("claude.cmd"), "").unwrap();
+        assert_eq!(super::find_in("claude", &path), Some(dir.join("claude.cmd")));
+        std::fs::write(dir.join("claude.exe"), "").unwrap();
+        assert_eq!(super::find_in("claude", &path), Some(dir.join("claude.exe")));
+        let relative = std::env::join_paths(["relative"]).unwrap();
+        assert_eq!(super::find_in("claude", &relative), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

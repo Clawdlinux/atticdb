@@ -140,7 +140,7 @@ pub fn fill_random(buf: &mut [u8]) -> io::Result<()> {
 /// Stops later child processes from inheriting this process's stdin, stdout and stderr.
 ///
 /// This process inherited them, so they are inheritable here too. std starts every child
-/// with handle inheritance on, so each child gets a copy, even one whose stdio is a file.
+/// with handle inheritance on. So each child gets a copy, even one whose stdio is a file.
 /// A server that outlives this process would then hold its caller's pipes open.
 /// The caller would never see end of file.
 /// std duplicates a handle for each child that should get it, so `Stdio::inherit` still works.

@@ -157,6 +157,8 @@ impl Lookup {
         if self.guards {
             crate::legacy::check_home(&dir, default)?;
         }
+        #[cfg(windows)]
+        crate::platform::check_in_profile(&dir, "home")?;
         Ok(dir)
     }
 

@@ -178,8 +178,12 @@ Windows support is in progress ([#137](https://github.com/Clawdlinux/atticdb/iss
 - The home defaults to `%LOCALAPPDATA%\atticdb`. `ATTICDB_HOME` moves it, as on Unix.
 - There is no Unix socket. A server always listens on loopback TCP, and `--listen none` fails. `--unix-socket` and `unix:///` URLs fail too.
 - A server the CLI starts listens on `127.0.0.1:0`, a free port. `LOCK` names that port, as `tcp=127.0.0.1:<port>`.
-- Before the CLI sends its token, it sends `GET /healthz` with a random `X-Atticdb-Nonce` header and no token. The server answers with a `proofs` array: a keyed BLAKE3 hash of the nonce and the instance id, 1 per tenant. The key is derived from that tenant's token. The CLI sends its token only when 1 proof matches its own. So a program squatting on the port never gets the token.
+- Before the CLI sends its token, it sends `GET /healthz` with a random `X-Atticdb-Nonce` header. That request carries no token.
+- The server answers with a `proofs` array, 1 entry per tenant. Each is a keyed BLAKE3 hash of the nonce, the instance id and the server's address on that connection. The key is derived from that tenant's token.
+- The CLI sends its token only when 1 proof matches its own token and the address it connected to. So a program squatting on the port never gets the token. A relay that passes the nonce to the real server gets a proof for the wrong address.
+- `--url http://...` skips discovery and the proof. The operator chose that endpoint, so the CLI trusts it.
 - Windows has no mode bits. The home lives in the user's profile, which is private by default, so AtticDB skips the owner and mode checks.
+- So the home, `--data-dir`, `--config` and a config's `data_dir` must be inside `%LOCALAPPDATA%` or `%USERPROFILE%`. Links and short names are resolved first. Anything else fails with an error that names the path and D92.
 - `atticdb stats` needs the Unix socket, so it fails. `atticdb migrate` has nothing to move.
 
 ## `atticdb verify` and `atticdb dump`

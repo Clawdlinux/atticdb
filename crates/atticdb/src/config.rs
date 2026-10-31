@@ -20,7 +20,7 @@ pub const MIN_TOKEN_BYTES: usize = 32;
 pub const MAX_TOKEN_BYTES: usize = 1024;
 /// Longest tenant name, in UTF-8 bytes. The engine's limit.
 pub const MAX_TENANT_BYTES: usize = 255;
-const MAX_FILE_BYTES: u64 = 1 << 20;
+pub(crate) const MAX_FILE_BYTES: u64 = 1 << 20;
 const FIELDS: &str = "data_dir, listen, unix_socket, unix_socket_group, tenants";
 
 /// A tenant's bearer token. `Debug` never shows it.
@@ -198,7 +198,7 @@ pub fn open_regular(options: &mut OpenOptions, path: &Path) -> std::io::Result<F
     Ok(file)
 }
 
-/// Checks that an open file is a regular file. Windows has no uid or mode bits to check: a
+/// Checks that an open file is a regular file. Windows has no uid or mode bits to check. A
 /// file in the user's profile folder is private by its inherited access list.
 #[cfg(not(unix))]
 pub fn check_private(file: &File, path: &Path, what: &str) -> Result<(), String> {

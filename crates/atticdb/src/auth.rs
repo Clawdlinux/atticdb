@@ -10,12 +10,13 @@ pub const NONCE_HEADER: &str = "X-Atticdb-Nonce";
 /// Nonce length in bytes. It travels as twice as many hex digits.
 pub const NONCE_BYTES: usize = 32;
 /// The `derive_key` context of a token's proof key.
-const PROOF_CONTEXT: &str = "atticdb healthz proof v1";
+const PROOF_CONTEXT: &str = "atticdb healthz proof v2";
 
 /// Token hashes for every configured tenant.
 pub struct Auth {
     tenants: Vec<(String, blake3::Hash)>,
-    /// Each tenant's [`proof_key`], in config order.
+    /// Each tenant's [`proof_key`], in config order. Only Windows answers with proofs.
+    #[cfg(windows)]
     proof_keys: Vec<[u8; 32]>,
 }
 
@@ -26,26 +27,33 @@ impl fmt::Debug for Auth {
 }
 
 impl Auth {
-    /// Hashes each tenant's token once, and derives its proof key.
+    /// Hashes each tenant's token once. On Windows it also derives each proof key.
     pub fn new(tenants: &[Tenant]) -> Self {
+        #[cfg(windows)]
         let proof_keys = tenants.iter().map(|tenant| proof_key(&tenant.token)).collect();
         let tenants = tenants
             .iter()
             .map(|tenant| (tenant.name.clone(), blake3::hash(tenant.token.expose().as_bytes())))
             .collect();
-        Self { tenants, proof_keys }
+        Self {
+            tenants,
+            #[cfg(windows)]
+            proof_keys,
+        }
     }
 
-    /// The `/healthz` proofs for the request's nonce, one per tenant in config order, as hex.
-    /// `None` without exactly 1 nonce header of [`NONCE_BYTES`] in hex.
-    pub fn proofs(&self, head: &Head, instance: &str) -> Option<Vec<String>> {
+    /// The `/healthz` proofs for the request's nonce, 1 per tenant in config order, as hex.
+    /// `endpoint` is the local address of the connection that asked. `None` without exactly
+    /// 1 nonce header of [`NONCE_BYTES`] in hex.
+    #[cfg(windows)]
+    pub fn proofs(&self, head: &Head, instance: &str, endpoint: &str) -> Option<Vec<String>> {
         let mut values = head.headers("x-atticdb-nonce");
         let (Some(value), None) = (values.next(), values.next()) else {
             return None;
         };
         let nonce = parse_nonce(value)?;
-        let proofs = self.proof_keys.iter().map(|key| proof(key, &nonce, instance).to_hex());
-        Some(proofs.map(|hex| hex.to_string()).collect())
+        let proofs = self.proof_keys.iter().map(|key| proof(key, &nonce, instance, endpoint));
+        Some(proofs.map(|hash| hash.to_hex().to_string()).collect())
     }
 
     /// Returns the tenant whose token the request presents, or `None` for a missing,
@@ -85,11 +93,20 @@ pub fn proof_key(token: &Token) -> [u8; 32] {
     blake3::derive_key(PROOF_CONTEXT, token.expose().as_bytes())
 }
 
-/// `keyed_hash(key, nonce || instance)`, where `instance` is the id's text as in `LOCK`.
-pub fn proof(key: &[u8; 32], nonce: &[u8; NONCE_BYTES], instance: &str) -> blake3::Hash {
+/// `keyed_hash(key, nonce || instance || endpoint)`. `instance` is the id's text as in `LOCK`.
+/// `endpoint` is the server's end of the connection, as `SocketAddr` prints it, such as
+/// `127.0.0.1:54321` or `[::1]:54321`. A relay would end the connection at its own address.
+/// So proofs it forwards from the real server fail.
+pub fn proof(
+    key: &[u8; 32],
+    nonce: &[u8; NONCE_BYTES],
+    instance: &str,
+    endpoint: &str,
+) -> blake3::Hash {
     let mut hasher = blake3::Hasher::new_keyed(key);
     hasher.update(nonce);
     hasher.update(instance.as_bytes());
+    hasher.update(endpoint.as_bytes());
     hasher.finalize()
 }
 
@@ -107,10 +124,17 @@ pub fn parse_nonce(text: &[u8]) -> Option<[u8; NONCE_BYTES]> {
     Some(nonce)
 }
 
-/// Whether `proofs`, the `/healthz` array, holds the proof for `token`, `nonce` and
-/// `instance`. Every entry is compared, each in constant time, without early exit.
-pub fn verify(token: &Token, nonce: &[u8; NONCE_BYTES], instance: &str, proofs: &Value) -> bool {
-    let expected = proof(&proof_key(token), nonce, instance);
+/// Whether `proofs`, the `/healthz` array, holds the proof for `token`, `nonce`, `instance`
+/// and `endpoint`, the address the client connected to. Every entry is compared, each in
+/// constant time, without early exit.
+pub fn verify(
+    token: &Token,
+    nonce: &[u8; NONCE_BYTES],
+    instance: &str,
+    endpoint: &str,
+    proofs: &Value,
+) -> bool {
+    let expected = proof(&proof_key(token), nonce, instance, endpoint);
     let mut found = false;
     for entry in proofs.as_array().map_or(&[][..], Vec::as_slice) {
         let hash = entry.as_str().and_then(|hex| blake3::Hash::from_hex(hex).ok());
@@ -123,8 +147,8 @@ pub fn verify(token: &Token, nonce: &[u8; NONCE_BYTES], instance: &str, proofs: 
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
-    use super::{parse_nonce, proof, proof_key, verify, Auth, NONCE_BYTES};
-    use crate::config::{Tenant, Token};
+    use super::{parse_nonce, proof, proof_key, verify, NONCE_BYTES};
+    use crate::config::Token;
     use serde_json::json;
 
     fn token(text: &str) -> Token {
@@ -147,40 +171,58 @@ mod tests {
     #[test]
     fn the_proof_follows_the_derivation() {
         let (secret, nonce) = (token("a"), [7; NONCE_BYTES]);
-        let key = blake3::derive_key("atticdb healthz proof v1", secret.expose().as_bytes());
+        let key = blake3::derive_key("atticdb healthz proof v2", secret.expose().as_bytes());
         assert_eq!(proof_key(&secret), key);
         let mut message = nonce.to_vec();
-        message.extend_from_slice(b"0123");
-        assert_eq!(proof(&key, &nonce, "0123"), blake3::keyed_hash(&key, &message));
+        message.extend_from_slice(b"0123127.0.0.1:5");
+        let hash = proof(&key, &nonce, "0123", "127.0.0.1:5");
+        assert_eq!(hash, blake3::keyed_hash(&key, &message));
     }
 
     #[test]
-    fn only_the_right_token_nonce_and_instance_verify() {
-        let (a, b) = (token("a"), token("b"));
+    fn only_the_right_token_nonce_instance_and_endpoint_verify() {
+        let (a, b, nonce) = (token("a"), token("b"), [9; NONCE_BYTES]);
+        let at = "127.0.0.1:5";
+        let hex = |hash: blake3::Hash| hash.to_hex().to_string();
+        let proofs = json!([
+            hex(proof(&proof_key(&a), &nonce, "0123", at)),
+            hex(proof(&proof_key(&b), &nonce, "0123", at)),
+        ]);
+        assert!(verify(&a, &nonce, "0123", at, &proofs));
+        assert!(verify(&b, &nonce, "0123", at, &proofs));
+        assert!(!verify(&token("c"), &nonce, "0123", at, &proofs), "another token");
+        assert!(!verify(&a, &[8; NONCE_BYTES], "0123", at, &proofs), "another nonce");
+        assert!(!verify(&a, &nonce, "0124", at, &proofs), "another instance");
+        assert!(!verify(&a, &nonce, "0123", "127.0.0.1:6", &proofs), "another endpoint");
+        assert!(!verify(&a, &nonce, "0123", "[::1]:5", &proofs), "another endpoint");
+        for bad in [json!(null), json!([]), json!(["zz"]), json!([1]), json!("x")] {
+            assert!(!verify(&a, &nonce, "0123", at, &bad), "{bad}");
+        }
+    }
+
+    /// Only Windows servers answer with proofs.
+    #[cfg(windows)]
+    #[test]
+    fn the_server_proves_every_tenant_for_a_valid_nonce() {
+        use crate::config::Tenant;
+        let (a, b, nonce, at) = (token("a"), token("b"), [9; NONCE_BYTES], "[::1]:5");
         let tenants = [
             Tenant { name: "a".into(), token: a.clone() },
             Tenant { name: "b".into(), token: b.clone() },
         ];
-        let auth = Auth::new(&tenants);
-        let nonce = [9; NONCE_BYTES];
+        let auth = super::Auth::new(&tenants);
         let hex = "09".repeat(NONCE_BYTES);
         let head = crate::http::Head::for_test("GET", "/healthz", &[("x-atticdb-nonce", &hex)]);
-        let proofs = json!(auth.proofs(&head, "0123").unwrap());
+        let proofs = json!(auth.proofs(&head, "0123", at).unwrap());
         assert_eq!(proofs.as_array().unwrap().len(), 2);
-        assert!(verify(&a, &nonce, "0123", &proofs));
-        assert!(verify(&b, &nonce, "0123", &proofs));
-        assert!(!verify(&token("c"), &nonce, "0123", &proofs), "another token");
-        assert!(!verify(&a, &[8; NONCE_BYTES], "0123", &proofs), "another nonce");
-        assert!(!verify(&a, &nonce, "0124", &proofs), "another instance");
-        for bad in [json!(null), json!([]), json!(["zz"]), json!([1]), json!("x")] {
-            assert!(!verify(&a, &nonce, "0123", &bad), "{bad}");
-        }
+        assert!(verify(&a, &nonce, "0123", at, &proofs));
+        assert!(verify(&b, &nonce, "0123", at, &proofs));
         let none = crate::http::Head::for_test("GET", "/healthz", &[]);
-        assert_eq!(auth.proofs(&none, "0123"), None);
+        assert_eq!(auth.proofs(&none, "0123", at), None);
         let twice = [("x-atticdb-nonce", hex.as_str()), ("x-atticdb-nonce", hex.as_str())];
         let twice = crate::http::Head::for_test("GET", "/healthz", &twice);
-        assert_eq!(auth.proofs(&twice, "0123"), None);
+        assert_eq!(auth.proofs(&twice, "0123", at), None);
         let short = crate::http::Head::for_test("GET", "/healthz", &[("x-atticdb-nonce", "09")]);
-        assert_eq!(auth.proofs(&short, "0123"), None);
+        assert_eq!(auth.proofs(&short, "0123", at), None);
     }
 }

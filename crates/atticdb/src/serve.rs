@@ -11,7 +11,7 @@
 //! 256 x 8 MiB = 2 GiB of raw bodies or turns, plus 2 trees of about 16 x 8 MiB, plus
 //! 256 MiB + 2 x 49 MiB of window bodies, in the worst case.
 //!
-//! Windows has no Unix socket here: a server there always listens on loopback TCP, and its
+//! Windows has no Unix socket here. A server there always listens on loopback TCP. Its
 //! `LOCK` names that address and no socket.
 
 use crate::api::{self, Route};
@@ -139,6 +139,8 @@ impl Shared {
     }
 
     fn connection<S: Stream>(&self, stream: S, tcp: bool) {
+        #[cfg(windows)]
+        let local = stream.local_addr().ok().map(|addr| addr.to_string());
         let mut conn = ServerConn::new(stream, Limits::default());
         let check = |head: &crate::http::Head| {
             let started = Instant::now();
@@ -155,9 +157,16 @@ impl Shared {
             let (method, path) = (request.head.method.clone(), request.head.path().to_owned());
             let tenant = tenant.unwrap_or_default();
             let response = match route {
+                #[cfg(unix)]
+                Route::Health => api::health(&self.engine, &self.config.instance),
+                // The proof is bound to this connection's local address. See `auth::proof`.
+                #[cfg(windows)]
                 Route::Health => {
-                    let proofs = self.config.auth.proofs(&request.head, &self.config.instance);
-                    api::health(&self.engine, &self.config.instance, proofs)
+                    let (auth, instance) = (&self.config.auth, &self.config.instance);
+                    let proofs = local
+                        .as_deref()
+                        .and_then(|local| auth.proofs(&request.head, instance, local));
+                    api::health_proved(&self.engine, instance, proofs)
                 }
                 Route::Stats => api::stats(&self.engine, &self.config.instance),
                 Route::Metrics => api::metrics(&self.engine),

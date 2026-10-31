@@ -37,6 +37,58 @@ pub(crate) fn real_path(path: &std::path::Path) -> std::io::Result<std::path::Pa
     Ok(real)
 }
 
+/// Whether `path` is `root` or inside it, by whole components. Case is ignored, as Windows
+/// ignores it, so `C:\Users\Me` holds `c:\users\me\x`. A string prefix would also take
+/// `C:\Users\Mel`.
+#[cfg(any(windows, test))]
+pub(crate) fn within(path: &std::path::Path, root: &std::path::Path) -> bool {
+    let fold = |part: std::path::Component| part.as_os_str().to_string_lossy().to_lowercase();
+    let mut parts = path.components();
+    root.components().all(|part| parts.next().is_some_and(|next| fold(next) == fold(part)))
+}
+
+/// Refuses `path` unless it is inside `%LOCALAPPDATA%` or `%USERPROFILE%`. `what` names it in
+/// the error. Windows gets no owner or mode check, so the profile's access list is the guard.
+/// Both sides are resolved first: made absolute, with links and short 8.3 names followed.
+#[cfg(windows)]
+pub(crate) fn check_in_profile(path: &std::path::Path, what: &str) -> Result<(), String> {
+    let roots = ["LOCALAPPDATA", "USERPROFILE"].into_iter().filter_map(std::env::var_os);
+    let roots: Vec<_> = roots
+        .map(std::path::PathBuf::from)
+        .filter(|root| root.is_absolute())
+        .filter_map(|root| resolve(&root).ok())
+        .collect();
+    let resolved = resolve(path).map_err(|error| format!("{what} {}: {error}", path.display()))?;
+    if roots.iter().any(|root| within(&resolved, root)) {
+        return Ok(());
+    }
+    Err(format!(
+        "{what} {} must be inside %LOCALAPPDATA% or %USERPROFILE% (D92). On Windows AtticDB \
+         checks no access lists, so it trusts only the user profile.",
+        path.display()
+    ))
+}
+
+/// `path` made absolute, with its longest existing part resolved by [`real_path`].
+#[cfg(windows)]
+fn resolve(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    let absolute = std::path::absolute(path)?;
+    let mut rest = Vec::new();
+    let mut base = absolute.as_path();
+    loop {
+        if let Ok(real) = real_path(base) {
+            return Ok(rest.into_iter().rev().fold(real, |path, name| path.join(name)));
+        }
+        match (base.parent(), base.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name);
+                base = parent;
+            }
+            _ => return Ok(absolute.clone()),
+        }
+    }
+}
+
 #[cfg(windows)]
 pub(crate) use windows::*;
 
@@ -103,9 +155,9 @@ mod windows {
     /// How long `taskkill` may take.
     const KILL_TIMEOUT: Duration = Duration::from_secs(10);
 
-    /// A server that outlives this process: no console, and not in this console's group,
-    /// so Ctrl-C here does not stop it. It must not hold this process's stdio either, or the
-    /// caller of this process would wait for end of file until the server exits.
+    /// A server that outlives this process. It gets no console and its own process group,
+    /// so Ctrl-C here does not stop it. It must not hold this process's stdio either.
+    /// Otherwise the caller of this process would wait for end of file until the server exits.
     pub(crate) fn detach(command: &mut Command) {
         atticdb_sys::disinherit_stdio();
         command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
@@ -152,6 +204,35 @@ mod windows {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn within_compares_whole_components() {
+        use std::path::Path;
+        let root = Path::new("/home/me");
+        for (path, inside) in
+            [("/home/me", true), ("/home/me/x", true), ("/home/mel", false), ("/home", false)]
+        {
+            assert_eq!(super::within(Path::new(path), root), inside, "{path}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn within_compares_whole_components_without_case() {
+        use std::path::Path;
+        let root = Path::new(r"C:\Users\Me");
+        for (path, inside) in [
+            (r"C:\Users\Me", true),
+            (r"c:\users\me\AppData\atticdb", true),
+            (r"C:\Users\Mel", false),
+            (r"C:\Users", false),
+            (r"D:\Users\Me", false),
+            (r"\\server\share\Users\Me", false),
+        ] {
+            assert_eq!(super::within(Path::new(path), root), inside, "{path}");
+        }
+    }
+
     #[test]
     fn plain_path_drops_the_verbatim_prefix() {
         for (path, plain) in [

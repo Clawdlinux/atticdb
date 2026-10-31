@@ -1,8 +1,10 @@
-//! The home flow on every platform: a fresh home starts a server, the shell verbs and the MCP
-//! adapter use it. On Windows that server is on loopback TCP, found through `LOCK` with a
-//! token proof. The squatter test is Windows only, as Unix discovery never uses `tcp=`.
+//! The home flow on every platform. A fresh home starts a server, which the shell verbs and
+//! the MCP adapter use. On Windows that server is on loopback TCP. Clients find it through
+//! `LOCK`, then check its token proof. The squatter tests are Windows only. Unix discovery
+//! never uses `tcp=`.
 //!
 //! Self-contained, as `support` is Unix only. Every server is stopped by the pid in `LOCK`.
+//! On Windows each command gets the test folder as its user profile.
 
 use serde_json::{json, Value};
 use std::fs::File;
@@ -81,8 +83,8 @@ impl Drop for Servers {
     }
 }
 
-/// Kills the server named in each `LOCK`, by pid and only when that pid runs `atticdb.exe`,
-/// until no lock was held for 500 ms, for up to 15 s.
+/// Kills the server named in each `LOCK`, by pid, when that pid runs `atticdb.exe`. It stops
+/// once no lock was held for 500 ms, or after 15 s.
 #[cfg(windows)]
 fn stop_servers(dirs: &[PathBuf]) {
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -159,13 +161,17 @@ fn wait(child: &mut Child, limit: Duration) -> Option<std::process::ExitStatus> 
     }
 }
 
-/// `atticdb` without [`HOME_VARS`], in `cwd`, with `env` added.
+/// `atticdb` without [`HOME_VARS`], in `cwd`, with `env` added. On Windows `cwd` is also the
+/// user profile, so homes in it pass the profile check.
 fn atticdb(cwd: &Path, env: &[(&str, &Path)]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_atticdb"));
     for var in HOME_VARS {
         command.env_remove(var);
     }
     command.current_dir(cwd);
+    if cfg!(windows) {
+        command.env("USERPROFILE", cwd).env("LOCALAPPDATA", cwd.join("AppData").join("Local"));
+    }
     for (name, value) in env {
         command.env(name, value);
     }
@@ -283,39 +289,90 @@ fn mcp_round_trip_on_a_fresh_home() {
     assert!(err.contains("atticdb: started server pid "), "{err}");
 }
 
-/// A listener that is not ours sits on the port in `LOCK` and answers `/healthz` with the
-/// `LOCK` instance and a wrong or missing proof. No command sends it the token.
+/// `verify` copies a data directory under its lock. A live server holds the lock, so it
+/// refuses with 75. Once the server is stopped, it passes.
+#[test]
+fn verify_respects_the_server_lock() {
+    let dir = Dir::new();
+    let home = dir.0.join("home");
+    let data = home.join("data");
+    let servers = Servers(vec![data.clone()]);
+    let env = [("ATTICDB_HOME", home.as_path())];
+    let (code, out, err) = run(&dir.0, &env, &["append", "--session", "s", "--content", "x"]);
+    assert_eq!(code, Some(0), "{out}{err}");
+    let verify = ["verify", "--data-dir", data.to_str().unwrap()];
+    let (code, out, err) = run(&dir.0, &[], &verify);
+    assert_eq!(code, Some(75), "{out}{err}");
+    assert!(err.contains("locked by pid="), "{err}");
+    drop(servers);
+    let (code, out, err) = run(&dir.0, &[], &verify);
+    assert_eq!(code, Some(0), "{out}{err}");
+}
+
+/// Squatters on the port in `LOCK`, discovery against a real server with many tenants, and
+/// the user profile check.
 #[cfg(windows)]
-mod squatter {
-    use super::{locked, run, Dir, Servers};
+mod windows {
+    use super::{atticdb, locked, run, wait, Dir, Servers};
+    use serde_json::{json, Value};
     use std::io::{Read, Write};
-    use std::net::TcpListener;
+    use std::net::{TcpListener, TcpStream};
     use std::path::Path;
+    use std::process::Stdio;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread::JoinHandle;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     const TOKEN: &str = "token-a-0123456789abcdefghijklmnopqrstuv";
 
-    /// Records every byte it receives, from every connection.
+    /// What a squatter answers.
+    enum Reply {
+        /// This `/healthz` body.
+        Body(String),
+        /// Whatever the server at this address answers, passed on unchanged.
+        Relay(String),
+    }
+
+    /// A listener that is not ours. It records every byte it receives, from every connection.
     struct Squatter {
         addr: String,
         seen: Arc<Mutex<Vec<u8>>>,
+        relayed: Arc<Mutex<Vec<u8>>>,
         stop: Arc<AtomicBool>,
         thread: Option<JoinHandle<()>>,
     }
 
+    /// Reads a request or response head, and a body by its `Content-Length`.
+    fn read_message(stream: &mut TcpStream) -> Vec<u8> {
+        let mut message = Vec::new();
+        let mut chunk = [0; 4096];
+        let complete = |message: &[u8]| {
+            let Some(end) = message.windows(4).position(|window| window == b"\r\n\r\n") else {
+                return false;
+            };
+            let head = String::from_utf8_lossy(&message[..end]).to_ascii_lowercase();
+            let length = head.lines().find_map(|line| line.strip_prefix("content-length: "));
+            let length: usize = length.and_then(|n| n.trim().parse().ok()).unwrap_or(0);
+            message.len() >= end + 4 + length
+        };
+        while !complete(&message) {
+            match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => message.extend_from_slice(&chunk[..n]),
+            }
+        }
+        message
+    }
+
     impl Squatter {
-        /// `proof` is the `proofs` array it answers with.
-        fn start(proof: serde_json::Value) -> Self {
+        fn start(reply: Reply) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             listener.set_nonblocking(true).unwrap();
             let addr = listener.local_addr().unwrap().to_string();
             let (seen, stop) = (Arc::new(Mutex::new(Vec::new())), Arc::new(AtomicBool::new(false)));
-            let (log, stopping) = (seen.clone(), stop.clone());
-            let body = serde_json::json!({"status": "ok", "instance": "0123", "proofs": proof});
-            let body = body.to_string();
+            let relayed = Arc::new(Mutex::new(Vec::new()));
+            let (log, stopping, passed) = (seen.clone(), stop.clone(), relayed.clone());
             let thread = std::thread::spawn(move || {
                 while !stopping.load(Ordering::Acquire) {
                     let Ok((mut stream, _)) = listener.accept() else {
@@ -324,46 +381,60 @@ mod squatter {
                     };
                     let _ = stream.set_nonblocking(false);
                     let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
-                    let mut chunk = [0; 4096];
-                    let mut head = Vec::new();
-                    while !head.windows(4).any(|window| window == b"\r\n\r\n") {
-                        match stream.read(&mut chunk) {
-                            Ok(0) | Err(_) => break,
-                            Ok(n) => head.extend_from_slice(&chunk[..n]),
+                    let mut request = read_message(&mut stream);
+                    let answer = match &reply {
+                        Reply::Body(body) => format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                             Content-Length: {}\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .into_bytes(),
+                        Reply::Relay(server) => {
+                            let mut upstream = TcpStream::connect(server).unwrap();
+                            upstream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                            upstream.write_all(&request).unwrap();
+                            let answer = read_message(&mut upstream);
+                            passed.lock().unwrap().extend_from_slice(&answer);
+                            answer
                         }
-                    }
-                    let answer = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
-                         Content-Length: {}\r\n\r\n{body}",
-                        body.len()
-                    );
-                    let _ = stream.write_all(answer.as_bytes());
+                    };
+                    let _ = stream.write_all(&answer);
                     // A token sent after the answer would arrive here.
                     let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+                    let mut chunk = [0; 4096];
                     while let Ok(n) = stream.read(&mut chunk) {
                         if n == 0 {
                             break;
                         }
-                        head.extend_from_slice(&chunk[..n]);
+                        request.extend_from_slice(&chunk[..n]);
                     }
-                    log.lock().unwrap().extend_from_slice(&head);
+                    log.lock().unwrap().extend_from_slice(&request);
                 }
             });
-            Self { addr, seen, stop, thread: Some(thread) }
+            Self { addr, seen, relayed, stop, thread: Some(thread) }
         }
 
-        /// Stops it and returns all it received.
-        fn finish(mut self) -> String {
+        /// A squatter that answers as instance 0123 with these `proofs`.
+        fn answering(proofs: Value) -> Self {
+            let body = json!({"status": "ok", "instance": "0123", "proofs": proofs});
+            Self::start(Reply::Body(body.to_string()))
+        }
+
+        /// Stops it. Returns all it received, and all it relayed back.
+        fn finish(mut self) -> (String, String) {
             self.stop.store(true, Ordering::Release);
             if let Some(thread) = self.thread.take() {
                 thread.join().unwrap();
             }
-            String::from_utf8_lossy(&self.seen.lock().unwrap()).into_owned()
+            let text = |bytes: &Mutex<Vec<u8>>| {
+                String::from_utf8_lossy(&bytes.lock().unwrap()).into_owned()
+            };
+            (text(&self.seen), text(&self.relayed))
         }
 
-        fn lock(&self, data: &Path) {
+        fn lock(&self, data: &Path, instance: &str) {
             std::fs::create_dir_all(data).unwrap();
-            let text = format!("pid=1 instance=0123 tcp={}\n", self.addr);
+            let text = format!("pid=1 instance={instance} tcp={}\n", self.addr);
             std::fs::write(data.join("LOCK"), text).unwrap();
         }
     }
@@ -375,31 +446,27 @@ mod squatter {
         assert!(!seen.contains(token), "{seen}");
     }
 
+    /// `append` on `data` with the token in a file and a 3 s retry deadline. No config, so it
+    /// starts no server.
+    fn append_to(dir: &Dir, data: &Path, token: &str) -> (Option<i32>, String, String) {
+        let file = dir.0.join("token");
+        std::fs::write(&file, token).unwrap();
+        let (data, file) = (data.to_str().unwrap(), file.to_str().unwrap());
+        let args = ["append", "--data-dir", data, "--token-file", file];
+        let args = [&args[..], &["--session", "s", "--retry-deadline", "3s", "--content", "x"]];
+        run(&dir.0, &[], &args.concat())
+    }
+
     /// With no config to start a server from, the command waits for a trusted server and
     /// fails. The squatter gets only nonces.
     #[test]
     fn a_squatter_with_a_wrong_proof_never_gets_the_token() {
         let dir = Dir::new();
         let data = dir.0.join("data");
-        let squatter = Squatter::start(serde_json::json!(["00".repeat(32)]));
-        squatter.lock(&data);
-        let token = dir.0.join("token");
-        std::fs::write(&token, TOKEN).unwrap();
-        let args = [
-            "append",
-            "--data-dir",
-            data.to_str().unwrap(),
-            "--token-file",
-            token.to_str().unwrap(),
-            "--session",
-            "s",
-            "--retry-deadline",
-            "3s",
-            "--content",
-            "x",
-        ];
-        let (code, out, err) = run(&dir.0, &[], &args);
-        let seen = squatter.finish();
+        let squatter = Squatter::answering(json!(["00".repeat(32)]));
+        squatter.lock(&data, "0123");
+        let (code, out, err) = append_to(&dir, &data, TOKEN);
+        let (seen, _) = squatter.finish();
         assert_ne!(code, Some(0), "{out}{err}");
         assert!(err.contains("gave no proof"), "{err}");
         assert_never_got_the_token(&seen, TOKEN);
@@ -413,19 +480,135 @@ mod squatter {
         let home = dir.0.join("home");
         let data = home.join("data");
         let _servers = Servers(vec![data.clone()]);
-        let squatter = Squatter::start(serde_json::json!([]));
-        squatter.lock(&data);
+        let squatter = Squatter::answering(json!([]));
+        squatter.lock(&data, "0123");
         let env = [("ATTICDB_HOME", home.as_path())];
         let (code, out, err) = run(&dir.0, &env, &["append", "--session", "s", "--content", "x"]);
-        let seen = squatter.finish();
+        let (seen, _) = squatter.finish();
         assert_eq!(code, Some(0), "{out}{err}");
         assert!(err.contains("gave no proof"), "{err}");
         assert!(locked(&data), "its own server holds the lock");
         let lock = std::fs::read_to_string(data.join("LOCK")).unwrap();
         assert!(!lock.contains("instance=0123 "), "{lock}");
+        assert_never_got_the_token(&seen, &home_token(&home));
+    }
+
+    fn home_token(home: &Path) -> String {
         let config = std::fs::read_to_string(home.join("atticdb.json")).unwrap();
-        let config: serde_json::Value = serde_json::from_str(&config).unwrap();
-        let token = config["tenants"][0]["token"].as_str().unwrap();
-        assert_never_got_the_token(&seen, token);
+        let config: Value = serde_json::from_str(&config).unwrap();
+        config["tenants"][0]["token"].as_str().unwrap().to_owned()
+    }
+
+    /// The real server's `instance` and `tcp` from its `LOCK`.
+    fn lock_fields(data: &Path) -> (String, String) {
+        let lock = std::fs::read_to_string(data.join("LOCK")).unwrap();
+        let field = |name: &str| {
+            let start = lock.find(name).unwrap() + name.len();
+            lock[start..].split_whitespace().next().unwrap().to_owned()
+        };
+        (field("instance="), field("tcp="))
+    }
+
+    /// A squatter names the live server's instance and relays the nonce to it. The real
+    /// proofs come back unchanged. They are bound to the server's own address, so they fail.
+    #[test]
+    fn a_relay_to_the_real_server_never_gets_the_token() {
+        let dir = Dir::new();
+        let home = dir.0.join("home");
+        let _servers = Servers(vec![home.join("data")]);
+        let env = [("ATTICDB_HOME", home.as_path())];
+        let (code, out, err) = run(&dir.0, &env, &["append", "--session", "s", "--content", "x"]);
+        assert_eq!(code, Some(0), "{out}{err}");
+        let (instance, server) = lock_fields(&home.join("data"));
+        let token = home_token(&home);
+        let squatter = Squatter::start(Reply::Relay(server));
+        let data = dir.0.join("other");
+        squatter.lock(&data, &instance);
+        let (code, out, err) = append_to(&dir, &data, &token);
+        let (seen, relayed) = squatter.finish();
+        assert_ne!(code, Some(0), "{out}{err}");
+        assert!(err.contains("gave no proof"), "{err}");
+        assert!(relayed.contains("\"proofs\":[\""), "the real server answered: {relayed}");
+        assert_never_got_the_token(&seen, &token);
+    }
+
+    /// A real server with 100 tenants answers with over 6 KiB of proofs. A client with the
+    /// last tenant's token finds it and writes.
+    #[test]
+    fn discovery_finds_a_server_with_100_tenants() {
+        let dir = Dir::new();
+        let data = dir.0.join("data");
+        let _servers = Servers(vec![data.clone()]);
+        let token = |n: usize| format!("token-{n:03}-0123456789abcdefghijklmnopqrstuv");
+        let tenants: Vec<Value> =
+            (0..100).map(|n| json!({"name": format!("t{n}"), "token": token(n)})).collect();
+        let config = dir.0.join("server.json");
+        std::fs::write(&config, json!({"tenants": tenants}).to_string()).unwrap();
+        let mut serve = atticdb(&dir.0, &[]);
+        serve.args(["serve", "--config", config.to_str().unwrap(), "--data-dir"]);
+        serve.args([data.to_str().unwrap(), "--listen", "127.0.0.1:0"]);
+        serve.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        let mut child = serve.spawn().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !(locked(&data)
+            && std::fs::read_to_string(data.join("LOCK")).is_ok_and(|l| l.contains(" tcp=")))
+        {
+            assert!(Instant::now() < deadline, "the server did not start");
+            assert!(matches!(child.try_wait(), Ok(None)), "the server exited");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let (code, out, err) = append_to(&dir, &data, &token(99));
+        assert_eq!(code, Some(0), "{out}{err}");
+        let _ = child.kill();
+        let _ = wait(&mut child, Duration::from_secs(10));
+    }
+
+    /// Every path that picks the store must be inside the user profile.
+    #[test]
+    fn paths_outside_the_profile_are_refused() {
+        let dir = Dir::new();
+        let profile = dir.0.join("profile");
+        let local = profile.join("AppData").join("Local");
+        std::fs::create_dir_all(&local).unwrap();
+        let outside = dir.0.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let config = outside.join("atticdb.json");
+        let tenants = json!([{"name": "me", "token": TOKEN}]);
+        std::fs::write(&config, json!({"tenants": tenants}).to_string()).unwrap();
+        let inside = local.join("atticdb.json");
+        let data = outside.join("data");
+        let with_data = json!({"data_dir": data, "tenants": tenants});
+        std::fs::write(&inside, with_data.to_string()).unwrap();
+        let token = profile.join("token");
+        std::fs::write(&token, TOKEN).unwrap();
+        let profile_env = [("USERPROFILE", profile.as_path()), ("LOCALAPPDATA", local.as_path())];
+        let (config, inside, data, token) = (
+            config.to_str().unwrap(),
+            inside.to_str().unwrap(),
+            data.to_str().unwrap(),
+            token.to_str().unwrap(),
+        );
+        let home = outside.join("home");
+        let cases: [(&[&str], Option<&Path>, &str); 4] = [
+            (&[], Some(home.as_path()), "home"),
+            (&["--data-dir", data, "--token-file", token], None, "data dir"),
+            (&["--config", config, "--tenant", "me"], None, "config"),
+            (&["--config", inside, "--tenant", "me"], None, "data dir"),
+        ];
+        for (flags, home, what) in cases {
+            let mut env = profile_env.to_vec();
+            env.extend(home.map(|home| ("ATTICDB_HOME", home)));
+            let args =
+                [&["append", "--content", "x", "--retry-deadline", "2s"][..], flags].concat();
+            let (code, out, err) = run(&dir.0, &env, &args);
+            assert_ne!(code, Some(0), "{args:?}: {out}{err}");
+            assert!(err.contains(&format!("{what} ")) && err.contains("(D92)"), "{args:?}: {err}");
+            assert!(!locked(&outside.join("data")), "{args:?}: nothing started");
+        }
+        assert!(!home.exists(), "no home was made outside the profile");
+        // The default home, inside the profile, works.
+        let _servers = Servers(vec![local.join("atticdb").join("data")]);
+        let (code, out, err) = run(&dir.0, &profile_env, &["append", "--content", "x"]);
+        assert_eq!(code, Some(0), "{out}{err}");
     }
 }

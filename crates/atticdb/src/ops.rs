@@ -10,7 +10,9 @@ use crate::serve::EXIT_LOCKED;
 use atticdb_core::{Engine, EngineOptions, ErrorKind};
 use atticdb_tape::{StdIo, SystemClock, Tape, TapeOptions};
 use serde_json::{json, Value};
-use std::fs::{DirBuilder, OpenOptions, TryLockError};
+#[cfg(unix)]
+use std::fs::TryLockError;
+use std::fs::{DirBuilder, OpenOptions};
 use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, PermissionsExt};
@@ -243,6 +245,18 @@ fn on_copy(
     )
 }
 
+/// Holds the tape's lock byte on `LOCK`. It releases it before the handle closes, as Windows
+/// may release a closed handle's lock late.
+#[cfg(windows)]
+struct PastEof<'a>(&'a std::fs::File);
+
+#[cfg(windows)]
+impl Drop for PastEof<'_> {
+    fn drop(&mut self) {
+        let _ = atticdb_sys::unlock_past_eof(self.0);
+    }
+}
+
 /// Copies the regular files of `dir` into a new mode 0700 directory under its `LOCK`.
 fn copy_locked(dir: &Path, scratch: Option<&Path>) -> Result<Scratch, (u8, String)> {
     let fail = |error: std::io::Error| (1, error.to_string());
@@ -253,6 +267,7 @@ fn copy_locked(dir: &Path, scratch: Option<&Path>) -> Result<Scratch, (u8, Strin
         }
         opened => opened.map_err(fail)?,
     };
+    #[cfg(unix)]
     match lock.try_lock() {
         Ok(()) => {}
         Err(TryLockError::WouldBlock) => {
@@ -262,6 +277,18 @@ fn copy_locked(dir: &Path, scratch: Option<&Path>) -> Result<Scratch, (u8, Strin
         }
         Err(TryLockError::Error(error)) => return Err(fail(error)),
     }
+    // The tape's lock byte, far past the end, so a server starting meanwhile can read `LOCK`.
+    // A whole-file lock would make its read fail.
+    #[cfg(windows)]
+    let _held = match atticdb_sys::try_lock_past_eof(&lock) {
+        Ok(true) => PastEof(&lock),
+        Ok(false) => {
+            let mut holder = String::new();
+            let _ = lock.read_to_string(&mut holder);
+            return Err((EXIT_LOCKED, format!("locked by {}", holder.trim())));
+        }
+        Err(error) => return Err(fail(error)),
+    };
     // Canonical, so `.` or a trailing slash cannot put the copy inside `dir`.
     let dir = std::fs::canonicalize(dir).map_err(fail)?;
     let parent = match scratch {
@@ -284,11 +311,6 @@ fn copy_locked(dir: &Path, scratch: Option<&Path>) -> Result<Scratch, (u8, Strin
         // The server's socket stays behind. Anything else would make an incomplete copy.
         #[cfg(unix)]
         if kind.is_socket() {
-            continue;
-        }
-        // Windows locks are mandatory, so the held `LOCK` cannot be read. The copy makes its own.
-        #[cfg(not(unix))]
-        if entry.file_name() == "LOCK" {
             continue;
         }
         if !kind.is_file() {

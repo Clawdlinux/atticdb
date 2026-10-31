@@ -23,6 +23,9 @@ pub trait Stream: Read + Write {
     fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()>;
     /// Shuts down one or both halves.
     fn shutdown(&self, how: Shutdown) -> io::Result<()>;
+    /// This end's address. Windows has TCP streams only, and binds `/healthz` proofs to it.
+    #[cfg(windows)]
+    fn local_addr(&self) -> io::Result<std::net::SocketAddr>;
 }
 
 macro_rules! impl_stream {
@@ -36,6 +39,10 @@ macro_rules! impl_stream {
             }
             fn shutdown(&self, how: Shutdown) -> io::Result<()> {
                 <$type>::shutdown(self, how)
+            }
+            #[cfg(windows)]
+            fn local_addr(&self) -> io::Result<std::net::SocketAddr> {
+                <$type>::local_addr(self)
             }
         }
     };
@@ -124,7 +131,7 @@ impl Head {
     }
 
     /// An HTTP/1.1 head with lowercase header `names`, for unit tests.
-    #[cfg(test)]
+    #[cfg(all(test, windows))]
     pub(crate) fn for_test(method: &str, target: &str, headers: &[(&str, &str)]) -> Self {
         let headers = headers.iter().map(|(name, value)| ((*name).into(), value.as_bytes().into()));
         Self {

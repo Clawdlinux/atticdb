@@ -120,8 +120,15 @@ pub(crate) fn loopback_host(value: &[u8]) -> bool {
 }
 
 /// `GET /healthz`. Read-only stays 200 on purpose: only a write can clear it.
-/// With `proofs`, from [`crate::auth::Auth::proofs`], the body also has a `proofs` array.
-pub fn health(engine: &Engine, instance: &str, proofs: Option<Vec<String>>) -> Response {
+pub fn health(engine: &Engine, instance: &str) -> Response {
+    let (status, text) = health_status(engine);
+    Response::json(status, &json!({"status": text, "instance": instance}))
+}
+
+/// [`health`], plus a `proofs` array when there are `proofs`, from
+/// [`crate::auth::Auth::proofs`]. Windows only, where discovery checks them.
+#[cfg(windows)]
+pub fn health_proved(engine: &Engine, instance: &str, proofs: Option<Vec<String>>) -> Response {
     let (status, text) = health_status(engine);
     let mut body = json!({"status": text, "instance": instance});
     if let Some(proofs) = proofs {

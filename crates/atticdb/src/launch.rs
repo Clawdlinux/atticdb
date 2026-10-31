@@ -1,14 +1,15 @@
 //! How `atticdb mcp` reaches a server: the operator's `--url`, a server found through
 //! `<data_dir>/LOCK` on its Unix socket, or a server it starts itself.
 //!
-//! Discovery never uses the TCP address in `LOCK`, and never sends the token to a
-//! socket that is not ours, under an owner-only parent, answering with the `LOCK`
+//! On Unix, discovery never uses the TCP address in `LOCK`. It sends the token only to a
+//! socket that is ours, under an owner-only parent. That socket must answer with the `LOCK`
 //! instance id.
 //!
-//! Windows has no Unix socket here. A started server listens on an ephemeral loopback port,
-//! which `LOCK` names. Discovery there connects to that port and sends `/healthz` with a
-//! random nonce. The token goes over that connection only after the server proved it knows
-//! the token for that nonce and the `LOCK` instance id.
+//! Windows has no Unix socket here, so discovery there does use the TCP address in `LOCK`.
+//! A started server listens on an ephemeral loopback port, which `LOCK` names. Discovery
+//! connects to that port and sends `/healthz` with a random nonce. The token goes over that
+//! connection only after a proof. The server must show it knows the token, for that nonce,
+//! the `LOCK` instance id and the address connected to.
 
 #[cfg(any(windows, test))]
 use crate::config::Token;
@@ -34,6 +35,14 @@ const POLL: Duration = Duration::from_millis(10);
 /// Longest TCP connect in discovery. Windows takes about 2 s to report a refused one.
 #[cfg(any(windows, test))]
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Smallest tenant entry in a config: `{"name":"a","token":"<32 bytes>"},` is 56 bytes.
+#[cfg(any(windows, test))]
+const MIN_TENANT_JSON: u64 = 56;
+/// Most bytes of a `/healthz` body with proofs. A config of at most 1 MiB holds at most
+/// 1 MiB / 56 tenants. Each proof takes 67 bytes: 64 hex digits, 2 quotes and a comma.
+/// 4 KiB covers the other fields. That is about 1.2 MiB.
+#[cfg(any(windows, test))]
+const PROOF_BYTES: u64 = crate::config::MAX_FILE_BYTES / MIN_TENANT_JSON * 67 + 4096;
 /// Why a `unix://` URL fails where there is no Unix socket.
 #[cfg(windows)]
 const NO_UNIX: &str =
@@ -447,10 +456,11 @@ pub(crate) fn discover(
     discover_tcp(dir, deadline, token)
 }
 
-/// A connection to the TCP address in `LOCK`, if it is 127.0.0.1 or [::1] and answered
-/// `/healthz` on this connection with the `LOCK` instance id and a proof that it knows
-/// `token`, by [`crate::auth::verify`]. The token then goes over the same connection.
-/// Otherwise the reason, and no token was sent: the probe carries only a random nonce.
+/// A connection to the TCP address in `LOCK`, which must be 127.0.0.1 or [::1]. On this
+/// connection the server must answer `/healthz` with the `LOCK` instance id. It must also
+/// prove it knows `token`, by [`crate::auth::verify`]. The token then goes over the same
+/// connection. Otherwise it returns the reason, and no token was sent. The probe carries
+/// only a random nonce.
 #[cfg(any(windows, test))]
 pub(crate) fn discover_tcp(
     dir: &Path,
@@ -485,6 +495,8 @@ pub(crate) fn discover_tcp(
         .and_then(|left| TcpStream::connect_timeout(&addr, left.min(CONNECT_TIMEOUT)))
         .map_err(|e| Refusal::of(&e, &idle, fail(&e)))?;
     let _ = stream.set_nodelay(true);
+    // The proof covers the server's end of this connection. A relay can't pass on a proof.
+    let endpoint = stream.peer_addr().map_err(|error| Refusal::Untrusted(fail(&error)))?;
     let nonce = crate::random_hex(crate::auth::NONCE_BYTES)
         .map_err(|error| Refusal::Untrusted(crate::platform::no_random(error)))?;
     let nonce_bytes = crate::auth::parse_nonce(nonce.as_bytes())
@@ -496,13 +508,15 @@ pub(crate) fn discover_tcp(
         (crate::auth::NONCE_HEADER, nonce.as_str()),
     ];
     let deadline = deadline.min(Instant::now() + PROBE_TIMEOUT);
-    let response = http::exchange(&mut stream, "GET", "/healthz", &headers, &[], deadline, 4096);
+    let response =
+        http::exchange(&mut stream, "GET", "/healthz", &headers, &[], deadline, PROOF_BYTES);
     let response = response.map_err(|error| Refusal::Untrusted(fail(&error)))?;
     let health: Value = serde_json::from_slice(&response.body).unwrap_or_default();
     if !matches!(response.status, 200 | 503) || health["instance"] != instance {
         return Err(Refusal::Untrusted(format!("{addr} is not instance {instance} from LOCK")));
     }
-    if !crate::auth::verify(token, &nonce_bytes, instance, &health["proofs"]) {
+    let endpoint = endpoint.to_string();
+    if !crate::auth::verify(token, &nonce_bytes, instance, &endpoint, &health["proofs"]) {
         return Err(Refusal::Untrusted(format!("{addr} gave no proof that it knows the token")));
     }
     Ok(stream)
@@ -660,6 +674,10 @@ mod tcp_tests {
         WrongProof,
         NoProof,
         WrongInstance,
+        /// The proof a server on another address would give, as a relay passes on.
+        Relayed,
+        /// The right proof last, after 99 others: more than 4 KiB of proofs.
+        Many,
     }
 
     /// A server on an ephemeral loopback port that answers 1 request. Returns its address
@@ -667,6 +685,7 @@ mod tcp_tests {
     fn fake(answer: Answer) -> (String, std::thread::JoinHandle<Vec<u8>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap().to_string();
+        let at = addr.clone();
         let thread = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
@@ -682,10 +701,23 @@ mod tcp_tests {
             let nonce = text.lines().find_map(|line| line.strip_prefix("x-atticdb-nonce: "));
             let nonce = parse_nonce(nonce.unwrap_or_default().trim().as_bytes()).unwrap();
             let key = proof_key(&token());
+            let right = proof(&key, &nonce, "0123", &at);
             let proofs = match answer {
-                Answer::Proof | Answer::WrongInstance => vec![proof(&key, &nonce, "0123")],
-                Answer::WrongProof => vec![proof(&key, &[0; 32], "0123")],
+                Answer::Proof | Answer::WrongInstance => vec![right],
+                Answer::WrongProof => vec![proof(&key, &[0; 32], "0123", &at)],
                 Answer::NoProof => vec![],
+                Answer::Relayed => vec![proof(&key, &nonce, "0123", "127.0.0.1:1")],
+                Answer::Many => {
+                    let other = |n: u8| {
+                        proof(
+                            &proof_key(&Token::new("u".repeat(40)).unwrap()),
+                            &[n; 32],
+                            "0123",
+                            &at,
+                        )
+                    };
+                    (0..99).map(other).chain([right]).collect()
+                }
             };
             let proofs: Vec<String> = proofs.iter().map(|hash| hash.to_hex().to_string()).collect();
             let instance = if matches!(answer, Answer::WrongInstance) { "9999" } else { "0123" };
@@ -748,7 +780,8 @@ mod tcp_tests {
     #[test]
     fn only_a_server_with_the_proof_is_trusted() {
         let temp = Temp::new();
-        for answer in [Answer::WrongProof, Answer::NoProof, Answer::WrongInstance] {
+        for answer in [Answer::WrongProof, Answer::NoProof, Answer::WrongInstance, Answer::Relayed]
+        {
             let (addr, thread) = fake(answer);
             lock(&temp.0, &addr);
             let refusal = discover(&temp.0).unwrap_err();
@@ -758,12 +791,26 @@ mod tcp_tests {
             assert!(!seen.to_ascii_lowercase().contains("authorization"), "{seen}");
             assert!(!seen.contains(token().expose()), "{seen}");
         }
-        let (addr, thread) = fake(Answer::Proof);
-        lock(&temp.0, &addr);
-        let stream = discover(&temp.0);
-        assert!(stream.is_ok(), "{:?}", stream.err());
-        drop(stream);
-        let seen = String::from_utf8(thread.join().unwrap()).unwrap();
-        assert!(!seen.to_ascii_lowercase().contains("authorization"), "{seen}");
+        for answer in [Answer::Proof, Answer::Many] {
+            let (addr, thread) = fake(answer);
+            lock(&temp.0, &addr);
+            let stream = discover(&temp.0);
+            assert!(stream.is_ok(), "{:?}", stream.err());
+            drop(stream);
+            let seen = String::from_utf8(thread.join().unwrap()).unwrap();
+            assert!(!seen.to_ascii_lowercase().contains("authorization"), "{seen}");
+        }
+    }
+
+    /// [`super::MIN_TENANT_JSON`] is the smallest tenant entry the config parser takes.
+    #[test]
+    fn the_probe_cap_covers_the_most_tenants_a_config_can_hold() {
+        let entry = serde_json::json!({"name": "a", "token": "t".repeat(32)}).to_string();
+        assert_eq!(entry.len() as u64 + 1, super::MIN_TENANT_JSON);
+        let most = crate::config::MAX_FILE_BYTES / super::MIN_TENANT_JSON;
+        let proofs: Vec<String> = (0..most).map(|_| "0".repeat(64)).collect();
+        let body =
+            serde_json::json!({"status": "ok", "instance": "0".repeat(32), "proofs": proofs});
+        assert!(body.to_string().len() as u64 <= super::PROOF_BYTES);
     }
 }
