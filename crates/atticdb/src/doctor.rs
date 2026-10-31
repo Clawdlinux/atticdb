@@ -191,6 +191,9 @@ fn app(
         checks.line("hook", hook);
     }
     if harness == Harness::Codex {
+        if cfg!(windows) {
+            println!("  {}", connect::CODEX_WINDOWS);
+        }
         // It only reads config, and never shows codex's output, which may hold secrets.
         let what = "codex mcp get atticdb";
         if connect::on_path("codex") {
@@ -384,6 +387,8 @@ fn synced(path: &Path, user: Option<&Path>) -> Option<&'static str> {
         }
     }
     let text = format!("{}/", path.display());
+    // Windows paths use `\`.
+    let text = if cfg!(windows) { text.replace('\\', "/") } else { text };
     let apps =
         [("/Dropbox/", "Dropbox"), ("/OneDrive/", "OneDrive"), ("/Google Drive/", "Google Drive")];
     apps.into_iter().find(|(folder, _)| text.contains(folder)).map(|(_, app)| app)

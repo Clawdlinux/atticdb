@@ -285,6 +285,22 @@ def test_unsupported_platform_points_to_source(server, dirs, tmp_path):
     assert requests == [] and not dirs[1].exists()
 
 
+@pytest.mark.parametrize("system", ["MINGW64_NT-10.0-26100", "MSYS_NT-10.0-26100", "CYGWIN_NT-10.0"])
+def test_windows_points_to_the_zip(server, dirs, tmp_path, system):
+    _, base, requests = server
+    fake = tmp_path / "fake"
+    fake.mkdir()
+    uname = fake / "uname"
+    uname.write_text(f'#!/bin/sh\ncase "$1" in -s) echo {system} ;; -m) echo x86_64 ;; esac\n')
+    uname.chmod(0o755)
+    result = install(dirs, base, path=f"{fake}:{SYSTEM_PATH}")
+    assert result.returncode == 1
+    assert "download atticdb-x86_64-pc-windows-msvc.zip" in result.stderr
+    assert "https://github.com/Clawdlinux/atticdb/releases/latest" in result.stderr
+    assert "then run: atticdb setup" in result.stderr
+    assert requests == [] and not dirs[1].exists()
+
+
 def test_relative_install_dir_fails(server, dirs):
     _, base, requests = server
     result = install(dirs, base, ATTICDB_INSTALL_DIR="bin")

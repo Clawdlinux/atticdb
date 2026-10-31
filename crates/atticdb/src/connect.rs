@@ -11,6 +11,8 @@ mod codex;
 pub use claude::Notes;
 /// What to do after Codex's hook is added.
 pub(crate) use codex::APPROVE as CODEX_APPROVE;
+/// What setup and doctor say about Codex on Windows, where it gets only its MCP entry.
+pub(crate) const CODEX_WINDOWS: &str = "Codex on Windows: MCP only, hooks wait for #137";
 // The files the legacy check reads, and how it finds the old binary.
 #[cfg(unix)]
 pub(crate) use claude::{
@@ -231,7 +233,10 @@ impl Harness {
             Self::Vscode if cfg!(target_os = "macos") => {
                 user_home()?.join("Library/Application Support/Code/User/mcp.json")
             }
-            // TODO(#137): Windows keeps it in %APPDATA%\Code\User, in part 3.
+            // VS Code's docs put the user `settings.json` in `%APPDATA%\Code\User`.
+            Self::Vscode if cfg!(windows) => absolute_env("APPDATA")
+                .ok_or("APPDATA must be set to an absolute path")?
+                .join(r"Code\User\mcp.json"),
             Self::Vscode => match absolute_env("XDG_CONFIG_HOME") {
                 Some(config) => config,
                 None => user_home()?.join(".config"),
@@ -332,7 +337,7 @@ pub fn detect(harness: Harness) -> bool {
 /// Codex: adds its MCP entry and tool approvals for `notes`, as a block at the end of its
 /// `config.toml`, unless `hook` is false its SessionStart hook, and its guide, a block in the
 /// `AGENTS.md` Codex reads. An `atticdb` server that AtticDB didn't write is never edited, so
-/// `force` doesn't apply.
+/// `force` doesn't apply. On Windows, Codex gets only its MCP entry.
 ///
 /// For Claude Code and Codex, a part that can't be applied is skipped, with what to do by
 /// hand, and the others still apply.
@@ -503,6 +508,14 @@ fn moved_home(harness: Harness, lookup: &Lookup) -> Result<Option<String>, Strin
     let Some(dir) = lookup.env_dir()? else { return Ok(None) };
     let dir = dir.into_os_string().into_string();
     let dir = dir.map_err(|_| format!("{HOME_ENV} must be UTF-8 to go in a harness config"))?;
+    // Copilot's docs don't say which syntax its env expansion takes on Windows, so `%` goes too.
+    if cfg!(windows) && dir.contains('%') {
+        return Err(format!(
+            "{HOME_ENV} {dir} holds a %. {} may expand variables in its config, so atticdb would \
+             read another home there. Nothing changed. Use a path without % or $",
+            harness.name()
+        ));
+    }
     if dir.contains('$') {
         return Err(format!(
             "{HOME_ENV} {dir} holds a $. {} may expand variables in its config, so atticdb would \
@@ -683,12 +696,82 @@ fn hook_file() -> Result<PathBuf, String> {
 
 /// The hook file's text: a `sessionStart` hook that runs `exe hook session-start`, passing
 /// `home` as `ATTICDB_HOME` when set.
+#[cfg(not(windows))]
 fn hook_text(exe: &str, home: Option<&str>) -> Result<String, String> {
     let bash = format!("'{}' hook session-start", exe.replace('\'', r"'\''"));
     let command = with_home(json!({"type": "command", "bash": bash, "timeoutSec": 5}), home);
     let hook = json!({"version": 1, "hooks": {"sessionStart": [command]}});
     let text = serde_json::to_string_pretty(&hook);
     Ok(text.map_err(|error| format!("cannot encode the hook: {error}"))? + "\n")
+}
+
+/// The hook file's text on Windows. Copilot runs the `powershell` command there, and so does
+/// VS Code. `env` passes `home` as `ATTICDB_HOME` when set.
+#[cfg(windows)]
+fn hook_text(exe: &str, home: Option<&str>) -> Result<String, String> {
+    let powershell = format!("& {} hook session-start", ps_quote(exe));
+    let command =
+        with_home(json!({"type": "command", "powershell": powershell, "timeoutSec": 5}), home);
+    let hook = json!({"version": 1, "hooks": {"sessionStart": [command]}});
+    let text = serde_json::to_string_pretty(&hook);
+    Ok(text.map_err(|error| format!("cannot encode the hook: {error}"))? + "\n")
+}
+
+/// The characters PowerShell reads as a single quote.
+#[cfg(any(windows, test))]
+const PS_QUOTES: [char; 5] = ['\'', '\u{2018}', '\u{2019}', '\u{201a}', '\u{201b}'];
+
+/// `word` in single quotes for PowerShell, where nothing expands: not `$`, `&` or a space.
+/// Each quote character inside is written twice, which PowerShell reads as 1.
+#[cfg(any(windows, test))]
+pub(crate) fn ps_quote(word: &str) -> String {
+    let mut quoted = String::from("'");
+    for c in word.chars() {
+        if PS_QUOTES.contains(&c) {
+            quoted.push(c);
+        }
+        quoted.push(c);
+    }
+    quoted.push('\'');
+    quoted
+}
+
+/// Splits a word [`ps_quote`] wrote off the start of `text`. Returns the word and the rest.
+#[cfg(any(windows, test))]
+pub(crate) fn ps_unquote(text: &str) -> Option<(String, &str)> {
+    let rest = text.strip_prefix('\'')?;
+    let mut word = String::new();
+    let mut chars = rest.char_indices().peekable();
+    while let Some((at, c)) = chars.next() {
+        if !PS_QUOTES.contains(&c) {
+            word.push(c);
+            continue;
+        }
+        match chars.peek() {
+            Some(&(_, next)) if next == c => {
+                word.push(c);
+                chars.next();
+            }
+            _ => return Some((word, &rest[at + c.len_utf8()..])),
+        }
+    }
+    None
+}
+
+/// The binary path in `command`, a hook entry, when [`hook_text`] could have written its line.
+#[cfg(not(windows))]
+fn line_exe(command: &Value) -> Option<String> {
+    let bash = command["bash"].as_str().unwrap_or_default();
+    let quoted = bash.strip_suffix(" hook session-start").and_then(|q| q.strip_prefix('\''));
+    quoted.and_then(|q| q.strip_suffix('\'')).map(|q| q.replace(r"'\''", "'"))
+}
+
+/// See the other system's version. On Windows the command is the `powershell` one.
+#[cfg(windows)]
+fn line_exe(command: &Value) -> Option<String> {
+    let line = command["powershell"].as_str().unwrap_or_default();
+    let (exe, rest) = ps_unquote(line.strip_prefix("& ")?)?;
+    (rest == " hook session-start").then_some(exe)
 }
 
 /// Writes the hook file for `exe` and `home`. Returns the line to print. In Plan mode, it
@@ -729,10 +812,7 @@ fn ours(bytes: &[u8]) -> bool {
 fn hook_exe(bytes: &[u8]) -> Option<String> {
     let hook: Value = serde_json::from_slice(bytes).unwrap_or_default();
     let command = &hook["hooks"]["sessionStart"][0];
-    let bash = command["bash"].as_str().unwrap_or_default();
-    let quoted = bash.strip_suffix(" hook session-start").and_then(|q| q.strip_prefix('\''));
-    let exe = quoted.and_then(|q| q.strip_suffix('\'')).map(|q| q.replace(r"'\''", "'"));
-    let exe = exe.filter(|exe| Path::new(exe).is_absolute())?;
+    let exe = line_exe(command).filter(|exe| Path::new(exe).is_absolute())?;
     // Writing the hook again for that path and home must give the same bytes.
     let home = command["env"][HOME_ENV].as_str();
     let same = hook_text(&exe, home).is_ok_and(|text| text.as_bytes() == bytes);
@@ -1068,4 +1148,43 @@ fn create(path: &Path, bytes: &[u8], mode: Option<u32>) -> std::io::Result<()> {
     }
     file.write_all(bytes)?;
     file.sync_all()
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::{hook_exe, hook_text, ps_quote, ps_unquote};
+
+    /// Paths with spaces, quotes, `&` and `$`, which neither shell may read.
+    const PATHS: [&str; 4] = [
+        "/opt/atticdb/bin/atticdb",
+        r"C:\Users\me\it's a & b $x\atticdb.exe",
+        "C:\\Program Files\\\u{2018}q\u{2019} \u{201a}\u{201b}''\\atticdb.exe",
+        "/home/me/'$(touch x)' `y`/atticdb",
+    ];
+
+    /// PowerShell reads `'`, `‘`, `’`, `‚` and `‛` as single quotes, so each is doubled.
+    #[test]
+    fn powershell_quoting_doubles_every_single_quote() {
+        assert_eq!(ps_quote(r"C:\a b\x.exe"), r"'C:\a b\x.exe'");
+        assert_eq!(ps_quote("it's \u{2019}"), "'it''s \u{2019}\u{2019}'");
+        for path in PATHS {
+            let quoted = ps_quote(path);
+            assert_eq!(ps_unquote(&format!("{quoted} rest")), Some((path.into(), " rest")));
+        }
+        assert_eq!(ps_unquote("'open"), None);
+        assert_eq!(ps_unquote("plain"), None);
+    }
+
+    /// The hook file names the binary so that reading it back gives the same path and home.
+    #[test]
+    fn the_hook_file_reads_back_its_binary() {
+        for path in PATHS.iter().filter(|path| std::path::Path::new(path).is_absolute()) {
+            for home in [None, Some("/h o m e"), Some(r"C:\Users\me\h o m e")] {
+                let text = hook_text(path, home).unwrap();
+                assert_eq!(hook_exe(text.as_bytes()).as_deref(), Some(*path), "{text}");
+            }
+        }
+        assert_eq!(hook_exe(b"{}"), None);
+    }
 }

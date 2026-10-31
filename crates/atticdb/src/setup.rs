@@ -280,6 +280,9 @@ fn show_plan(harnesses: &[Harness], options: Options) -> u8 {
                  VS Code gets those too."
             );
         }
+        if cfg!(windows) && harness == Harness::Codex {
+            println!("  {}", connect::CODEX_WINDOWS);
+        }
     }
     let shared = harnesses.iter().any(|h| matches!(h, Harness::Vscode | Harness::Copilot));
     if !options.hook && shared {
@@ -334,7 +337,9 @@ pub(crate) fn apply(chosen: &[(Harness, Options)], more: Vec<String>, lookup: &L
                 }
             }
         }
-        if options.hook || matches!(harness, Harness::Vscode | Harness::Copilot) {
+        // Codex on Windows has no hook to check.
+        let codex_hook = !(cfg!(windows) && harness == Harness::Codex);
+        if (options.hook && codex_hook) || matches!(harness, Harness::Vscode | Harness::Copilot) {
             let hook = cwd.clone().and_then(|cwd| check_hook(harness, &cwd, lookup));
             failed.extend(hook.err().map(|why| format!("hook: {why}")));
         }

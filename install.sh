@@ -46,6 +46,13 @@ detect_target() {
         Linux/aarch64 | Linux/arm64)
             echo aarch64-unknown-linux-musl
             ;;
+        MINGW* | MSYS* | CYGWIN*)
+            # Windows gets a zip. This script installs nothing there.
+            printf 'atticdb install: on Windows, download atticdb-x86_64-pc-windows-msvc.zip from\n' >&2
+            printf '  https://github.com/Clawdlinux/atticdb/releases/latest\n' >&2
+            printf 'Put atticdb.exe in a folder on your PATH, then run: atticdb setup\n' >&2
+            exit 1
+            ;;
         *)
             printf 'atticdb install: no prebuilt binary for %s %s.\n' "$os" "$arch" >&2
             printf 'Build it from source with Rust instead:\n  %s\n' "$FROM_SOURCE" >&2

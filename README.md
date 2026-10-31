@@ -5,7 +5,8 @@ Status: early. Don't run it in production. Built so far: the tape, session engin
 
 ## Where to run it
 
-macOS and Linux only. Windows isn't supported. Release binaries cover macOS and Linux on x86_64 and arm64. The Linux ones are static, so any distro works. Then `atticdb setup` connects it to VS Code, Copilot CLI, Claude Code and Codex.
+macOS, Linux and Windows x86_64. Release binaries cover macOS and Linux on x86_64 and arm64, and Windows on x86_64. The Linux ones are static, so any distro works. Then `atticdb setup` connects it to VS Code, Copilot CLI, Claude Code and Codex.
+On Windows, Codex gets only its MCP entry for now. Durability there is weaker, as Windows has no directory fsync. [Windows](crates/atticdb/README.md#windows) lists what differs.
 
 Every write is acked only after `fdatasync`, so the disk under the data directory sets your write latency. Keep it on a local disk:
 
@@ -16,7 +17,7 @@ Every write is acked only after `fdatasync`, so the disk under the data director
 | HDD | Untested. It should work, but each ack waits for a sync to a spinning disk, which takes milliseconds |
 | NFS, SMB, FUSE mounts, or folders synced by iCloud Drive, Dropbox, OneDrive or Google Drive | Don't. `fsync` and `flock` guarantees vary on these, and sync clients copy files while they're being written |
 
-The data directory must be mode `0700` (D75). Below a free-space floor AtticDB goes read-only and keeps serving reads (I14).
+The data directory must be mode `0700` (D75). Windows has no modes, so there it must be inside the user profile (D92). Below a free-space floor AtticDB goes read-only and keeps serving reads (I14).
 
 ## Quick start
 
@@ -30,6 +31,18 @@ atticdb setup             # asks which apps, then wires them
 The installer puts `atticdb` in `~/.local/bin` and checks the download against the release's `SHA256SUMS`. It never uses sudo or edits your shell files.
 Releases ship monthly, and the latest is the default.
 Set `ATTICDB_VERSION=0.1.0` to pin a release, `ATTICDB_INSTALL_DIR` to install elsewhere, or `ATTICDB_DOWNLOAD_BASE` for a mirror.
+
+On Windows x86_64, download `atticdb-x86_64-pc-windows-msvc.zip` and `SHA256SUMS` from the [latest release](https://github.com/Clawdlinux/atticdb/releases/latest).
+Check the zip, then put `atticdb.exe` in a folder on your PATH. In PowerShell:
+
+```powershell
+(Get-FileHash .\atticdb-x86_64-pc-windows-msvc.zip -Algorithm SHA256).Hash.ToLower()   # must match SHA256SUMS
+Expand-Archive .\atticdb-x86_64-pc-windows-msvc.zip "$env:LOCALAPPDATA\Programs\atticdb"
+$env:PATH += ";$env:LOCALAPPDATA\Programs\atticdb"   # this session only. Add it to your user PATH too
+atticdb setup
+```
+
+`install.sh` doesn't run on Windows.
 
 From source, with Rust installed:
 

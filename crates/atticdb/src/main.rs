@@ -27,7 +27,7 @@ const USAGE: &str = "usage:
   atticdb connect <vscode|copilot> [--force] [--dry-run]
   atticdb connect <claude-code|codex> [--force] [--no-hook] [--notes ask|auto] [--dry-run]
   atticdb disconnect <vscode|copilot|claude-code|codex>
-  atticdb hook session-start [--harness <name>]
+  atticdb hook session-start [--harness <name>] [--home <dir>]
   atticdb studio [--url unix:///path|http://127.0.0.1:<port>] [--data-dir <dir>] [--config <path>]
                 [--tenant <name>] [--token-file <path>] [--no-open]
   atticdb append <connect> --content <text> [--role user|assistant|tool]
@@ -136,17 +136,7 @@ fn main() -> ExitCode {
                 [name] => Harness::parse(name).map(atticdb::connect::disconnect),
                 _ => None,
             },
-            "hook" => match rest {
-                [event] if event == "session-start" => Some(atticdb::hook::session_start(None)),
-                [event, flag, name] if event == "session-start" && flag == "--harness" => {
-                    Some(atticdb::hook::session_start(Some(name)))
-                }
-                // A hook must not fail, so a missing name prints `{}` like an unknown one.
-                [event, flag] if event == "session-start" && flag == "--harness" => {
-                    Some(atticdb::hook::session_start(Some("")))
-                }
-                _ => None,
-            },
+            "hook" => hook(rest),
             "studio" => flags(rest, &CONNECT[..5], &["--no-open"]).map(atticdb::studio::start),
             "append" => tool(rest, "memory_append", &["--content", "--role"], &[]),
             "recent" => tool(rest, "memory_recent", &["--n", "--max-bytes"], &[]),
@@ -172,6 +162,29 @@ fn main() -> ExitCode {
         eprintln!("{USAGE}");
         2
     }))
+}
+
+/// `atticdb hook session-start [--harness <name>] [--home <dir>]`. A hook must not fail, so a
+/// flag with no value passes an empty one, which prints `{}`.
+fn hook(args: &[String]) -> Option<u8> {
+    let (event, rest) = args.split_first()?;
+    if event != "session-start" {
+        return None;
+    }
+    let (mut harness, mut home) = (None, None);
+    let mut rest = rest.iter();
+    while let Some(flag) = rest.next() {
+        let value = match flag.as_str() {
+            "--harness" => &mut harness,
+            "--home" => &mut home,
+            _ => return None,
+        };
+        if value.is_some() {
+            return None;
+        }
+        *value = Some(rest.next().cloned().unwrap_or_default());
+    }
+    Some(atticdb::hook::session_start(harness.as_deref(), home.as_deref()))
 }
 
 /// Parses `--name value` pairs and bare switches, each at most once. `None` is a usage error.
@@ -288,6 +301,10 @@ fn stats(mut flags: HashMap<String, String>) -> Option<u8> {
     let (url, dir) = (flags.remove("--url"), flags.remove("--data-dir"));
     if url.is_some() == dir.is_some() {
         return None;
+    }
+    // Windows has no Unix socket, so it says so before reading the URL.
+    if cfg!(windows) {
+        return Some(atticdb::ops::stats(None, None));
     }
     let socket = match url.as_deref().map(Url::parse).transpose() {
         Ok(Some(Url::Unix(path))) => Some(path),

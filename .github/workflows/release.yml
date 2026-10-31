@@ -160,6 +160,12 @@ jobs:
             os: ubuntu-latest
           - target: aarch64-unknown-linux-musl
             os: ubuntu-24.04-arm
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    # Bash on every runner, Git Bash on Windows, so the shared steps read $TARGET the same way.
+    defaults:
+      run:
+        shell: bash
     env:
       TARGET: ${{ matrix.target }}
       VERSION: ${{ needs.version.outputs.version }}
@@ -188,6 +194,7 @@ jobs:
           echo "CC_$(echo "$TARGET" | tr - _)=musl-gcc" >> "$GITHUB_ENV"
       - run: cargo build --locked --release -p atticdb --target "$TARGET"
       - name: Smoke test
+        if: runner.os != 'Windows'
         run: |
           bin="target/$TARGET/release/atticdb"
           info=$(file "$bin")
@@ -222,17 +229,50 @@ jobs:
             echo "::error::$bin --version printed '$got', want 'atticdb $VERSION'"
             exit 1
           fi
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bin = "target\$env:TARGET\release\atticdb.exe"
+          $got = & $bin --version
+          if ($LASTEXITCODE -ne 0 -or "$got" -ne "atticdb $env:VERSION") {
+            Write-Output "::error::$bin --version printed '$got', want 'atticdb $env:VERSION'"
+            exit 1
+          }
+          Write-Output $got
       - name: Package
+        if: runner.os != 'Windows'
         run: |
           stage=$(mktemp -d)
           cp "target/$TARGET/release/atticdb" README.md LICENSE-APACHE LICENSE-MIT "$stage/"
           mkdir dist
           tar -czf "dist/atticdb-$TARGET.tar.gz" -C "$stage" atticdb README.md LICENSE-APACHE LICENSE-MIT
           tar -tzvf "dist/atticdb-$TARGET.tar.gz"
+      # A zip, which Windows opens with no extra tools. The same 4 files, at the top level.
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $stage = Join-Path $env:RUNNER_TEMP "stage"
+          New-Item -ItemType Directory -Path $stage, dist | Out-Null
+          $files = "target\$env:TARGET\release\atticdb.exe", "README.md", "LICENSE-APACHE", "LICENSE-MIT"
+          Copy-Item -Path $files -Destination $stage
+          $zip = "dist\atticdb-$env:TARGET.zip"
+          Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $zip
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $zip))
+          $names = $archive.Entries | ForEach-Object { $_.FullName }
+          $archive.Dispose()
+          Write-Output $names
+          $want = "LICENSE-APACHE", "LICENSE-MIT", "README.md", "atticdb.exe"
+          if ((($names | Sort-Object) -join ",") -ne (($want | Sort-Object) -join ",")) {
+            Write-Output "::error::$zip holds $($names -join ', '), want $($want -join ', ')"
+            exit 1
+          }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: atticdb-${{ matrix.target }}
-          path: dist/atticdb-${{ matrix.target }}.tar.gz
+          path: dist/atticdb-${{ matrix.target }}.${{ runner.os == 'Windows' && 'zip' || 'tar.gz' }}
           if-no-files-found: error
 
   publish:
@@ -263,13 +303,15 @@ jobs:
       - name: Write SHA256SUMS
         working-directory: dist
         run: |
-          set -- atticdb-*.tar.gz
-          if [ "$#" -ne 4 ]; then
-            echo "::error::want 4 tarballs, found $*"
+          shopt -s nullglob
+          tars=(atticdb-*.tar.gz)
+          zips=(atticdb-*.zip)
+          if [ "${#tars[@]}" -ne 4 ] || [ "${#zips[@]}" -ne 1 ]; then
+            echo "::error::want 5 archives, 4 tarballs and 1 zip, found ${tars[*]} ${zips[*]}"
             exit 1
           fi
           cp ../install.sh .
-          sha256sum atticdb-*.tar.gz install.sh > SHA256SUMS
+          sha256sum "${tars[@]}" "${zips[@]}" install.sh > SHA256SUMS
           cat SHA256SUMS
       # A scheduled or manual release tags the commit it built. The API creates the tag, so the
       # job needs no git credentials. A tag made with GITHUB_TOKEN starts no other run. A re-run
@@ -304,6 +346,8 @@ jobs:
           export PATH="$HOME/.local/bin:$PATH"   # needed only if the installer said it isn't on PATH
           atticdb setup
           ```
+
+          Install on Windows x86_64: download `atticdb-x86_64-pc-windows-msvc.zip`. Put `atticdb.exe` in a folder on your PATH. Then run `atticdb setup`.
 
           Check the files against SHA256SUMS.
           EOF

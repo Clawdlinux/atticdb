@@ -61,6 +61,22 @@ cargo test --workspace -- --ignored                # the slow checks, in debug
 The `sim` and `engine_sim` sims stay outside `tests/it` as their own test targets, so CI can call them by name.
 Debug builds skip slow filesystem tests and seeded tape schedules. The release CI step runs them.
 
+## Windows
+
+The `windows` job in the `ci` workflow runs on `windows-latest`.
+It runs clippy and the tests of the storage crates and of `atticdb`, and both sims on 2,000 seeds.
+In `atticdb`'s `tests/it`, Windows runs `portable`, `apps` and `cli`. The rest need the Unix socket, Unix modes or Unix tools.
+`apps` runs `atticdb setup` against a temp user profile, with a fake `claude.cmd` on `PATH`.
+Then it runs each written hook as its app does: the Copilot hook in PowerShell, Claude Code's in exec form.
+It never reads or writes the real profile. Each test stops the servers it started, by the pid in `LOCK`.
+Check Windows code from macOS or Linux with:
+
+```sh
+cargo clippy -p atticdb --target x86_64-pc-windows-msvc --features blake3/pure --all-targets --all-features -- -D warnings
+```
+
+`blake3/pure` skips blake3's C and assembly, which need a Windows C compiler. Never commit it.
+
 ## Fault injection
 
 Wrap storage in `atticdb_tape::HookIo` (feature `sim`). Do not write a new `Io` impl, and do not add fault flags to a shared mock.
@@ -110,6 +126,8 @@ The same nightly job runs both sims on 20,000 new seeds each night.
 ## Install smoke
 
 The `install-smoke` workflow tests the live release on fresh Linux and macOS runners after each release and weekly.
+Its Windows job downloads the release's zip, checks it against `SHA256SUMS` and runs the same first-use checks in PowerShell.
+A release with no zip, such as v0.1.0, skips that job with a notice.
 
 ## Before adding a test
 

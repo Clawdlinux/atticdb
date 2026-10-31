@@ -1,5 +1,16 @@
-use crate::support::{self, atticdb, data_dir, Dir, Holders};
-use std::process::Stdio;
+use crate::portable::{Dir, HOME_VARS};
+#[cfg(unix)]
+use crate::support::{atticdb, data_dir, Holders};
+use std::process::{Command, Stdio};
+
+/// The `atticdb` binary, without [`HOME_VARS`].
+fn bare() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_atticdb"));
+    for var in HOME_VARS {
+        command.env_remove(var);
+    }
+    command
+}
 
 /// `--version` and `-V` print the name and the version on stdout and exit 0. They take no
 /// other args. The home is never read, so a relative `ATTICDB_HOME` does not matter. A source
@@ -13,7 +24,7 @@ fn version_flag() {
     };
     assert_eq!(format!("atticdb {}\n", atticdb::VERSION), want);
     for flag in ["--version", "-V"] {
-        let mut command = support::command(env!("CARGO_BIN_EXE_atticdb"));
+        let mut command = bare();
         command.arg(flag).current_dir(&dir.0).env("HOME", dir.0.join("h"));
         let out = command.env("ATTICDB_HOME", "rel").stdin(Stdio::null()).output().unwrap();
         assert_eq!(out.status.code(), Some(0), "{flag}");
@@ -21,7 +32,7 @@ fn version_flag() {
         assert!(out.stderr.is_empty(), "{flag}: {}", String::from_utf8_lossy(&out.stderr));
         assert!(!dir.0.join("h").exists() && !dir.0.join("rel").exists(), "{flag}: no home");
 
-        let mut command = support::command(env!("CARGO_BIN_EXE_atticdb"));
+        let mut command = bare();
         command.args([flag, "extra"]).current_dir(&dir.0).env("HOME", dir.0.join("h"));
         let out = command.stdin(Stdio::null()).output().unwrap();
         assert_eq!(out.status.code(), Some(2), "{flag} extra");
@@ -30,7 +41,8 @@ fn version_flag() {
 }
 
 /// A first `append` on a fresh home starts a server and succeeds. Waiting for it is the
-/// normal path, so stderr has no "no trusted server" line.
+/// normal path, so stderr has no "no trusted server" line. `portable` covers Windows.
+#[cfg(unix)]
 #[test]
 fn first_run_is_quiet() {
     let dir = Dir::new();
