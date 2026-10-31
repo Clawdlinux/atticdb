@@ -238,6 +238,8 @@ impl Io for StdIo {
     fn total_bytes(&self, dir: &Path) -> Result<u64> {
         #[cfg(windows)]
         {
+            // With a per-user NTFS quota, this total is the quota, not the volume size.
+            // So the free-space floor follows the quota, unlike statvfs on Unix.
             Ok(atticdb_sys::free_space(dir)?.1)
         }
         #[cfg(not(windows))]

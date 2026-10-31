@@ -75,6 +75,8 @@ fn resolve(path: &Path) -> io::Result<Vec<u16>> {
 /// Returns the bytes available to the caller and the volume's total bytes, in that order.
 ///
 /// Uses `GetDiskFreeSpaceExW`. The available count honors per-user quotas.
+/// With a per-user quota, the total is the quota, not the volume size.
+/// So AtticDB's free-space floor follows the quota, unlike statvfs on Unix.
 /// `path` must name a directory. A trailing separator is added, which UNC shares require.
 pub fn free_space(path: &Path) -> io::Result<(u64, u64)> {
     let path = wide(&path.join(""))?;
