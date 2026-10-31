@@ -1,0 +1,145 @@
+/*
+ * "Pinned sentence, photographs pass", adjusted: the words pin in the left
+ * columns and the pictures pass in the right ones, so nothing covers them.
+ * The pin lasts about 1 screen on desktop and never more than 2.
+ */
+.intro {
+  padding-block: var(--space-section);
+}
+
+.title {
+  margin-bottom: 1.5rem;
+}
+
+.statement {
+  max-width: 24ch;
+  font-size: var(--step-lead);
+  line-height: 1.3;
+}
+
+.photos {
+  display: flex;
+  flex-direction: column;
+  gap: 3rem;
+  margin-top: 3rem;
+}
+
+.figure {
+  display: flex;
+  flex-direction: column;
+  gap: 0.625rem;
+}
+
+.frame {
+  overflow: hidden;
+}
+
+.img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.portrait .frame {
+  aspect-ratio: 4 / 5;
+}
+
+.portrait .img {
+  object-position: 50% 45%;
+}
+
+.landscape .frame {
+  aspect-ratio: 16 / 10;
+}
+
+.landscape .img {
+  object-position: 50% 70%;
+}
+
+.square .frame {
+  aspect-ratio: 1;
+}
+
+.caption {
+  max-width: 40ch;
+  color: var(--muted);
+  font-size: var(--step-small);
+  line-height: 1.4;
+}
+
+/* Phone and tablet: words first, then the pictures alternate sides. */
+.portrait {
+  width: 64%;
+}
+
+.landscape {
+  width: 78%;
+  align-self: flex-end;
+}
+
+.square {
+  width: 52%;
+}
+
+@media (min-width: 48rem) {
+  .intro {
+    display: grid;
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+    column-gap: 2rem;
+    align-items: start;
+  }
+
+  .pin {
+    grid-column: 1 / 6;
+    position: sticky;
+    top: 0;
+    display: flex;
+    height: 100svh;
+    align-items: center;
+  }
+
+  .photos {
+    grid-column: 7 / 13;
+    gap: 16svh;
+    margin-top: 0;
+    padding-block: 12svh;
+  }
+
+  .portrait {
+    width: 62%;
+  }
+
+  .landscape {
+    width: 100%;
+  }
+
+  .square {
+    width: 52%;
+    margin-left: 18%;
+  }
+}
+
+/* The one moving picture: a slow scale on each archival photograph. */
+@media (prefers-reduced-motion: no-preference) {
+  .img {
+    animation: drift 18s ease-in-out infinite alternate;
+  }
+
+  .landscape .img {
+    animation-delay: -6s;
+  }
+
+  .square .img {
+    animation-delay: -12s;
+  }
+}
+
+@keyframes drift {
+  from {
+    transform: scale(1);
+  }
+
+  to {
+    transform: scale(1.08);
+  }
+}

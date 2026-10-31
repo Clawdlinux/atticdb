@@ -1,0 +1,108 @@
+/* "One plan as a sentence": the price sits on a signal block one line-height tall. */
+.pricing {
+  display: flex;
+  min-height: 80svh;
+  flex-direction: column;
+  justify-content: center;
+  padding-block: var(--space-section);
+}
+
+.title {
+  font-size: min(var(--step-display), 11.5vw);
+  line-height: 0.95;
+  letter-spacing: -0.02em;
+  text-wrap: nowrap;
+}
+
+.line {
+  display: block;
+}
+
+.price {
+  display: inline-block;
+  height: 0.95em;
+  padding-inline: 0.15em;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-variant-numeric: lining-nums;
+}
+
+.foot {
+  display: grid;
+  gap: 1.5rem;
+  margin-top: 2.5rem;
+}
+
+.support p {
+  max-width: 34ch;
+  font-size: var(--step-lead);
+  line-height: 1.3;
+}
+
+.actions {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.75rem;
+}
+
+.button {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  padding: 0.5rem 1.5rem;
+  background: var(--ink);
+  color: var(--bg);
+  font-weight: 500;
+  text-decoration: none;
+  transition:
+    transform 160ms var(--ease-out),
+    opacity 160ms ease-out;
+}
+
+.button:hover {
+  opacity: 0.88;
+}
+
+.button:active {
+  transform: scale(0.97);
+}
+
+.second {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  text-decoration-thickness: 1px;
+}
+
+.second:hover {
+  text-decoration-thickness: 2px;
+}
+
+@media (min-width: 64rem) {
+  .foot {
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+    column-gap: 2rem;
+    align-items: end;
+    margin-top: 4rem;
+  }
+
+  .support {
+    grid-column: 1 / 7;
+  }
+
+  .actions {
+    grid-column: 10 / 13;
+    align-items: flex-end;
+  }
+
+  .button {
+    min-width: 12rem;
+  }
+
+  .second {
+    justify-content: flex-end;
+  }
+}

@@ -1,0 +1,37 @@
+/* "Names as one sentence", kept to a 36px statement. The opening words are the heading. */
+.works {
+  padding-block: var(--space-section);
+}
+
+.statement {
+  max-width: 62rem;
+  font-family: var(--font-display), Impact, sans-serif;
+  /* 36px at 1440, under 24px on a phone. */
+  font-size: min(var(--step-head), 2.25rem, 6vw);
+  line-height: 1.05;
+  letter-spacing: -0.01em;
+  text-transform: uppercase;
+}
+
+.lead,
+.names {
+  display: inline;
+  font: inherit;
+  letter-spacing: inherit;
+}
+
+.lead {
+  color: var(--ink);
+}
+
+.names {
+  color: var(--muted);
+}
+
+.name {
+  transition: color 400ms ease-out;
+}
+
+.name[data-lit="true"] {
+  color: var(--ink);
+}

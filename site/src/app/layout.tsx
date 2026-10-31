@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Bebas_Neue, EB_Garamond, JetBrains_Mono } from "next/font/google";
 import Providers from "@/components/Providers";
+import SiteFooter from "@/components/SiteFooter";
 import SiteNav from "@/components/SiteNav";
 import { SITE_URL } from "@/lib/site";
 import "./globals.css";
@@ -54,6 +55,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <main id="main" className="container" tabIndex={-1}>
             {children}
           </main>
+          <SiteFooter />
         </Providers>
       </body>
     </html>

@@ -1,0 +1,124 @@
+/*
+ * "Question at both edges": line 1 at the top of a full-screen field, line 2 at the bottom.
+ * Between them, a strip of punched tape fills the gap in the sentence, then the choice.
+ */
+.cta {
+  display: grid;
+  min-height: 100svh;
+  margin-top: var(--space-section);
+  padding-block: 2rem 1.5rem;
+  text-align: center;
+}
+
+.title {
+  display: flex;
+  grid-area: 1 / 1;
+  flex-direction: column;
+  justify-content: space-between;
+  font-size: var(--step-display);
+  line-height: 0.85;
+  letter-spacing: -0.02em;
+}
+
+.top,
+.bottom {
+  display: block;
+}
+
+.band {
+  display: flex;
+  grid-area: 1 / 1;
+  flex-direction: column;
+  align-self: center;
+  gap: 1.5rem;
+  /* Clear of both lines of the question. */
+  margin-block: calc(var(--step-display) * 0.85 + 2rem);
+}
+
+.figure {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.strip {
+  overflow: hidden;
+  aspect-ratio: 3 / 1;
+}
+
+.img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: 50% 54%;
+}
+
+.caption {
+  color: var(--muted);
+  font-size: var(--step-small);
+  text-align: left;
+}
+
+.choice {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.75rem;
+}
+
+.install {
+  text-align: left;
+}
+
+.or {
+  color: var(--muted);
+}
+
+.star {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  padding: 0.5rem 1.5rem;
+  background: var(--ink);
+  color: var(--bg);
+  font-weight: 500;
+  text-decoration: none;
+  white-space: nowrap;
+  transition:
+    transform 160ms var(--ease-out),
+    opacity 160ms ease-out;
+}
+
+.star:hover {
+  opacity: 0.88;
+}
+
+.star:active {
+  transform: scale(0.97);
+}
+
+.after {
+  color: var(--muted);
+}
+
+@media (min-width: 48rem) {
+  .strip {
+    aspect-ratio: 6 / 1;
+  }
+
+  .choice {
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+    gap: 2rem;
+  }
+
+  .install {
+    flex: 0 1 60rem;
+  }
+
+  .star {
+    min-width: 12.5rem;
+  }
+}

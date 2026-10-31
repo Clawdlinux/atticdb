@@ -14,6 +14,10 @@
   --step-head: clamp(2.5rem, 1.2rem + 5vw, 5.5rem);
   /* Sized for the hero: 82px at 390, 160px at 1440. */
   --step-display: clamp(3.5rem, 3.3rem + 7.43vw, 10rem);
+
+  /* Space between sections: 64px on a phone, about 110px at 1440. */
+  --space-section: clamp(4rem, 2rem + 5.5vw, 7.5rem);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 *,
@@ -38,6 +42,8 @@ body {
   font-size: var(--step-body);
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
+  /* Full-bleed fields reach 100vw. clip keeps sticky intact, unlike hidden. */
+  overflow-x: clip;
 }
 
 h1,
@@ -115,6 +121,17 @@ pre {
 
 main {
   padding-block: 3rem;
+}
+
+/* One treatment for every archival picture: greyscale, so the oxide and bone stay the only colours. */
+.archival {
+  filter: grayscale(1) contrast(1.05);
+}
+
+/* A colour field that runs edge to edge from inside .container. Content keeps the container's margins. */
+.bleed {
+  margin-inline: calc(50% - 50vw);
+  padding-inline: calc(50vw - 50%);
 }
 
 .visually-hidden {

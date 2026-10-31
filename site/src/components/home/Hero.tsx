@@ -101,7 +101,7 @@ export default function Hero() {
       </p>
 
       <div className={styles.actions} data-load>
-        <CopyCommand id="install" label="Install AtticDB" />
+        <CopyCommand label="Install AtticDB" />
         <a className={styles.waitlist} href={WAITLIST_URL}>
           Join the cloud waitlist
         </a>

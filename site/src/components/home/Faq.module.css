@@ -1,0 +1,61 @@
+/* "Large questions, answers beside": every answer open, the heading is the table's first cell. */
+.faq {
+  display: grid;
+  row-gap: 3.5rem;
+  padding-block: var(--space-section);
+  background: var(--field-1);
+  color: var(--field-1-ink);
+}
+
+.faq :focus-visible {
+  outline-color: var(--field-1-ink);
+}
+
+.title {
+  color: color-mix(in srgb, var(--field-1-ink) 62%, var(--field-1));
+}
+
+.pair {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.question {
+  max-width: 22ch;
+  font-family: var(--font-text), Georgia, serif;
+  font-size: var(--step-lead);
+  font-weight: 500;
+  line-height: 1.15;
+  text-transform: none;
+}
+
+.answer {
+  max-width: 40ch;
+  line-height: 1.55;
+}
+
+@media (min-width: 48rem) {
+  .faq {
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+    column-gap: 2rem;
+    row-gap: 4.5rem;
+  }
+
+  .head {
+    grid-column: 1 / 7;
+  }
+
+  .pair {
+    grid-column: 1 / -1;
+    grid-template-columns: subgrid;
+    align-items: baseline;
+  }
+
+  .q {
+    grid-column: 1 / 7;
+  }
+
+  .a {
+    grid-column: 8 / 13;
+  }
+}

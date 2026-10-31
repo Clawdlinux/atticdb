@@ -1,0 +1,117 @@
+/* "Contact as the headline", on the signal field: the name itself is the display line. */
+.footer {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.footer :focus-visible {
+  outline-color: var(--accent-ink);
+}
+
+.inner {
+  display: flex;
+  min-height: 90svh;
+  flex-direction: column;
+  padding-block: 2.5rem 2rem;
+}
+
+.top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 2rem;
+}
+
+.notes {
+  max-width: 40ch;
+}
+
+.notes span {
+  display: block;
+}
+
+.back {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  flex: none;
+  text-decoration-thickness: 1px;
+}
+
+.back:hover,
+.links a:hover,
+.credits a:hover {
+  text-decoration-thickness: 2px;
+}
+
+.display {
+  margin-top: auto;
+  padding-top: 3rem;
+  font-family: var(--font-display), Impact, sans-serif;
+  /* ATTICDB is about 2.45em wide in Bebas Neue: this fills about 95% of the line. */
+  font-size: min(34.5vw, 31rem);
+  line-height: 0.8;
+  letter-spacing: -0.005em;
+  text-transform: uppercase;
+}
+
+.display a {
+  display: inline-block;
+  padding-top: 0.06em;
+  text-decoration: none;
+  transition: opacity 160ms ease-out;
+}
+
+.display a:hover {
+  opacity: 0.85;
+}
+
+.meta {
+  display: grid;
+  gap: 1.5rem;
+  margin-top: 2rem;
+  font-size: var(--step-small);
+  line-height: 1.45;
+}
+
+.links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 1.25rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.links a {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+}
+
+.credits ul {
+  margin: 0.25rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.credits a {
+  text-decoration-thickness: 1px;
+}
+
+@media (min-width: 64rem) {
+  .meta {
+    grid-template-columns: 1fr 1.6fr auto;
+    align-items: start;
+    column-gap: 3rem;
+  }
+
+  .links {
+    max-width: 22rem;
+  }
+
+  .licence {
+    padding-top: 0.75rem;
+    text-align: right;
+  }
+}

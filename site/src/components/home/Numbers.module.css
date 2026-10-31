@@ -1,0 +1,119 @@
+/* "Column aligned on the decimal": whole numbers right-aligned, decimals left, caption on the baseline. */
+.numbers {
+  display: grid;
+  gap: 2.5rem;
+  padding-block: var(--space-section);
+  background: var(--field-1);
+  color: var(--field-1-ink);
+}
+
+.numbers :focus-visible {
+  outline-color: var(--field-1-ink);
+}
+
+.title > span {
+  display: block;
+}
+
+.soft {
+  color: color-mix(in srgb, var(--field-1-ink) 62%, var(--field-1));
+}
+
+.more {
+  max-width: 34ch;
+  margin-top: 1.5rem;
+}
+
+.link {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  font-weight: 500;
+  text-decoration-thickness: 2px;
+  transition: opacity 160ms ease-out;
+}
+
+.link:hover {
+  opacity: 0.75;
+}
+
+.list {
+  display: grid;
+  grid-template-columns: 52% minmax(0, 1fr);
+  row-gap: 1.75rem;
+}
+
+.row {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  row-gap: 0.25rem;
+}
+
+.figure {
+  display: contents;
+  font-family: var(--font-display), Impact, sans-serif;
+  font-size: var(--step-head);
+  line-height: 1;
+  font-variant-numeric: tabular-nums lining-nums;
+}
+
+.whole {
+  text-align: right;
+}
+
+.whole,
+.decimals {
+  font-family: var(--font-display), Impact, sans-serif;
+  font-size: min(var(--step-display), 15vw);
+  line-height: 0.85;
+  font-variant-numeric: tabular-nums lining-nums;
+}
+
+.caption {
+  grid-column: 1 / -1;
+  max-width: 36ch;
+  font-size: var(--step-body);
+  line-height: 1.35;
+}
+
+@media (min-width: 64rem) {
+  .numbers {
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+    column-gap: 2rem;
+    align-items: center;
+  }
+
+  .side {
+    grid-column: 1 / 6;
+  }
+
+  .ledger {
+    grid-column: 7 / 13;
+  }
+
+  .list {
+    grid-template-columns: max-content max-content minmax(0, 1fr);
+    align-items: baseline;
+    column-gap: 0;
+    row-gap: 1.25rem;
+  }
+
+  .row {
+    align-items: baseline;
+  }
+
+  .whole,
+  .decimals {
+    font-size: min(var(--step-display), 8rem);
+  }
+
+  .decimals {
+    min-width: 0.9em;
+  }
+
+  .caption {
+    grid-column: 3;
+    padding-left: 1.5rem;
+  }
+}
