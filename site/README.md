@@ -55,13 +55,12 @@ Both main domains redirect `/docs` and `/docs/*` to `docs.atticdb.com`.
 The build copies docs pages, their sitemap and robots file, and shared assets into that separate output.
 Main-only pages are excluded. Vercel checks static files before rewrites, so host rewrites cannot replace the main homepage.
 
-Link `atticdb-docs` to read its `orgId` and `projectId` from `.vercel/project.json`.
-You can also inspect projects with `vercel project ls`.
-Use those docs-project IDs, not the main project's IDs. Deploy from `site/`:
+Vercel's remote build always reads `vercel.json`, so `--local-config` doesn't switch the build.
+`scripts/deploy-docs.sh` stages a copy of `site/` with `vercel.docs.json` as its `vercel.json`, then deploys it.
+It finds the docs project id with `vercel project inspect atticdb-docs`. Deploy from `site/`:
 
 ```sh
-VERCEL_ORG_ID="<team id>" VERCEL_PROJECT_ID="<docs project id>" \
-  vercel deploy --prod --local-config vercel.docs.json
+scripts/deploy-docs.sh --prod
 ```
 
 Set the domains on their respective projects:
@@ -90,7 +89,7 @@ Vercel issues the certificates.
 Wrangler can't write DNS because its OAuth scopes stop at `zone:read`.
 Create a Cloudflare API token with Zone DNS Edit for `atticdb.com`.
 Save the token outside the repository. Never commit it.
-From the repository root, run `scripts/cf-dns.sh <token-file>` to create these records through the Cloudflare API.
+From `site/`, run `scripts/cf-dns.sh <token-file>` to create these records through the Cloudflare API.
 
 ### Headers
 
