@@ -15,7 +15,7 @@ use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant};
 
 /// Variables that could lead a test to a real home. No spawn inherits them.
-const HOME_VARS: [&str; 10] = [
+pub(crate) const HOME_VARS: [&str; 10] = [
     "HOME",
     "ATTICDB_HOME",
     "ATTICDB_TOKEN",
@@ -28,12 +28,12 @@ const HOME_VARS: [&str; 10] = [
     "CODEX_HOME",
 ];
 /// Longest wait for 1 command.
-const COMMAND_TIMEOUT: Duration = Duration::from_secs(90);
+pub(crate) const COMMAND_TIMEOUT: Duration = Duration::from_secs(90);
 
 // A private, short directory, removed on drop. Unix uses `support::Dir`, whose short path
 // fits a socket.
 #[cfg(unix)]
-use crate::support::Dir;
+pub(crate) use crate::support::Dir;
 
 /// A new directory under the temp dir, in the user's profile. Removed on drop.
 #[cfg(windows)]
@@ -60,7 +60,7 @@ impl Drop for Dir {
 }
 
 /// Whether a process holds `data`'s lock.
-fn locked(data: &Path) -> bool {
+pub(crate) fn locked(data: &Path) -> bool {
     File::open(data.join("LOCK")).is_ok_and(|file| file.try_lock().is_err())
 }
 
@@ -72,7 +72,7 @@ fn lock_pid(data: &Path) -> Option<u32> {
 }
 
 /// Stops the servers of these data directories at drop, also when a test fails.
-struct Servers(Vec<PathBuf>);
+pub(crate) struct Servers(pub(crate) Vec<PathBuf>);
 
 impl Drop for Servers {
     fn drop(&mut self) {
@@ -86,7 +86,7 @@ impl Drop for Servers {
 /// Kills the server named in each `LOCK`, by pid, when that pid runs `atticdb.exe`. It stops
 /// once no lock was held for 500 ms, or after 15 s.
 #[cfg(windows)]
-fn stop_servers(dirs: &[PathBuf]) {
+pub(crate) fn stop_servers(dirs: &[PathBuf]) {
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut free_since = Instant::now();
     while Instant::now() < deadline {
@@ -135,7 +135,7 @@ fn run_bounded(command: &mut Command) -> Option<String> {
 }
 
 /// Reads `from` to its end on a thread.
-fn drain(mut from: impl Read + Send + 'static) -> Receiver<String> {
+pub(crate) fn drain(mut from: impl Read + Send + 'static) -> Receiver<String> {
     let (sender, receiver) = channel();
     std::thread::spawn(move || {
         let mut text = Vec::new();
@@ -146,7 +146,7 @@ fn drain(mut from: impl Read + Send + 'static) -> Receiver<String> {
 }
 
 /// Waits up to `limit` for `child`, else kills it and returns `None`.
-fn wait(child: &mut Child, limit: Duration) -> Option<std::process::ExitStatus> {
+pub(crate) fn wait(child: &mut Child, limit: Duration) -> Option<std::process::ExitStatus> {
     let deadline = Instant::now() + limit;
     loop {
         if let Ok(Some(status)) = child.try_wait() {

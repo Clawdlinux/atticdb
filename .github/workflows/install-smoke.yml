@@ -267,3 +267,295 @@ jobs:
             fi
           fi
           rm -rf "$SMOKE_DIR"
+
+  # Windows has no installer. A new user downloads the zip, checks it against SHA256SUMS and
+  # puts atticdb.exe on PATH. A release from before v0.2.0 has no zip, so the job then skips
+  # with a notice. Each command runs as that user, by the u function, in a fresh profile.
+  windows:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (contains(fromJSON('["push", "schedule", "workflow_dispatch"]'),
+      github.event.workflow_run.event) &&
+      github.event.workflow_run.conclusion == 'success')
+    name: smoke windows-latest
+    runs-on: windows-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      EVENT: ${{ github.event_name }}
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+      RUN_EVENT: ${{ github.event.workflow_run.event }}
+      RUN_TAG: ${{ github.event.workflow_run.head_branch }}
+      INPUT_VERSION: ${{ inputs.version }}
+      RELEASES: https://github.com/Clawdlinux/atticdb/releases
+      ZIP: atticdb-x86_64-pc-windows-msvc.zip
+    steps:
+      - name: Find the release
+        id: release
+        run: |
+          switch ($env:EVENT) {
+            'release' { $want = $env:RELEASE_TAG }
+            # A tag push names its tag. A scheduled or manual run ran on main, so test latest.
+            'workflow_run' { $want = if ($env:RUN_EVENT -eq 'push') { $env:RUN_TAG } else { '' } }
+            'workflow_dispatch' { $want = $env:INPUT_VERSION }
+            default { $want = '' }
+          }
+          if (-not $want) {
+            # The tag that latest names.
+            $latest = Invoke-WebRequest -Uri "$env:RELEASES/latest" -Method Head -MaximumRetryCount 3 -RetryIntervalSec 5
+            $url = $latest.BaseResponse.RequestMessage.RequestUri.AbsoluteUri
+            if ($url -notmatch '/tag/(v[^/]+)$') {
+              Write-Output "::error::cannot read the latest tag from $url"
+              exit 1
+            }
+            $want = $Matches[1]
+          }
+          $want = $want -replace '^v', ''
+          $sums = Join-Path $env:RUNNER_TEMP 'SHA256SUMS'
+          Invoke-WebRequest -Uri "$env:RELEASES/download/v$want/SHA256SUMS" -OutFile $sums -MaximumRetryCount 3 -RetryIntervalSec 5
+          $line = Get-Content $sums | Where-Object { $_ -like "*  $env:ZIP" } | Select-Object -First 1
+          $sha = if ($line -match '^([0-9a-f]{64})  ') { $Matches[1] } else { '' }
+          if (-not $sha) {
+            Write-Output "::notice::release v$want has no $env:ZIP, so the Windows smoke test is skipped. Releases from v0.2.0 on have it."
+            Add-Content -Path $env:GITHUB_OUTPUT -Value 'skip=true'
+            exit 0
+          }
+          Add-Content -Path $env:GITHUB_OUTPUT -Value 'skip=false', "version=$want", "sha256=$sha"
+          Write-Output "testing v$want, $env:ZIP $sha"
+
+      - name: Install from the zip
+        if: steps.release.outputs.skip == 'false'
+        env:
+          WANT: ${{ steps.release.outputs.version }}
+          WANT_SHA: ${{ steps.release.outputs.sha256 }}
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP ('s' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+          $user = Join-Path $dir 'h'
+          $bin = Join-Path $user 'bin'
+          $folders = "$user\proj", "$user\AppData\Roaming", "$user\AppData\Local", $bin, "$dir\tmp"
+          New-Item -ItemType Directory -Force -Path $folders | Out-Null
+          $zip = Join-Path $dir $env:ZIP
+          Invoke-WebRequest -Uri "$env:RELEASES/download/v$env:WANT/$env:ZIP" -OutFile $zip -MaximumRetryCount 3 -RetryIntervalSec 5
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
+          if ($hash -ne $env:WANT_SHA) {
+            Write-Output "::error::$env:ZIP has SHA-256 $hash, but SHA256SUMS says $env:WANT_SHA"
+            exit 1
+          }
+          Expand-Archive -LiteralPath $zip -DestinationPath $bin
+          $names = (Get-ChildItem -LiteralPath $bin | ForEach-Object Name | Sort-Object) -join ','
+          if ($names -ne 'atticdb.exe,LICENSE-APACHE,LICENSE-MIT,README.md') {
+            Write-Output "::error::$env:ZIP holds $names"
+            exit 1
+          }
+          $lib = Join-Path $dir 'lib.ps1'
+          Set-Content -LiteralPath $lib -Value @'
+          # u <seconds> <program> [args] [-Stdin <text>] [-Extra <env>]: runs a program as the new
+          # user. Its environment holds the user's folders, PATH, Extra and what Windows needs.
+          # It is killed, with every process it started, after <seconds>.
+          function u {
+              param(
+                  [Parameter(Mandatory)][int]$Secs,
+                  [Parameter(Mandatory)][string]$Program,
+                  [string[]]$Arguments = @(),
+                  [string]$Stdin = '',
+                  [hashtable]$Extra = @{}
+              )
+              $info = [System.Diagnostics.ProcessStartInfo]::new($Program)
+              foreach ($arg in $Arguments) { $info.ArgumentList.Add($arg) }
+              $info.UseShellExecute = $false
+              $info.RedirectStandardInput = $true
+              $info.RedirectStandardOutput = $true
+              $info.RedirectStandardError = $true
+              $info.WorkingDirectory = $env:SMOKE_PROJ
+              $vars = @{
+                  USERPROFILE = $env:SMOKE_HOME
+                  APPDATA = "$env:SMOKE_HOME\AppData\Roaming"
+                  LOCALAPPDATA = "$env:SMOKE_HOME\AppData\Local"
+                  TEMP = "$env:SMOKE_DIR\tmp"
+                  TMP = "$env:SMOKE_DIR\tmp"
+                  PATH = "$env:SMOKE_BIN;$env:SystemRoot\System32"
+                  SystemRoot = $env:SystemRoot
+                  SystemDrive = $env:SystemDrive
+                  windir = $env:windir
+                  ComSpec = $env:ComSpec
+                  PATHEXT = $env:PATHEXT
+              }
+              foreach ($key in $Extra.Keys) { $vars[$key] = $Extra[$key] }
+              $info.Environment.Clear()
+              foreach ($key in $vars.Keys) { $info.Environment[$key] = $vars[$key] }
+              $process = [System.Diagnostics.Process]::Start($info)
+              $out = $process.StandardOutput.ReadToEndAsync()
+              $err = $process.StandardError.ReadToEndAsync()
+              $process.StandardInput.Write($Stdin)
+              $process.StandardInput.Close()
+              if (-not $process.WaitForExit($Secs * 1000)) {
+                  $process.Kill($true)
+                  throw "$Program $Arguments did not exit in $Secs s"
+              }
+              $process.WaitForExit()
+              if (-not ($out.Wait(10000) -and $err.Wait(10000))) {
+                  throw "$Program $Arguments did not close its output"
+              }
+              [pscustomobject]@{ Code = $process.ExitCode; Out = $out.Result; Err = $err.Result }
+          }
+
+          # ok <result> <what>: the result's stdout, or the step fails when it did not exit 0.
+          function ok {
+              param($Result, [string]$What)
+              if ($Result.Code -ne 0) {
+                  Write-Host $Result.Out
+                  Write-Host $Result.Err
+                  Write-Host "::error::$What exited $($Result.Code)"
+                  exit 1
+              }
+              $Result.Out
+          }
+
+          # check <condition> <what>: the step fails, saying what, unless the condition holds.
+          function check {
+              param([bool]$Condition, [string]$What)
+              if (-not $Condition) {
+                  Write-Host "::error::$What"
+                  exit 1
+              }
+          }
+          '@
+          @(
+            "SMOKE_DIR=$dir"
+            "SMOKE_LIB=$lib"
+            "SMOKE_HOME=$user"
+            "SMOKE_PROJ=$user\proj"
+            "SMOKE_BIN=$bin"
+            "SMOKE_EXE=$bin\atticdb.exe"
+            "SMOKE_DATA=$user\AppData\Local\atticdb\data"
+            "SMOKE_CODE=$user\AppData\Roaming\Code\User"
+          ) | Add-Content -Path $env:GITHUB_ENV
+          . $lib
+          # GITHUB_ENV takes effect in the next step, and u needs these now.
+          $env:SMOKE_DIR = $dir
+          $env:SMOKE_HOME = $user
+          $env:SMOKE_PROJ = "$user\proj"
+          $env:SMOKE_BIN = $bin
+          $got = (ok (u 10 "$bin\atticdb.exe" @('--version')) 'atticdb --version').Trim()
+          check ($got -eq "atticdb $env:WANT") "atticdb --version printed '$got', want 'atticdb $env:WANT'"
+          Write-Output $got
+
+      - name: First use
+        if: steps.release.outputs.skip == 'false'
+        run: |
+          . $env:SMOKE_LIB
+          $exe = $env:SMOKE_EXE
+          # The first command makes the home and starts the server.
+          $first = u 30 $exe @('append', '--content', 'smoke note')
+          Write-Output '::group::stderr of the first append'
+          Write-Output $first.Err
+          Write-Output '::endgroup::'
+          check ((ok $first 'the first append' | ConvertFrom-Json).committed -eq $true) 'the first append did not commit'
+          $set = ok (u 30 $exe @('fact', 'set', '--key', 'user/smoke', '--content', 'ok')) 'fact set'
+          check (($set | ConvertFrom-Json).committed -eq $true) 'fact set did not commit'
+          $hits = (ok (u 30 $exe @('search', '--query', 'smoke')) 'search' | ConvertFrom-Json).hits
+          check ([bool]($hits | Where-Object { $_.content -eq 'smoke note' })) 'search did not find the note'
+          $fact = (ok (u 30 $exe @('fact', 'get', '--key', 'user/smoke')) 'fact get' | ConvertFrom-Json).fact
+          check ($fact.content -eq 'ok') 'fact get did not return ok'
+          $turns = @((ok (u 30 $exe @('recent', '--n', '1')) 'recent' | ConvertFrom-Json).turns)
+          check ($turns.Count -eq 1 -and $turns[0].content -eq 'smoke note') 'recent did not return the note'
+
+      # VS Code counts as installed when its user profile dir exists.
+      - name: Set up VS Code and run doctor
+        if: steps.release.outputs.skip == 'false'
+        run: |
+          . $env:SMOKE_LIB
+          $exe = $env:SMOKE_EXE
+          New-Item -ItemType Directory -Force -Path $env:SMOKE_CODE | Out-Null
+          Write-Output (ok (u 60 $exe @('setup', '--yes', '--harness', 'vscode')) 'atticdb setup')
+          $entry = (Get-Content -Raw -LiteralPath "$env:SMOKE_CODE\mcp.json" | ConvertFrom-Json).servers.atticdb
+          check ($entry.type -eq 'stdio' -and $entry.command -eq $exe) "mcp.json runs $($entry.command), want $exe"
+          $hooks = Get-Content -Raw -LiteralPath "$env:SMOKE_HOME\.copilot\hooks\atticdb.json" | ConvertFrom-Json
+          $hook = $hooks.hooks.sessionStart[0]
+          check ($hook.powershell -like "& '*' hook session-start" -and -not $hook.bash) 'the hook has no powershell line'
+          $guide = Get-Content -Raw -LiteralPath "$env:SMOKE_HOME\.copilot\instructions\atticdb.instructions.md"
+          check ($guide -match 'atticdb') 'the instructions do not mention atticdb'
+          $doctor = u 60 $exe @('doctor')
+          Write-Output $doctor.Out
+          ok $doctor 'atticdb doctor' | Out-Null
+          # The VS Code section, up to the next unindented line.
+          $vscode, $on = @(), $false
+          foreach ($line in $doctor.Out -split "\r?\n") {
+            if ($line -eq 'VS Code:') { $on = $true; continue }
+            if ($line -match '^\S') { $on = $false }
+            if ($on) { $vscode += $line }
+          }
+          foreach ($name in 'parts', 'binary', 'hook') {
+            check ($vscode -contains "  ${name}: ok") "doctor did not report VS Code ${name}: ok"
+          }
+
+      # Runs what VS Code would: the command, args and env of the mcp.json entry.
+      - name: MCP round trip
+        if: steps.release.outputs.skip == 'false'
+        run: |
+          . $env:SMOKE_LIB
+          $entry = (Get-Content -Raw -LiteralPath "$env:SMOKE_CODE\mcp.json" | ConvertFrom-Json).servers.atticdb
+          Write-Output "entry: $($entry | ConvertTo-Json -Compress)"
+          $extra = @{}
+          if ($entry.env) { foreach ($pair in $entry.env.PSObject.Properties) { $extra[$pair.Name] = [string]$pair.Value } }
+          $requests = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"install-smoke","version":"1"}}}'
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+            '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"memory_search","arguments":{"query":"smoke"}}}'
+            '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"fact_get","arguments":{"key":"user/smoke"}}}'
+          )
+          # The adapter exits when stdin closes, after answering each request.
+          $out = ok (u 30 $entry.command @($entry.args) -Stdin (($requests -join "`n") + "`n") -Extra $extra) 'atticdb mcp'
+          Write-Output $out
+          $replies = @($out -split "\r?\n" | Where-Object { $_.Trim() } | ForEach-Object { $_ | ConvertFrom-Json })
+          check ((($replies | ForEach-Object { $_.id }) -join ',') -eq '1,2,3,4') 'the replies are not ids 1 to 4'
+          check ($replies[0].result.serverInfo.name -eq 'atticdb') 'initialize did not name atticdb'
+          $tools = ($replies[1].result.tools | ForEach-Object { $_.name } | Sort-Object) -join ','
+          check ($tools -eq 'fact_get,fact_list,fact_set,memory_append,memory_recent,memory_search') "tools/list gave $tools"
+          $search = $replies[2].result
+          check ($search.isError -ne $true -and $search.content[0].text -like '*smoke note*') 'memory_search did not find the note'
+          check ([bool]($search.structuredContent.hits | Where-Object { $_.content -eq 'smoke note' })) 'memory_search has no hit'
+          check ($replies[3].result.isError -ne $true -and $replies[3].result.content[0].text -eq 'ok') 'fact_get did not return ok'
+
+      # Runs the sessionStart hook as Copilot would on Windows: its powershell line, with its
+      # JSON on stdin.
+      - name: Session-start hook
+        if: steps.release.outputs.skip == 'false'
+        run: |
+          . $env:SMOKE_LIB
+          $hook = (Get-Content -Raw -LiteralPath "$env:SMOKE_HOME\.copilot\hooks\atticdb.json" | ConvertFrom-Json).hooks.sessionStart[0]
+          Write-Output "hook: $($hook | ConvertTo-Json -Compress)"
+          $extra = @{}
+          if ($hook.env) { foreach ($pair in $hook.env.PSObject.Properties) { $extra[$pair.Name] = [string]$pair.Value } }
+          $stdin = @{ cwd = $env:SMOKE_PROJ } | ConvertTo-Json -Compress
+          $shell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+          $out = ok (u 10 $shell @('-NoProfile', '-NonInteractive', '-Command', $hook.powershell) -Stdin $stdin -Extra $extra) 'the hook'
+          Write-Output $out
+          $context = ($out | ConvertFrom-Json).additionalContext
+          check ($context -like '*AtticDB memory*' -and $context -like '*smoke note*' -and $context -like '*user/smoke: ok*') 'the hook did not print the memory block'
+
+      - name: Server log
+        if: failure() && steps.release.outputs.skip == 'false'
+        run: Get-Content -Tail 50 -LiteralPath "$env:SMOKE_DATA\serve.log" -ErrorAction SilentlyContinue
+
+      # Stops the server the first command started, by the pid in its LOCK, never by name.
+      - name: Clean up
+        if: always()
+        run: |
+          if (-not $env:SMOKE_DIR) { exit 0 }
+          $lock = Join-Path $env:SMOKE_DATA 'LOCK'
+          $text = Get-Content -Raw -LiteralPath $lock -ErrorAction SilentlyContinue
+          if ($text -match '^pid=(\d+) ') {
+            # A stale LOCK may name a pid that another program now has.
+            $server = Get-Process -Id ([int]$Matches[1]) -ErrorAction SilentlyContinue
+            if ($server -and $server.ProcessName -eq 'atticdb') {
+              Stop-Process -Id $server.Id -Force
+              if (-not $server.WaitForExit(10000)) {
+                Write-Output "::warning::server $($server.Id) did not stop in 10 s"
+              }
+            }
+          }
+          Remove-Item -Recurse -Force -LiteralPath $env:SMOKE_DIR -ErrorAction SilentlyContinue

@@ -11,6 +11,8 @@
 //!   user's own. See [`guide`].
 //!
 //! Codex keeps 1 approval per hook in `config.toml`. AtticDB never writes those.
+//!
+//! On Windows, Codex gets only the MCP entry, until its hooks there are checked (D92).
 
 use super::claude::{
     add_hook, drop_hooks, edit_file, find_program, hook_args, hook_binaries, hook_command,
@@ -83,8 +85,9 @@ pub(crate) fn hooks_file() -> Result<PathBuf, String> {
     Ok(codex_home()?.join("hooks.json"))
 }
 
-/// Adds the MCP block for `notes`, the hook when `hook`, and the guide. It stops with exit
-/// code 2 for a relative `CODEX_HOME`. In Plan mode, it writes nothing and runs no `codex`.
+/// Adds the MCP block for `notes`, the hook when `hook`, and the guide. On Windows, only the
+/// MCP block. It stops with exit code 2 for a relative `CODEX_HOME`. In Plan mode, it writes
+/// nothing and runs no `codex`.
 pub(super) fn connect(hook: bool, notes: Notes, mode: Mode, lookup: &Lookup) -> Report {
     if let Err(error) = check_codex_env() {
         return Report::stopped(2, error);
@@ -106,6 +109,9 @@ pub(super) fn connect(hook: bool, notes: Notes, mode: Mode, lookup: &Lookup) -> 
         Err(error) => return Report::stopped(1, error),
     };
     let home = home.as_deref();
+    // On Windows Codex gets only its MCP entry, until its hooks there are checked (D92).
+    let mcp_only = cfg!(windows);
+    let hook = hook && !mcp_only;
     let mut lines = vec![set_block(&config, &exe, home, notes, mode).unwrap_or_else(|line| line)];
     let (mut next, mut hook_state, off) = (Vec::new(), None, hook && hooks_off(&config));
     if hook {
@@ -132,9 +138,11 @@ pub(super) fn connect(hook: bool, notes: Notes, mode: Mode, lookup: &Lookup) -> 
             next.extend(moved.then(|| POSITION.to_owned()));
         }
     }
-    let (guide, too_big) = guide::add(&dir, mode);
-    lines.push(guide);
-    warnings.extend(too_big);
+    if !mcp_only {
+        let (guide, too_big) = guide::add(&dir, mode);
+        lines.push(guide);
+        warnings.extend(too_big);
+    }
     Report { lines, warnings, next, stopped: None, hook: hook_state, hooks_off: off }
 }
 

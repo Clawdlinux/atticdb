@@ -4,6 +4,7 @@
 //! so the prompt prefix stays the same.
 
 use crate::connect::Harness;
+use crate::home::Lookup;
 use crate::mcp::{HomeReader, DEFAULT_AGENT};
 use serde_json::{json, Value};
 use std::io::{Read, Write};
@@ -33,8 +34,10 @@ const MORE: &str = "(more in atticdb)";
 /// `{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "<block>"}}`.
 /// `None`, `vscode` and `copilot` read `{"additionalContext": "<block>"}`. Any other name,
 /// or an empty one for a `--harness` with no value, prints `{}`, as a hook must not fail.
-/// Returns exit code 0.
-pub fn session_start(harness: Option<&str>) -> u8 {
+/// `home`, from `--home`, is the home to read, in place of `ATTICDB_HOME`. It must be an
+/// absolute path, else the hook prints `{}`. Claude Code's hook passes it on Windows, where
+/// it runs with no shell to set a variable. Returns exit code 0.
+pub fn session_start(harness: Option<&str>, home: Option<&str>) -> u8 {
     let start = Instant::now();
     let specific = match harness {
         None | Some("vscode" | "copilot") => false,
@@ -60,7 +63,13 @@ pub fn session_start(harness: Option<&str>) -> u8 {
         }
         std::process::exit(0);
     });
-    let output = match block(std::io::stdin().lock().take(MAX_INPUT), start + BUDGET) {
+    let lookup = match home.map(Path::new) {
+        None => Ok(Lookup::ENV),
+        Some(dir) if dir.is_absolute() => Ok(Lookup::home(dir.to_owned())),
+        Some(_) => Err("--home must be an absolute path".to_owned()),
+    };
+    let stdin = std::io::stdin().lock().take(MAX_INPUT);
+    let output = match lookup.and_then(|lookup| block(stdin, start + BUDGET, &lookup)) {
         Ok(Some(block)) if specific => json!({"hookSpecificOutput":
             {"hookEventName": "SessionStart", "additionalContext": block}}),
         Ok(Some(block)) => json!({"additionalContext": block}),
@@ -87,22 +96,27 @@ fn print_once(output: &Value) -> bool {
     first
 }
 
-/// The block for the `cwd` in `input`, or `None` when memory has nothing for it. Reads end
-/// by `deadline`.
-fn block(input: impl Read, deadline: Instant) -> Result<Option<String>, String> {
+/// The block for the `cwd` in `input`, or `None` when memory has nothing for it. Reads the
+/// home `lookup` finds, and end by `deadline`.
+fn block(input: impl Read, deadline: Instant, lookup: &Lookup) -> Result<Option<String>, String> {
     // Parsing stops at the end of the first object, so stdin left open after it cannot hang
     // the hook. A bare number or `true` waits for more, until the 4 s stop.
     let first = serde_json::Deserializer::from_reader(input).into_iter::<Value>().next();
     let input = first.ok_or("stdin is empty")?;
     let input = input.map_err(|error| format!("stdin is not JSON of at most 1 MiB: {error}"))?;
     let cwd = input["cwd"].as_str().ok_or("stdin has no cwd string")?;
-    block_for(&repo(Path::new(cwd))?, deadline)
+    block_in(&repo(Path::new(cwd))?, deadline, lookup)
 }
 
 /// The block for `repo`, or `None` when memory has nothing for it. Reads the home, as the
 /// hook does, and ends by `deadline`.
 pub(crate) fn block_for(repo: &str, deadline: Instant) -> Result<Option<String>, String> {
-    let mut home = HomeReader::new(repo, deadline)?;
+    block_in(repo, deadline, &Lookup::ENV)
+}
+
+/// [`block_for`] on the home `lookup` finds.
+fn block_in(repo: &str, deadline: Instant, lookup: &Lookup) -> Result<Option<String>, String> {
+    let mut home = HomeReader::in_home(repo, deadline, lookup)?;
     // A page may stop short of 50 at its byte or scan budget, so follow `next`. Every read
     // shares the deadline, which ends the paging too.
     let mut facts = |prefix: String| {

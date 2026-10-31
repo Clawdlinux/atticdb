@@ -156,15 +156,19 @@ mod windows {
     const KILL_TIMEOUT: Duration = Duration::from_secs(10);
 
     /// A server that outlives this process. It gets no console and its own process group,
-    /// so Ctrl-C here does not stop it. It must not hold this process's stdio either.
-    /// Otherwise the caller of this process would wait for end of file until the server exits.
+    /// so Ctrl-C here does not stop it. It must hold no handle of this process either, its
+    /// stdio or one its parent passed down, such as PowerShell's stdout under a Copilot hook.
+    /// Otherwise a caller up the chain would wait for end of file until the server exits.
     pub(crate) fn detach(command: &mut Command) {
-        atticdb_sys::disinherit_stdio();
+        atticdb_sys::disinherit_all();
         command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
     }
 
-    /// A short-lived helper: no console window pops up.
+    /// A short-lived helper: no console window pops up. It gets only the stdio its command
+    /// sets, never a copy of this process's own. Otherwise a server it starts, such as the
+    /// hook's, could hold this process's stdout open, and this process's caller would wait.
     pub(crate) fn no_window(command: &mut Command) {
+        atticdb_sys::disinherit_stdio();
         command.creation_flags(CREATE_NO_WINDOW);
     }
 

@@ -172,19 +172,7 @@ In Copilot CLI, run `/sandbox`, and on the Filesystem tab add the home under Use
 | 70 | Poisoned, with `--exit-on-poison` |
 | 75 | Another process holds the data directory lock |
 
-### On Windows
-
-Windows support is in progress ([#137](https://github.com/Clawdlinux/atticdb/issues/137)).
-- The home defaults to `%LOCALAPPDATA%\atticdb`. `ATTICDB_HOME` moves it, as on Unix.
-- There is no Unix socket. A server always listens on loopback TCP, and `--listen none` fails. `--unix-socket` and `unix:///` URLs fail too.
-- A server the CLI starts listens on `127.0.0.1:0`, a free port. `LOCK` names that port, as `tcp=127.0.0.1:<port>`.
-- Before the CLI sends its token, it sends `GET /healthz` with a random `X-Atticdb-Nonce` header. That request carries no token.
-- The server answers with a `proofs` array, 1 entry per tenant. Each is a keyed BLAKE3 hash of the nonce, the instance id and the server's address on that connection. The key is derived from that tenant's token.
-- The CLI sends its token only when 1 proof matches its own token and the address it connected to. So a program squatting on the port never gets the token. A relay that passes the nonce to the real server gets a proof for the wrong address.
-- `--url http://...` skips discovery and the proof. The operator chose that endpoint, so the CLI trusts it.
-- Windows has no mode bits. The home lives in the user's profile, which is private by default, so AtticDB skips the owner and mode checks.
-- So the home, every data dir, every config and every token file must be inside `%LOCALAPPDATA%` or `%USERPROFILE%`. That covers `ATTICDB_HOME`, `--data-dir`, `--config`, `--token-file` and a config's `data_dir`, for the clients and for `atticdb serve`. AtticDB also makes no private file or folder outside the profile, such as `init --config` or a `verify --scratch` copy. Links and short names are resolved first. Anything else fails with an error that names the path and D92.
-- `atticdb stats` needs the Unix socket, so it fails. `atticdb migrate` has nothing to move.
+On Windows the server listens on loopback TCP only. See [Windows](#windows).
 
 ## `atticdb verify` and `atticdb dump`
 
@@ -316,7 +304,7 @@ Claude Code and Codex have their own parts. See [Claude Code](#claude-code) and 
 
 | Name | File | Entry |
 |---|---|---|
-| `vscode` | macOS: `~/Library/Application Support/Code/User/mcp.json`. Linux: `$XDG_CONFIG_HOME/Code/User/mcp.json` when set and absolute, else `~/.config/Code/User/mcp.json` | `servers.atticdb`: `atticdb mcp --agent vscode-copilot` |
+| `vscode` | macOS: `~/Library/Application Support/Code/User/mcp.json`. Linux: `$XDG_CONFIG_HOME/Code/User/mcp.json` when set and absolute, else `~/.config/Code/User/mcp.json`. Windows: `%APPDATA%\Code\User\mcp.json` | `servers.atticdb`: `atticdb mcp --agent vscode-copilot` |
 | `copilot` | `$COPILOT_HOME/mcp-config.json` when set and absolute, else `~/.copilot/mcp-config.json` | `mcpServers.atticdb`: `atticdb mcp --agent copilot`, all tools |
 
 The entry runs the absolute path of the binary you ran. It holds no token and no config path.
@@ -356,6 +344,7 @@ VS Code's Copilot chat and Copilot CLI both read it:
 ```
 
 The binary path is single-quoted for the shell, with each `'` written as `'\''`.
+On Windows the key is `powershell`, not `bash`. See [Windows](#windows).
 The rules above apply: no write when it matches, a backup, a synced temp file and a rename.
 `disconnect` deletes it once neither config has an AtticDB entry, then syncs the directory. No backup is kept.
 It deletes the hook AtticDB writes for any absolute binary path, with or without that env. So a moved binary's hook goes too.
@@ -393,6 +382,7 @@ Without `claude` on `PATH`, the part is skipped and the command to run is printe
 
 The hook group has no matcher, so it also runs after compaction.
 Under `ATTICDB_HOME`, the entry passes `-e ATTICDB_HOME=<path>`, after the name, since `-e` takes a list: `claude mcp add -s user atticdb -e ATTICDB_HOME=<path> -- <binary> mcp --agent claude-code`. Claude's command hooks have no env field, so the hook command starts with `ATTICDB_HOME='<path>' `.
+On Windows the hook runs in exec form, with `--home <path>` in place of the prefix. See [Windows](#windows).
 The hook doesn't share a file with VS Code or Copilot CLI, so its home may differ from theirs. `connect` then warns that memory splits between the homes.
 The allow rules never include `fact_set`, so saving a rule always asks. `--notes ask` also removes a `memory_append` rule.
 Claude Code reads the MCP server's instructions, so `CLAUDE.md` isn't touched.
@@ -416,6 +406,7 @@ Then start a new Claude Code session.
 
 `atticdb connect codex [--force] [--no-hook] [--notes ask|auto] [--dry-run]` creates the home, then adds 3 parts.
 `atticdb disconnect codex` removes them.
+On Windows it adds only the MCP entry, until Codex's hooks there are checked ([#142](https://github.com/Clawdlinux/atticdb/issues/142)). `setup` and `doctor` say so in 1 line: `Codex on Windows: MCP only, hooks wait for #142`.
 `--force` changes nothing for Codex, as AtticDB never edits an `atticdb` server it didn't write.
 The config dir is `$CODEX_HOME` when set, else `~/.codex`.
 A relative `CODEX_HOME` fails both verbs with exit 2 before any change. `codex` would inherit it and read another config. An empty one counts as unset.
@@ -504,7 +495,9 @@ Each part prints 1 line, and the exit code works as for Claude Code. Then open C
 
 ## `atticdb hook session-start`
 
-`atticdb hook session-start [--harness <name>]` is the session-start hook. It reads at most 1 MiB of JSON on stdin and uses only `cwd`.
+`atticdb hook session-start [--harness <name>] [--home <dir>]` is the session-start hook. It reads at most 1 MiB of JSON on stdin and uses only `cwd`.
+`--home <dir>` reads that home, in place of `ATTICDB_HOME`. It must be absolute, else the hook prints `{}`.
+Claude Code's hook passes it on Windows, where its exec form has no shell to set a variable.
 Parsing stops after the first JSON object, so stdin left open after that object does not block it.
 The repo comes from `cwd` by the rule in `atticdb mcp` above, so a worktree gets its main repo's block.
 It reads the home like `atticdb mcp` with no flags, and starts the server if needed. It ignores `ATTICDB_TOKEN`.
@@ -585,6 +578,64 @@ Exit code 1 when it cannot start, 2 for a bad flag.
 
 The page has 7 screens: Overview, Log, Sessions, Facts, Search, Chat start and Health, each at a hash route.
 `studio/seed.sh <empty dir>` seeds a throwaway home with realistic memory and hostile values. Set `ATTICDB_BIN` for a build not on `PATH`, then run `HOME=<dir> XDG_DATA_HOME= ATTICDB_HOME= atticdb studio`.
+
+## Windows
+
+AtticDB runs on Windows x86_64, from [#137](https://github.com/Clawdlinux/atticdb/issues/137). D92 in the [decision log](../../docs/design/0002-decision-log.md) gives the reasons.
+
+The home and the profile rule:
+
+- The home defaults to `%LOCALAPPDATA%\atticdb`. `ATTICDB_HOME` moves it, as on Unix.
+- Windows has no mode bits, and AtticDB checks no access lists. It trusts only the user profile, which is private by default.
+- So the home, every data dir, every config and every token file must be inside `%LOCALAPPDATA%` or `%USERPROFILE%`.
+- That covers `ATTICDB_HOME`, `--data-dir`, `--config`, `--token-file` and a config's `data_dir`, for the clients and for `atticdb serve`.
+- AtticDB makes no private file or folder outside the profile, such as `init --config` or a `verify --scratch` copy.
+- Links and short names are resolved first. Anything else fails with an error that names the path and D92.
+
+The server, over loopback TCP with a proof:
+
+- There is no Unix socket. A server always listens on loopback TCP, and `--listen none` fails. `--unix-socket` and `unix:///` URLs fail too.
+- A server the CLI starts listens on `127.0.0.1:0`, a free port. `LOCK` names that port, as `tcp=127.0.0.1:<port>`.
+- Before the CLI sends its token, it sends `GET /healthz` with a random `X-Atticdb-Nonce` header. That request carries no token.
+- The server answers with a `proofs` array, 1 entry per tenant. Each is a keyed BLAKE3 hash of the nonce, the instance id and the server's address on that connection. The key is derived from that tenant's token.
+- The CLI sends its token only when 1 proof matches its own token and the address it connected to. So a program squatting on the port never gets the token. A relay that passes the nonce to the real server gets a proof for the wrong address.
+- `--url http://...` skips discovery and the proof. The operator chose that endpoint, so the CLI trusts it.
+- `atticdb stats` fails with exit 1. Stats span all tenants, so only the Unix socket serves them. A TCP token speaks for 1 tenant. `atticdb doctor` checks the server and store instead.
+
+Durability is weaker than on Unix:
+
+- An ack still waits until the write is flushed to disk.
+- Windows has no directory fsync. Creating or deleting a file has no documented flush, so a crash may undo 1.
+- A rename uses `MOVEFILE_WRITE_THROUGH`, so it returns only once the move is on disk.
+- With a per-user disk quota, free space is what the quota leaves. So the free-space floor follows the quota.
+
+The apps: VS Code, Copilot CLI and Claude Code get every part. Codex gets only its MCP entry, until [#142](https://github.com/Clawdlinux/atticdb/issues/142).
+
+| App | Windows files | What differs |
+|---|---|---|
+| VS Code | `%APPDATA%\Code\User\mcp.json` | Nothing else. It reads the Copilot hook and instructions below |
+| Copilot CLI | `mcp-config.json`, `hooks\atticdb.json` and `instructions\atticdb.instructions.md` in `%USERPROFILE%\.copilot`, or `%COPILOT_HOME%` | The hook's key is `powershell`: `& '<binary>' hook session-start` |
+| Claude Code | `%USERPROFILE%\.claude.json` and `%USERPROFILE%\.claude\settings.json` | The hook runs in exec form, below. `claude` may be `claude.exe` or npm's `claude.cmd` |
+| Codex | `%USERPROFILE%\.codex\config.toml` | Only the MCP entry. No hook and no `AGENTS.md` guide |
+
+The Copilot hook's binary path is single-quoted for PowerShell, so `$`, `&` and spaces stay as they are.
+PowerShell reads `'`, `‘`, `’`, `‚` and `‛` as single quotes, so each one inside is written twice.
+GitHub's hooks reference says Copilot runs the `powershell` command on Windows. VS Code's hooks docs say the same.
+Under `ATTICDB_HOME`, the hook's `env` passes it, as on Unix. A home with `%` is refused, like one with `$`, as Copilot may expand variables there.
+
+Claude Code's hook needs Claude Code 2.1.139 or later, which added exec form. Claude Code starts the binary with `args`, and no shell:
+
+```json
+{"hooks": [{"type": "command", "command": "<binary>", "args": ["hook", "session-start", "--harness", "claude-code"], "timeout": 5}]}
+```
+
+Under `ATTICDB_HOME`, `args` ends with `"--home", "<path>"`. The MCP entry passes `-e ATTICDB_HOME=<path>`, as on Unix.
+
+A cold server start can take longer than the hook's 3 s budget. Then the first chat after it gets no memory block.
+The next chat gets it, as the server is up by then.
+A hook handle above value 0x40000 may still reach the server, so that first chat may also miss its block.
+
+Not yet: arm64, an `install.ps1`, and Codex's hooks ([#142](https://github.com/Clawdlinux/atticdb/issues/142)). Ask in an issue if you need the others.
 
 ## Tests
 

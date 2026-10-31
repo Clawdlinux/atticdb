@@ -1,9 +1,10 @@
 #![allow(clippy::unwrap_used)]
 
-// These need the Unix socket, Unix modes or Unix tools. Windows runs `portable`.
+// These need the Unix socket, Unix modes or Unix tools. Windows runs `portable`, `apps` and
+// `cli`.
 #[cfg(unix)]
 mod api;
-#[cfg(unix)]
+mod apps;
 mod cli;
 #[cfg(unix)]
 mod connect;

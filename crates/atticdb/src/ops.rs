@@ -56,11 +56,16 @@ pub fn stats(socket: Option<&Path>, data_dir: Option<&Path>) -> u8 {
     }
 }
 
-/// Stats are served on the Unix socket only, which Windows lacks. Returns 1.
+/// Stats are served on the Unix socket only, which Windows lacks. They span all tenants, and
+/// a TCP token speaks for 1 tenant, so TCP doesn't serve them. Returns 1.
 #[cfg(not(unix))]
 pub fn stats(socket: Option<&Path>, data_dir: Option<&Path>) -> u8 {
     let _ = (socket, data_dir);
-    eprintln!("atticdb stats: stats are served on the Unix socket only, which Windows lacks");
+    eprintln!(
+        "atticdb stats: stats are served on the Unix socket only, which Windows lacks. They \
+         span all tenants, and a TCP token speaks for 1 tenant. atticdb doctor checks the \
+         server and store"
+    );
     1
 }
 

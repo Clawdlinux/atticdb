@@ -334,7 +334,7 @@ fn set_entry(
     }
     let (add, remove) = (add_args(exe, home), REMOVE.map(String::from).to_vec());
     let by_hand = match current {
-        Some(_) => format!("{} && {}", shell_line("claude", &remove), shell_line("claude", &add)),
+        Some(_) => and_then(&shell_line("claude", &remove), &shell_line("claude", &add)),
         None => shell_line("claude", &add),
     };
     let Some(claude) = find_program("claude") else {
@@ -472,8 +472,8 @@ pub(crate) fn find_program(name: &str) -> Option<PathBuf> {
     })
 }
 
-/// The first program called `name` on `PATH`, by [`find_in`].
-// TODO(#137): part 3 checks how Claude Code and Codex install on Windows.
+/// The first program called `name` on `PATH`, by [`find_in`]. Claude Code's native installer
+/// puts a `claude.exe` there, and npm a `claude.cmd` shim.
 #[cfg(windows)]
 pub(crate) fn find_program(name: &str) -> Option<PathBuf> {
     find_in(name, &std::env::var_os("PATH")?)
@@ -580,21 +580,43 @@ fn quote(word: &str) -> String {
     format!("'{}'", word.replace('\'', r"'\''"))
 }
 
-/// The `program` command line for `args`, as typed in a shell.
+/// The `program` command line for `args`, as typed in a shell: `sh`, or PowerShell on Windows.
 pub(super) fn shell_line(program: &str, args: &[String]) -> String {
+    #[cfg(not(windows))]
+    let (quote, safe) = (quote, b"_./=:@%+,-".as_slice());
+    // PowerShell reads `@` and `,` itself, and Windows paths hold `\`.
+    #[cfg(windows)]
+    let (quote, safe) = (|word: &str| super::ps_quote(word), b"_./=:+-\\".as_slice());
     let plain = |word: &str| {
         !word.is_empty()
-            && word
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b"_./=:@%+,-".contains(&byte))
+            && word.bytes().all(|byte| byte.is_ascii_alphanumeric() || safe.contains(&byte))
     };
     let words = args.iter().map(|arg| if plain(arg) { arg.clone() } else { quote(arg) });
     std::iter::once(program.to_owned()).chain(words).collect::<Vec<_>>().join(" ")
 }
 
+/// The command lines `first`, then `second`, which runs only when `first` worked, as typed in
+/// a shell. Windows PowerShell 5.1 has no `&&`, so there `second` runs inside `if ($?)`.
+fn and_then(first: &str, second: &str) -> String {
+    if cfg!(windows) {
+        format!("{first}; if ($?) {{ {second} }}")
+    } else {
+        format!("{first} && {second}")
+    }
+}
+
 /// What `harness`'s hook command passes the binary.
 pub(super) fn hook_args(harness: Harness) -> String {
     format!(" hook session-start --harness {}", harness.name())
+}
+
+/// The args of `harness`'s hook in exec form, which Claude Code runs with no shell. The home
+/// goes in `--home`, as Claude's command hooks have no env field.
+#[cfg(windows)]
+fn exec_args(harness: Harness, home: Option<&str>) -> Value {
+    let mut args = vec!["hook", "session-start", "--harness", harness.name()];
+    args.extend(home.map(|home| ["--home", home]).into_iter().flatten());
+    json!(args)
 }
 
 /// `harness`'s hook command: the quoted binary, after `ATTICDB_HOME='<home>' ` when `home`
@@ -606,9 +628,18 @@ pub(super) fn hook_command(harness: Harness, exe: &str, home: Option<&str>) -> S
 }
 
 /// The SessionStart group AtticDB adds. It has no matcher, so it also runs after compaction.
+#[cfg(not(windows))]
 fn hook_group(exe: &str, home: Option<&str>) -> Value {
     let command = hook_command(Harness::ClaudeCode, exe, home);
     json!({"hooks": [{"type": "command", "command": command, "timeout": 5}]})
+}
+
+/// See the other system's version. On Windows the hook is in exec form: Claude Code starts
+/// the binary with `args`, and no shell. So no quoting can go wrong.
+#[cfg(windows)]
+fn hook_group(exe: &str, home: Option<&str>) -> Value {
+    let args = exec_args(Harness::ClaudeCode, home);
+    json!({"hooks": [{"type": "command", "command": exe, "args": args, "timeout": 5}]})
 }
 
 /// Splits a single-quoted word, with `'\''` for each `'`, off the start of `text`. Returns
@@ -630,14 +661,52 @@ fn unquote(text: &str) -> Option<(String, &str)> {
     }
 }
 
-/// Whether `command` is a hook command AtticDB writes for `harness`, for any absolute binary
-/// path and any home. The binary's file name doesn't count, as an install may name it
-/// `atticdb-0.1.0`.
-fn our_command(harness: Harness, command: &str) -> bool {
-    command_exe(harness, command).is_some()
+/// The binary that `handler` runs when it is a hook handler AtticDB writes for `harness`, by
+/// [`command_exe`]. On Windows, Claude Code's is in exec form, by [`exec_exe`].
+fn handler_exe(harness: Harness, handler: &Value) -> Option<String> {
+    let command = handler["command"].as_str().filter(|_| handler["type"] == "command")?;
+    #[cfg(windows)]
+    if harness == Harness::ClaudeCode {
+        return exec_exe(handler, command);
+    }
+    command_exe(harness, command)
 }
 
-/// The binary path in `command` when it is a hook command AtticDB writes, by [`our_command`].
+/// The binary `command` names when `handler` is Claude Code's hook in exec form, as AtticDB
+/// writes it, for any absolute binary path and any home.
+#[cfg(windows)]
+fn exec_exe(handler: &Value, command: &str) -> Option<String> {
+    let args = handler["args"].as_array()?;
+    let home = match args.as_slice() {
+        [.., flag, home] if flag == "--home" => Some(home.as_str()?),
+        _ => None,
+    };
+    let ours =
+        Path::new(command).is_absolute() && handler["args"] == exec_args(Harness::ClaudeCode, home);
+    ours.then(|| command.to_owned())
+}
+
+/// What tells AtticDB's handlers apart: the command, and on Windows its args too.
+fn handler_key(handler: &Value) -> Value {
+    if cfg!(windows) {
+        json!([handler["command"], handler["args"]])
+    } else {
+        handler["command"].clone()
+    }
+}
+
+/// What `handler` runs, in words: its command, then its args when it has some.
+fn handler_text(handler: &Value) -> String {
+    let command = handler["command"].as_str().unwrap_or_default();
+    match handler.get("args") {
+        Some(args) => format!("{} with args {args}", json!(command)),
+        None => command.to_owned(),
+    }
+}
+
+/// The binary path in `command` when it is a hook command AtticDB writes for `harness`, for
+/// any absolute binary path and any home. The binary's file name doesn't count, as an install
+/// may name it `atticdb-0.1.0`.
 fn command_exe(harness: Harness, command: &str) -> Option<String> {
     let (home, rest) = match command.strip_prefix(&format!("{HOME_ENV}=")) {
         Some(rest) => {
@@ -661,10 +730,7 @@ pub(super) fn hook_binaries(harness: Harness, path: &Path) -> Vec<(PathBuf, Stri
     let groups = root["hooks"]["SessionStart"].as_array().cloned().unwrap_or_default();
     let handlers =
         groups.iter().flat_map(|group| group["hooks"].as_array().cloned().unwrap_or_default());
-    let exe = |handler: Value| {
-        let command = handler["command"].as_str().filter(|_| handler["type"] == "command")?;
-        command_exe(harness, command)
-    };
+    let exe = |handler: Value| handler_exe(harness, &handler);
     handlers.filter_map(exe).map(|exe| (path.to_owned(), exe)).collect()
 }
 
@@ -684,10 +750,7 @@ pub(super) fn binaries() -> Vec<(PathBuf, String)> {
 /// Whether `group` is a SessionStart group whose every handler runs `harness`'s AtticDB hook.
 pub(super) fn our_group(harness: Harness, group: &Value) -> bool {
     let handlers = group["hooks"].as_array().map(Vec::as_slice).unwrap_or_default();
-    let ours = |handler: &Value| {
-        let command = handler["command"].as_str();
-        handler["type"] == "command" && command.is_some_and(|command| our_command(harness, command))
-    };
+    let ours = |handler: &Value| handler_exe(harness, handler).is_some();
     !handlers.is_empty() && handlers.iter().all(ours)
 }
 
@@ -735,18 +798,15 @@ fn done(text: String, state: State, said: &str) -> Edit {
     Ok(Done { text, said: said.into(), state, by_hand: false })
 }
 
-/// `harness`'s AtticDB hook commands in SessionStart groups that also run other hooks. `text`
-/// must be strict JSON.
-fn mixed(harness: Harness, text: &str) -> Vec<String> {
+/// `harness`'s AtticDB hook handlers in SessionStart groups that also run other hooks, by
+/// [`handler_key`]. `text` must be strict JSON.
+fn mixed(harness: Harness, text: &str) -> Vec<Value> {
     let root: Value = serde_json::from_str(text).unwrap_or_default();
     let groups = root["hooks"]["SessionStart"].as_array().cloned().unwrap_or_default();
     let handlers = groups.iter().filter(|group| !our_group(harness, group));
     let handlers =
         handlers.flat_map(|group| group["hooks"].as_array().cloned().unwrap_or_default());
-    let ours = |handler: Value| {
-        let command = handler["command"].as_str().filter(|command| our_command(harness, command));
-        command.filter(|_| handler["type"] == "command").map(str::to_owned)
-    };
+    let ours = |handler: Value| handler_exe(harness, &handler).map(|_| handler_key(&handler));
     handlers.filter_map(ours).collect()
 }
 
@@ -756,13 +816,14 @@ fn mixed(harness: Harness, text: &str) -> Vec<String> {
 pub(super) fn add_hook(harness: Harness, text: &str, group: &Value) -> Edit {
     let stale = |old: &Value| our_group(harness, old) && old != group;
     let (text, stale) = jsonedit::remove(text, &HOOKS, stale)?;
-    let command = group["hooks"][0]["command"].as_str().unwrap_or_default();
+    let handler = &group["hooks"][0];
     let mixed = mixed(harness, &text);
-    if mixed.iter().any(|other| other != command) {
+    if mixed.iter().any(|other| *other != handler_key(handler)) {
         return Err(Refused {
             why: "an older atticdb hook is inside a group with other hooks".into(),
             by_hand: Some(format!(
-                "Update the atticdb handler inside that group by hand, to run: {command}"
+                "Update the atticdb handler inside that group by hand, to run: {}",
+                handler_text(handler)
             )),
         });
     }
@@ -944,5 +1005,39 @@ mod find_tests {
         let relative = std::env::join_paths(["relative"]).unwrap();
         assert_eq!(super::find_in("claude", &relative), None);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The second command runs only when the first worked: `&&` in `sh`, `if ($?)` in
+    /// PowerShell.
+    #[test]
+    fn and_then_stops_when_the_first_command_fails() {
+        let line = super::and_then("claude mcp remove", "claude mcp add");
+        let wanted = if cfg!(windows) {
+            "claude mcp remove; if ($?) { claude mcp add }"
+        } else {
+            "claude mcp remove && claude mcp add"
+        };
+        assert_eq!(line, wanted);
+    }
+
+    /// On Windows Claude Code's hook is in exec form, with the home in `--home`. AtticDB finds
+    /// its own, and no other.
+    #[cfg(windows)]
+    #[test]
+    fn the_exec_form_hook_reads_back_its_binary() {
+        use super::{handler_exe, hook_group, our_group, Harness};
+        let exe = r"C:\Users\me\it's & $x\atticdb.exe";
+        for home in [None, Some(r"C:\Users\me\h o m e")] {
+            let group = hook_group(exe, home);
+            let handler = &group["hooks"][0];
+            assert_eq!(handler_exe(Harness::ClaudeCode, handler).as_deref(), Some(exe));
+            assert!(our_group(Harness::ClaudeCode, &group));
+            let mut other = handler.clone();
+            other["args"][1] = "x".into();
+            assert_eq!(handler_exe(Harness::ClaudeCode, &other), None);
+            let mut relative = handler.clone();
+            relative["command"] = "atticdb.exe".into();
+            assert_eq!(handler_exe(Harness::ClaudeCode, &relative), None);
+        }
     }
 }

@@ -49,7 +49,7 @@ jobs:
       - run: python3 -m pytest scripts/tests
       - if: runner.os == 'Linux'
         run: shellcheck install.sh
-  # The Windows port covers the storage crates and the server crate so far (#137).
+  # The Windows port (#137): the storage crates, the server, the CLI and the app wiring.
   windows:
     runs-on: windows-latest
     timeout-minutes: 30
@@ -62,6 +62,10 @@ jobs:
       # The server, CLI and adapters on loopback TCP. The Unix-only `it` modules compile out.
       - run: cargo clippy --locked -p atticdb --all-targets --all-features -- -D warnings
       - run: cargo test --locked -p atticdb --lib
+      # The fake claude in the apps tests is Python.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - run: cargo test --locked -p atticdb --test it
       # Tests ignored in debug, such as 10,000 renames over an existing file.
       - run: cargo test --locked -p atticdb-tape --release --lib --test it -- --include-ignored

@@ -168,14 +168,9 @@ pub(crate) struct HomeReader {
 }
 
 impl HomeReader {
-    /// Resolves the home as `atticdb mcp` with no connection flags does, quietly ignoring
-    /// `ATTICDB_TOKEN`. All reads together, connects and server starts included, end by
-    /// `deadline`.
-    pub(crate) fn new(session: &str, deadline: Instant) -> Result<Self, String> {
-        Self::in_home(session, deadline, &crate::home::Lookup::ENV)
-    }
-
-    /// [`Self::new`] on the home `lookup` finds.
+    /// Resolves the home `lookup` finds as `atticdb mcp` with no connection flags does,
+    /// quietly ignoring `ATTICDB_TOKEN`. All reads together, connects and server starts
+    /// included, end by `deadline`.
     pub(crate) fn in_home(
         session: &str,
         deadline: Instant,

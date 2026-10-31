@@ -135,6 +135,11 @@ impl Lookup {
         Self { given: Some(dir), guards: false }
     }
 
+    /// The home `dir`, as if `ATTICDB_HOME` named it, with the legacy guards.
+    pub(crate) fn home(dir: PathBuf) -> Self {
+        Self { given: Some(Some(dir)), guards: true }
+    }
+
     /// `ATTICDB_HOME` as [`env_dir`] reads it, or as given.
     pub(crate) fn env_dir(&self) -> Result<Option<PathBuf>, String> {
         match &self.given {
