@@ -295,9 +295,9 @@ fn code(reports: &[Report]) -> u8 {
     stopped.unwrap_or_else(|| u8::from(reports.iter().any(Report::skipped)))
 }
 
-/// Connects each app with its options in turn, past any that fails, then checks each one
-/// and prints what to do next. Returns the exit code: the highest an app stopped with, else
-/// 1 when a part was skipped or a check failed.
+/// Connects each app with its options in turn, past any that fails. Then it checks each one
+/// and prints what to do next. Returns the highest exit code an app stopped with. Else it
+/// returns 1 when a part was skipped or a check failed.
 fn apply(chosen: &[(Harness, Options)]) -> u8 {
     println!("Applying:");
     let mut reports = Vec::new();
