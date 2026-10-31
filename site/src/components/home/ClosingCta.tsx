@@ -11,13 +11,17 @@ export default function ClosingCta() {
   const credit = creditFor(TAPE);
   return (
     <section className={styles.cta} aria-labelledby="cta-title">
-      <Reveal as="h2" id="cta-title" className={styles.title}>
-        <span className={styles.top}>Ready to</span>{" "}
-        <span className={styles.bottom}>remember?</span>
-      </Reveal>
+      <h2 id="cta-title" className={styles.title}>
+        <Reveal as="span" className={styles.top}>
+          Ready to
+        </Reveal>{" "}
+        <Reveal as="span" delay={0.075} className={styles.bottom}>
+          remember?
+        </Reveal>
+      </h2>
 
       <div className={styles.band}>
-        <Reveal delay={0.075}>
+        <Reveal delay={0.15}>
           <figure className={styles.figure}>
             <div className={styles.strip}>
               <Image
@@ -36,7 +40,7 @@ export default function ClosingCta() {
           </figure>
         </Reveal>
 
-        <Reveal delay={0.15} className={styles.choice}>
+        <Reveal delay={0.225} className={styles.choice}>
           <div className={styles.install}>
             <CopyCommand id="install" label="Install AtticDB" />
           </div>
@@ -46,7 +50,7 @@ export default function ClosingCta() {
           </a>
         </Reveal>
 
-        <Reveal delay={0.225}>
+        <Reveal delay={0.3}>
           <p className={styles.after}>
             Then run <code>atticdb setup</code> to connect your apps.
           </p>
