@@ -1,0 +1,9 @@
+date,harness,scenario,run,pass,atticdb_calls,input_tokens,output_tokens,cache_read_tokens,turns,wall_s,setup_exit,parse_ok,notes
+2026-10-31,claude-code,S1,1,1,{},42904,11,8963,1,4.4,0,1,reply=`cargo nextest run`
+2026-10-31,claude-code,S2,1,1,"{""memory_search"":1}",132469,178,73439,3,4.9,0,1,reply=Redis dropped: 2 extra round trips per append broke 1 ms p99 budget.
+2026-10-31,claude-code,S3,1,1,"{""fact_list"":1,""fact_set"":1,""memory_append"":1}",319004,837,253481,7,11.2,0,1,reply=Saved in AtticDB as `repo/evalrepo/node-version`: always pin Node 22. No repo files changed.
+2026-10-31,claude-code,S4,1,1,"{""fact_list"":2,""memory_append"":1}",321629,1087,256082,9,15.2,0,1,"reply=`add(a, b)` now in `calc.py:6`, same style as `subtract`. Not run: Python check needed approval, so function untested. Change uncommitted on `master`."
+2026-10-31,claude-code,S1,2,1,{},25925,144,8964,1,3.6,0,1,reply=`cargo nextest run`
+2026-10-31,claude-code,S2,2,1,"{""memory_search"":1}",135033,177,79051,3,5.4,0,1,"reply=Redis added 2 extra round trips per append, which broke 1 ms p99 budget."
+2026-10-31,claude-code,S3,2,1,"{""fact_list"":1,""fact_set"":1,""memory_append"":1}",320142,770,255308,6,11.4,0,1,"reply=Saved in AtticDB as `repo/evalrepo/node-version`: always pin Node 22. No repo files changed. Key use folder name `evalrepo`. Git check for main checkout path got blocked, so name come from working dir"
+2026-10-31,claude-code,S4,2,1,"{""fact_list"":2,""memory_append"":1}",309506,1213,243522,10,16.0,0,1,"reply=`add(a, b)` now in `calc.py`, above `subtract`, same docstring style. Not run: verify command needed approval, so `add` untested. Change uncommitted on `master`."

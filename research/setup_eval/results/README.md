@@ -92,7 +92,16 @@ Only S2 and S4 were rerun, on Codex 0.147.0. 10 billed sessions. Rows: [`2026-10
 
 The failed v2 S4 run made no AtticDB calls at all. A summary that never depends on the model needs a `Stop` hook. That is capture (#72), which waits for users to ask.
 
-The Claude Code rerun for these wording changes is still to do. Its eval login has to be renewed first.
+Claude Code 2.1.310 was rerun on `53932ce` with the new wording, S1 to S4, 2 runs each. 8 billed sessions. Rows: [`2026-10-31-122-claude.csv`](2026-10-31-122-claude.csv).
+
+| Scenario | Pass | AtticDB calls, median | Turns, median | Wall s, median |
+|---|---|---|---|---|
+| S1 recall | 2/2 | 0 | 1 | 4.0 |
+| S2 search | 2/2 | 1 | 3 | 5.2 |
+| S3 save | 2/2 | 3 | 6.5 | 11.3 |
+| S4 summary | 2/2 | 3 | 9.5 | 15.6 |
+
+No regression. S2 now takes 1 `memory_search` and 3 turns, against 2 calls and 7 turns before.
 
 ## Takeaways
 
