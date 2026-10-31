@@ -6,6 +6,8 @@
 .hero {
   --d: min(var(--step-display), 22vw);
   --line-2: calc(3.939 * var(--d));
+  /* Headline line-height. The ack chip is exactly one of these tall. */
+  --lh: 0.85;
   --ease: cubic-bezier(0.16, 1, 0.3, 1);
   --chip-gap: 0.5rem;
   padding-block: 0 3rem;
@@ -24,7 +26,7 @@
 
 .title {
   font-size: var(--d);
-  line-height: 0.85;
+  line-height: var(--lh);
   letter-spacing: -0.02em;
   text-wrap: nowrap;
 }
@@ -42,14 +44,14 @@
   white-space: nowrap;
 }
 
-/* The ack chip: one cap height tall, sitting on line 1's baseline. */
+/* The ack chip: one headline line-height tall, its bottom edge on line 1's baseline. */
 
 .ack {
   display: inline-block;
   /* overflow other than visible puts an inline-block's baseline at its bottom edge. */
   overflow: hidden;
   width: 1.66em;
-  height: 0.7em;
+  height: calc(var(--lh) * 1em);
   margin-left: 0.14em;
   vertical-align: baseline;
   background: var(--surface);
@@ -418,13 +420,14 @@
   }
 
   .chipWriters {
-    top: calc(6.25rem + 1.275 * var(--d));
+    /* Line 1 is 0.975d tall: the chip rises 0.125d above the 0.725d baseline. Centre on line 2. */
+    top: calc(6.25rem + 1.4 * var(--d));
     right: calc(50% + var(--line-2) / 2 + 0.1 * var(--d));
     transform: translateY(-50%) rotate(2.5deg);
   }
 
   .chipPower {
-    top: calc(6.25rem + 1.45 * var(--d));
+    top: calc(6.25rem + 1.575 * var(--d));
     left: calc(50% + var(--line-2) / 2 + 0.1 * var(--d));
     transform: rotate(-2deg);
   }
