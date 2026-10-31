@@ -49,7 +49,7 @@ The downloads badge counts release archive downloads. Our own install tests are 
 ```sh
 atticdb setup --dry-run   # shows what it would change, writes nothing
 atticdb setup             # asks which apps, then wires them
-atticdb doctor            # checks the install and writes nothing
+atticdb doctor            # checks the install; it may start the server
 ```
 
 `setup` finds Copilot CLI, VS Code, Claude Code and Codex. It adds the MCP entry, a chat-start hook and the guide each app reads. Every edited file is backed up first. `atticdb disconnect <app>` removes exactly what it added. Codex runs a new hook only after you approve it once in Codex. [research/setup_eval/results](research/setup_eval/results/README.md) has the eval results.

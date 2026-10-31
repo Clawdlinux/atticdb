@@ -20,5 +20,5 @@ Include these:
 ## Scope
 
 - AtticDB is a local server. TCP listens on loopback only. A non-loopback address fails startup, as AtticDB has no TLS.
-- The token in the config file grants its whole tenant. The config and any token file must be yours, with no group or other bits.
+- The token in the config file grants its whole tenant. On Unix, the config and any token file must be yours, with no group or other bits. On Windows they must be inside the user profile, and their access lists aren't checked (D92).
 - The data directory must be mode 0700 (D75). On Windows it must be inside the user profile instead (D92). Anyone with write access to it can edit history.
