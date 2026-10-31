@@ -212,6 +212,10 @@ In this order. Each maps to a sheet blueprint.
 
 ## Motion
 
+Our call after build: the hero headline reveal uses CSS keyframes so it plays at first paint and never hides text without JS.
+Section entrances run from a small inline script for the same reason.
+Framer Motion (`motion/react`) drives every interactive transition after hydration: the ack readout swap, the chip selection highlight, the power switch, the plug demo's write blocks, copy feedback and search results.
+
 - Signature: the masked headline. Each hero line rises from behind its baseline, 900 ms, strong ease-out, line 2 starts 110 ms later. The sentence and button fade up after.
 - Every section: heading, then text, then picture, staggered 60 to 90 ms, rising 16 to 32 px, once on enter.
 - Feedback on every control: hover, press and focus.
