@@ -419,7 +419,8 @@ fn hook_home_must_be_absolute_and_stats_needs_a_unix_socket() {
 
 /// PowerShell reads `‘`, `’`, `‚` and `‛` as single quotes too. A binary in a folder named
 /// with them still runs from the Copilot hook. The first run starts the server, which must
-/// not hold the hook's output open, or Copilot would wait for it.
+/// not hold the hook's output open, or Copilot would wait for it. Then the hook prints the
+/// rule in each PowerShell.
 #[cfg(windows)]
 #[test]
 fn the_powershell_hook_quotes_every_single_quote() {
@@ -434,9 +435,20 @@ fn the_powershell_hook_quotes_every_single_quote() {
     assert_eq!(code, Some(0), "{out}{err}");
     crate::portable::stop_servers(&[data]);
     let hook_file = read_json(&profile.root.join(".copilot").join("hooks").join("atticdb.json"));
+    let hook = &hook_file["hooks"]["sessionStart"][0];
     std::fs::create_dir_all(dir.0.join("app")).unwrap();
     let stdin = json!({"cwd": dir.0.join("app")}).to_string();
-    for mut command in copilot_hook(&profile, &hook_file["hooks"]["sessionStart"][0]) {
+    // A cold start may outlast the hook's budget, so then it prints {}. Its line must still
+    // arrive, which it can't if the server holds the pipe.
+    let mut first = copilot_hook(&profile, hook).remove(0);
+    let (code, out, err) = output(&mut first, stdin.as_bytes());
+    assert_eq!(code, Some(0), "{first:?}: {out}{err}");
+    assert!(serde_json::from_str::<Value>(out.trim()).is_ok(), "{first:?}: {out}{err}");
+    assert!(err.contains("atticdb: started server pid "), "{first:?}: {out}{err}");
+    let get = ["fact", "get", "--key", "user/style"];
+    let (code, out, err) = profile.atticdb(&dir.0, &[], &get);
+    assert_eq!(code, Some(0), "{out}{err}");
+    for mut command in copilot_hook(&profile, hook) {
         let (code, out, err) = output(&mut command, stdin.as_bytes());
         assert_eq!(code, Some(0), "{command:?}: {out}{err}");
         assert!(out.contains(RULE), "{command:?}: {hook_file}: {out}{err}");
