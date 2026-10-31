@@ -124,6 +124,22 @@ describe("Reveal", () => {
     expect(el.style.opacity).toBe("");
   });
 
+  it("unobserves a waiting element when it unmounts", () => {
+    boot();
+    placeAt(5000);
+    const { unmount } = render(<Reveal>Leaves early</Reveal>);
+    const el = screen.getByText("Leaves early");
+    expect(observers.some((o) => o.targets.includes(el))).toBe(true);
+    unmount();
+    expect(observers.some((o) => o.targets.includes(el))).toBe(false);
+    // A later scroll finds nothing to show and does not touch the detached node.
+    placeAt(200);
+    act(() => {
+      window.dispatchEvent(new Event("scroll"));
+    });
+    expect(el).toHaveAttribute("data-reveal", "waiting");
+  });
+
   it("never hides anything where IntersectionObserver is missing", () => {
     // @ts-expect-error simulate an old browser
     globalThis.IntersectionObserver = undefined;

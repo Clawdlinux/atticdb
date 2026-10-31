@@ -1,4 +1,7 @@
-/* "Contact as the headline", on the signal field: the name itself is the display line. */
+/*
+ * "Contact as the headline", on the signal field: the name itself is the display line.
+ * The name sits at the display step; on desktop the links and credits close the line beside it.
+ */
 .footer {
   background: var(--accent);
   color: var(--accent-ink);
@@ -10,7 +13,6 @@
 
 .inner {
   display: flex;
-  min-height: 90svh;
   flex-direction: column;
   padding-block: 2.5rem 2rem;
 }
@@ -48,8 +50,7 @@
   margin-top: auto;
   padding-top: 3rem;
   font-family: var(--font-display), Impact, sans-serif;
-  /* ATTICDB is about 2.45em wide in Bebas Neue: this fills about 95% of the line. */
-  font-size: min(34.5vw, 31rem);
+  font-size: var(--step-display);
   line-height: 0.8;
   letter-spacing: -0.005em;
   text-transform: uppercase;
@@ -100,18 +101,35 @@
 }
 
 @media (min-width: 64rem) {
-  .meta {
-    grid-template-columns: 1fr 1.6fr auto;
-    align-items: start;
-    column-gap: 3rem;
+  .inner {
+    display: grid;
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+    grid-template-rows: auto 1fr;
+    column-gap: 2rem;
   }
 
-  .links {
-    max-width: 22rem;
+  .top {
+    grid-column: 1 / -1;
+  }
+
+  /* ATTICDB at the display step is about 2.45em: 392px at 1440, half the line. */
+  .display {
+    grid-column: 1 / 7;
+    align-self: end;
+    padding-top: 5rem;
+  }
+
+  .meta {
+    grid-column: 7 / 13;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.6fr);
+    align-self: end;
+    align-items: start;
+    column-gap: 2rem;
+    margin-top: 0;
+    padding-bottom: 0.5rem;
   }
 
   .licence {
-    padding-top: 0.75rem;
-    text-align: right;
+    grid-column: 1 / -1;
   }
 }

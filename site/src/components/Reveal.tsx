@@ -1,5 +1,6 @@
 "use client";
 
+import type { RevealWindow } from "@/lib/motion";
 import { useEffect, useLayoutEffect, useRef, type ElementType, type JSX, type ReactNode } from "react";
 
 type RevealProps = {
@@ -23,8 +24,8 @@ export default function Reveal({ children, delay = 0, as = "div", className, id 
 
   useIsoLayoutEffect(() => {
     const el = ref.current;
-    const w = window as Window & { __reveal?: (el: Element) => void };
-    if (el) w.__reveal?.(el);
+    if (!el) return;
+    return (window as RevealWindow).__reveal?.(el);
   }, []);
 
   const Tag = as as ElementType;

@@ -154,6 +154,6 @@ Scores: design 7.6 · usability 8.2 · creativity 7.2 · content 8.3 → overall
 Caps applied: none.
 Top three problems:
 1. The inner pages open on a type-only hero, so after home they read as one template; only the data below tells them apart.
-2. The footer wordmark is set at 34.5vw (496px at 1440), the one size off the 5 steps and the display step; it is the footer's poster and stays.
+2. Fixed in fix round 1: the footer wordmark now sits at the display step (160px at 1440), with the links and credits closing the line beside it. On the inner pages it is a second display size next to each hero's own display step.
 3. No footage anywhere; the drift on the archival photographs is the only moving picture.
 ```
