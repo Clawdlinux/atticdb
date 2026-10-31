@@ -11,6 +11,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Barrier};
 
 #[test]
+#[cfg_attr(windows, ignore = "matches paths printed with / separators")]
 fn byte_threshold_and_segment_roll_install_the_superblock() {
     for (case, size, budget, count) in
         [("byte threshold", 4096, 300, 3), ("segment roll", 200, 256 * 1024 * 1024, 2)]
@@ -35,6 +36,7 @@ fn byte_threshold_and_segment_roll_install_the_superblock() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "matches paths printed with / separators")]
 fn clock_threshold_rate_limits_superblock_installs_off_the_reply_path() {
     let (io, clock) = (Arc::new(HookIo::sim(35)), clock());
     let (mut core, _) = WriterCore::open(io.clone(), clock.clone(), "db", opts(4096)).unwrap();
@@ -91,6 +93,7 @@ fn superblock_sync_failures_preserve_acknowledgements_and_poison_writes() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "matches paths printed with / separators")]
 fn open_and_shutdown_install_superblocks_with_bounded_rewrites() {
     for (case, payload_len, sessions, bounded) in
         [("preallocated tails", 5, 8, false), ("full segments", 912, 16, true)]
@@ -219,6 +222,7 @@ fn live_restart_after_a_failed_sync_rewrites_survivors_before_acknowledging() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "matches paths printed with / separators")]
 fn live_restart_rewrites_across_rolls_and_before_a_trimmed_tail() {
     let (io, clock) = (Arc::new(HookIo::sim(0)), clock());
     let (mut core, _) = WriterCore::open(io.clone(), clock.clone(), "db", opts(435)).unwrap();

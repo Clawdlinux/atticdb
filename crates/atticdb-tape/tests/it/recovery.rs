@@ -195,6 +195,7 @@ fn at(images: &[(String, SimDisk)], event: &str) -> usize {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "matches paths printed with / separators")]
 fn manifest_is_durable_before_tail_files_are_removed() {
     for (case, fail_manifest) in [("trim", false), ("failed manifest sync", true)] {
         let io = Arc::new(HookIo::sim(1));
@@ -240,6 +241,7 @@ fn manifest_is_durable_before_tail_files_are_removed() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "matches paths printed with / separators")]
 fn every_operator_cut_crash_image_reopens_without_a_missing_durable_prefix() {
     let io = Arc::new(HookIo::sim(6));
     let (mut core, _) = open(io.clone(), opts(128));

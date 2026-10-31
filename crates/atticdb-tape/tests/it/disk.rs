@@ -26,6 +26,7 @@ enum Fault {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "matches paths printed with / separators")]
 fn space_faults_set_group_outcome() {
     use Fault::*;
     for (case, fault, expect_read_only, expect_poisoned) in [
@@ -230,6 +231,7 @@ fn space_fault(case: &str, fault: Fault, expect_read_only: bool, expect_poisoned
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "matches paths printed with / separators")]
 fn a_group_spanning_segments_is_reserved_before_any_prepare() {
     for (case, size, count, bytes, segments, behavior, durable_lsn) in [
         ("written rolls", 200, 3, 8, 3, Behavior::Pass, 3),
