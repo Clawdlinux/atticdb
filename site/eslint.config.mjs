@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Taste skill state and screenshots (git-ignored scratch).
+    ".taste-skill/**",
   ]),
 ]);
 
