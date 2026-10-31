@@ -17,7 +17,10 @@ use windows_sys::Win32::Storage::FileSystem::{
     GetDiskFreeSpaceExW, LockFileEx, MoveFileExW, UnlockFileEx, LOCKFILE_EXCLUSIVE_LOCK,
     LOCKFILE_FAIL_IMMEDIATELY, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
 };
-use windows_sys::Win32::System::Threading::CreateEventW;
+use windows_sys::Win32::System::SystemServices::PROCESS_MITIGATION_STRICT_HANDLE_CHECK_POLICY;
+use windows_sys::Win32::System::Threading::{
+    CreateEventW, GetCurrentProcess, GetProcessMitigationPolicy, ProcessStrictHandleCheckPolicy,
+};
 use windows_sys::Win32::System::IO::{
     CancelIoEx, GetOverlappedResult, OVERLAPPED, OVERLAPPED_0, OVERLAPPED_0_0,
 };
@@ -163,6 +166,29 @@ pub fn disinherit_stdio() {
 /// this covers a process with up to 65,536 handles.
 const MAX_HANDLE_VALUE: usize = 1 << 18;
 
+/// `RaiseExceptionOnInvalidHandleReference`, bit 0 of the strict handle check policy's flags.
+const RAISE_ON_INVALID_HANDLE: u32 = 1;
+
+/// Whether this process raises an exception when it uses a handle value that is not valid.
+/// Exploit Protection's "Validate handle usage" turns that on. Then probing handle values would
+/// crash the process. A failed query counts as on. See
+/// <https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocessmitigationpolicy>.
+fn strict_handle_checks() -> bool {
+    let mut policy = PROCESS_MITIGATION_STRICT_HANDLE_CHECK_POLICY::default();
+    // SAFETY: GetCurrentProcess returns a pseudo-handle, which needs no closing. The call
+    // writes at most `size_of_val(&policy)` bytes, into `policy` on this stack frame.
+    let read = unsafe {
+        GetProcessMitigationPolicy(
+            GetCurrentProcess(),
+            ProcessStrictHandleCheckPolicy,
+            (&raw mut policy).cast(),
+            size_of_val(&policy),
+        )
+    };
+    // SAFETY: both union members are 32 bits wide, so `Flags` reads exactly those bits.
+    read == 0 || unsafe { policy.Anonymous.Flags } & RAISE_ON_INVALID_HANDLE != 0
+}
+
 /// Stops later child processes from inheriting any handle of this process, not only its
 /// stdio.
 ///
@@ -172,17 +198,31 @@ const MAX_HANDLE_VALUE: usize = 1 << 18;
 /// wait for end of file. std still gives each child the stdio its command sets, as it
 /// duplicates those handles for that child. Best effort: values above [`MAX_HANDLE_VALUE`] are
 /// not checked, and a failed call changes nothing.
+///
+/// Under strict handle checks, by [`strict_handle_checks`], a probe of a value that is not a
+/// handle would raise an exception. Then it clears only the stdio, by [`disinherit_stdio`].
+///
+/// It doesn't take std's spawn lock. A `Command::spawn` on another thread at the same moment
+/// could lose its stdio, as std's duplicated handles would stop being inheritable. So call it
+/// only from the 1 thread that spawns, right before it spawns. AtticDB calls it only to start a
+/// server, behind 1 `Launch`, which no other thread spawns beside.
 pub fn disinherit_all() {
     disinherit_stdio();
+    if strict_handle_checks() {
+        return;
+    }
     for value in (4..=MAX_HANDLE_VALUE).step_by(4) {
         let handle: HANDLE = std::ptr::without_provenance_mut(value);
         let mut flags = 0;
         // SAFETY: GetHandleInformation only reads the flags of `handle` into `flags`. A value
-        // that is not an open handle makes the call fail, which changes nothing.
+        // that is not an open handle makes the call fail, which changes nothing. Strict handle
+        // checks, which would raise an exception instead, are off.
         let inheritable = unsafe { GetHandleInformation(handle, &mut flags) } != 0
             && flags & HANDLE_FLAG_INHERIT != 0;
         if inheritable {
-            // SAFETY: SetHandleInformation only changes the flags of `handle`, which is open.
+            // SAFETY: another thread may close `handle` after the check, or reuse its value for
+            // a new handle. Either is harmless. The call only clears the inherit flag, and a
+            // closed value makes it fail, which changes nothing.
             let _ = unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) };
         }
     }
@@ -553,7 +593,9 @@ mod tests {
         unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) };
         assert_eq!(flags(), HANDLE_FLAG_INHERIT);
         disinherit_all();
-        assert_eq!(flags(), 0);
+        // Under strict handle checks it clears only the stdio.
+        let left = if strict_handle_checks() { HANDLE_FLAG_INHERIT } else { 0 };
+        assert_eq!(flags(), left);
         drop(file);
         std::fs::remove_dir_all(&dir).unwrap();
         disinherit_stdio();
