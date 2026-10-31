@@ -1,0 +1,158 @@
+:root {
+  --bg: #16110E;
+  --surface: #221B17;
+  --ink: #EDE6D8;
+  --muted: #A89C8C;
+  --accent: #C8F03C;
+  --accent-ink: #16110E;
+  --field-1: #EDE6D8;
+  --field-1-ink: #16110E;
+
+  --step-small: clamp(0.8125rem, 0.79rem + 0.1vw, 0.875rem);
+  --step-body: clamp(1.0625rem, 1rem + 0.25vw, 1.1875rem);
+  --step-lead: clamp(1.25rem, 1.1rem + 0.7vw, 1.625rem);
+  --step-head: clamp(2.5rem, 1.2rem + 5vw, 5.5rem);
+  --step-display: clamp(4rem, 2rem + 10vw, 10rem);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+* {
+  margin: 0;
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-text), Georgia, serif;
+  font-size: var(--step-body);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-family: var(--font-display), Impact, sans-serif;
+  font-size: var(--step-head);
+  font-weight: 400;
+  line-height: 1;
+  text-transform: uppercase;
+  text-wrap: balance;
+}
+
+p {
+  text-wrap: pretty;
+}
+
+a {
+  color: inherit;
+  text-underline-offset: 0.2em;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+button {
+  min-height: 44px;
+  border: 0;
+  border-radius: 0;
+  background: var(--accent);
+  color: var(--accent-ink);
+  cursor: pointer;
+}
+
+img,
+picture,
+video,
+canvas,
+svg {
+  display: block;
+  max-width: 100%;
+}
+
+pre,
+code {
+  font-family: var(--font-code), monospace;
+  font-size: var(--step-small);
+}
+
+pre {
+  overflow-x: auto;
+}
+
+:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 4px;
+}
+
+::selection {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.container {
+  width: min(80rem, calc(100% - 2 * clamp(1rem, 4vw, 4rem)));
+  margin-inline: auto;
+}
+
+main {
+  padding-block: 3rem;
+}
+
+.skip-link {
+  position: absolute;
+  top: 1rem;
+  left: 1rem;
+  z-index: 10;
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  padding: 0.5rem 1rem;
+  background: var(--accent);
+  color: var(--accent-ink);
+  transform: translateY(calc(-100% - 2rem));
+}
+
+.skip-link:focus {
+  transform: translateY(0);
+}
+
+.js [data-reveal] {
+  opacity: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  .js [data-reveal] {
+    opacity: 1;
+    transform: none;
+  }
+}
