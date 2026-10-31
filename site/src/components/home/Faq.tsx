@@ -1,16 +1,26 @@
 import Reveal from "@/components/Reveal";
-import { HOME_FAQ } from "@/content/faq";
+import { HOME_FAQ, type Qa } from "@/content/faq";
 import styles from "./Faq.module.css";
 
-export default function Faq() {
+type FaqProps = {
+  items?: Qa[];
+  heading?: string;
+  id?: string;
+};
+
+export default function Faq({
+  items = HOME_FAQ,
+  heading = "Questions",
+  id = "faq-title",
+}: FaqProps) {
   return (
-    <section className={`bleed ${styles.faq}`} aria-labelledby="faq-title">
+    <section className={`bleed ${styles.faq}`} aria-labelledby={id}>
       <Reveal className={styles.head}>
-        <h2 id="faq-title" className={styles.title}>
-          Questions
+        <h2 id={id} className={styles.title}>
+          {heading}
         </h2>
       </Reveal>
-      {HOME_FAQ.map(({ q, a }, i) => (
+      {items.map(({ q, a }, i) => (
         <div key={q} className={styles.pair}>
           <Reveal delay={0.06 * (i % 2)} className={styles.q}>
             <h3 className={styles.question}>{q}</h3>
