@@ -1,5 +1,6 @@
 "use client";
 
+import type { Transition } from "motion/react";
 import { useEffect, useRef, useState } from "react";
 import Swap from "@/components/Swap";
 import { INSTALL_CMD } from "@/lib/site";
@@ -10,18 +11,24 @@ type CopyCommandProps = {
   id?: string;
   label?: string;
   // "bone" sets the button in oxide ink for a bone field, so the accent stays the page's one action.
-  tone?: "accent" | "bone";
+  // "ink" sets the button in bone on a dark panel, for a list of commands under one accent action.
+  tone?: "accent" | "bone" | "ink";
+  // The label swap. Defaults to Swap's own.
+  swap?: { transition: Transition; rise: number };
 };
 
 type Status = "idle" | "copied" | "selected";
 
 const RESET_MS = 2000;
 
+const BUTTON_TONE = { accent: "button--accent", bone: "button--field", ink: "button--ink" } as const;
+
 export default function CopyCommand({
   command = INSTALL_CMD,
   id,
   label = "Copy",
   tone = "accent",
+  swap,
 }: CopyCommandProps) {
   const [status, setStatus] = useState<Status>("idle");
   const codeRef = useRef<HTMLElement>(null);
@@ -61,7 +68,7 @@ export default function CopyCommand({
       </pre>
       <button
         type="button"
-        className={`button ${tone === "bone" ? "button--field" : "button--accent"} ${styles.action}`}
+        className={`button ${BUTTON_TONE[tone]} ${styles.action}`}
         onClick={copy}
         data-status={status}
       >
@@ -75,7 +82,7 @@ export default function CopyCommand({
               {text}
             </span>
           ))}
-          <Swap value={shown} className={styles.shown} mode="sync" />
+          <Swap value={shown} className={styles.shown} mode="sync" {...swap} />
         </span>
       </button>
       <span className="visually-hidden" role="status">

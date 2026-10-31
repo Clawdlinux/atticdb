@@ -24,6 +24,23 @@ export const SWAP_RISE = 8;
 export const TAP = { scale: 0.96 } as const;
 export const HOVER = { scale: 1.03 } as const;
 
+/*
+ * The installer's set: rigid, corporate, no overshoot. Its own curve, cubic-bezier(0.2, 0, 0, 1).
+ * Durations: quick 120 ms, standard 240 ms, slow 480 ms. Exits run 160 ms.
+ * The step cascade waits 40 ms a step and stops at 160 ms, so it stays under 200 ms.
+ */
+export const INSTALL_EASE = [0.2, 0, 0, 1] as const;
+export const INSTALL = {
+  quick: { duration: 0.12, ease: INSTALL_EASE },
+  standard: { duration: 0.24, ease: INSTALL_EASE },
+  slow: { duration: 0.48, ease: INSTALL_EASE },
+  exit: { duration: 0.16, ease: INSTALL_EASE },
+  instant: { duration: 0 },
+  risePx: 6,
+  stagger: 0.04,
+  staggerMax: 0.16,
+} as const;
+
 export type RevealWindow = Window & { __reveal?: (el: Element) => () => void };
 
 /*

@@ -59,11 +59,15 @@ describe("home page", () => {
     }
   });
 
-  it("anchors #install on the closing call's install command, once", () => {
+  it("anchors #install once, on the installer section right after How it works", () => {
     const { container } = render(<Home />);
     const anchors = container.querySelectorAll("#install");
     expect(anchors).toHaveLength(1);
-    expect(within(anchors[0] as HTMLElement).getByText(INSTALL_CMD).tagName).toBe("CODE");
+    const section = anchors[0] as HTMLElement;
+    expect(section.tagName).toBe("SECTION");
+    expect(within(section).getByRole("heading", { level: 2, name: "Install it your way" })).toBeInTheDocument();
+    expect(within(section).getByText(INSTALL_CMD).tagName).toBe("CODE");
+    expect(section.previousElementSibling?.querySelector("#how-title")).not.toBeNull();
     expect(screen.getByRole("link", { name: "Star on GitHub" })).toHaveAttribute(
       "href",
       GITHUB_URL,

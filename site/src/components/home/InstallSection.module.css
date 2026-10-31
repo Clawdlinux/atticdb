@@ -1,0 +1,37 @@
+/* "Controls beside a terminal": the choices on bone, the commands in an oxide panel. */
+.install {
+  padding-block: var(--space-section);
+  background: var(--field-1);
+  color: var(--field-1-ink);
+  /* The installer's colours, retinted for the bone field. */
+  --installer-tile: color-mix(in srgb, var(--field-1-ink) 9%, var(--field-1));
+  --installer-tile-ink: var(--field-1-ink);
+  --installer-tile-fill: var(--field-1-ink);
+  --installer-tile-fill-ink: var(--field-1);
+  --installer-legend: color-mix(in srgb, var(--field-1-ink) 62%, var(--field-1));
+  --installer-focus: var(--field-1-ink);
+  --installer-panel: var(--bg);
+}
+
+.head {
+  display: grid;
+  gap: 1rem;
+  margin-bottom: 2.5rem;
+}
+
+/* Same treatment as the other bone headings: --step-head in the soft ink. */
+.title {
+  color: color-mix(in srgb, var(--field-1-ink) 62%, var(--field-1));
+}
+
+.lead {
+  max-width: 40ch;
+  font-size: var(--step-lead);
+  line-height: 1.3;
+}
+
+@media (min-width: 64rem) {
+  .head {
+    margin-bottom: 3.5rem;
+  }
+}

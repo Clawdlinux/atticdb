@@ -42,7 +42,7 @@ export default function ClosingCta() {
 
         <Reveal delay={0.225} className={styles.choice}>
           <div className={styles.install}>
-            <CopyCommand id="install" label="Install AtticDB" />
+            <CopyCommand label="Install AtticDB" />
           </div>
           <span className={styles.or}>or</span>
           <a className={`button button--ink ${styles.star}`} href={GITHUB_URL}>

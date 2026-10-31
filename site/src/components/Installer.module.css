@@ -1,0 +1,241 @@
+/*
+ * Controls on the left, the steps in a terminal-like panel on the right.
+ * A parent can retint it with the --installer-* properties. The fallbacks suit the dark page.
+ */
+.installer {
+  display: grid;
+  gap: 2rem;
+  align-items: start;
+}
+
+.installer :focus-visible {
+  outline-color: var(--installer-focus, var(--accent));
+}
+
+.controls {
+  display: grid;
+  gap: 1.5rem;
+}
+
+.group {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+}
+
+.legend {
+  margin-bottom: 0.5rem;
+  padding: 0;
+  color: var(--installer-legend, var(--muted));
+  font-size: var(--step-small);
+}
+
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(var(--cols, 1), minmax(0, 1fr));
+  gap: 4px;
+}
+
+.tiles[data-count="2"] {
+  --cols: 2;
+}
+
+.tiles[data-count="3"] {
+  --cols: 3;
+}
+
+.tile {
+  position: relative;
+  display: flex;
+  min-height: 44px;
+  background: var(--installer-tile, var(--surface));
+  color: var(--installer-tile-ink, var(--ink));
+  cursor: pointer;
+}
+
+/* The real input covers the tile, so the whole tile is the target and keeps native keys. */
+.input {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.tile:has(.input:focus-visible) {
+  outline: 3px solid var(--installer-focus, var(--accent));
+  outline-offset: 2px;
+}
+
+/* The radio fill: one block that slides to the picked tile. */
+.fill {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  background: var(--installer-tile-fill, var(--ink));
+}
+
+/* The checkbox fill fades, at the quick step. */
+.boxFill {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  background: var(--installer-tile-fill, var(--ink));
+  opacity: 0;
+  transition: opacity 120ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+.input:checked ~ .boxFill {
+  opacity: 1;
+}
+
+.text {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 0.625rem;
+  padding: 0.5rem 0.75rem;
+  line-height: 1.2;
+}
+
+/* The words flip once the sliding fill is half way under them. */
+.input:checked ~ .text {
+  color: var(--installer-tile-fill-ink, var(--bg));
+  transition: color 0s linear 120ms;
+}
+
+.check .input:checked ~ .text {
+  transition: none;
+}
+
+/* A solid square says "pick any". It goes from faint to full. */
+.mark {
+  flex: none;
+  width: 0.75rem;
+  height: 0.75rem;
+  background: currentColor;
+  opacity: 0.3;
+}
+
+.input:checked ~ .text .mark {
+  opacity: 1;
+}
+
+.panel {
+  --installer-focus: var(--ink);
+  min-width: 0;
+  padding: 1rem;
+  background: var(--installer-panel, var(--surface));
+  color: var(--ink);
+}
+
+.steps {
+  display: grid;
+  gap: 1.5rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.step {
+  display: grid;
+  gap: 0.625rem;
+  min-width: 0;
+}
+
+.say {
+  max-width: 60ch;
+}
+
+.say a {
+  text-decoration: underline;
+}
+
+.commands {
+  display: grid;
+  gap: 4px;
+}
+
+/* The old and the new command share one cell while they swap. */
+.cell {
+  display: grid;
+  min-width: 0;
+}
+
+.line {
+  grid-area: 1 / 1;
+  min-width: 0;
+}
+
+/* Long commands break at a space first. A URL splits only when it can't fit on its own line. */
+.line pre {
+  word-break: normal;
+  overflow-wrap: anywhere;
+}
+
+.foot {
+  display: grid;
+  justify-items: start;
+  gap: 1rem;
+  margin-top: 1.75rem;
+}
+
+.copyAll {
+  min-width: 8rem;
+}
+
+.labels {
+  display: grid;
+  overflow: hidden;
+}
+
+.labels > span {
+  grid-area: 1 / 1;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.sizer {
+  visibility: hidden;
+}
+
+.shown {
+  display: block;
+}
+
+.notes {
+  display: grid;
+  gap: 0.25rem;
+  margin: 0;
+  padding: 0;
+  color: var(--muted);
+  font-size: var(--step-small);
+  list-style: none;
+}
+
+@media (min-width: 64rem) {
+  .installer {
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+    column-gap: 2rem;
+  }
+
+  .controls {
+    grid-column: 1 / 5;
+  }
+
+  .panel {
+    grid-column: 5 / 13;
+    padding: 1.75rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .input:checked ~ .text {
+    transition: none;
+  }
+}
