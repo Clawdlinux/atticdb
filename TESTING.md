@@ -129,6 +129,8 @@ The `install-smoke` workflow tests the live release on fresh Linux and macOS run
 Its Windows job downloads the release's zip, checks it against `SHA256SUMS` and runs the same first-use checks in PowerShell.
 Only v0.1.0, which predates Windows support, may skip that job. A later release without the zip fails it.
 
+The `badges` workflow counts each install-smoke run's archive downloads in `ci-installs.tsv` on the `badges` branch. It subtracts them from the release totals for the README downloads badge.
+
 ## Before adding a test
 
 Look for an existing scenario that already drives the path. Extend it. If you add a test, check whether two old ones can now merge.

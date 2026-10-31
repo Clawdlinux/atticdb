@@ -1,5 +1,7 @@
 # AtticDB
 
+[![Downloads](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FClawdlinux%2Fatticdb%2Fbadges%2Fdownloads.json)](https://github.com/Clawdlinux/atticdb/releases)
+
 Agent memory database in Rust. It stores turn history per session and keyed facts. A write is acked only after it is synced to disk.
 Status: early. Don't run it in production. Built so far: the tape, session engine, disk-full handling, server and facts (S1 to S4).
 
@@ -43,6 +45,8 @@ atticdb setup
 ```
 
 `install.sh` doesn't run on Windows.
+
+The downloads badge counts release archive downloads. Our own install tests are left out. A daily workflow updates it.
 
 From source, with Rust installed:
 
