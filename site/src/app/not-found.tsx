@@ -4,6 +4,7 @@ import Link from "next/link";
 import Reveal from "@/components/Reveal";
 import { creditFor } from "@/content/credits";
 import { STAGGER } from "@/lib/motion";
+import { siteHref } from "@/lib/site";
 import styles from "./not-found.module.css";
 
 export const metadata: Metadata = {
@@ -55,7 +56,7 @@ export default function NotFound() {
         </span>
       </h1>
       <p className={styles.lead}>That page isn&apos;t here. It may have moved, or it never existed.</p>
-      <Link className={`button button--accent ${styles.home}`} href="/">
+      <Link className={`button button--accent ${styles.home}`} href={siteHref("/")}>
         Back to the home page
       </Link>
 

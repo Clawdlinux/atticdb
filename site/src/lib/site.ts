@@ -14,3 +14,7 @@ export function absoluteUrl(path: string): string {
   const clean = path.replace(/^\/+|\/+$/g, "");
   return clean ? `${SITE_URL}/${clean}` : SITE_URL;
 }
+
+export function siteHref(path: string, base = process.env.SITE_BASE ?? ""): string {
+  return base + path;
+}

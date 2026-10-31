@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { CREDITS } from "@/content/credits";
-import { DOCS_URL, GITHUB_URL } from "@/lib/site";
+import { DOCS_URL, GITHUB_URL, siteHref } from "@/lib/site";
 import styles from "./SiteFooter.module.css";
 
 const LINKS = [
@@ -38,7 +38,7 @@ export default function SiteFooter() {
               {LINKS.map(({ label, href }) => (
                 <li key={label}>
                   {href.startsWith("/") ? (
-                    <Link href={href}>{label}</Link>
+                    <Link href={siteHref(href)}>{label}</Link>
                   ) : (
                     <a href={href}>{label}</a>
                   )}

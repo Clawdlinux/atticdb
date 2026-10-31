@@ -1,6 +1,6 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import NotFound, { metadata as notFoundMetadata } from "@/app/not-found";
 import robots from "@/app/robots";
 import sitemap from "@/app/sitemap";
@@ -117,6 +117,7 @@ describe("structured data", () => {
 
 
 describe("static discovery routes", () => {
+  afterEach(() => vi.unstubAllEnvs());
   it("lists only the 4 public canonical URLs in the sitemap", () => {
     expect(sitemap().map(({ url }) => url)).toEqual([
       "https://atticdb.com",
@@ -139,7 +140,8 @@ describe("static discovery routes", () => {
     expect(notFoundMetadata.openGraph).toBeNull();
   });
 
-  it("renders an accessible 404 heading and a home link without JavaScript", () => {
+  it.each(["", "https://atticdb.com"])("renders an accessible 404 with home base %j without JavaScript", (base) => {
+    vi.stubEnv("SITE_BASE", base);
     const html = renderToStaticMarkup(createElement(NotFound));
     const document = new DOMParser().parseFromString(html, "text/html");
     expect(document.querySelectorAll("h1")).toHaveLength(1);
@@ -147,7 +149,7 @@ describe("static discovery routes", () => {
     expect(document.querySelector("p")?.textContent).toBe(
       "That page isn't here. It may have moved, or it never existed.",
     );
-    expect(document.querySelector("a")?.getAttribute("href")).toBe("/");
+    expect(document.querySelector("a")?.getAttribute("href")).toBe(`${base}/`);
     expect(document.querySelector("a")?.textContent).toBe("Back to the home page");
   });
 });

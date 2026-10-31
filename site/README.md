@@ -33,24 +33,53 @@ npx serve out
 
 Open the address printed by `serve`. Its clean URLs map `/pricing` to `pricing.html`.
 Stop the server with Ctrl+C.
-The preview does not apply Cloudflare's `_headers` rules.
+The preview does not apply Vercel's host rules or security headers.
+Docs are available at `/docs` locally.
 
 ## Deploy
 
-Build and test first. Then run:
+Use the Vercel CLI with project `atticdb-site`. Its root is `site/`.
+Build and test first. Start from the repository root:
 
 ```sh
-npx wrangler login
-npx wrangler pages deploy out --project-name atticdb-site
+cd site
+vercel link --project atticdb-site
+vercel deploy
+vercel deploy --prod
+vercel domains add atticdb.com atticdb-site
+vercel domains add www.atticdb.com atticdb-site
+vercel domains add docs.atticdb.com atticdb-site
 ```
 
-Create the `atticdb-site` Pages project if Wrangler prompts you.
-Add `atticdb.com` and `www.atticdb.com` as custom domains in that Pages project.
-Set a Cloudflare redirect from `www.atticdb.com` to `atticdb.com`. Preserve the path and query string.
-`wrangler.toml` points Pages at `out/`.
+`vercel.json` builds with `npm run build` and serves `out/` without a framework runtime.
+The same build serves the main site and docs.
+`www.atticdb.com` redirects to `atticdb.com`.
+The main domains redirect `/docs` and `/docs/*` to `docs.atticdb.com`.
+Host rules serve docs at that host's root, with its own sitemap and robots file.
+Shared navigation links return to `https://atticdb.com` on Vercel builds.
 
-`public/_headers` sets the CSP and security headers. Hashed assets under `/_next/static/` receive immutable caching.
-Inline scripts and styles are allowed because Next.js exports them. Fonts and images are hosted locally.
+### Cloudflare DNS
+
+Keep DNS on Cloudflare. Set all 3 records to **DNS only**, without the proxy.
+Vercel issues the certificates.
+
+| Type | Name | Content | Proxy |
+| --- | --- | --- | --- |
+| A | @ | 76.76.21.21 | DNS only |
+| CNAME | www | cname.vercel-dns.com | DNS only |
+| CNAME | docs | cname.vercel-dns.com | DNS only |
+
+Wrangler can't write DNS because its OAuth scopes stop at `zone:read`.
+Create a Cloudflare API token with Zone DNS Edit for `atticdb.com`.
+Save the token outside the repository. Never commit it.
+From the repository root, run `scripts/cf-dns.sh <token-file>` to create these records through the Cloudflare API.
+
+### Headers
+
+`vercel.json` sets the CSP and security headers.
+Hashed assets under `/_next/static/` receive immutable caching.
+Inline scripts and styles are allowed because Next.js exports them.
+Fonts and images are hosted locally.
 
 ## CI
 

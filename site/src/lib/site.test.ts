@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { absoluteUrl, DOCS_ORIGIN, DOCS_URL, INSTALL_CMD, WAITLIST_URL, VPC_URL } from "@/lib/site";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { absoluteUrl, siteHref, DOCS_ORIGIN, DOCS_URL, INSTALL_CMD, WAITLIST_URL, VPC_URL } from "@/lib/site";
 
 describe("absoluteUrl", () => {
   it.each([
@@ -35,5 +35,31 @@ describe("site links", () => {
     expect(VPC_URL).toBe(
       "https://github.com/Clawdlinux/atticdb/issues/new?template=feature.yml&title=Cloud%20in%20my%20VPC%3A%20",
     );
+  });
+});
+
+describe("siteHref", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it.each([
+    ["/", "", "/"],
+    ["/pricing", "", "/pricing"],
+    ["/#install", "", "/#install"],
+    ["/", "https://atticdb.com", "https://atticdb.com/"],
+    ["/pricing", "https://atticdb.com", "https://atticdb.com/pricing"],
+    ["/#install", "https://atticdb.com", "https://atticdb.com/#install"],
+  ])("joins %s to base %j", (path, base, expected) => {
+    expect(siteHref(path, base)).toBe(expected);
+  });
+
+  it("defaults to relative links outside Vercel", () => {
+    vi.stubEnv("SITE_BASE", undefined);
+    expect(siteHref("/pricing")).toBe("/pricing");
+  });
+
+  it("uses the configured main origin by default", () => {
+    vi.stubEnv("SITE_BASE", "https://atticdb.com");
+    expect(siteHref("/pricing")).toBe("https://atticdb.com/pricing");
+    expect(siteHref("/pricing", "")).toBe("/pricing");
   });
 });
