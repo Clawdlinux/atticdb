@@ -171,7 +171,7 @@ fn tool_calls_over_stdio() {
     let names: Vec<&str> =
         tools.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
     let five = ["memory_append", "memory_recent", "fact_set", "fact_get", "fact_list"];
-    assert_eq!(names, [&five[..], &["memory_search"]].concat());
+    assert_eq!(names, [&five[..], &["memory_search", "file_ref", "file_get"]].concat());
     assert_eq!(tools[5]["inputSchema"]["required"], json!(["query"]));
     // VS Code runs read-only tools without a confirmation prompt.
     let read_only: Vec<bool> = tools
@@ -180,7 +180,9 @@ fn tool_calls_over_stdio() {
         .iter()
         .map(|t| t["annotations"]["readOnlyHint"] == true)
         .collect();
-    assert_eq!(read_only, [false, true, false, true, true, true]);
+    assert_eq!(read_only, [false, true, false, true, true, true, false, true]);
+    assert_eq!(tools[6]["inputSchema"]["required"], json!(["path", "about"]));
+    assert_eq!(tools[6]["annotations"]["destructiveHint"], false, "file_ref keeps versions");
     assert_eq!(tools[2]["annotations"]["destructiveHint"], true, "fact_set replaces and deletes");
     let (set, get, list) =
         (&tools[2]["inputSchema"], &tools[3]["inputSchema"], &tools[4]["inputSchema"]);
@@ -522,6 +524,108 @@ fn tool_calls_over_stdio() {
     }
     let (_, lost) = running.vias[1].a("GET", "/v1/window?agent=mcp&session=lost&last=9", None);
     assert_eq!(lost["turns"], json!([]), "nothing sent under 2 s");
+}
+
+/// A file ref keeps each version of a path on the facts index, and reads report whether the
+/// file on disk is still the saved one.
+#[test]
+fn file_refs_keep_versions() {
+    let dir = Dir::new();
+    let running = support::serve(support::sim_engine(&SimDisk::new(4), |_| {}), &dir, 8);
+    let url = format!("http://{}", running.server.tcp_addr().unwrap());
+    let token = private_file(&dir, "t", TOKEN_A);
+    let args = ["--url", &url, "--token-file", &token, "--agent", "ag", "--session", "s1"];
+    let mut mcp = Mcp::start(&dir.0, &args, None);
+    mcp.handshake();
+
+    let shots = dir.0.join("shots ü");
+    std::fs::create_dir(&shots).unwrap();
+    let file = shots.join("shot 1.png");
+    std::fs::write(&file, b"first image").unwrap();
+    let path = file.to_str().unwrap();
+    let key = format!("file{}", std::fs::canonicalize(&file).unwrap().to_str().unwrap());
+    let hash = |bytes: &[u8]| blake3::hash(bytes).to_hex().to_string();
+
+    let saved = mcp.call("file_ref", json!({"path": path, "about": "login page, dark mode"}));
+    let first = &saved["structuredContent"];
+    assert_eq!((&first["key"], &first["unchanged"]), (&json!(key), &json!(false)), "{saved}");
+    assert_eq!(first["blake3"], hash(b"first image"));
+    let first_lsn = first["lsn"].as_u64().unwrap();
+    let again = mcp.call("file_ref", json!({"path": path, "about": "login page, dark mode"}));
+    assert_eq!(again["structuredContent"]["unchanged"], true, "same bytes and about: {again}");
+    assert_eq!(again["structuredContent"]["lsn"], first_lsn, "nothing written");
+
+    // Touched, not edited: the hash still matches.
+    let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+    std::fs::File::options().write(true).open(&file).unwrap().set_modified(later).unwrap();
+    let got = mcp.call("file_get", json!({"path": path}));
+    assert_eq!(got["structuredContent"]["ref"]["status"], "ok", "{got}");
+    assert_eq!(got["structuredContent"]["ref"]["about"], "login page, dark mode");
+    let meta = &got["structuredContent"]["ref"]["file"];
+    assert_eq!((&meta["bytes"], &meta["mime"]), (&json!(11), &json!("image/png")));
+
+    std::fs::write(&file, b"second image, wider").unwrap();
+    let edited = mcp.call("file_get", json!({"path": path}));
+    assert_eq!(edited["structuredContent"]["ref"]["status"], "changed");
+    let saved = mcp.call("file_ref", json!({"path": path, "about": "login page, light mode"}));
+    let second_lsn = saved["structuredContent"]["lsn"].as_u64().unwrap();
+    assert!(second_lsn > first_lsn);
+    let versions = mcp.call("file_get", json!({"path": path, "versions": true}));
+    let content = &versions["structuredContent"];
+    let list = content["versions"].as_array().unwrap();
+    let lsns: Vec<u64> = list.iter().map(|v| v["lsn"].as_u64().unwrap()).collect();
+    assert_eq!(lsns, [second_lsn, first_lsn], "newest first: {versions}");
+    assert_eq!(list[1]["blake3"], hash(b"first image"));
+    assert_eq!(list[1]["about"], "login page, dark mode");
+    assert_eq!(content["on_disk"], second_lsn);
+    assert_eq!(content["ref"]["status"], "ok");
+
+    let found = mcp.call("memory_search", json!({"query": "light"}));
+    assert_eq!(text(&found), format!("[fact {key}] login page, light mode"));
+    let folder = mcp.call("file_get", json!({"path": shots.to_str().unwrap()}));
+    let refs = folder["structuredContent"]["refs"].as_array().unwrap();
+    assert_eq!((refs.len(), &refs[0]["key"], &refs[0]["status"]), (1, &json!(key), &json!("ok")));
+
+    std::fs::remove_file(&file).unwrap();
+    let gone = mcp.call("file_get", json!({"path": path, "versions": true}));
+    let content = &gone["structuredContent"];
+    assert_eq!(content["ref"]["status"], "missing", "{gone}");
+    assert_eq!(
+        (content["versions"].as_array().unwrap().len(), &content["on_disk"]),
+        (2, &Value::Null)
+    );
+
+    // A 1021-byte path: its key, `file` and the path, is 1025 bytes. macOS caps paths at 1024.
+    let mut deep = std::fs::canonicalize(&shots).unwrap();
+    loop {
+        let left = 1021 - deep.as_os_str().len();
+        if left <= 201 {
+            deep = deep.join("z".repeat(left - 1));
+            break;
+        }
+        deep = deep.join("y".repeat(199));
+        std::fs::create_dir(&deep).unwrap();
+    }
+    std::fs::write(&deep, b"z").unwrap();
+    let missing = dir.0.join("nope.png");
+    for (case, args, expect) in [
+        ("missing file", json!({"path": missing, "about": "x"}), "path not found"),
+        ("folder", json!({"path": shots, "about": "x"}), "path must be a file"),
+        ("empty about", json!({"path": deep, "about": " "}), "about is required"),
+        ("no path", json!({"about": "x"}), "path is required"),
+        (
+            "long key",
+            json!({"path": deep, "about": "x"}),
+            "path is too long: its key is over 1024 bytes",
+        ),
+    ] {
+        let rejected = mcp.call("file_ref", args);
+        assert_eq!(rejected["isError"], true, "{case}: {rejected}");
+        assert!(text(&rejected).starts_with(expect), "{case}: {rejected}");
+    }
+    let page = mcp.call("fact_list", json!({"prefix": "file/"}));
+    assert_eq!(page["structuredContent"]["facts"].as_array().unwrap().len(), 1, "nothing else");
+    assert_eq!(mcp.close().0.code(), Some(0));
 }
 
 /// Adapters find or start one server, and send the token only to a server they trust.
