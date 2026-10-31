@@ -31,6 +31,9 @@ const FIRST_BACKOFF: Duration = Duration::from_millis(100);
 const MAX_BACKOFF: Duration = Duration::from_secs(2);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const POLL: Duration = Duration::from_millis(10);
+/// Longest TCP connect in discovery. Windows takes about 2 s to report a refused one.
+#[cfg(any(windows, test))]
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Why a `unix://` URL fails where there is no Unix socket.
 #[cfg(windows)]
 const NO_UNIX: &str =
@@ -474,11 +477,12 @@ pub(crate) fn discover_tcp(
     if addr.ip() != Ipv4Addr::LOCALHOST && addr.ip() != Ipv6Addr::LOCALHOST {
         return Err(Refusal::Untrusted(format!("LOCK names {addr}, not 127.0.0.1 or [::1]")));
     }
-    // Nothing listening is a stale `LOCK`. A server listens before it writes `LOCK`.
-    let idle = [ErrorKind::ConnectionRefused];
+    // Nothing listening is a stale `LOCK`. A server listens before it writes `LOCK`. Windows
+    // retries a refused loopback connect for about 2 s, so a timeout counts as refused too.
+    let idle = [ErrorKind::ConnectionRefused, ErrorKind::TimedOut];
     let fail = |error: &io::Error| format!("{addr}: {error}");
     let mut stream = http::remaining(deadline)
-        .and_then(|left| TcpStream::connect_timeout(&addr, left.min(PROBE_TIMEOUT)))
+        .and_then(|left| TcpStream::connect_timeout(&addr, left.min(CONNECT_TIMEOUT)))
         .map_err(|e| Refusal::of(&e, &idle, fail(&e)))?;
     let _ = stream.set_nodelay(true);
     let nonce = crate::random_hex(crate::auth::NONCE_BYTES)
