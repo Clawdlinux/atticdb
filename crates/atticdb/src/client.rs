@@ -1,8 +1,8 @@
-//! The 1 client of the server's HTTP memory API. It runs the 6 operations:
+//! The client side of the server's HTTP memory API. It runs the 6 operations:
 //! `memory_append`, `memory_recent`, `memory_search`, `fact_set`, `fact_get` and `fact_list`.
 //! Each one checks its arguments, hides secrets in writes, sends the request with retries,
-//! and shapes the result. The MCP adapter, the shell verbs, the session-start hook and the
-//! studio all reach the store through here.
+//! and shapes the result. The MCP adapter, the shell verbs and the session-start hook use it.
+//! The studio uses it only to find the store and token, then sends its own reads.
 
 use crate::config::{read_token_file, Config, Token};
 use crate::launch::{Launch, Url};

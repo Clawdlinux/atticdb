@@ -3,10 +3,11 @@
 The server binary. HTTP/JSON over loopback TCP and a Unix socket, with the same token auth on both.
 `atticdb mcp` is a stdio MCP adapter that talks to it.
 
-The server has 1 HTTP API. `src/client.rs` is its 1 Rust client.
+The server has 1 HTTP API. `src/client.rs` runs its 6 memory operations.
 It checks arguments, hides secrets in writes, retries and shapes results.
-`atticdb mcp`, the shell verbs, the session-start hook and `atticdb studio` are thin wrappers over it.
-The [Python client](../../clients/python/README.md) calls the HTTP API directly.
+`atticdb mcp`, the shell verbs and the session-start hook are thin wrappers over it.
+`atticdb studio` uses it only to find the store and token, then sends its own read requests.
+`atticdb load` and the [Python client](../../clients/python/README.md) call the HTTP API directly.
 
 ```sh
 atticdb init --config atticdb.json --tenant me     # writes a 0600 config, prints the token once
