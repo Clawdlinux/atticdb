@@ -5,7 +5,7 @@
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 [![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)](#where-to-run-it)
 
-AtticDB is local, durable, fsync'd memory for coding agents: an agent memory database in Rust.
+AtticDB is local, durable memory for coding agents, written in Rust.
 It stores turn history per session and keyed facts. A write is acked only after it is synced to disk.
 It wires into Copilot CLI, VS Code, Claude Code and Codex with 1 command.
 
