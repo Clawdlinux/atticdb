@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { absoluteUrl, DOCS_URL, INSTALL_CMD, WAITLIST_URL, VPC_URL } from "@/lib/site";
+import { absoluteUrl, DOCS_ORIGIN, DOCS_URL, INSTALL_CMD, WAITLIST_URL, VPC_URL } from "@/lib/site";
 
 describe("absoluteUrl", () => {
   it.each([
@@ -26,8 +26,9 @@ describe("site links", () => {
     );
   });
 
-  it("points the docs link at the README", () => {
-    expect(DOCS_URL).toBe("https://github.com/Clawdlinux/atticdb#readme");
+  it("points the docs link at the docs host", () => {
+    expect(DOCS_URL).toBe("https://docs.atticdb.com");
+    expect(DOCS_ORIGIN).toBe("https://docs.atticdb.com");
   });
 
   it("opens the VPC request issue", () => {

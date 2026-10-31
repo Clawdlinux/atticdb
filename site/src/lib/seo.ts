@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { docCanonical, findDoc } from "@/content/docs";
 import type { Qa } from "@/content/faq";
 import { absoluteUrl, GITHUB_URL, SITE_URL } from "@/lib/site";
 
@@ -31,6 +32,13 @@ export const PAGES: { path: PagePath; title: string; description: string }[] = [
   },
 ];
 
+const OG_IMAGE = {
+  url: "/og.png",
+  width: 1200,
+  height: 630,
+  alt: "AtticDB: memory that hits the disk. Acked 94 µs.",
+};
+
 export function pageMetadata(path: PagePath): Metadata {
   const page = PAGES.find((page) => page.path === path);
   if (!page) throw new Error(`No metadata for ${path}`);
@@ -45,12 +53,36 @@ export function pageMetadata(path: PagePath): Metadata {
       description,
       url: absoluteUrl(path),
       siteName: "AtticDB",
-      images: [{
-        url: "/og.png",
-        width: 1200,
-        height: 630,
-        alt: "AtticDB: memory that hits the disk. Acked 94 µs.",
-      }],
+      images: [OG_IMAGE],
+      type: "website",
+    },
+    twitter: {
+      card: "summary_large_image",
+      title,
+      description,
+      images: ["/og.png"],
+    },
+  };
+}
+
+// Docs pages live on their own host, so the canonical and og:url point there.
+export function docMetadata(slug: string): Metadata {
+  const page = findDoc(slug);
+  if (!page) throw new Error(`No docs page for ${JSON.stringify(slug)}`);
+  const title = `${page.title} · AtticDB docs`;
+  const { description } = page;
+  const url = docCanonical(slug);
+
+  return {
+    title: { absolute: title },
+    description,
+    alternates: { canonical: url },
+    openGraph: {
+      title,
+      description,
+      url,
+      siteName: "AtticDB",
+      images: [OG_IMAGE],
       type: "website",
     },
     twitter: {

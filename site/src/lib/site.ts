@@ -1,6 +1,7 @@
 export const SITE_URL = "https://atticdb.com";
 export const GITHUB_URL = "https://github.com/Clawdlinux/atticdb";
-export const DOCS_URL = GITHUB_URL + "#readme";
+export const DOCS_ORIGIN = "https://docs.atticdb.com";
+export const DOCS_URL = DOCS_ORIGIN;
 export const INSTALL_CMD =
   "curl -fsSL https://github.com/Clawdlinux/atticdb/releases/latest/download/install.sh | sh";
 export const WAITLIST_URL =
