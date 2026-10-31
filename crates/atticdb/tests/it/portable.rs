@@ -315,7 +315,7 @@ fn verify_respects_the_server_lock() {
 mod windows {
     use super::{atticdb, locked, run, wait, Dir, Servers};
     use serde_json::{json, Value};
-    use std::io::{Read, Write};
+    use std::io::{BufRead, BufReader, Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::path::Path;
     use std::process::Stdio;
@@ -547,15 +547,24 @@ mod windows {
         let mut serve = atticdb(&dir.0, &[]);
         serve.args(["serve", "--config", config.to_str().unwrap(), "--data-dir"]);
         serve.args([data.to_str().unwrap(), "--listen", "127.0.0.1:0"]);
-        serve.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        serve.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
         let mut child = serve.spawn().unwrap();
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while !(locked(&data)
-            && std::fs::read_to_string(data.join("LOCK")).is_ok_and(|l| l.contains(" tcp=")))
-        {
-            assert!(Instant::now() < deadline, "the server did not start");
-            assert!(matches!(child.try_wait(), Ok(None)), "the server exited");
-            std::thread::sleep(Duration::from_millis(20));
+        // Its engine is open once it prints the serving line.
+        let (sender, lines) = std::sync::mpsc::channel();
+        let stderr = BufReader::new(child.stderr.take().unwrap());
+        std::thread::spawn(move || {
+            for line in stderr.lines().map_while(Result::ok) {
+                let _ = sender.send(line);
+            }
+        });
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let line =
+                lines.recv_timeout(left).unwrap_or_else(|_| panic!("the server did not start"));
+            if line.starts_with("atticdb: serving ") {
+                break;
+            }
         }
         let (code, out, err) = append_to(&dir, &data, &token(99));
         assert_eq!(code, Some(0), "{out}{err}");

@@ -273,6 +273,11 @@ impl StoreFlags {
         let config_path = config.map(std::path::absolute).transpose();
         let config_path = config_path.map_err(|error| format!("--config: {error}"))?;
         let config_path = config_path.or_else(|| home.as_ref().map(|home| home.config.clone()));
+        // Someone who can write there could pick the token, or name a server of theirs.
+        #[cfg(windows)]
+        if let Some(path) = &config_path {
+            crate::platform::check_in_profile(path, "config")?;
+        }
         let config = config_path.as_deref().map(Config::load).transpose()?;
         // Absolute against this folder, as a started server runs in `/`.
         let unix_socket = config.as_ref().and_then(|config| config.unix_socket.as_deref());
@@ -301,15 +306,13 @@ impl StoreFlags {
         let data_dir = data_dir.or(home.map(|home| home.data_dir));
         let data_dir = data_dir.or_else(|| config.and_then(|config| config.data_dir));
         let data_dir = data_dir.map(std::path::absolute).transpose().map_err(|e| e.to_string())?;
-        if url.is_none() && data_dir.is_none() {
-            return Err("set --url, or --data-dir or a config with data_dir".into());
-        }
         // Someone who can write there could name a server of theirs in `LOCK`.
         #[cfg(windows)]
-        for (path, what) in [(&config_path, "config"), (&data_dir, "data dir")] {
-            if let Some(path) = path {
-                crate::platform::check_in_profile(path, what)?;
-            }
+        if let Some(path) = &data_dir {
+            crate::platform::check_in_profile(path, "data dir")?;
+        }
+        if url.is_none() && data_dir.is_none() {
+            return Err("set --url, or --data-dir or a config with data_dir".into());
         }
         let launch = Launch::new(url, data_dir, config_path, unix_socket);
         #[cfg(windows)]

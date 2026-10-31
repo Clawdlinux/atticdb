@@ -510,7 +510,10 @@ pub(crate) fn discover_tcp(
     let deadline = deadline.min(Instant::now() + PROBE_TIMEOUT);
     let response =
         http::exchange(&mut stream, "GET", "/healthz", &headers, &[], deadline, PROOF_BYTES);
-    let response = response.map_err(|error| Refusal::Untrusted(fail(&error)))?;
+    // A server listens before its engine is open, and answers only after. Until then the
+    // probe times out, which is no server yet. No token was sent.
+    let slow = [ErrorKind::TimedOut];
+    let response = response.map_err(|error| Refusal::of(&error, &slow, fail(&error)))?;
     let health: Value = serde_json::from_slice(&response.body).unwrap_or_default();
     if !matches!(response.status, 200 | 503) || health["instance"] != instance {
         return Err(Refusal::Untrusted(format!("{addr} is not instance {instance} from LOCK")));
