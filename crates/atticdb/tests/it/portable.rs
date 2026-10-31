@@ -86,7 +86,7 @@ impl Drop for Servers {
 /// Kills the server named in each `LOCK`, by pid, when that pid runs `atticdb.exe`. It stops
 /// once no lock was held for 500 ms, or after 15 s.
 #[cfg(windows)]
-fn stop_servers(dirs: &[PathBuf]) {
+pub(crate) fn stop_servers(dirs: &[PathBuf]) {
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut free_since = Instant::now();
     while Instant::now() < deadline {

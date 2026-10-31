@@ -163,8 +163,11 @@ mod windows {
         command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
     }
 
-    /// A short-lived helper: no console window pops up.
+    /// A short-lived helper: no console window pops up. It gets only the stdio its command
+    /// sets, never a copy of this process's own. Otherwise a server it starts, such as the
+    /// hook's, could hold this process's stdout open, and this process's caller would wait.
     pub(crate) fn no_window(command: &mut Command) {
+        atticdb_sys::disinherit_stdio();
         command.creation_flags(CREATE_NO_WINDOW);
     }
 

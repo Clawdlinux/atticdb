@@ -418,18 +418,21 @@ fn hook_home_must_be_absolute_and_stats_needs_a_unix_socket() {
 }
 
 /// PowerShell reads `‘`, `’`, `‚` and `‛` as single quotes too. A binary in a folder named
-/// with them still runs from the Copilot hook.
+/// with them still runs from the Copilot hook. The first run starts the server, which must
+/// not hold the hook's output open, or Copilot would wait for it.
 #[cfg(windows)]
 #[test]
 fn the_powershell_hook_quotes_every_single_quote() {
     let dir = Dir::new();
     let profile = Profile::new(&dir.0.join("p"), "it\u{2019}s \u{2018}q\u{2019} \u{201a}\u{201b}");
-    let _servers = Servers(vec![profile.default_data()]);
+    let data = profile.default_data();
+    let _servers = Servers(vec![data.clone()]);
     let (code, out, err) = profile.atticdb(&dir.0, &[], &["connect", "copilot"]);
     assert_eq!(code, Some(0), "{out}{err}");
     let set = ["fact", "set", "--key", "user/style", "--content", "short sentences"];
     let (code, out, err) = profile.atticdb(&dir.0, &[], &set);
     assert_eq!(code, Some(0), "{out}{err}");
+    crate::portable::stop_servers(&[data]);
     let hook_file = read_json(&profile.root.join(".copilot").join("hooks").join("atticdb.json"));
     std::fs::create_dir_all(dir.0.join("app")).unwrap();
     let stdin = json!({"cwd": dir.0.join("app")}).to_string();
