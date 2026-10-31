@@ -4,13 +4,11 @@ import Link from "next/link";
 import Reveal from "@/components/Reveal";
 import { creditFor } from "@/content/credits";
 import { STAGGER } from "@/lib/motion";
-import { absoluteUrl } from "@/lib/site";
 import styles from "./not-found.module.css";
 
 export const metadata: Metadata = {
   title: { absolute: "Nothing in the attic. | AtticDB" },
-  alternates: { canonical: absoluteUrl("/404") },
-  robots: { index: false, follow: true },
+  openGraph: null,
 };
 
 // What is in the attic: the same archival pictures as the home page, in one row.
@@ -57,7 +55,7 @@ export default function NotFound() {
         </span>
       </h1>
       <p className={styles.lead}>That page isn&apos;t here. It may have moved, or it never existed.</p>
-      <Link className={styles.home} href="/">
+      <Link className={`button button--accent ${styles.home}`} href="/">
         Back to the home page
       </Link>
 

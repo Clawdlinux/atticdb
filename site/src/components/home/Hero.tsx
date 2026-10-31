@@ -124,12 +124,12 @@ export default function Hero() {
         </p>
       </div>
 
-      <p className={styles.lead} data-load>
+      <p className={styles.lead}>
         AtticDB is an open-source memory database for coding agents. It acks a write only after
         fdatasync. One Rust binary, no model calls.
       </p>
 
-      <div className={styles.actions} data-load>
+      <div className={styles.actions}>
         <CopyCommand label="Install AtticDB" />
         <motion.a
           className={styles.waitlist}

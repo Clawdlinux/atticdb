@@ -52,7 +52,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       </head>
       <body>
         <Providers>
-          <a className="skip-link" href="#main">
+          <a className="button button--accent skip-link" href="#main">
             Skip to content
           </a>
           <SiteNav />

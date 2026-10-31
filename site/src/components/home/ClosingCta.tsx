@@ -45,7 +45,7 @@ export default function ClosingCta() {
             <CopyCommand id="install" label="Install AtticDB" />
           </div>
           <span className={styles.or}>or</span>
-          <a className={styles.star} href={GITHUB_URL}>
+          <a className={`button button--ink ${styles.star}`} href={GITHUB_URL}>
             Star on GitHub
           </a>
         </Reveal>

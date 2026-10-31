@@ -37,7 +37,8 @@ export default function PricingPage() {
         </p>
       </section>
 
-      <section className={styles.plansSection} aria-label="Plans">
+      <section className={styles.plansSection} aria-labelledby="plans-title">
+        <h2 id="plans-title" className="visually-hidden">Plans</h2>
         <div className={styles.plans}>
           {PLANS.map((plan, i) => {
             const isLocal = plan.id === "local";
@@ -48,7 +49,7 @@ export default function PricingPage() {
                 className={`${styles.plan} ${isLocal ? styles.local : ""}`}
                 style={step(i)}
               >
-                <h2 className={styles.planName}>{plan.name}</h2>
+                <h3 className={styles.planName}>{plan.name}</h3>
                 <p className={styles.price}>{plan.price}</p>
                 <p className={styles.terms}>
                   {plan.unit ? `${plan.price} ${plan.unit}. ` : null}
@@ -64,7 +65,7 @@ export default function PricingPage() {
                     <CopyCommand label={plan.cta.label} tone="bone" />
                   ) : (
                     <a
-                      className={`${styles.cta} ${isPro ? styles.ctaAccent : ""}`}
+                      className={`button ${isPro ? "button--accent" : "button--ink"} ${styles.cta}`}
                       href={plan.cta.href}
                     >
                       {plan.cta.label}

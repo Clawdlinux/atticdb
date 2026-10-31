@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import NotFound from "@/app/not-found";
+import NotFound, { metadata as notFoundMetadata } from "@/app/not-found";
 import robots from "@/app/robots";
 import sitemap from "@/app/sitemap";
 import JsonLd from "@/components/JsonLd";
@@ -83,7 +83,6 @@ describe("structured data", () => {
       downloadUrl: `${GITHUB_URL}/releases/latest`,
       license: "Apache-2.0 OR MIT",
       offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
-      codeRepository: GITHUB_URL,
     });
     expect(softwareAppJsonLd().license).toContain("Apache-2.0");
   });
@@ -132,6 +131,12 @@ describe("static discovery routes", () => {
       rules: { userAgent: "*", allow: "/" },
       sitemap: "https://atticdb.com/sitemap.xml",
     });
+  });
+
+  it("leaves 404 noindex to Next without canonical or inherited social URLs", () => {
+    expect(notFoundMetadata.alternates?.canonical).toBeUndefined();
+    expect(notFoundMetadata.robots).toBeUndefined();
+    expect(notFoundMetadata.openGraph).toBeNull();
   });
 
   it("renders an accessible 404 heading and a home link without JavaScript", () => {

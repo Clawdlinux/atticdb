@@ -42,6 +42,6 @@ export const PRICING_FAQ: Qa[] = [
   },
   {
     q: "When does cloud launch?",
-    a: "When enough people ask. Add a thumbs-up to the waitlist issue.",
+    a: "When enough people ask. Each waitlist issue counts, so open one from the buttons above.",
   },
 ];

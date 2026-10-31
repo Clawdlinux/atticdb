@@ -125,7 +125,7 @@ export const COMPARE_ROWS: { label: string; cells: Record<string, Cell> }[] = [
       redis: { value: "V0: stdio/SSE MCP server", source: sources.redisMcp },
       cognee: { value: "cognee-mcp server and agent plugins", source: sources.cognee },
       engram: { value: "Built-in stdio/HTTP MCP server", source: sources.engram },
-      "claude-md": { value: "Native Claude Code memory", source: sources.claude },
+      "claude-md": { value: "Not published" },
     },
   },
   {

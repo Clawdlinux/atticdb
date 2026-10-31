@@ -26,7 +26,7 @@ export default function PricingTeaser() {
           </p>
         </Reveal>
         <Reveal delay={0.15} className={styles.actions}>
-          <Link className={styles.button} href="/pricing">
+          <Link className={`button button--ink ${styles.action}`} href="/pricing">
             See pricing
           </Link>
           <a className={styles.second} href={WAITLIST_URL}>

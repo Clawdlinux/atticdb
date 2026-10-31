@@ -20,23 +20,12 @@
   word-break: break-all;
 }
 
-/* Press scale comes from Framer Motion (whileTap). */
-.button {
+.action {
   flex: 0 0 auto;
-  min-height: 44px;
-  padding: 0.5rem 1.25rem;
-  font-weight: 500;
-  transition: opacity var(--t-hover) ease-out;
 }
 
-.button:hover {
-  opacity: 0.88;
-}
-
-.bone .button {
+.bone .action {
   flex-grow: 1;
-  background: var(--field-1-ink);
-  color: var(--field-1);
 }
 
 .labels {
@@ -59,7 +48,7 @@
 }
 
 @media (max-width: 30rem) {
-  .button {
+  .action {
     flex-grow: 1;
   }
 }

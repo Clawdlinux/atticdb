@@ -75,14 +75,6 @@
   list-style: none;
 }
 
-/* Press and hover scale come from Framer Motion. */
-.example {
-  padding: 0.5rem 1rem;
-  background: var(--field-1-ink);
-  color: var(--field-1);
-  font-size: var(--step-body);
-}
-
 /* The product's answer: a fragment of its interface. */
 .panel[data-ui] {
   max-width: 35rem;

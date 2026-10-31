@@ -29,28 +29,6 @@
   font-size: var(--step-lead);
 }
 
-.home {
-  display: inline-flex;
-  min-height: 44px;
-  align-items: center;
-  padding: 0.65rem 1.25rem;
-  background: var(--accent);
-  color: var(--accent-ink);
-  text-decoration: none;
-  transition:
-    transform var(--t-press) var(--ease-out),
-    opacity var(--t-hover) ease-out;
-}
-
-.home:hover {
-  opacity: 0.88;
-}
-
-.home:active {
-  opacity: 1;
-  transform: scale(0.97);
-}
-
 /* The attic's contents in one row: 2 by 2 on a phone, 4 across from a tablet. */
 .photos {
   display: grid;

@@ -51,6 +51,14 @@ describe("home page", () => {
     for (const img of imgs) expect(img.getAttribute("alt")?.trim()).toBeTruthy();
   });
 
+  it("uses the shared button shape for every solid action", () => {
+    render(<Home />);
+    for (const button of screen.getAllByRole("button")) expect(button).toHaveClass("button");
+    for (const name of ["See pricing", "Star on GitHub"]) {
+      expect(screen.getByRole("link", { name })).toHaveClass("button", "button--ink");
+    }
+  });
+
   it("anchors #install on the closing call's install command, once", () => {
     const { container } = render(<Home />);
     const anchors = container.querySelectorAll("#install");
@@ -82,6 +90,17 @@ describe("Showcase", () => {
     expect(rows.length).toBeGreaterThan(0);
     expect(rows.length).toBeLessThanOrEqual(3);
     for (const row of rows) expect(row.textContent?.toLowerCase()).toContain("ext4");
+  });
+
+  it("counts all matches while displaying only the newest 3", () => {
+    const { container } = render(<Showcase />);
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "atticdb" } });
+    expect(screen.getByText("15 of 16 records match, newest first")).toBeInTheDocument();
+    const rows = container.querySelectorAll('[data-ui="results"] li[data-present="true"]');
+    expect(rows).toHaveLength(3);
+    expect([...rows].map((row) => row.querySelector("time")?.getAttribute("datetime"))).toEqual([
+      "2026-10-30T10:00:00.000Z", "2026-10-29T16:05:00.000Z", "2026-10-29T08:50:00.000Z",
+    ]);
   });
 
   it("keeps only matching rows present as the words narrow", () => {

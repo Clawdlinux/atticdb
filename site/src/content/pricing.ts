@@ -1,14 +1,15 @@
-import { GITHUB_URL, VPC_URL, WAITLIST_URL } from "@/lib/site";
+import { VPC_URL, WAITLIST_URL } from "@/lib/site";
 
 export type Plan = {
-  id: "local" | "pro" | "team" | "vpc";
   name: string;
   price: string;
   unit: string;
   status: "Available" | "Planned";
   includes: string[];
-  cta: { label: string; href: string };
-};
+} & (
+  | { id: "local"; cta: { label: string; href?: never } }
+  | { id: "pro" | "team" | "vpc"; cta: { label: string; href: string } }
+);
 
 export const PLANS: Plan[] = [
   {
@@ -21,7 +22,7 @@ export const PLANS: Plan[] = [
       "Everything in the binary: sessions, facts, search, MCP, setup for 4 apps, secret redaction, studio.",
       "Apache-2.0 or MIT",
     ],
-    cta: { label: "Install AtticDB", href: `${GITHUB_URL}#quick-start` },
+    cta: { label: "Install AtticDB" },
   },
   {
     id: "pro",
@@ -67,6 +68,10 @@ export const PLANS: Plan[] = [
 
 export const PLAN_FEATURES: { feature: string; values: Record<Plan["id"], string> }[] = [
   {
+    feature: "Status",
+    values: Object.fromEntries(PLANS.map((plan) => [plan.id, plan.status])) as Record<Plan["id"], string>,
+  },
+  {
     feature: "Price",
     values: { local: "$0 forever", pro: "$15 per month", team: "$29 per seat per month", vpc: "Talk to us" },
   },
@@ -100,7 +105,7 @@ export const PLAN_FEATURES: { feature: string; values: Record<Plan["id"], string
   },
   {
     feature: "SSO",
-    values: { local: "Not included", pro: "Not included", team: "GitHub and Google sign-in", vpc: "SAML SSO" },
+    values: { local: "Not included", pro: "Not included", team: "Not included", vpc: "SAML SSO" },
   },
 ];
 

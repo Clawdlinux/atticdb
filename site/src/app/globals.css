@@ -77,7 +77,7 @@ a {
   transition: opacity var(--t-press) ease-out;
 }
 
-/* Feedback on every link: a press dims it for a beat. Buttons scale in their own modules. */
+/* Links dim on press. Solid actions share the button rules below. */
 a:active {
   opacity: 0.7;
 }
@@ -89,19 +89,47 @@ select {
   font: inherit;
 }
 
-button {
+.button {
+  display: inline-flex;
   min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  padding: 0.5rem;
   border: 0;
   border-radius: 0;
-  background: var(--accent);
-  color: var(--accent-ink);
+  font-weight: 500;
+  text-align: center;
+  text-decoration: none;
   cursor: pointer;
   transition:
     transform var(--t-press) var(--ease-out),
     opacity var(--t-hover) ease-out;
 }
 
-button:active {
+.button--accent {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.button--ink {
+  --button-focus: var(--ink);
+  background: var(--ink);
+  color: var(--bg);
+}
+
+.button--field {
+  --button-focus: var(--field-1-ink);
+  background: var(--field-1-ink);
+  color: var(--field-1);
+}
+
+.button:hover,
+.button:focus-visible {
+  opacity: 0.88;
+}
+
+.button:active {
+  opacity: 0.7;
   transform: scale(0.97);
 }
 
@@ -125,7 +153,7 @@ pre {
 }
 
 :focus-visible {
-  outline: 3px solid var(--accent);
+  outline: 3px solid var(--button-focus, var(--accent));
   outline-offset: 4px;
 }
 
@@ -168,12 +196,6 @@ main {
   top: 1rem;
   left: 1rem;
   z-index: 10;
-  display: inline-flex;
-  min-height: 44px;
-  align-items: center;
-  padding: 0.5rem 1rem;
-  background: var(--accent);
-  color: var(--accent-ink);
   transform: translateY(calc(-100% - 2rem));
 }
 

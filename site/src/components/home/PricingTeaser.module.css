@@ -47,29 +47,6 @@
   gap: 0.75rem;
 }
 
-.button {
-  display: inline-flex;
-  min-height: 44px;
-  align-items: center;
-  justify-content: center;
-  padding: 0.5rem 1.5rem;
-  background: var(--ink);
-  color: var(--bg);
-  font-weight: 500;
-  text-decoration: none;
-  transition:
-    transform var(--t-press) var(--ease-out),
-    opacity var(--t-hover) ease-out;
-}
-
-.button:hover {
-  opacity: 0.88;
-}
-
-.button:active {
-  transform: scale(0.97);
-}
-
 .second {
   display: inline-flex;
   min-height: 44px;
@@ -105,7 +82,7 @@
     align-items: flex-end;
   }
 
-  .button {
+  .action {
     min-width: 12rem;
   }
 

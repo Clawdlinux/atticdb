@@ -202,22 +202,12 @@
 }
 
 .switch {
+  --button-focus: var(--accent);
   grid-area: control;
   justify-self: start;
-  display: inline-flex;
-  min-height: 44px;
-  align-items: center;
   gap: 0.625rem;
-  padding: 0 0.75rem 0 0.5rem;
-  background: var(--bg);
-  color: var(--ink);
   font-size: var(--step-body);
   white-space: nowrap;
-}
-
-.switch:hover {
-  text-decoration: underline;
-  text-underline-offset: 0.2em;
 }
 
 .switch[aria-disabled="true"] {
@@ -489,6 +479,6 @@
 @media (max-width: 22.49rem) {
   .switch {
     gap: 0.375rem;
-    padding-inline: 0.375rem 0.5rem;
+    font-size: var(--step-small);
   }
 }

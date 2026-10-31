@@ -177,7 +177,7 @@ In this order. Each maps to a sheet blueprint.
   - What counts as storage? "The bytes of your turns, facts and fact history on disk. Forgotten records stop counting after compaction."
   - Can I move from local to cloud? "That's the plan. Same API and MCP tools, so your agents won't notice. The import tool ships with cloud."
   - What if I exceed 10 GB? "Planned: $1 per extra GB per month. Nothing is deleted and writes never stop for billing."
-  - When does cloud launch? "When enough people ask. Add a thumbs-up to the waitlist issue."
+  - When does cloud launch? "When enough people ask. Each waitlist issue counts, so open one from the buttons above."
 
 ### `/compare`
 

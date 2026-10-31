@@ -1,9 +1,7 @@
 "use client";
 
-import { motion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
 import Swap from "@/components/Swap";
-import { PRESS, TAP } from "@/lib/motion";
 import { INSTALL_CMD } from "@/lib/site";
 import styles from "./CopyCommand.module.css";
 
@@ -61,13 +59,11 @@ export default function CopyCommand({
       <pre className={styles.code}>
         <code ref={codeRef}>{command}</code>
       </pre>
-      <motion.button
+      <button
         type="button"
-        className={styles.button}
+        className={`button ${tone === "bone" ? "button--field" : "button--accent"} ${styles.action}`}
         onClick={copy}
         data-status={status}
-        whileTap={TAP}
-        transition={PRESS}
       >
         {/*
           Every label sits in one grid cell, so the button never changes width.
@@ -81,7 +77,7 @@ export default function CopyCommand({
           ))}
           <Swap value={shown} className={styles.shown} mode="sync" />
         </span>
-      </motion.button>
+      </button>
       <span className="visually-hidden" role="status">
         {status === "copied"
           ? "Command copied."

@@ -73,7 +73,6 @@ export function softwareAppJsonLd() {
     downloadUrl: `${GITHUB_URL}/releases/latest`,
     license: "Apache-2.0 OR MIT",
     offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
-    codeRepository: GITHUB_URL,
   };
 }
 

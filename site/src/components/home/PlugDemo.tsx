@@ -2,7 +2,7 @@
 
 import { motion } from "motion/react";
 import { useCallback, useEffect, useReducer, useRef, type ReactNode } from "react";
-import { HOVER, PRESS, SETTLE, SPRING, SWAP, SWAP_RISE, TAP } from "@/lib/motion";
+import { SETTLE, SPRING, SWAP, SWAP_RISE } from "@/lib/motion";
 import { initialPlug, stepPlug, type PlugState } from "./plug";
 import styles from "./Hero.module.css";
 
@@ -53,17 +53,14 @@ export function PowerChip({ state, running, onRun, className }: PowerChipProps) 
     <div className={`${styles.chip} ${className ?? ""}`} data-ui="power">
       <span className={styles.chipLabel}>Power</span>
       <span className={styles.readout}>{on ? "On" : "Off"}</span>
-      <motion.button
+      <button
         type="button"
-        className={styles.switch}
+        className={`button button--field ${styles.switch}`}
         data-on={on}
         aria-disabled={running || undefined}
         onClick={() => {
           if (!running) onRun();
         }}
-        whileHover={HOVER}
-        whileTap={TAP}
-        transition={PRESS}
       >
         <span className={styles.track} aria-hidden="true">
           <motion.span
@@ -74,7 +71,7 @@ export function PowerChip({ state, running, onRun, className }: PowerChipProps) 
           />
         </span>
         {action}
-      </motion.button>
+      </button>
     </div>
   );
 }

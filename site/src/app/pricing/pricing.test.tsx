@@ -52,8 +52,9 @@ describe("pricing page", () => {
   it("renders the 4 plans in order with status, includes and actions", () => {
     render(<PricingPage />);
     const plansRegion = screen.getByRole("region", { name: "Plans" });
+    expect(within(plansRegion).getByRole("heading", { level: 2, name: "Plans" })).toHaveClass("visually-hidden");
     const planHeadings = within(plansRegion)
-      .getAllByRole("heading", { level: 2 })
+      .getAllByRole("heading", { level: 3 })
       .map((h) => h.textContent);
     expect(planHeadings).toEqual(["Local", "Cloud Pro", "Cloud Team", "Your cloud"]);
 
@@ -114,6 +115,9 @@ describe("pricing page", () => {
 
     const bodyRows = table.querySelectorAll("tbody tr");
     expect(bodyRows).toHaveLength(PLAN_FEATURES.length);
+    expect(within(bodyRows[0] as HTMLElement).getByRole("rowheader")).toHaveTextContent("Status");
+    expect(within(bodyRows[0] as HTMLElement).getAllByRole("cell").map((cell) => cell.textContent))
+      .toEqual(["Available", "Planned", "Planned", "Planned"]);
     for (const row of PLAN_FEATURES) {
       for (const value of Object.values(row.values)) {
         expect(value).not.toBe("Not specified");

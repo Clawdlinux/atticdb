@@ -14,7 +14,7 @@ export default function SiteNav() {
         <Link href="/benchmarks">Benchmarks</Link>
         <a href={DOCS_URL}>Docs</a>
       </nav>
-      <Link className={styles.install} href="/#install">
+      <Link className="button button--ink" href="/#install">
         Install
       </Link>
     </header>

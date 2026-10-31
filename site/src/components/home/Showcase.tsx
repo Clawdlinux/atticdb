@@ -3,7 +3,7 @@
 import { AnimatePresence, motion, useIsPresent } from "motion/react";
 import { useId, useRef, useState, type ReactNode } from "react";
 import Reveal from "@/components/Reveal";
-import { HOVER, PRESS, SPRING, SWAP, SWAP_RISE, TAP } from "@/lib/motion";
+import { SPRING, SWAP, SWAP_RISE } from "@/lib/motion";
 import { SAMPLE_MEMORY, searchMemory, type MemoryRecord } from "@/content/memory";
 import styles from "./Showcase.module.css";
 
@@ -59,7 +59,8 @@ export default function Showcase() {
   const [query, setQuery] = useState(START);
   const inputRef = useRef<HTMLInputElement>(null);
   const id = useId();
-  const results = searchMemory(query);
+  const matches = searchMemory(query, Infinity);
+  const results = matches.slice(0, 3);
   const empty = query.trim() === "";
 
   function fill(example: string) {
@@ -95,7 +96,7 @@ export default function Showcase() {
             <p className={styles.count}>
               {empty
                 ? "Newest records"
-                : `${results.length} of ${SAMPLE_MEMORY.length} records match, newest first`}
+                : `${matches.length} of ${SAMPLE_MEMORY.length} records match, newest first`}
             </p>
             {results.length ? (
               <ol className={styles.rows}>
@@ -119,16 +120,13 @@ export default function Showcase() {
           <ul className={styles.examples}>
             {EXAMPLES.map((example) => (
               <li key={example}>
-                <motion.button
+                <button
                   type="button"
-                  className={styles.example}
+                  className="button button--field"
                   onClick={() => fill(example)}
-                  whileHover={HOVER}
-                  whileTap={TAP}
-                  transition={PRESS}
                 >
                   {example}
-                </motion.button>
+                </button>
               </li>
             ))}
           </ul>

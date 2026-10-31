@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { GITHUB_URL, SITE_URL, VPC_URL, WAITLIST_URL } from "@/lib/site";
+import { SITE_URL, VPC_URL, WAITLIST_URL } from "@/lib/site";
 import * as bench from "./bench";
 import * as pricing from "./pricing";
 import * as compare from "./compare";
@@ -82,12 +82,15 @@ describe("pricing content", () => {
     expect(PLANS.find((plan) => plan.id === "pro")?.cta.href).toBe(WAITLIST_URL);
     expect(PLANS.find((plan) => plan.id === "team")?.cta.href).toBe(WAITLIST_URL);
     expect(PLANS.find((plan) => plan.id === "vpc")?.cta.href).toBe(VPC_URL);
-    expect(PLANS.find((plan) => plan.id === "local")?.cta.href).toMatch(new RegExp(`^${GITHUB_URL}`));
+    expect(PLANS.find((plan) => plan.id === "local")?.cta).toEqual({ label: "Install AtticDB" });
   });
 
-  it("covers each plan in 6 to 9 feature rows and keeps both pricing notes", () => {
-    expect(PLAN_FEATURES.length).toBeGreaterThanOrEqual(6);
-    expect(PLAN_FEATURES.length).toBeLessThanOrEqual(9);
+  it("covers each plan in 10 feature rows and keeps both pricing notes", () => {
+    expect(PLAN_FEATURES).toHaveLength(10);
+    expect(PLAN_FEATURES[0]).toEqual({
+      feature: "Status",
+      values: { local: "Available", pro: "Planned", team: "Planned", vpc: "Planned" },
+    });
     for (const row of PLAN_FEATURES) {
       expect(Object.keys(row.values).sort()).toEqual(["local", "pro", "team", "vpc"]);
       for (const value of Object.values(row.values)) {
@@ -95,6 +98,11 @@ describe("pricing content", () => {
       }
     }
     expect(PRICING_NOTES).toHaveLength(2);
+  });
+
+  it("does not describe Team social sign-in as SSO", () => {
+    expect(PLAN_FEATURES.find((row) => row.feature === "SSO")?.values.team).toBe("Not included");
+    expect(PLANS.find((plan) => plan.id === "team")?.includes).toContain("GitHub and Google sign-in.");
   });
 });
 
@@ -117,6 +125,8 @@ describe("comparison content", () => {
     for (const product of PRODUCTS.filter((product) => product.id !== "atticdb")) {
       expect(durability.cells[product.id].value).toBe("Not published");
     }
+    expect(COMPARE_ROWS.find((row) => row.label === "MCP")?.cells["claude-md"])
+      .toEqual({ value: "Not published" });
     const offline = COMPARE_ROWS.find((row) => row.label === "runs fully offline")!;
     for (const id of ["mem0", "zep", "letta", "supermemory", "redis", "claude-md"]) {
       expect(offline.cells[id].value).toBe("Not published");
@@ -158,7 +168,7 @@ describe("FAQ content", () => {
       "The bytes of your turns, facts and fact history on disk. Forgotten records stop counting after compaction.",
       "That's the plan. Same API and MCP tools, so your agents won't notice. The import tool ships with cloud.",
       "Planned: $1 per extra GB per month. Nothing is deleted and writes never stop for billing.",
-      "When enough people ask. Add a thumbs-up to the waitlist issue.",
+      "When enough people ask. Each waitlist issue counts, so open one from the buttons above.",
     ]);
   });
 
