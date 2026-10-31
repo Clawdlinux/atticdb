@@ -377,7 +377,7 @@ fn codex_gets_only_its_mcp_entry_on_windows() {
     let dir = Dir::new();
     let profile = Profile::new(&dir.0.join("p"), "bin");
     let _servers = Servers(vec![profile.default_data()]);
-    let line = "Codex on Windows: MCP only, hooks wait for #137";
+    let line = "Codex on Windows: MCP only, hooks wait for #142";
     let (code, out, err) = profile.atticdb(&dir.0, &[], &["setup", "--yes", "--harness", "codex"]);
     assert_eq!(code, Some(0), "{out}{err}");
     assert_eq!(out.matches(line).count(), usize::from(cfg!(windows)), "{out}");

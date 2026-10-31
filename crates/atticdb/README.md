@@ -406,7 +406,7 @@ Then start a new Claude Code session.
 
 `atticdb connect codex [--force] [--no-hook] [--notes ask|auto] [--dry-run]` creates the home, then adds 3 parts.
 `atticdb disconnect codex` removes them.
-On Windows it adds only the MCP entry, until Codex's hooks there are checked. `setup` and `doctor` say so in 1 line.
+On Windows it adds only the MCP entry, until Codex's hooks there are checked ([#142](https://github.com/Clawdlinux/atticdb/issues/142)). `setup` and `doctor` say so in 1 line: `Codex on Windows: MCP only, hooks wait for #142`.
 `--force` changes nothing for Codex, as AtticDB never edits an `atticdb` server it didn't write.
 The config dir is `$CODEX_HOME` when set, else `~/.codex`.
 A relative `CODEX_HOME` fails both verbs with exit 2 before any change. `codex` would inherit it and read another config. An empty one counts as unset.
@@ -609,7 +609,7 @@ Durability is weaker than on Unix:
 - A rename uses `MOVEFILE_WRITE_THROUGH`, so it returns only once the move is on disk.
 - With a per-user disk quota, free space is what the quota leaves. So the free-space floor follows the quota.
 
-The apps: VS Code, Copilot CLI and Claude Code get every part. Codex gets only its MCP entry, for now.
+The apps: VS Code, Copilot CLI and Claude Code get every part. Codex gets only its MCP entry, until [#142](https://github.com/Clawdlinux/atticdb/issues/142).
 
 | App | Windows files | What differs |
 |---|---|---|
@@ -631,7 +631,10 @@ Claude Code's hook needs Claude Code 2.1.139 or later, which added exec form. Cl
 
 Under `ATTICDB_HOME`, `args` ends with `"--home", "<path>"`. The MCP entry passes `-e ATTICDB_HOME=<path>`, as on Unix.
 
-Not yet: arm64, an `install.ps1`, and Codex's hooks. Ask in an issue if you need them.
+A cold server start can take longer than the hook's 3 s budget. Then the first chat after it gets no memory block.
+The next chat gets it, as the server is up by then.
+
+Not yet: arm64, an `install.ps1`, and Codex's hooks ([#142](https://github.com/Clawdlinux/atticdb/issues/142)). Ask in an issue if you need the others.
 
 ## Tests
 

@@ -12,7 +12,7 @@ pub use claude::Notes;
 /// What to do after Codex's hook is added.
 pub(crate) use codex::APPROVE as CODEX_APPROVE;
 /// What setup and doctor say about Codex on Windows, where it gets only its MCP entry.
-pub(crate) const CODEX_WINDOWS: &str = "Codex on Windows: MCP only, hooks wait for #137";
+pub(crate) const CODEX_WINDOWS: &str = "Codex on Windows: MCP only, hooks wait for #142";
 // The files the legacy check reads, and how it finds the old binary.
 #[cfg(unix)]
 pub(crate) use claude::{

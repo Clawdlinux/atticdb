@@ -6,7 +6,7 @@ Status: early. Don't run it in production. Built so far: the tape, session engin
 ## Where to run it
 
 macOS, Linux and Windows x86_64. Release binaries cover macOS and Linux on x86_64 and arm64, and Windows on x86_64. The Linux ones are static, so any distro works. Then `atticdb setup` connects it to VS Code, Copilot CLI, Claude Code and Codex.
-On Windows, Codex gets only its MCP entry for now. Durability there is weaker, as Windows has no directory fsync. [Windows](crates/atticdb/README.md#windows) lists what differs.
+On Windows, Codex gets only its MCP entry for now ([#142](https://github.com/Clawdlinux/atticdb/issues/142)). On Windows, Claude Code 2.1.139 or later is needed for the hook. Durability there is weaker, as Windows has no directory fsync. [Windows](crates/atticdb/README.md#windows) lists what differs.
 
 Every write is acked only after `fdatasync`, so the disk under the data directory sets your write latency. Keep it on a local disk:
 

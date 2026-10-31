@@ -376,7 +376,8 @@ fn remote(name: &str) -> bool {
 
 /// The sync app that copies `path`, if any: iCloud Drive, a folder in `~/Library/CloudStorage`
 /// such as Dropbox, OneDrive or Google Drive on macOS, or a path through a `Dropbox`,
-/// `OneDrive` or `Google Drive` folder. `user` is `$HOME`.
+/// `OneDrive` or `Google Drive` folder. A folder named `OneDrive - <org>`, as OneDrive for
+/// work or school names it on Windows, counts as OneDrive too. `user` is `$HOME`.
 fn synced(path: &Path, user: Option<&Path>) -> Option<&'static str> {
     if let Some(user) = user {
         if path.starts_with(user.join("Library/Mobile Documents")) {
@@ -391,7 +392,8 @@ fn synced(path: &Path, user: Option<&Path>) -> Option<&'static str> {
     let text = if cfg!(windows) { text.replace('\\', "/") } else { text };
     let apps =
         [("/Dropbox/", "Dropbox"), ("/OneDrive/", "OneDrive"), ("/Google Drive/", "Google Drive")];
-    apps.into_iter().find(|(folder, _)| text.contains(folder)).map(|(_, app)| app)
+    let found = apps.into_iter().find(|(folder, _)| text.contains(folder)).map(|(_, app)| app);
+    found.or_else(|| text.contains("/OneDrive - ").then_some("OneDrive"))
 }
 
 /// Prints the sandbox note. Doctor runs outside any sandbox, so it can't check one.
@@ -418,6 +420,36 @@ mod tests {
         }
         for name in ["apfs", "hfs", "ext4", "btrfs", "xfs", "tmpfs", "type 0x1234"] {
             assert!(!remote(name), "{name}");
+        }
+    }
+
+    /// Sync folders by path. A business OneDrive folder, `OneDrive - <org>`, counts too.
+    #[test]
+    fn synced_folders() {
+        let user = Path::new("/Users/me");
+        let rows = [
+            ("/Users/me/Library/Mobile Documents/x", Some("iCloud Drive")),
+            ("/Users/me/Library/CloudStorage/OneDrive-Org/x", Some("a cloud storage folder")),
+            ("/home/me/Dropbox/atticdb", Some("Dropbox")),
+            ("/home/me/OneDrive/atticdb", Some("OneDrive")),
+            ("/home/me/OneDrive", Some("OneDrive")),
+            ("/home/me/Google Drive/atticdb", Some("Google Drive")),
+            ("/home/me/OneDrive - Contoso/atticdb", Some("OneDrive")),
+            ("/home/me/OneDrive - Contoso", Some("OneDrive")),
+            ("/home/me/OneDriveBackup/atticdb", None),
+            ("/home/me/My OneDrive - notes/atticdb", None),
+            ("/home/me/.local/share/atticdb", None),
+        ];
+        for (path, wanted) in rows {
+            assert_eq!(synced(Path::new(path), Some(user)), wanted, "{path}");
+        }
+        #[cfg(windows)]
+        for (path, wanted) in [
+            (r"C:\Users\me\OneDrive - Contoso\atticdb", Some("OneDrive")),
+            (r"C:\Users\me\OneDrive\atticdb", Some("OneDrive")),
+            (r"C:\Users\me\AppData\Local\atticdb", None),
+        ] {
+            assert_eq!(synced(Path::new(path), None), wanted, "{path}");
         }
     }
 }
