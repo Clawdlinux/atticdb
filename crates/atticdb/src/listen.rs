@@ -215,8 +215,12 @@ fn lock(path: &Path) -> std::io::Result<OwnedFd> {
 
 /// Makes `dir` with its parents when `mask` is 0o077 and nothing is there, then checks it by
 /// [`check_owned`]. Windows sets no mode: a folder in the user's profile is private already.
+/// So `dir` must be inside the profile, by [`crate::platform::check_in_profile`], before
+/// anything is made.
 #[cfg(not(unix))]
 pub fn owned_dir(dir: &Path, mask: u32) -> Result<(), String> {
+    #[cfg(windows)]
+    crate::platform::check_in_profile(dir, "private dir")?;
     let fail = |error: std::io::Error| format!("{}: {error}", dir.display());
     if mask == 0o077 && fs::symlink_metadata(dir).is_err() {
         fs::create_dir_all(dir).map_err(fail)?;

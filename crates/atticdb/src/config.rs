@@ -121,6 +121,9 @@ pub fn read_token_file(path: &Path) -> Result<Token, String> {
 pub fn init(path: &Path, tenant: &str) -> Result<Token, String> {
     let fail = |message: String| format!("config {}: {message}", path.display());
     check_tenant_name(tenant).map_err(|message| fail(message.into()))?;
+    // Windows ignores the mode, so the new token file gets its folder's access list.
+    #[cfg(windows)]
+    crate::platform::check_in_profile(path, "config")?;
     let token = crate::random_hex(MIN_TOKEN_BYTES)
         .map_err(|error| fail(crate::platform::no_random(error)))
         .and_then(|hex| Token::new(hex).map_err(|message| fail(message.into())))?;

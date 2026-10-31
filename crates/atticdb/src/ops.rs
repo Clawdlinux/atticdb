@@ -303,6 +303,9 @@ fn copy_locked(dir: &Path, scratch: Option<&Path>) -> Result<Scratch, (u8, Strin
     name.push(format!(".verify-{}", crate::random_hex(4).map_err(fail)?));
     let path = parent.join(name);
     let named = |error| (1, format!("{}: {error}", path.display()));
+    // Windows ignores the mode, so the copy gets its folder's access list.
+    #[cfg(windows)]
+    crate::platform::check_in_profile(&path, "scratch copy").map_err(|error| (1, error))?;
     DirBuilder::new().mode(0o700).create(&path).map_err(named)?;
     let copy = Scratch(path);
     for entry in std::fs::read_dir(&dir).map_err(fail)? {

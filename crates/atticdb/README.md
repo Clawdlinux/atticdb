@@ -183,7 +183,7 @@ Windows support is in progress ([#137](https://github.com/Clawdlinux/atticdb/iss
 - The CLI sends its token only when 1 proof matches its own token and the address it connected to. So a program squatting on the port never gets the token. A relay that passes the nonce to the real server gets a proof for the wrong address.
 - `--url http://...` skips discovery and the proof. The operator chose that endpoint, so the CLI trusts it.
 - Windows has no mode bits. The home lives in the user's profile, which is private by default, so AtticDB skips the owner and mode checks.
-- So the home, every data dir, every config and every token file must be inside `%LOCALAPPDATA%` or `%USERPROFILE%`. That covers `ATTICDB_HOME`, `--data-dir`, `--config`, `--token-file` and a config's `data_dir`, for the clients and for `atticdb serve`. Links and short names are resolved first. Anything else fails with an error that names the path and D92.
+- So the home, every data dir, every config and every token file must be inside `%LOCALAPPDATA%` or `%USERPROFILE%`. That covers `ATTICDB_HOME`, `--data-dir`, `--config`, `--token-file` and a config's `data_dir`, for the clients and for `atticdb serve`. AtticDB also makes no private file or folder outside the profile, such as `init --config` or a `verify --scratch` copy. Links and short names are resolved first. Anything else fails with an error that names the path and D92.
 - `atticdb stats` needs the Unix socket, so it fails. `atticdb migrate` has nothing to move.
 
 ## `atticdb verify` and `atticdb dump`

@@ -671,4 +671,49 @@ mod windows {
             assert!(!outside_data.exists(), "{args:?}: no data dir was made outside");
         }
     }
+
+    /// Nothing private is made outside the profile: no token file from `init`, and no copy
+    /// of the store from `verify --scratch`.
+    #[test]
+    fn private_files_are_never_made_outside_the_profile() {
+        let dir = Dir::new();
+        let profile = dir.0.join("profile");
+        let local = profile.join("AppData").join("Local");
+        let outside = dir.0.join("outside");
+        for folder in [&local, &outside] {
+            std::fs::create_dir_all(folder).unwrap();
+        }
+        let env = [("USERPROFILE", profile.as_path()), ("LOCALAPPDATA", local.as_path())];
+        let empty = |what: &str| {
+            let left: Vec<_> = std::fs::read_dir(&outside).unwrap().collect();
+            assert!(left.is_empty(), "{what}: made {left:?}");
+        };
+        let config = outside.join("atticdb.json");
+        let init = ["init", "--config", config.to_str().unwrap(), "--tenant", "me"];
+        let (code, out, err) = run(&dir.0, &env, &init);
+        assert_ne!(code, Some(0), "{out}{err}");
+        assert!(err.contains("config ") && err.contains("(D92)"), "{err}");
+        assert!(!out.contains("token"), "{out}");
+        empty("init");
+
+        let home = profile.join("home");
+        let data = home.join("data");
+        let servers = Servers(vec![data.clone()]);
+        let mut with_home = env.to_vec();
+        with_home.push(("ATTICDB_HOME", home.as_path()));
+        let (code, out, err) = run(&dir.0, &with_home, &["append", "--content", "x"]);
+        assert_eq!(code, Some(0), "{out}{err}");
+        drop(servers);
+        let data = data.to_str().unwrap();
+        let verify = ["verify", "--data-dir", data, "--scratch", outside.to_str().unwrap()];
+        let (code, out, err) = run(&dir.0, &env, &verify);
+        assert_ne!(code, Some(0), "{out}{err}");
+        assert!(err.contains("scratch copy ") && err.contains("(D92)"), "{err}");
+        empty("verify");
+        let scratch = profile.join("scratch");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let verify = ["verify", "--data-dir", data, "--scratch", scratch.to_str().unwrap()];
+        let (code, out, err) = run(&dir.0, &env, &verify);
+        assert_eq!(code, Some(0), "a scratch dir in the profile works: {out}{err}");
+    }
 }
