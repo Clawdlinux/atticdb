@@ -35,12 +35,12 @@
   color: var(--field-1-ink);
   caret-color: var(--field-1-ink);
   font-family: var(--font-display), Impact, sans-serif;
-  font-size: min(var(--step-display), 12vw);
+  font-size: var(--step-head);
   line-height: 1;
   letter-spacing: -0.02em;
   text-transform: uppercase;
   appearance: none;
-  transition: opacity 160ms ease-out;
+  transition: opacity var(--t-hover) ease-out;
 }
 
 .input::-webkit-search-cancel-button {
@@ -52,8 +52,8 @@
 }
 
 .input:focus-visible {
-  outline: none;
-  border-bottom-color: var(--field-1-ink);
+  outline: 3px solid var(--field-1-ink);
+  outline-offset: 6px;
 }
 
 .body {
@@ -81,8 +81,8 @@
   color: var(--field-1);
   font-size: var(--step-body);
   transition:
-    transform 160ms var(--ease-out),
-    opacity 160ms ease-out;
+    transform var(--t-press) var(--ease-out),
+    opacity var(--t-hover) ease-out;
 }
 
 .example:hover {
@@ -155,6 +155,12 @@
 
 [data-ui] .none {
   padding-block: 0.75rem;
+}
+
+@media (min-width: 90rem) {
+  .input {
+    font-size: var(--step-display);
+  }
 }
 
 @media (min-width: 64rem) {

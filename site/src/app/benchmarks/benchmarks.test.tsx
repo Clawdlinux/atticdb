@@ -70,7 +70,9 @@ describe("benchmarks page", () => {
 
   it("renders 4 benchmark data tables with formatted numbers, including 9,799 and 94 in the NVMe 1-writer AtticDB row", () => {
     const { container } = render(<BenchmarksPage />);
-    const dataTables = container.querySelectorAll("table:not(.visually-hidden)");
+    const dataTables = [...container.querySelectorAll("table")].filter(
+      (t) => !t.closest(".visually-hidden"),
+    );
     expect(dataTables).toHaveLength(4);
     for (const table of dataTables) {
       expect(table.querySelector("caption")).not.toBeNull();

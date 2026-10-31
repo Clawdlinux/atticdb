@@ -1,6 +1,6 @@
 .hero {
-  /* Fits "CLOUD WHEN YOU WANT IT." on one line from 390px to 1440px in Bebas Neue. */
-  --step-display: clamp(2.625rem, 11.2vw, 9.5rem);
+  /* Fits "CLOUD WHEN YOU WANT IT." on one line from 320px to 1440px in Bebas Neue. */
+  --step-display: min(11.2vw, 9.5rem);
   padding-block: 1rem 3.5rem;
 }
 
@@ -30,7 +30,7 @@
   line-height: 1.35;
 }
 
-/* Plans band: 1 col at 390, 2x2 from 768, 4 cols from 1280 (80rem). */
+/* Plans band: 1 col at 390, 2x2 from 768. Four across would break "Talk to us" at the heading step. */
 
 .plansSection {
   padding-block: 1rem var(--space-section);
@@ -59,13 +59,6 @@
   outline-color: var(--field-1-ink);
 }
 
-/* Keep Cloud Pro as the page's single --accent button; Local's copy button uses oxide ink. */
-.local :global(button) {
-  flex-grow: 1;
-  background: var(--field-1-ink);
-  color: var(--field-1);
-}
-
 .planName {
   font-family: var(--font-text), Georgia, serif;
   font-size: var(--step-lead);
@@ -77,38 +70,21 @@
 .price {
   margin-top: 0.75rem;
   font-family: var(--font-display), Impact, sans-serif;
-  font-size: min(var(--step-head), 4.25rem);
+  font-size: var(--step-head);
   line-height: 0.92;
   letter-spacing: -0.02em;
   text-transform: uppercase;
   font-variant-numeric: tabular-nums lining-nums;
 }
 
-.planMeta {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 0.5rem 1rem;
-  margin-top: 0.625rem;
-  font-size: var(--step-small);
-}
-
-.unit {
-  color: var(--muted);
-}
-
-.local .unit {
-  color: color-mix(in srgb, var(--field-1-ink) 72%, var(--field-1));
+/* The terms read as one sentence at body size: "$15 per month. Planned." */
+.terms {
+  margin-top: 0.75rem;
+  min-height: 1.5em;
 }
 
 .status {
-  color: var(--ink);
   font-weight: 500;
-}
-
-.local .status {
-  color: var(--field-1-ink);
 }
 
 .includes {
@@ -140,8 +116,8 @@
   text-align: center;
   text-decoration: none;
   transition:
-    transform 160ms var(--ease-out),
-    opacity 160ms ease-out;
+    transform var(--t-press) var(--ease-out),
+    opacity var(--t-hover) ease-out;
 }
 
 .cta:hover {
@@ -165,14 +141,6 @@
   padding-block: var(--space-section);
 }
 
-.notesTitle {
-  color: var(--muted);
-  font-family: var(--font-text), Georgia, serif;
-  font-size: var(--step-lead);
-  font-weight: 500;
-  line-height: 1.15;
-  text-transform: none;
-}
 
 .notesBody {
   display: grid;
@@ -252,7 +220,7 @@
 @media (prefers-reduced-motion: no-preference) {
   :global(.js) .rise {
     transform: translateY(105%);
-    animation: line-up 850ms var(--ease-out) forwards;
+    animation: line-up var(--t-rise) var(--ease-out) forwards;
     animation-delay: calc(var(--i, 0) * 110ms + 120ms);
   }
 
@@ -276,6 +244,13 @@
     gap: 1.5rem;
   }
 
+  .table th:last-child,
+  .table td:last-child {
+    padding-right: 0;
+  }
+}
+
+@media (min-width: 64rem) {
   .notesSection {
     grid-template-columns: repeat(12, minmax(0, 1fr));
     column-gap: 2rem;
@@ -283,23 +258,10 @@
   }
 
   .notesHead {
-    grid-column: 1 / 5;
+    grid-column: 1 / 6;
   }
 
   .notesBody {
-    grid-column: 5 / 13;
-  }
-
-  .table th:last-child,
-  .table td:last-child {
-    padding-right: 0;
-    text-align: right;
-  }
-}
-
-@media (min-width: 80rem) {
-  .plans {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 1.25rem;
+    grid-column: 6 / 13;
   }
 }

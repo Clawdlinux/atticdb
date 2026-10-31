@@ -8,7 +8,6 @@
   --line-2: calc(3.939 * var(--d));
   /* Headline line-height. The ack chip is exactly one of these tall. */
   --lh: 0.85;
-  --ease: cubic-bezier(0.16, 1, 0.3, 1);
   --chip-gap: 0.5rem;
   padding-block: 0 3rem;
   text-align: center;
@@ -158,7 +157,7 @@
   padding-inline: 0.75rem;
   font-size: var(--step-body);
   white-space: nowrap;
-  transition: transform 160ms var(--ease);
+  transition: transform var(--t-press) var(--ease-out);
 }
 
 .option:hover span {
@@ -193,7 +192,7 @@
   color: var(--ink);
   font-size: var(--step-body);
   white-space: nowrap;
-  transition: transform 160ms var(--ease);
+  transition: transform var(--t-press) var(--ease-out);
 }
 
 .switch:hover {
@@ -224,7 +223,7 @@
   height: 0.875rem;
   background: var(--bg);
   transform: translateX(1rem);
-  transition: transform 260ms var(--ease);
+  transition: transform 260ms var(--ease-out);
 }
 
 .switch[data-on="false"] .track {
@@ -265,7 +264,7 @@
   min-height: 44px;
   align-items: center;
   text-decoration-thickness: 1px;
-  transition: opacity 160ms ease-out;
+  transition: opacity var(--t-hover) ease-out;
 }
 
 .waitlist:hover {
@@ -314,12 +313,12 @@
   background: var(--surface);
   transition:
     opacity 300ms ease-out,
-    transform 300ms var(--ease);
+    transform 300ms var(--ease-out);
 }
 
 .cell[data-kind="pending"] {
   background: var(--muted);
-  animation: cell-in 220ms var(--ease);
+  animation: cell-in 220ms var(--ease-out);
 }
 
 .cell[data-kind="acked"] {
@@ -379,7 +378,7 @@
 @media (prefers-reduced-motion: no-preference) {
   :global(.js) .rise {
     transform: translateY(105%);
-    animation: line-up 900ms var(--ease) forwards;
+    animation: line-up var(--t-rise) var(--ease-out) forwards;
     animation-delay: calc(var(--i) * 110ms + 150ms);
   }
 
@@ -387,7 +386,7 @@
   :global(.js) .actions {
     opacity: 0;
     transform: translateY(12px);
-    animation: fade-up 600ms var(--ease) 700ms forwards;
+    animation: fade-up 600ms var(--ease-out) 700ms forwards;
   }
 
   .light[data-pulse="true"] {
@@ -491,5 +490,13 @@
     display: flex;
     min-height: 3em;
     align-items: center;
+  }
+}
+
+/* Under 360px the two chips share 288px: tighten the switch so it stays inside its chip. */
+@media (max-width: 22.49rem) {
+  .switch {
+    gap: 0.375rem;
+    padding-inline: 0.375rem 0.5rem;
   }
 }

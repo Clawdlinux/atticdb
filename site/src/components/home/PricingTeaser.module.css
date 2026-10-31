@@ -7,8 +7,9 @@
   padding-block: var(--space-section);
 }
 
+/* Heading size until the second line fits one line at the display size. */
 .title {
-  font-size: min(var(--step-display), 11.5vw);
+  font-size: var(--step-head);
   line-height: 0.95;
   letter-spacing: -0.02em;
   text-wrap: nowrap;
@@ -57,8 +58,8 @@
   font-weight: 500;
   text-decoration: none;
   transition:
-    transform 160ms var(--ease-out),
-    opacity 160ms ease-out;
+    transform var(--t-press) var(--ease-out),
+    opacity var(--t-hover) ease-out;
 }
 
 .button:hover {
@@ -79,6 +80,12 @@
 
 .second:hover {
   text-decoration-thickness: 2px;
+}
+
+@media (min-width: 90rem) {
+  .title {
+    font-size: var(--step-display);
+  }
 }
 
 @media (min-width: 64rem) {

@@ -30,7 +30,7 @@
   align-items: center;
   font-weight: 500;
   text-decoration-thickness: 2px;
-  transition: opacity 160ms ease-out;
+  transition: opacity var(--t-hover) ease-out;
 }
 
 .link:hover {
@@ -65,7 +65,7 @@
 .whole,
 .decimals {
   font-family: var(--font-display), Impact, sans-serif;
-  font-size: min(var(--step-display), 15vw);
+  font-size: var(--step-display);
   line-height: 0.85;
   font-variant-numeric: tabular-nums lining-nums;
 }
@@ -96,16 +96,11 @@
     grid-template-columns: max-content max-content minmax(0, 1fr);
     align-items: baseline;
     column-gap: 0;
-    row-gap: 1.25rem;
+    row-gap: 0.5rem;
   }
 
   .row {
     align-items: baseline;
-  }
-
-  .whole,
-  .decimals {
-    font-size: min(var(--step-display), 8rem);
   }
 
   .decimals {

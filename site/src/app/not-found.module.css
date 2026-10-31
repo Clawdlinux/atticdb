@@ -1,26 +1,30 @@
 .page {
   display: flex;
-  min-height: 65vh;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
   gap: 2rem;
   padding-block: var(--space-section);
-  background: var(--bg);
   text-align: center;
 }
 
 .title {
-  font-size: min(var(--step-display), 22vw);
+  font-size: var(--step-display);
   line-height: 0.9;
   letter-spacing: -0.02em;
 }
 
-.title span {
+.line {
+  display: block;
+  overflow: hidden;
+  padding-bottom: 0.08em;
+  margin-bottom: -0.08em;
+}
+
+.rise {
   display: block;
 }
 
-.page p {
+.lead {
   max-width: 34rem;
   font-size: var(--step-lead);
 }
@@ -33,14 +37,116 @@
   background: var(--accent);
   color: var(--accent-ink);
   text-decoration: none;
-  transition: transform 180ms var(--ease-out), opacity 180ms var(--ease-out);
+  transition:
+    transform var(--t-press) var(--ease-out),
+    opacity var(--t-hover) ease-out;
 }
 
 .home:hover {
-  transform: translateY(-2px);
+  opacity: 0.88;
 }
 
 .home:active {
-  transform: translateY(1px);
-  opacity: 0.85;
+  opacity: 1;
+  transform: scale(0.97);
+}
+
+/* The attic's contents in one row: 2 by 2 on a phone, 4 across from a tablet. */
+.photos {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 2rem 1rem;
+  width: 100%;
+  margin-top: 2rem;
+  text-align: left;
+}
+
+.figure {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.frame {
+  overflow: hidden;
+  aspect-ratio: 4 / 5;
+}
+
+.img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.caption {
+  color: var(--muted);
+  font-size: var(--step-small);
+  line-height: 1.4;
+}
+
+@media (min-width: 48rem) {
+  .photos {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 1.5rem;
+  }
+}
+
+@keyframes line-up {
+  to {
+    transform: none;
+  }
+}
+
+/* Held only through the delay (fill backwards), so hover and press work once it lands. */
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+}
+
+@keyframes drift {
+  from {
+    transform: scale(1);
+  }
+
+  to {
+    transform: scale(1.08);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  :global(.js) .rise {
+    transform: translateY(105%);
+    animation: line-up var(--t-rise) var(--ease-out) forwards;
+  }
+
+  :global(.js) .line + .line .rise {
+    animation-delay: 110ms;
+  }
+
+  :global(.js) .lead,
+  :global(.js) .home {
+    animation: fade-up 600ms var(--ease-out) 450ms backwards;
+  }
+
+  :global(.js) .home {
+    animation-delay: 525ms;
+  }
+
+  .img {
+    animation: drift 18s ease-in-out infinite alternate;
+  }
+
+  .photos > :nth-child(2) .img {
+    animation-delay: -6s;
+  }
+
+  .photos > :nth-child(3) .img {
+    animation-delay: -12s;
+  }
+
+  .photos > :nth-child(4) .img {
+    animation-delay: -3s;
+  }
 }

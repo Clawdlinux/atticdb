@@ -36,7 +36,7 @@ export default function WorksWith() {
       <Reveal className={styles.statement}>
         <h2 id="works-title" className={styles.lead}>
           Wires itself into
-        </h2>{" "}
+        </h2>
         <p className={styles.names}>
           {joined(APPS, 0, lit)}. On {joined(SYSTEMS, APPS.length, lit)}.
         </p>

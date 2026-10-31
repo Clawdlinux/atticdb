@@ -8,13 +8,20 @@ type CopyCommandProps = {
   command?: string;
   id?: string;
   label?: string;
+  // "bone" sets the button in oxide ink for a bone field, so the accent stays the page's one action.
+  tone?: "accent" | "bone";
 };
 
 type Status = "idle" | "copied" | "selected";
 
 const RESET_MS = 2000;
 
-export default function CopyCommand({ command = INSTALL_CMD, id, label = "Copy" }: CopyCommandProps) {
+export default function CopyCommand({
+  command = INSTALL_CMD,
+  id,
+  label = "Copy",
+  tone = "accent",
+}: CopyCommandProps) {
   const [status, setStatus] = useState<Status>("idle");
   const codeRef = useRef<HTMLElement>(null);
   const timer = useRef<number | undefined>(undefined);
@@ -47,7 +54,7 @@ export default function CopyCommand({ command = INSTALL_CMD, id, label = "Copy" 
   const shown = status === "copied" ? "Copied" : status === "selected" ? "Selected" : label;
 
   return (
-    <div className={styles.box} id={id}>
+    <div className={`${styles.box} ${tone === "bone" ? styles.bone : ""}`} id={id}>
       <pre className={styles.code}>
         <code ref={codeRef}>{command}</code>
       </pre>

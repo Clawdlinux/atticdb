@@ -167,30 +167,33 @@ export default function BenchChart({ disk }: { disk: Disk }) {
         </svg>
       </div>
 
-      <table className="visually-hidden">
-        <caption>{`Closed-loop durable acks per second on ${DISK_LABEL[disk]}`}</caption>
-        <thead>
-          <tr>
-            <th scope="col">Writers</th>
-            {SYSTEMS.map((sys) => (
-              <th key={sys.id} scope="col">
-                {sys.label}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {WRITER_GROUPS.map((writers) => (
-            <tr key={writers}>
-              <th scope="row">{writers}</th>
-              {SYSTEMS.map((sys) => {
-                const row = findClosedRow(disk, writers, sys.id);
-                return <td key={sys.id}>{fmt.format(row.acksPerSec)}</td>;
-              })}
+      {/* A table keeps its full width even when shrunk, so a zero-height box clips it. */}
+      <div style={{ position: "relative", height: 0, overflow: "hidden" }}>
+        <table className="visually-hidden">
+          <caption>{`Closed-loop durable acks per second on ${DISK_LABEL[disk]}`}</caption>
+          <thead>
+            <tr>
+              <th scope="col">Writers</th>
+              {SYSTEMS.map((sys) => (
+                <th key={sys.id} scope="col">
+                  {sys.label}
+                </th>
+              ))}
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {WRITER_GROUPS.map((writers) => (
+              <tr key={writers}>
+                <th scope="row">{writers}</th>
+                {SYSTEMS.map((sys) => {
+                  const row = findClosedRow(disk, writers, sys.id);
+                  return <td key={sys.id}>{fmt.format(row.acksPerSec)}</td>;
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

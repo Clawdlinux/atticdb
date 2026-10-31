@@ -43,11 +43,12 @@
   outline-color: var(--field-1-ink);
 }
 
+/* A real superscript; line-height 0 keeps it from opening up the row. */
 .refSup {
-  margin-left: 0.25em;
+  margin-left: 0.2em;
   font-size: var(--step-small);
-  line-height: 1;
-  vertical-align: baseline;
+  line-height: 0;
+  vertical-align: super;
 }
 
 .refLink {
@@ -56,7 +57,7 @@
   font-weight: 500;
   text-decoration: underline;
   text-underline-offset: 0.15em;
-  transition: opacity 160ms ease-out;
+  transition: opacity var(--t-hover) ease-out;
 }
 
 .refLink:hover {
@@ -135,7 +136,7 @@
   text-underline-offset: 0.2em;
   transition:
     color 160ms ease-out,
-    opacity 160ms ease-out;
+    opacity var(--t-hover) ease-out;
 }
 
 .sourceLink:hover {
@@ -159,7 +160,7 @@
 @media (prefers-reduced-motion: no-preference) {
   :global(.js) .rise {
     transform: translateY(105%);
-    animation: line-up 850ms var(--ease-out) forwards;
+    animation: line-up var(--t-rise) var(--ease-out) forwards;
     animation-delay: calc(var(--i, 0) * 110ms + 120ms);
   }
 

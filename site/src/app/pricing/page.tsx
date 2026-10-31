@@ -50,10 +50,10 @@ export default function PricingPage() {
               >
                 <h2 className={styles.planName}>{plan.name}</h2>
                 <p className={styles.price}>{plan.price}</p>
-                <div className={styles.planMeta}>
-                  <p className={styles.unit}>{plan.unit || "\u00a0"}</p>
-                  <p className={styles.status}>{plan.status}</p>
-                </div>
+                <p className={styles.terms}>
+                  {plan.unit ? `${plan.price} ${plan.unit}. ` : null}
+                  <span className={styles.status}>{plan.status}.</span>
+                </p>
                 <ul className={styles.includes}>
                   {plan.includes.map((item) => (
                     <li key={item}>{item}</li>
@@ -61,7 +61,7 @@ export default function PricingPage() {
                 </ul>
                 <div className={styles.action}>
                   {isLocal ? (
-                    <CopyCommand label={plan.cta.label} />
+                    <CopyCommand label={plan.cta.label} tone="bone" />
                   ) : (
                     <a
                       className={`${styles.cta} ${isPro ? styles.ctaAccent : ""}`}
@@ -80,7 +80,7 @@ export default function PricingPage() {
       <section className={styles.notesSection} aria-labelledby="notes-title">
         <Reveal className={styles.notesHead}>
           <h2 id="notes-title" className={styles.notesTitle}>
-            Storage is the meter
+            No per-call fees
           </h2>
         </Reveal>
         <div className={styles.notesBody}>

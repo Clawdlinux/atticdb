@@ -57,9 +57,14 @@ describe("pricing page", () => {
       .map((h) => h.textContent);
     expect(planHeadings).toEqual(["Local", "Cloud Pro", "Cloud Team", "Your cloud"]);
 
-    const planned = within(plansRegion).getAllByText("Planned");
+    const planned = within(plansRegion).getAllByText("Planned.");
     expect(planned).toHaveLength(3);
-    expect(within(plansRegion).getByText("Available")).toBeInTheDocument();
+    expect(within(plansRegion).getByText("Available.")).toBeInTheDocument();
+    // Status reads inline, in one sentence with the terms.
+    expect(planned[0].parentElement).toHaveTextContent("$15 per month. Planned.");
+    expect(within(plansRegion).getByText("Available.").parentElement).toHaveTextContent(
+      "$0 forever. Available.",
+    );
 
     expect(within(plansRegion).getByText(INSTALL_CMD).tagName).toBe("CODE");
     expect(within(plansRegion).getByRole("button", { name: /Install AtticDB/i })).toBeInTheDocument();
@@ -74,6 +79,11 @@ describe("pricing page", () => {
 
     const vpcLink = within(plansRegion).getByRole("link", { name: "Talk to us" });
     expect(vpcLink).toHaveAttribute("href", VPC_URL);
+  });
+
+  it("heads the notes with a fact, not a repeat of the note", () => {
+    render(<PricingPage />);
+    expect(screen.getByRole("heading", { level: 2, name: "No per-call fees" })).toBeInTheDocument();
   });
 
   it("renders both pricing notes as statement paragraphs", () => {
