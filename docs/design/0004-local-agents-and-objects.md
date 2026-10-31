@@ -99,34 +99,14 @@ Other harnesses use the MCP tools only, until they have equivalent hooks.
 ### Track C: links and objects
 
 - **C-links:** a turn or a fact can carry `refs`: a list of `{url, title?, mime?}` in `meta`. AtticDB stores them and returns them. It never fetches them. No format change.
-- **C-objects:** a local, content-addressed object store in the data directory.
-  - **Layout:** the first time a data directory needs it, the server creates `objects/`, `objects/tmp/`, `objects/sha256/` and all 256 `objects/sha256/<2 hex>/` shards. It `fsync`s each new directory's parent, up to the data directory, before writing any ref. No put ever creates a directory. So a ref can't point into a directory whose entry was lost.
-  - **Write:** `PUT /v1/objects` streams a body with a `Content-Type`. The server writes `objects/tmp/<random>`, hashes it while writing, then `fsync`s. It renames it to `objects/sha256/<2 hex>/<62 hex>` and `fsync`s that shard directory. Then it appends an `ObjectRef {tenant, idem_key, digest, bytes, mime}` record to the tape. The `idem_key` is on the tape so replay can rebuild the put's dedup entry, like every other write's (I6). A retry after a restart still returns the original result within the window. The ack comes after that record is durable. The reply is `{"object":"sha256:<hex>","bytes":N}`.
-  - **Read:** `GET /v1/objects/sha256:<hex>` streams the bytes, only if the caller's tenant holds a live ref. Turns and facts point at objects through `refs`, using an `object:` URL.
-  - **Retries:** a put carries an `idem_key`, like every other write (I6). Within the dedup window, a retry returns the original result and writes nothing, even if the ref was forgotten in between. So a lost reply can't bring back a forgotten object. After eviction a retry writes a new ref, as I6 allows for every write. The digest only dedups the file on disk.
-  - **Limits:** 1 GiB per object by default, configurable. Objects count against the free-space floor, which is checked before writing.
-  - **Forget (I10):** `forget` gets an object selector, `object: sha256:<hex>`. It hides every ref the tenant holds to that digest at or below the forget's LSN, so 2 earlier puts of the same bytes are both hidden. A put after the forget makes a new, visible ref, just as an append after a forget makes a new turn. Forgetting a turn that points at an object hides the turn, not the object. Bytes stay on disk until compaction exists, like turns today. Tenants never share a ref. Identical bytes stored by 2 tenants share 1 file, but each tenant's refs are separate (Q5).
-  - **No direct probing:** a put always streams and hashes the full body. There's no call that asks whether a digest exists, and no upload that skips bytes because the client sent a digest. Either would let a tenant probe for another tenant's files. A capacity channel remains near the free-space floor, since existing bytes add none. Per-tenant dedup closes it if tenants don't trust each other (0005).
-  - **Crashes:** a crash after the rename but before the ref leaves an unreferenced file. It's invisible, and a later sweep removes it. A ref can never point at a missing file, because the file is synced first.
-- **C-mcp:**
-  - **File access is limited to allowed roots.** `object_put` and `object_get` take host paths, and a model could ask for `~/.ssh/id_rsa` or write over a dotfile. So each path is resolved with symlinks first, then must fall inside an allowed root. The roots are listed in AtticDB's config under `object_roots`. `atticdb connect --project` adds that project directory. A user-level connect adds none. With no roots, both tools return an error that says how to add one, and `atticdb object` on the shell still works. A path outside every root is refused. The adapter never asks the model to approve it, because the user wasn't asked.
-  - `object_put {path}`: the adapter streams a local file. The model never sends base64.
-  - `object_get {object, path?}`: an image under a size cap comes back as MCP image content, and `path` is optional. Anything else needs `path`. AtticDB writes the object there, refuses to overwrite an existing file, and returns the path. Without `path` it returns an error with the object's size and type, so the caller can choose where it goes. It never writes to a default location.
-  - Shell: `atticdb object put <file>` and `atticdb object get <object> -o <file>`. The Python client gets matching calls.
-
-Why objects live outside the tape:
-- Frames cap at 4 MiB.
-- Recovery scans, replay and checkpoints all pay for every byte on the tape. A single 1 GB recording would roll about 16 segments and slow every reopen.
-- Objects need streaming, not JSON.
-
-Why not the S3 protocol: SigV4 auth, multipart upload and bucket semantics are a large surface. No user has asked for S3 clients pointed at AtticDB (Q3). A `refs` URL can already point at `s3://` or `https://` objects stored elsewhere.
-
-### Track D: compression (evidence-gated)
-
-- **Gate:** dogfood data (#46) shows text turns would save 30% or more of disk, and compression costs under 5% of append throughput at 16 and 64 writers on NVMe.
-- **Candidate:** per-record zstd above a size threshold, marked by a frame flag. That's a format version bump plus 1 dependency.
-- **Objects:** compressed by MIME type, skipping types that are already compressed: JPEG, PNG, MP4, ZIP.
-- Without the data, nothing here gets built.
+- **C-files (shipped, D94):** a file ref is the fact `file<absolute path>`. Content is a 1-line `about` written by the agent. Meta holds `{"file": {bytes, modified_ns, blake3, mime}}`. The file stays where it is.
+  - **Lookup:** the facts B-tree gives exact lookup by path and folder listing by key prefix. No new index.
+  - **Versions:** each save of a changed file is a fact revision. The server keeps the newest 16 per path. `file_get versions: true` lists them and names the one whose blake3 is on disk now.
+  - **Status:** `ok`, `changed` or `missing`, checked by the client at read time. Size and mtime first. The hash decides when they differ, so a touched file stays `ok`.
+  - **Unchanged saves:** the same bytes and about as the current ref write nothing.
+  - **Limits:** keys are at most 1024 bytes, and a tenant holds up to 100,000 facts. Hashing and stat run in the client, as the user. The model sends a path, never bytes.
+  - **Surfaces:** MCP `file_ref {path, about}` and `file_get {path, versions?}`. Shell `atticdb file save` and `atticdb file get`.
+- **C-objects (dropped 2026-10-31, D94):** a local object store that copies bytes into the data directory. Local users keep their files where they are and need references, not copies. The design is in git history at 122adfe if a remote or shared store ever needs it.
 
 ## Phases
 
@@ -134,7 +114,7 @@ Why not the S3 protocol: SigV4 auth, multipart upload and bucket semantics are a
 |---|---|---|---|
 | P1 (#71) | Track A: install, home, `connect`, `doctor`, README storage guidance | Q1 answered | No |
 | P2 (#72) | Track B: Claude Code capture, A-sessions | P1 shipped, Q2 answered | No |
-| P3 (#73) | Track C: links, then objects | S5 forget (#45) designed, so object refs follow I10. Q3 to Q5 answered | Yes, a new record kind |
+| P3 (#73) | Track C: file refs (shipped). Objects dropped for local users (D94) | None | No |
 | P4 (#74) | Track D: compression | Dogfood numbers from #46 meet the gate | Yes, a frame flag |
 
 Deferred, with the evidence that would reopen each:
