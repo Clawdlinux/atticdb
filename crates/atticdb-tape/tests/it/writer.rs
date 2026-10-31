@@ -11,7 +11,6 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Barrier};
 
 #[test]
-#[cfg_attr(windows, ignore = "matches paths printed with / separators")]
 fn byte_threshold_and_segment_roll_install_the_superblock() {
     for (case, size, budget, count) in
         [("byte threshold", 4096, 300, 3), ("segment roll", 200, 256 * 1024 * 1024, 2)]
@@ -21,7 +20,10 @@ fn byte_threshold_and_segment_roll_install_the_superblock() {
         let (mut core, _) = open(io.clone(), Options { superblock_bytes: budget, ..opts(size) });
         let opened = std::mem::take(&mut *events.lock().unwrap());
         let first = "rename db/spare.zdb db/seg-0000000000000001.zdb".to_owned();
-        assert!(opened.contains(&first), "{case}: first segment zero-filled: {opened:?}");
+        assert!(
+            opened.iter().any(|e| slashed(e) == first),
+            "{case}: first segment zero-filled: {opened:?}"
+        );
         for lsn in 1..=count {
             commit(&mut core, hello()).unwrap();
             assert!(core.read(lsn).unwrap().is_some(), "{case}, ack={lsn}");
@@ -36,7 +38,6 @@ fn byte_threshold_and_segment_roll_install_the_superblock() {
 }
 
 #[test]
-#[cfg_attr(windows, ignore = "matches paths printed with / separators")]
 fn clock_threshold_rate_limits_superblock_installs_off_the_reply_path() {
     let (io, clock) = (Arc::new(HookIo::sim(35)), clock());
     let (mut core, _) = WriterCore::open(io.clone(), clock.clone(), "db", opts(4096)).unwrap();
@@ -85,6 +86,10 @@ fn superblock_sync_failures_preserve_acknowledgements_and_poison_writes() {
         }
         assert!(core.is_poisoned(), "{case}");
         assert_eq!(core.durable_lsn(), durable_lsn, "{case}");
+        let events_seen = events.lock().unwrap().clone();
+        // The failed sync is recorded, so the zero below can't come from unmatched path text.
+        let failed_sync = events_seen.iter().any(|e| slashed(e).starts_with("sync db/"));
+        assert!(failed_sync, "{case}: {events_seen:?}");
         assert_eq!(superblock_installs(&events), 0, "{case}");
         drop(core);
         assert_eq!(superblock(&io.inner, 4096), 0, "{case}");
@@ -93,7 +98,6 @@ fn superblock_sync_failures_preserve_acknowledgements_and_poison_writes() {
 }
 
 #[test]
-#[cfg_attr(windows, ignore = "matches paths printed with / separators")]
 fn open_and_shutdown_install_superblocks_with_bounded_rewrites() {
     for (case, payload_len, sessions, bounded) in
         [("preallocated tails", 5, 8, false), ("full segments", 912, 16, true)]
@@ -148,7 +152,8 @@ fn open_and_shutdown_install_superblocks_with_bounded_rewrites() {
         assert_eq!(superblock(&io.inner, 1024), sessions + 1, "{case}");
         assert_eq!(&core.read(sessions + 1).unwrap().unwrap().payload, b"hello", "{case}");
         let events = events.lock().unwrap();
-        let first = |prefix: &str| events.iter().position(|e| e.starts_with(prefix)).unwrap();
+        let first =
+            |prefix: &str| events.iter().position(|e| slashed(e).starts_with(prefix)).unwrap();
         let (rewritten, synced) = (first("write db/seg-"), first("sync db/seg-"));
         let installed = first("rename db/SUPERBLOCK.tmp db/SUPERBLOCK");
         let recovered_dir = events[..installed].iter().rposition(|e| e == "dir-sync db").unwrap();
@@ -222,7 +227,6 @@ fn live_restart_after_a_failed_sync_rewrites_survivors_before_acknowledging() {
 }
 
 #[test]
-#[cfg_attr(windows, ignore = "matches paths printed with / separators")]
 fn live_restart_rewrites_across_rolls_and_before_a_trimmed_tail() {
     let (io, clock) = (Arc::new(HookIo::sim(0)), clock());
     let (mut core, _) = WriterCore::open(io.clone(), clock.clone(), "db", opts(435)).unwrap();
@@ -244,7 +248,7 @@ fn live_restart_rewrites_across_rolls_and_before_a_trimmed_tail() {
     let (mut core, report) = WriterCore::open(io.clone(), clock.clone(), "db", opts(435)).unwrap();
     assert_eq!(report.durable_lsn, 4);
     assert!(report.truncated.is_some());
-    let wrote = |event: &str| events.lock().unwrap().iter().any(|e| e == event);
+    let wrote = |event: &str| events.lock().unwrap().iter().any(|e| slashed(e) == event);
     assert!(wrote("write db/seg-0000000000000001.zdb 117"));
     assert!(wrote("write db/seg-0000000000000002.zdb 0"));
     assert!(!wrote("write db/seg-0000000000000001.zdb 0"));

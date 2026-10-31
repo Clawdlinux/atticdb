@@ -90,8 +90,18 @@ pub(crate) fn superblock(disk: &SimDisk, size: u64) -> u64 {
     DataDir::open(image(disk), "db", None, size).unwrap().superblock()
 }
 
+/// Renders event or path text with `/` separators, so string checks match on every platform.
+/// Windows prints paths with `\`. Other platforms get the text back unchanged.
+pub(crate) fn slashed(text: &str) -> String {
+    if cfg!(windows) {
+        text.replace('\\', "/")
+    } else {
+        text.to_owned()
+    }
+}
+
 pub(crate) fn superblock_installs(events: &Mutex<Vec<String>>) -> usize {
-    let installs = |e: &&String| e.as_str() == "rename db/SUPERBLOCK.tmp db/SUPERBLOCK";
+    let installs = |e: &&String| slashed(e) == "rename db/SUPERBLOCK.tmp db/SUPERBLOCK";
     events.lock().unwrap().iter().filter(installs).count()
 }
 
@@ -177,7 +187,8 @@ impl StateMachine for Machine {
         log.threads.push(std::thread::current().id());
         if let Some((disk, expected)) = &self.expected_segments {
             let list = disk.list(Path::new("db")).unwrap();
-            let count = list.iter().filter(|p| p.to_string_lossy().contains("/seg-")).count();
+            let count =
+                list.iter().filter(|p| slashed(&p.to_string_lossy()).contains("/seg-")).count();
             assert_eq!(count, *expected, "segments must be reserved before prepare");
         }
         match self.behavior {

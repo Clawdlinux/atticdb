@@ -1017,8 +1017,10 @@ mod tests {
     }
 
     /// Checkpoint data files created so far, by name.
+    /// Windows prints `db\ckpt-`, so it reads separators as `/` first. Unix text is unchanged.
     fn created(events: &Mutex<Vec<String>>) -> Vec<String> {
-        let events = events.lock().unwrap();
+        let slashed = |e: &String| if cfg!(windows) { e.replace('\\', "/") } else { e.clone() };
+        let events = events.lock().unwrap().iter().map(slashed).collect::<Vec<_>>();
         events.iter().filter_map(|e| e.strip_prefix("create db/ckpt-")).map(str::to_owned).collect()
     }
 
