@@ -1,0 +1,103 @@
+// The motion tokens for script. The CSS twins live in globals.css (--ease-out, --t-reveal, --rise).
+export const MOTION = {
+  // Same curve as --ease-out: a strong ease-out for every entrance and every press.
+  ease: "cubic-bezier(0.16, 1, 0.3, 1)",
+  revealMs: 800,
+  stillMs: 300,
+  risePx: 24,
+} as const;
+
+// Seconds between the parts of a section: heading, then text, then picture.
+export const STAGGER = 0.075;
+
+type RevealWindow = Window & { __reveal?: (el: Element) => void };
+
+/*
+ * Runs as an inline <head> script, so section entrances never wait for a JS chunk.
+ * Nothing is hidden before it runs, and nothing on screen when it runs is ever hidden.
+ * Only an element whose top is below the fold waits at opacity 0. The observer shows it,
+ * and so does any scroll, resize or print that finds it on screen.
+ * Its end state is committed before the entrance plays, so a dropped animation still shows it.
+ * Self-contained on purpose: it is serialised with toString().
+ */
+export function revealBoot(cfg: typeof MOTION) {
+  const w = window as RevealWindow;
+  if (w.__reveal) return;
+  const still = !!window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+  const seen = new WeakSet<Element>();
+  const waiting = new Set<HTMLElement>();
+
+  const onScreen = (el: Element) => {
+    const r = el.getBoundingClientRect();
+    return r.top < window.innerHeight && r.bottom > 0;
+  };
+
+  const show = (el: HTMLElement) => {
+    if (!waiting.delete(el)) return;
+    io?.unobserve(el);
+    el.dataset.reveal = "shown";
+    el.style.opacity = "";
+    el.style.transform = "";
+    if (typeof el.animate !== "function") return;
+    const end = getComputedStyle(el);
+    const from: Keyframe = still
+      ? { opacity: 0 }
+      : { opacity: 0, transform: `translateY(${cfg.risePx}px)` };
+    const to: Keyframe = still ? { opacity: end.opacity } : { opacity: end.opacity, transform: end.transform };
+    el.animate([from, to], {
+      duration: still ? cfg.stillMs : cfg.revealMs,
+      delay: Number(el.dataset.revealDelay) || 0,
+      easing: cfg.ease,
+      fill: "backwards",
+    });
+  };
+
+  const check = () => {
+    waiting.forEach((el) => {
+      if (onScreen(el)) show(el);
+    });
+  };
+
+  const io =
+    typeof IntersectionObserver === "function"
+      ? new IntersectionObserver(
+          (entries) => {
+            for (const e of entries) if (e.isIntersecting) show(e.target as HTMLElement);
+          },
+          { rootMargin: "0px 0px -8% 0px" },
+        )
+      : null;
+
+  const add = (el: Element) => {
+    if (seen.has(el) || !(el instanceof HTMLElement)) return;
+    seen.add(el);
+    if (!io || el.getBoundingClientRect().top < window.innerHeight) return;
+    el.dataset.reveal = "waiting";
+    el.style.opacity = "0";
+    if (!still) el.style.transform = `translateY(${cfg.risePx}px)`;
+    waiting.add(el);
+    io.observe(el);
+  };
+
+  // Positions only mean something once the stylesheets apply. The first frame after
+  // DOMContentLoaded waits for them, so the scan runs there. Until then nothing is touched.
+  let ready = false;
+  const scan = () => {
+    ready = true;
+    document.querySelectorAll("[data-reveal]").forEach(add);
+  };
+  const start = () => requestAnimationFrame(scan);
+
+  w.__reveal = (el) => {
+    if (ready) add(el);
+  };
+  window.addEventListener("scroll", check, { passive: true });
+  window.addEventListener("resize", check);
+  window.addEventListener("beforeprint", () => waiting.forEach(show));
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start);
+  else start();
+}
+
+export function revealBootScript(): string {
+  return `document.documentElement.classList.add('js');(${revealBoot.toString()})(${JSON.stringify(MOTION)});`;
+}

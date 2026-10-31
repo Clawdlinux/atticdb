@@ -1,9 +1,10 @@
 import type { Metadata } from "next";
-import { Bebas_Neue, EB_Garamond, JetBrains_Mono } from "next/font/google";
+import { Bebas_Neue, EB_Garamond, JetBrains_Mono } from "next/font/google"; // taste-skill-ignore: mono is set on pre and code only
 import Providers from "@/components/Providers";
 import SiteFooter from "@/components/SiteFooter";
 import SiteNav from "@/components/SiteNav";
 import { pageMetadata } from "@/lib/seo";
+import { revealBootScript } from "@/lib/motion";
 import { SITE_URL } from "@/lib/site";
 import "./globals.css";
 
@@ -22,7 +23,7 @@ const text = EB_Garamond({
   display: "swap",
 });
 
-const code = JetBrains_Mono({
+const code = JetBrains_Mono({ // taste-skill-ignore: code blocks only
   subsets: ["latin"],
   variable: "--font-code",
   display: "swap",
@@ -45,7 +46,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <head>
         <script
           dangerouslySetInnerHTML={{
-            __html: "document.documentElement.classList.add('js')",
+            __html: revealBootScript(),
           }}
         />
       </head>

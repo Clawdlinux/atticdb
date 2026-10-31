@@ -17,7 +17,14 @@
 
   /* Space between sections: 64px on a phone, about 110px at 1440. */
   --space-section: clamp(4rem, 2rem + 5.5vw, 7.5rem);
+
+  /* Motion: one curve, a strong ease-out, for entrances and feedback alike. Script twin: lib/motion.ts. */
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --t-press: 140ms;
+  --t-hover: 180ms;
+  --t-ui: 260ms;
+  --t-reveal: 800ms;
+  --t-rise: 900ms;
 }
 
 *,
@@ -35,7 +42,7 @@ html {
 }
 
 body {
-  min-height: 100vh;
+  min-height: 100svh;
   background: var(--bg);
   color: var(--ink);
   font-family: var(--font-text), Georgia, serif;
@@ -67,6 +74,12 @@ p {
 a {
   color: inherit;
   text-underline-offset: 0.2em;
+  transition: opacity var(--t-press) ease-out;
+}
+
+/* Feedback on every link: a press dims it for a beat. Buttons scale in their own modules. */
+a:active {
+  opacity: 0.7;
 }
 
 button,
@@ -83,6 +96,13 @@ button {
   background: var(--accent);
   color: var(--accent-ink);
   cursor: pointer;
+  transition:
+    transform var(--t-press) var(--ease-out),
+    opacity var(--t-hover) ease-out;
+}
+
+button:active {
+  transform: scale(0.97);
 }
 
 img,
@@ -159,6 +179,14 @@ main {
 
 .skip-link:focus {
   transform: translateY(0);
+}
+
+/* A part still waiting to rise never prints blank. */
+@media print {
+  [data-reveal] {
+    opacity: 1 !important;
+    transform: none !important;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
