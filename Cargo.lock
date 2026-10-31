@@ -34,6 +34,7 @@ name = "atticdb"
 version = "0.1.0"
 dependencies = [
  "atticdb-core",
+ "atticdb-sys",
  "atticdb-tape",
  "blake3",
  "httparse",
@@ -52,9 +53,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "atticdb-sys"
+version = "0.1.0"
+dependencies = [
+ "windows-sys",
+]
+
+[[package]]
 name = "atticdb-tape"
 version = "0.1.0"
 dependencies = [
+ "atticdb-sys",
  "atticdb-tape",
  "crc32c",
  "criterion",

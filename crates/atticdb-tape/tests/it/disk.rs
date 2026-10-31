@@ -111,11 +111,14 @@ fn space_fault(case: &str, fault: Fault, expect_read_only: bool, expect_poisoned
     let before_prepares = log.lock().unwrap().prepares;
     let before_manifest = read(disk, "db/MANIFEST");
     let before_files = disk.list(db).unwrap();
-    let segments = before_files.iter().filter(|p| p.to_string_lossy().contains("/seg-")).count();
+    let segments =
+        before_files.iter().filter(|p| slashed(&p.to_string_lossy()).contains("/seg-")).count();
+    assert!(segments > 0, "{case}: the open tape has a segment");
     let next_segment = segments as u64 + 1;
     let before_events = events.lock().unwrap().clone();
     if indexed {
-        let allocations = before_events.iter().filter(|e| e.starts_with("allocate db/LSN-"));
+        let allocations =
+            before_events.iter().filter(|e| slashed(e).starts_with("allocate db/LSN-"));
         // Page-wise growth made 258 calls here, one per 1024-LSN group per file.
         assert_eq!(allocations.count(), 3, "{case}: index allocate calls while priming");
         assert_eq!(index_lens(disk), [1 << 20, 2 << 20], "{case}: primed index backing");

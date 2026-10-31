@@ -191,7 +191,7 @@ fn truncation_resumes_at_the_cut_and_reopens_twice_after_new_ack() {
 }
 
 fn at(images: &[(String, SimDisk)], event: &str) -> usize {
-    images.iter().position(|(e, _)| e == event).unwrap()
+    images.iter().position(|(e, _)| slashed(e) == event).unwrap()
 }
 
 #[test]
