@@ -278,12 +278,12 @@ Branch on `outcome`, never on the status alone. One call is one `idem_key`, reus
 
 ## `atticdb mcp`
 
-`atticdb mcp` gives the model `memory_append`, `memory_recent`, `fact_set`, `fact_get`, `fact_list` and `memory_search`. Search finds turns and current facts by words, across every session, newest first. It starts the server if none is running.
+`atticdb mcp` gives the model `memory_append`, `memory_recent`, `fact_set`, `fact_get`, `fact_list`, `memory_search`, `file_ref` and `file_get`. Search finds turns and current facts by words, across every session, newest first. It starts the server if none is running.
 The model can read and write any session in the tenant. Don't give it to a model you don't trust with the whole tenant.
 The server's instructions tell the model when to read memory and what to save. Claude Code and Codex read them.
 
 Newline-delimited JSON-RPC 2.0 on stdin and stdout. Logs go to stderr. It exits 0 when stdin closes.
-Tools: `memory_append {content, role?, session?, meta?}`, `memory_recent {n?, session?, max_bytes?}`, the fact tools, and `memory_search {query, limit?, before?, max_bytes?}`.
+Tools: `memory_append {content, role?, session?, meta?}`, `memory_recent {n?, session?, max_bytes?}`, the fact tools, `memory_search {query, limit?, before?, max_bytes?}`, `file_ref {path, about}` and `file_get {path, versions?}`.
 Read tools carry `readOnlyHint: true`, so VS Code runs them without asking. `initialize` returns short `instructions`: use the memory block, and where to save rules and notes. Copilot CLI adds a server's instructions to the system prompt only for allowlisted servers, or with `--allow-all-mcp-server-instructions`.
 Integers beyond ±(2^53 - 1), such as `commit_time_ns`, come back as strings in tool results, because JavaScript clients can't hold them (I-JSON, RFC 7493). The shell verbs print them as numbers.
 `--agent` defaults to `mcp`, as in the shell verbs. The session-start hook reads that agent's notes too. A tool may pass `session`. An empty `session` counts as none, so the call uses the default session. The tenant still comes from the token.
@@ -333,6 +333,16 @@ How it finds a server:
 
 An auto-started server runs in its own process group and outlives the adapters. Stop it with `kill <pid>`. The pid is in `<data_dir>/LOCK`.
 
+### Files, images and recordings
+
+AtticDB keeps references to files, not the bytes (D94). `file_ref {path, about}` saves the path, size, mtime, blake3 hash and MIME type, plus the agent's 1-line about. It is the fact `file<absolute path>`, so lookup by path is exact and a folder lists by prefix.
+
+- Saving a changed file again adds a version. The newest 16 are kept.
+- `file_get {path}` reports `ok`, `changed` or `missing`. A touched file with the same bytes stays `ok`.
+- `file_get {path, versions: true}` lists the versions and names the one on disk now.
+- A deleted file reached through a symlink or `..` still finds its key. Windows shares key as `file//server/share`.
+- Search matches the about text.
+
 ### Secrets
 
 Before `memory_append` and `fact_set` write, AtticDB replaces secrets in the content and in every `meta` string with placeholders such as `[secret:github-token]`.
@@ -347,7 +357,7 @@ It is best effort. A secret that was changed, split or encoded gets through, so 
 
 ## Shell verbs
 
-The same 6 tools run from a shell, with `atticdb mcp`'s connection flags. Each prints 1 JSON line. `fact set --delete` deletes.
+The same 8 tools run from a shell, with `atticdb mcp`'s connection flags. Each prints 1 JSON line. `fact set --delete` deletes.
 
 ```sh
 export ATTICDB_TOKEN=$TOKEN
@@ -358,6 +368,8 @@ atticdb fact set $Z --key repo/payments/retry-rule --content "Retry 3 times, the
 atticdb fact get $Z --key repo/payments/retry-rule    # {"fact":{"agent":"planner","content":...}}
 atticdb fact list $Z --prefix repo/ --limit 50        # {"facts":[...],"next":null}
 atticdb search $Z --query "retry rule"                # {"hits":[...],"next":null}
+atticdb file save $Z --path shots/login.png --about "login page, dark mode"
+atticdb file get $Z --path shots/login.png --versions # {"ref":{...,"status":"ok"},"versions":[...],"on_disk":7}
 ```
 
 Each write picks 1 random `idem_key` and retries with it until `--retry-deadline` (default 30 s). Exit 0 means done. Exit 1 means nothing was written, or a read failed. Exit 2 is a usage error.
