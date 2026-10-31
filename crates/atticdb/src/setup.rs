@@ -454,6 +454,6 @@ pub(crate) fn kill_group(child: &mut std::process::Child) {
 pub(crate) fn check_store(cwd: &Path) -> Result<(), String> {
     let session = crate::home::repo(cwd).unwrap_or_else(|| "setup".into());
     let deadline = Instant::now() + STORE_TIMEOUT;
-    let mut home = crate::mcp::HomeReader::in_home(&session, deadline, &Lookup::ENV)?;
+    let mut home = crate::client::HomeReader::in_home(&session, deadline, &Lookup::ENV)?;
     home.read("setup", "fact_list", &json!({"prefix": "user/", "limit": 1})).map(drop)
 }

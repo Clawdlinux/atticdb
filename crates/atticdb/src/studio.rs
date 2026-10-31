@@ -7,10 +7,10 @@
 //! answer, and there is none. The exact `Host` check blocks DNS rebinding.
 
 use crate::api;
+use crate::client::{Store, StoreFlags, StoreKind};
 use crate::config::Token;
 use crate::http::{self, ClientResponse, Head, Limits, Response, ServerConn};
 use crate::launch::Launch;
-use crate::mcp::{Store, StoreFlags, StoreKind};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -181,7 +181,7 @@ fn open_page(url: &str) -> Result<(), String> {
     command
         .arg(&page)
         // The browser it starts gets this environment, and a token there may be live.
-        .env_remove(crate::mcp::TOKEN_ENV)
+        .env_remove(crate::client::TOKEN_ENV)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -227,7 +227,7 @@ fn open_page(url: &str) -> Result<(), String> {
     command
         .arg(&page)
         // The browser it starts gets this environment, and a token there may be live.
-        .env_remove(crate::mcp::TOKEN_ENV)
+        .env_remove(crate::client::TOKEN_ENV)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());

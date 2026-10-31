@@ -197,7 +197,7 @@ fn flags(args: &[String], valued: &[&str], switches: &[&str]) -> Option<HashMap<
 
 fn tool(args: &[String], name: &str, valued: &[&str], switches: &[&str]) -> Option<u8> {
     flags(args, &[&CONNECT[..], valued].concat(), switches)
-        .map(|flags| atticdb::mcp::command(name, flags))
+        .map(|flags| atticdb::client::command(name, flags))
 }
 
 /// `atticdb connect`. `--no-hook` and `--notes` are for Claude Code and Codex only. Codex
@@ -347,8 +347,8 @@ fn load(mut flags: HashMap<String, String>) -> Option<u8> {
     };
     let token = match flags.remove("--token-file") {
         Some(path) => atticdb::config::read_token_file(Path::new(&path)),
-        None => std::env::var(atticdb::mcp::TOKEN_ENV)
-            .map_err(|_| format!("set {} or --token-file", atticdb::mcp::TOKEN_ENV))
+        None => std::env::var(atticdb::client::TOKEN_ENV)
+            .map_err(|_| format!("set {} or --token-file", atticdb::client::TOKEN_ENV))
             .and_then(|text| atticdb::config::Token::new(text).map_err(str::to_owned)),
     };
     match token {
