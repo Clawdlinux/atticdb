@@ -246,3 +246,57 @@ Framer Motion (`motion/react`) drives every interactive transition after hydrati
 ## Left to the builder
 
 Component boundaries, file names inside `site/`, exact easing curves, exact sample memory records, the chart's geometry.
+
+## Addendum 2026-10-31: Vercel, interactive install, docs subdomain
+
+The owner asked for 3 more things: deploy on Vercel, an interactive install for local users, and docs on a subdomain.
+Calls marked "Our call" are the builder's.
+
+### Hosting (supersedes the Cloudflare Pages lines in "Stack")
+
+- One Vercel project, `atticdb-site`, root `site/`. Static output: `buildCommand` `npm run build`, `outputDirectory` `out`, `framework` null, `cleanUrls` true.
+- Domains on that project: `atticdb.com` (primary), `www.atticdb.com` (redirects to apex), `docs.atticdb.com`.
+- DNS stays on Cloudflare. Records are DNS-only, so Vercel issues the certificates: apex `A 76.76.21.21`, `www` and `docs` `CNAME cname.vercel-dns.com`.
+  Wrangler can't write DNS (its OAuth scopes stop at `zone:read`), so records go through the Cloudflare API with a token that has Zone DNS Edit on atticdb.com.
+- Security headers move from `public/_headers` into `vercel.json`, with the same values. `public/_headers` and `wrangler.toml` are removed (Our call: one deploy target, no drift).
+
+### Interactive install (the live thing for local users)
+
+A client component, `Installer`, used on home (new section `id="install"`, after How it works) and on the docs install page.
+Every command it prints exists in the CLI at `crates/atticdb/src/main.rs` and `setup.rs`.
+
+- **Your system:** macOS, Linux, Windows. Detected after mount, macOS on the server render. The user can switch.
+- **How to install:** macOS and Linux get "Install script" (the default, `INSTALL_CMD`) and "From source" (`cargo install --git https://github.com/Clawdlinux/atticdb atticdb --locked`). Windows gets "Release zip" (the 4 PowerShell lines from the README) and "From source".
+- **Apps to connect:** Copilot CLI, VS Code, Claude Code, Codex. All checked by default. Their `--harness` names are `copilot`, `vscode`, `claude-code`, `codex`.
+- **Options:** "Preview first" (on by default, adds a `atticdb setup --dry-run` step before the real one). "Load memory when a chat starts" (on by default; off adds `--no-hook`; shown only when Claude Code or Codex is checked).
+- **Output:** an ordered list of steps. Each has 1 sentence and its command with a copy button. The last step is `atticdb doctor --harness <list>`. "Copy all" copies every command, one per line.
+- When all 4 apps are checked, `--harness` is omitted, because setup then asks. Our call: it still passes `--harness` with all 4 so the command does what it shows.
+- With no app checked, the setup and doctor steps are replaced by 1 sentence: "Pick at least 1 app to connect."
+- Windows notes, shown only for Windows: "On Windows, Codex gets only its MCP entry for now." and "Claude Code needs version 2.1.139 or later for the chat-start hook."
+- Logic lives in a pure, tested function: `buildInstallSteps(options) -> InstallStep[]`.
+- Without JS, the default steps for macOS render in full.
+
+### Motion for the installer (from the motion-design skill)
+
+- Personality: Corporate, material Rigid (metal and disks): no overshoot.
+- Signature easing `cubic-bezier(0.2, 0, 0, 1)`. Durations: quick 120 ms, standard 240 ms, slow 480 ms.
+- Primary: changed command lines swap with a 6 px rise and fade (240 ms enter, 160 ms exit). Unchanged lines don't move.
+- Secondary: the selected option's fill slides between choices (shared `layoutId`). Copy shows "Copied" with a 120 ms swap.
+- Ambient: the step list re-cascades at 40 ms per step, under 200 ms total, only when the system or method changes.
+- Reduced motion: no travel. Swaps become instant.
+
+### Docs at docs.atticdb.com
+
+- Markdown files in `site/content/docs/*.md`, rendered at build with `marked` (Our call: the one new dependency, so docs stay plain Markdown).
+- Pages, in order: Overview (`/`), Install (`/install`, with the Installer), Connect your apps (`/connect`), MCP tools (`/mcp`), Shell verbs and studio (`/cli`), Server and HTTP API (`/http-api`), How it works (`/how-it-works`), Windows (`/windows`).
+- Content comes only from `README.md` and `crates/atticdb/README.md` at the branch's base commit. Facts are copied, not invented. Each page ends with "Source: <file> on GitHub".
+- Routes live under `/docs/*` in the app. On Vercel, a host rewrite serves them at `docs.atticdb.com/*`. Requests for `atticdb.com/docs/*` redirect to the docs host.
+- Links between docs pages use a base that is empty on Vercel builds (`process.env.VERCEL` set) and `/docs` everywhere else, so local preview works.
+- The docs layout has the site's palette and type: a sidebar list of the 8 pages on desktop, a select-free page list above the content on phones, and prev and next links at the foot.
+- Each docs page has its own title and description and canonical `https://docs.atticdb.com/<page>`. The docs host serves its own `sitemap.xml` and `robots.txt`.
+- The site nav and footer "Docs" link goes to `https://docs.atticdb.com`.
+
+### Gate for this addendum
+
+`npm test`, `npm run lint` and `npm run build` pass. Screenshots at 1440 and 390 of home's install section and 3 docs pages are checked by eye.
+The taste skill's scripts are not run: SkillSpector rated that skill DO_NOT_INSTALL, and the owner hasn't approved it.
