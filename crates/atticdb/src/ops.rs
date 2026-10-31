@@ -1,19 +1,25 @@
 //! Operator commands against a running server or a copy of a stopped data directory.
 
 use crate::config::Token;
-use crate::launch::{self, Launch, Url};
+#[cfg(unix)]
+use crate::launch;
+use crate::launch::{Launch, Url};
+#[cfg(not(unix))]
+use crate::platform::DirBuilderExt;
 use crate::serve::EXIT_LOCKED;
 use atticdb_core::{Engine, EngineOptions, ErrorKind};
 use atticdb_tape::{StdIo, SystemClock, Tape, TapeOptions};
 use serde_json::{json, Value};
 use std::fs::{DirBuilder, OpenOptions, TryLockError};
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Prints `GET /v1/stats` as `key=value` lines. Never starts a server: that would hide an outage.
+#[cfg(unix)]
 pub fn stats(socket: Option<&Path>, data_dir: Option<&Path>) -> u8 {
     let deadline = Instant::now() + Duration::from_secs(5);
     let stream = match (socket, data_dir) {
@@ -48,6 +54,14 @@ pub fn stats(socket: Option<&Path>, data_dir: Option<&Path>) -> u8 {
     }
 }
 
+/// Stats are served on the Unix socket only, which Windows lacks. Returns 1.
+#[cfg(not(unix))]
+pub fn stats(socket: Option<&Path>, data_dir: Option<&Path>) -> u8 {
+    let _ = (socket, data_dir);
+    eprintln!("atticdb stats: stats are served on the Unix socket only, which Windows lacks");
+    1
+}
+
 /// Closed-loop append load, the way agents write: each writer waits for its ack before the
 /// next batch, on one keep-alive connection. Prints `key=value` lines, latency per ack.
 pub fn load(
@@ -63,7 +77,7 @@ pub fn load(
     let run = match crate::random_hex(4) {
         Ok(run) => run,
         Err(error) => {
-            eprintln!("atticdb load: cannot read /dev/urandom: {error}");
+            eprintln!("atticdb load: {}", crate::platform::no_random(error));
             return 1;
         }
     };
@@ -268,7 +282,13 @@ fn copy_locked(dir: &Path, scratch: Option<&Path>) -> Result<Scratch, (u8, Strin
         let entry = entry.map_err(fail)?;
         let kind = entry.file_type().map_err(fail)?;
         // The server's socket stays behind. Anything else would make an incomplete copy.
+        #[cfg(unix)]
         if kind.is_socket() {
+            continue;
+        }
+        // Windows locks are mandatory, so the held `LOCK` cannot be read. The copy makes its own.
+        #[cfg(not(unix))]
+        if entry.file_name() == "LOCK" {
             continue;
         }
         if !kind.is_file() {
@@ -278,7 +298,16 @@ fn copy_locked(dir: &Path, scratch: Option<&Path>) -> Result<Scratch, (u8, Strin
             let to = copy.0.join(entry.file_name());
             std::fs::copy(entry.path(), &to).map_err(fail)?;
             // Opening needs write access, and a backup can be read-only.
+            #[cfg(unix)]
             std::fs::set_permissions(&to, std::fs::Permissions::from_mode(0o600)).map_err(fail)?;
+            // On Windows this clears only the read-only attribute.
+            #[cfg(not(unix))]
+            #[allow(clippy::permissions_set_readonly_false)]
+            {
+                let mut permissions = std::fs::metadata(&to).map_err(fail)?.permissions();
+                permissions.set_readonly(false);
+                std::fs::set_permissions(&to, permissions).map_err(fail)?;
+            }
         }
     }
     Ok(copy)

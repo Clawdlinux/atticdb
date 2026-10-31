@@ -17,7 +17,9 @@ use std::convert::Infallible;
 use std::hint::black_box;
 use std::io::{self, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
+#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -108,7 +110,7 @@ fn run(mut flags: HashMap<String, String>, open: bool) -> Result<Infallible, Str
     let listener = listener.map_err(|error| error.to_string())?;
     let port = listener.local_addr().map_err(|error| error.to_string())?.port();
     let secret = crate::random_hex(16);
-    let secret = secret.map_err(|error| format!("cannot read /dev/urandom: {error}"))?;
+    let secret = secret.map_err(crate::platform::no_random)?;
     let url = format!("http://127.0.0.1:{port}/#k={secret}");
     // 1 write, so a reader never sees half of a line.
     let mut stdout = io::stdout();
@@ -155,11 +157,12 @@ fn get(
 
 /// Writes a 0600 redirect page to `url` in the home directory and opens it in the browser.
 /// The secret is never in a process argument, where `ps` would show it.
+#[cfg(unix)]
 fn open_page(url: &str) -> Result<(), String> {
     let dir = crate::home::dir()?;
     crate::listen::owned_dir(&dir, 0o077)?;
     let page = dir.join("studio.html");
-    let hex = crate::random_hex(8).map_err(|error| format!("cannot read /dev/urandom: {error}"))?;
+    let hex = crate::random_hex(8).map_err(crate::platform::no_random)?;
     let tmp = dir.join(format!(".studio.html.{hex}"));
     let html = format!(
         "<!doctype html>\n<meta charset=\"utf-8\">\n<title>AtticDB studio</title>\n\
@@ -196,6 +199,42 @@ fn open_page(url: &str) -> Result<(), String> {
         Ok(status) if !status.success() => not_opened(&format!("{program} exited: {status}")),
         _ => {}
     };
+    let _ = std::thread::Builder::new().name("atticdb-open".into()).spawn(reap);
+    Ok(())
+}
+
+/// Writes the redirect page as on Unix, then opens it with `explorer.exe`. No shell parses
+/// the path, so a `&` or `^` in it stays literal. `cmd /C start` would parse them.
+#[cfg(windows)]
+fn open_page(url: &str) -> Result<(), String> {
+    let dir = crate::home::dir()?;
+    crate::listen::owned_dir(&dir, 0o077)?;
+    let page = dir.join("studio.html");
+    let hex = crate::random_hex(8).map_err(crate::platform::no_random)?;
+    let tmp = dir.join(format!(".studio.html.{hex}"));
+    let html = format!(
+        "<!doctype html>\n<meta charset=\"utf-8\">\n<title>AtticDB studio</title>\n\
+         <meta http-equiv=\"refresh\" content=\"0;url={url}\">\n\
+         <a href=\"{url}\">Open AtticDB studio</a>\n"
+    );
+    let written = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp);
+    let written = written.and_then(|mut file| file.write_all(html.as_bytes()));
+    if let Err(error) = written.and_then(|()| std::fs::rename(&tmp, &page)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("{}: {error}", page.display()));
+    }
+    let mut command = Command::new(crate::platform::system_program("explorer.exe"));
+    command
+        .arg(&page)
+        // The browser it starts gets this environment, and a token there may be live.
+        .env_remove(crate::mcp::TOKEN_ENV)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    crate::platform::no_window(&mut command);
+    let mut child = crate::spawn(&mut command).map_err(|error| format!("explorer: {error}"))?;
+    // explorer.exe exits 1 even when it opened the page, so its status tells nothing.
+    let reap = move || drop(child.wait());
     let _ = std::thread::Builder::new().name("atticdb-open".into()).spawn(reap);
     Ok(())
 }

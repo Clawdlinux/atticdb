@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 use std::fmt;
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{Shutdown, TcpStream};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::sync::{Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -40,6 +41,7 @@ macro_rules! impl_stream {
     };
 }
 impl_stream!(TcpStream);
+#[cfg(unix)]
 impl_stream!(UnixStream);
 
 /// Size limits and total deadlines. Deadlines bound a whole phase, not one read,
@@ -119,6 +121,21 @@ impl Head {
     /// The first value of a header. `name` must be lowercase.
     pub fn header<'a>(&'a self, name: &'a str) -> Option<&'a [u8]> {
         self.headers(name).next()
+    }
+
+    /// An HTTP/1.1 head with lowercase header `names`, for unit tests.
+    #[cfg(test)]
+    pub(crate) fn for_test(method: &str, target: &str, headers: &[(&str, &str)]) -> Self {
+        let headers = headers.iter().map(|(name, value)| ((*name).into(), value.as_bytes().into()));
+        Self {
+            method: method.into(),
+            target: target.into(),
+            minor_version: 1,
+            content_length: 0,
+            headers: headers.collect(),
+            expect_continue: false,
+            keep_alive: true,
+        }
     }
 }
 
@@ -691,7 +708,9 @@ pub fn exchange<S: Stream + ?Sized>(
     Ok(ClientResponse { status, body })
 }
 
+// These tests run on a Unix socket pair. Windows gets them in part 3 of #137.
 #[cfg(test)]
+#[cfg(unix)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::type_complexity)]
     use super::*;

@@ -305,6 +305,8 @@ impl StoreFlags {
             return Err("set --url, or --data-dir or a config with data_dir".into());
         }
         let launch = Launch::new(url, data_dir, config_path, unix_socket);
+        #[cfg(windows)]
+        let launch = launch.with_token(token.clone());
         Ok(Store { launch, token, kind, tenant, home: home_dir })
     }
 }
@@ -551,7 +553,7 @@ impl Adapter {
     fn write(&mut self, target: &str, mut body: Value) -> Value {
         match crate::random_hex(16) {
             Ok(key) => body["idem_key"] = json!(key),
-            Err(error) => return tool_error(format!("cannot read /dev/urandom: {error}")),
+            Err(error) => return tool_error(crate::platform::no_random(error)),
         }
         let (mut merge, mut reasons) = (Merge::default(), Vec::new());
         self.retry("POST", target, body.to_string().as_bytes(), |reply| {

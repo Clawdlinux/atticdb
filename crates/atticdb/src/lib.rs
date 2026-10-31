@@ -15,11 +15,17 @@ pub mod hook;
 pub mod http;
 pub mod jsonedit;
 pub mod launch;
+#[cfg(unix)]
+pub mod legacy;
+/// Windows has no install from before the rename, so `migrate` has nothing to do there.
+#[cfg(not(unix))]
+#[path = "legacy_none.rs"]
 pub mod legacy;
 pub mod listen;
 pub mod mcp;
 pub mod ops;
 pub mod outcome;
+mod platform;
 mod redact;
 pub mod serve;
 pub mod setup;

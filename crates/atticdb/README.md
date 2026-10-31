@@ -172,6 +172,16 @@ In Copilot CLI, run `/sandbox`, and on the Filesystem tab add the home under Use
 | 70 | Poisoned, with `--exit-on-poison` |
 | 75 | Another process holds the data directory lock |
 
+### On Windows
+
+Windows support is in progress ([#137](https://github.com/Clawdlinux/atticdb/issues/137)).
+- The home defaults to `%LOCALAPPDATA%\atticdb`. `ATTICDB_HOME` moves it, as on Unix.
+- There is no Unix socket. A server always listens on loopback TCP, and `--listen none` fails. `--unix-socket` and `unix:///` URLs fail too.
+- A server the CLI starts listens on `127.0.0.1:0`, a free port. `LOCK` names that port, as `tcp=127.0.0.1:<port>`.
+- Before the CLI sends its token, it sends `GET /healthz` with a random `X-Atticdb-Nonce` header and no token. The server answers with a `proofs` array: a keyed BLAKE3 hash of the nonce and the instance id, 1 per tenant. The key is derived from that tenant's token. The CLI sends its token only when 1 proof matches its own. So a program squatting on the port never gets the token.
+- Windows has no mode bits. The home lives in the user's profile, which is private by default, so AtticDB skips the owner and mode checks.
+- `atticdb stats` needs the Unix socket, so it fails. `atticdb migrate` has nothing to move.
+
 ## `atticdb verify` and `atticdb dump`
 
 Both check a stopped data directory without changing it. Opening a data directory repairs it, so they never open the original. They take its `LOCK` without creating anything, copy its regular files into a new mode 0700 directory, open the copy, and remove it, also on failure. The lock stops a server from starting during the copy.

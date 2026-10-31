@@ -12,9 +12,11 @@ pub use claude::Notes;
 /// What to do after Codex's hook is added.
 pub(crate) use codex::APPROVE as CODEX_APPROVE;
 // The files the legacy check reads, and how it finds the old binary.
+#[cfg(unix)]
 pub(crate) use claude::{
     find_program, settings_file as claude_settings, state_file as claude_state,
 };
+#[cfg(unix)]
 pub(crate) use codex::{codex_home, hooks_file as codex_hooks};
 
 /// What a part did, or in [`Mode::Plan`] would do.
@@ -158,10 +160,15 @@ impl Report {
 }
 
 use crate::home::{user_home, Lookup, HOME_ENV};
+#[cfg(not(unix))]
+use crate::platform::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use atticdb_tape::{Io, StdIo};
 use serde_json::{json, Map, Value};
-use std::fs::{File, OpenOptions, Permissions};
+#[cfg(unix)]
+use std::fs::Permissions;
+use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
@@ -224,6 +231,7 @@ impl Harness {
             Self::Vscode if cfg!(target_os = "macos") => {
                 user_home()?.join("Library/Application Support/Code/User/mcp.json")
             }
+            // TODO(#137): Windows keeps it in %APPDATA%\Code\User, in part 3.
             Self::Vscode => match absolute_env("XDG_CONFIG_HOME") {
                 Some(config) => config,
                 None => user_home()?.join(".config"),
@@ -282,6 +290,12 @@ pub(crate) fn copilot_home() -> Result<PathBuf, String> {
 pub(crate) fn binary() -> Result<String, String> {
     let exe = std::env::current_exe().and_then(std::fs::canonicalize);
     let exe = exe.map_err(|error| format!("cannot find the atticdb binary: {error}"))?;
+    // `canonicalize` gives `\\?\C:\...`, which other apps may not read.
+    #[cfg(windows)]
+    let exe = match exe.into_os_string().into_string() {
+        Ok(text) => PathBuf::from(crate::platform::plain_path(text)),
+        Err(_) => return Err("the atticdb binary's path must be UTF-8".into()),
+    };
     exe.into_os_string().into_string().map_err(|_| "the atticdb binary's path must be UTF-8".into())
 }
 
@@ -996,7 +1010,7 @@ fn write(path: &Path, old: Option<&Saved>, text: &[u8]) -> Result<Option<PathBuf
         None => None,
     };
     let file_name = path.file_name().map(|name| name.to_string_lossy()).unwrap_or_default();
-    let hex = crate::random_hex(8).map_err(|error| format!("cannot read /dev/urandom: {error}"))?;
+    let hex = crate::random_hex(8).map_err(crate::platform::no_random)?;
     let tmp = parent.join(format!(".{file_name}.atticdb-{hex}"));
     let written = create(&tmp, text, old.map(|(_, mode)| *mode))
         .and_then(|()| std::fs::rename(&tmp, path))
@@ -1047,6 +1061,8 @@ fn save(path: &Path, bytes: &[u8], mode: u32) -> Result<PathBuf, String> {
 fn create(path: &Path, bytes: &[u8], mode: Option<u32>) -> std::io::Result<()> {
     let mut file: File =
         OpenOptions::new().write(true).create_new(true).mode(mode.unwrap_or(0o600)).open(path)?;
+    // Windows has no mode bits to copy. The new file is writable, as the old one was.
+    #[cfg(unix)]
     if let Some(mode) = mode {
         file.set_permissions(Permissions::from_mode(mode))?;
     }

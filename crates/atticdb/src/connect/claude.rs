@@ -17,10 +17,14 @@ use super::{
 };
 use crate::home::{user_home, Lookup, HOME_ENV};
 use crate::jsonedit;
+#[cfg(not(unix))]
+use crate::platform::DirBuilderExt;
 use serde_json::{json, Value};
 use std::fs::OpenOptions;
 use std::io::{ErrorKind, Read};
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -458,6 +462,7 @@ fn drop_entry(state: &Path) -> Line {
 
 /// The first `name` on `PATH` that is an executable regular file. Relative `PATH` entries
 /// are skipped.
+#[cfg(unix)]
 pub(crate) fn find_program(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     let dirs = std::env::split_paths(&path).filter(|dir| dir.is_absolute());
@@ -465,6 +470,18 @@ pub(crate) fn find_program(name: &str) -> Option<PathBuf> {
         std::fs::metadata(program)
             .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
     })
+}
+
+/// The first `name`, `name.exe` or `name.cmd` on `PATH` that is a regular file. Relative
+/// `PATH` entries are skipped. npm installs `claude` and `codex` as `.cmd` shims.
+// TODO(#137): part 3 checks how Claude Code and Codex install on Windows.
+#[cfg(windows)]
+pub(crate) fn find_program(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    let dirs = std::env::split_paths(&path).filter(|dir| dir.is_absolute());
+    let names = [name.to_owned(), format!("{name}.exe"), format!("{name}.cmd")];
+    dirs.flat_map(|dir| names.iter().map(move |name| dir.join(name)).collect::<Vec<_>>())
+        .find(|program| std::fs::metadata(program).is_ok_and(|meta| meta.is_file()))
 }
 
 /// Runs `claude` with `args`, by [`run`].
@@ -509,7 +526,10 @@ fn drain(mut from: impl Read + Send + 'static, keep: usize) -> Receiver<(Vec<u8>
 pub(super) fn run(command: &mut Command, line: &str, capture: bool) -> Result<Vec<u8>, String> {
     let stdout = if capture { Stdio::piped() } else { Stdio::null() };
     command.stdin(Stdio::null()).stdout(stdout).stderr(Stdio::null());
+    #[cfg(unix)]
     command.process_group(0);
+    #[cfg(windows)]
+    crate::platform::no_window(command);
     // Retries take at most 200 ms of the 10 s budget.
     let mut child =
         crate::spawn(command).map_err(|error| format!("{line} could not start: {error}"))?;
@@ -522,8 +542,12 @@ pub(super) fn run(command: &mut Command, line: &str, capture: bool) -> Result<Ve
             Ok(None) => {
                 // The group's id is the child's pid, and the child isn't reaped yet, so the
                 // id can't have been reused.
+                #[cfg(unix)]
                 let group = rustix::process::Pid::from_child(&child);
+                #[cfg(unix)]
                 let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+                #[cfg(windows)]
+                crate::platform::kill_tree(&child);
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(format!("{line} did not finish in 10 s"));

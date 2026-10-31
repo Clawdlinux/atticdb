@@ -10,11 +10,17 @@
 //! budget, up to 5 s before 503 `busy`. So request and window memory stays under about
 //! 256 x 8 MiB = 2 GiB of raw bodies or turns, plus 2 trees of about 16 x 8 MiB, plus
 //! 256 MiB + 2 x 49 MiB of window bodies, in the worst case.
+//!
+//! Windows has no Unix socket here: a server there always listens on loopback TCP, and its
+//! `LOCK` names that address and no socket.
 
 use crate::api::{self, Route};
 use crate::auth::Auth;
 use crate::config::{Config, Listen};
 use crate::http::{self, Limits, Response, ServerConn, Stream};
+#[cfg(not(unix))]
+use crate::listen;
+#[cfg(unix)]
 use crate::listen::{self, Installed};
 use atticdb_core::{Engine, EngineError, EngineOptions, ErrorKind, Health};
 use atticdb_tape::{Error, Tape};
@@ -22,8 +28,12 @@ use rustix::event::{PollFd, PollFlags, Timespec};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
+#[cfg(unix)]
 use std::os::fd::AsFd;
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
+#[cfg(windows)]
+use std::os::windows::io::AsSocket as AsFd;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
@@ -44,6 +54,7 @@ pub struct Listeners {
     pub tcp: Option<TcpListener>,
     /// The Unix socket and the path it is installed at. The path is removed on a
     /// poison exit if it is still ours.
+    #[cfg(unix)]
     pub unix: Option<(UnixListener, Installed)>,
 }
 
@@ -100,6 +111,7 @@ struct Shared {
     engine: Arc<Engine>,
     config: ServeConfig,
     tcp: Option<SocketAddr>,
+    #[cfg(unix)]
     unix: Option<Installed>,
     stopping: AtomicBool,
     tracker: Arc<Tracker>,
@@ -119,6 +131,7 @@ impl Shared {
             return;
         }
         self.tracker.wait_until(|conns| conns.in_flight == 0);
+        #[cfg(unix)]
         if let Some(unix) = &self.unix {
             let _ = unix.remove();
         }
@@ -142,7 +155,10 @@ impl Shared {
             let (method, path) = (request.head.method.clone(), request.head.path().to_owned());
             let tenant = tenant.unwrap_or_default();
             let response = match route {
-                Route::Health => api::health(&self.engine, &self.config.instance),
+                Route::Health => {
+                    let proofs = self.config.auth.proofs(&request.head, &self.config.instance);
+                    api::health(&self.engine, &self.config.instance, proofs)
+                }
                 Route::Stats => api::stats(&self.engine, &self.config.instance),
                 Route::Metrics => api::metrics(&self.engine),
                 Route::Append => api::append(&self.engine, &tenant, request.body),
@@ -229,10 +245,12 @@ impl Server {
 /// Serves an opened engine on bound listeners. Tests pass an engine on `SimDisk`.
 pub fn run(engine: Arc<Engine>, listeners: Listeners, config: ServeConfig) -> io::Result<Server> {
     let tcp = listeners.tcp.as_ref().map(TcpListener::local_addr).transpose()?;
+    #[cfg(unix)]
     let (unix, unix_path) = listeners.unix.unzip();
     let shared = Arc::new(Shared {
         engine,
         tcp,
+        #[cfg(unix)]
         unix: unix_path,
         stopping: AtomicBool::new(false),
         tracker: Arc::default(),
@@ -250,6 +268,7 @@ pub fn run(engine: Arc<Engine>, listeners: Listeners, config: ServeConfig) -> io
         };
         threads.push(spawn_accept(&shared, accept, TcpStream::try_clone, true)?);
     }
+    #[cfg(unix)]
     if let Some(listener) = unix {
         listener.set_nonblocking(true)?;
         let accept = move || {
@@ -351,17 +370,28 @@ fn try_start(config: Config, exit_on_poison: bool, log_requests: bool) -> Result
     let fail = |message: String| (1, message);
     let data_dir = config.data_dir.ok_or_else(|| fail("set data_dir or --data-dir".into()))?;
     let data_dir = std::path::absolute(&data_dir).map_err(|error| fail(error.to_string()))?;
+    #[cfg(unix)]
     let socket = config.unix_socket.unwrap_or_else(|| data_dir.join(listen::SOCKET_NAME));
+    #[cfg(unix)]
     let socket = std::path::absolute(&socket).map_err(|error| fail(error.to_string()))?;
+    #[cfg(unix)]
     let group = config.unix_socket_group.as_deref().map(listen::resolve_group).transpose();
+    #[cfg(unix)]
     let group = group.map_err(fail)?;
+    #[cfg(not(unix))]
+    if config.unix_socket.is_some() || config.unix_socket_group.is_some() {
+        return Err(fail("unix_socket needs a Unix socket, which Windows lacks".into()));
+    }
     let locked = |holder: String| {
         let dir = data_dir.display();
         (EXIT_LOCKED, format!("data directory {dir} is locked by {}", holder.trim()))
     };
     let default = Listen::Tcp(SocketAddr::from((Ipv4Addr::LOCALHOST, listen::DEFAULT_PORT)));
     let tcp = match config.listen.unwrap_or(default) {
+        #[cfg(unix)]
         Listen::None => None,
+        #[cfg(not(unix))]
+        Listen::None => return Err(fail("listen none leaves no way in on Windows".into())),
         // A second server on a fixed port fails here, before the lock. Say who holds it.
         Listen::Tcp(addr) => Some(listen::bind_tcp(addr).map_err(|error| {
             match lock_holder(&data_dir).filter(|_| error.kind() == io::ErrorKind::AddrInUse) {
@@ -377,21 +407,33 @@ fn try_start(config: Config, exit_on_poison: bool, log_requests: bool) -> Result
     let instance = crate::random_hex(16).map_err(|error| fail(error.to_string()))?;
     listen::owned_dir(&data_dir, 0o077).map_err(fail)?;
     let mut options = EngineOptions::default();
+    #[cfg(unix)]
     let address = format!("instance={instance} unix={} tcp={tcp_text}", socket.display());
+    #[cfg(not(unix))]
+    let address = format!("instance={instance} tcp={tcp_text}");
     options.tape.server_address = Some(address);
     let engine = open_engine(&data_dir, options).map_err(|error| match error.kind {
         ErrorKind::Storage(Error::DataDirLocked { holder }) => locked(holder),
         _ => fail(format!("cannot open {}: {error}", data_dir.display())),
     })?;
+    #[cfg(unix)]
     let unix = listen::install_unix(&socket, group, &instance).map_err(fail)?;
+    #[cfg(unix)]
     let listeners = Listeners { tcp, unix: Some(unix) };
+    #[cfg(not(unix))]
+    let listeners = Listeners { tcp };
     let auth = Auth::new(&config.tenants);
     let max_connections = MAX_CONNECTIONS;
     let config = ServeConfig { auth, instance, exit_on_poison, max_connections, log_requests };
     let server = run(Arc::new(engine), listeners, config).map_err(|e| fail(e.to_string()))?;
     // One write, so a reader never sees half of the line.
+    #[cfg(unix)]
     let (instance, socket) = (&server.shared.config.instance, socket.display());
+    #[cfg(unix)]
     let line = format!("atticdb: serving instance={instance} tcp={tcp_text} unix={socket}\n");
+    #[cfg(not(unix))]
+    let line =
+        format!("atticdb: serving instance={} tcp={tcp_text}\n", server.shared.config.instance);
     let _ = io::stderr().write_all(line.as_bytes());
     server.wait();
     let _ =
