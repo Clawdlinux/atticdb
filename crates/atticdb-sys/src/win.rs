@@ -26,41 +26,50 @@ const LOCK_OFFSET: u64 = 0x7FFF_FFFF_FFFF_FFFE;
 /// The longest path, in UTF-16 units without the NUL, that Win32 accepts without `\\?\`.
 const MAX_PATH_UNITS: usize = 259;
 
+fn encode(path: &Path) -> Vec<u16> {
+    path.as_os_str().encode_wide().collect()
+}
+
 /// Converts a path to a NUL-terminated UTF-16 string. Interior NULs are rejected.
 ///
-/// Paths longer than `MAX_PATH_UNITS` get the `\\?\` prefix, as std does internally.
+/// Relative paths and paths longer than `MAX_PATH_UNITS` go through [`resolve`].
+/// Win32 limits a relative path to MAX_PATH after joining it to the current directory.
+/// `\\?\` can't lift that, because it doesn't accept relative paths.
+/// std also resolves relative paths with `GetFullPathNameW` before prefixing.
 fn wide(path: &Path) -> io::Result<Vec<u16>> {
-    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    let mut wide = encode(path);
     if wide.contains(&0) {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL character"));
     }
-    if wide.len() > MAX_PATH_UNITS {
-        if let Some(long) = verbatim(path)? {
-            wide = long;
-        }
+    if wide.len() > MAX_PATH_UNITS || !path.is_absolute() {
+        wide = resolve(path)?;
     }
     wide.push(0);
     Ok(wide)
 }
 
-/// Returns `path` as a `\\?\` path, or `None` if it already has a `\\?\` or `\\.\` prefix.
+/// Makes `path` absolute, then adds `\\?\` if it is still longer than `MAX_PATH_UNITS`.
 ///
-/// `\\?\` turns off Win32 path parsing. So the path is made absolute and normalized first.
-/// `std::path::absolute` calls `GetFullPathNameW`, which resolves `.`, `..` and `/`.
-fn verbatim(path: &Path) -> io::Result<Option<Vec<u16>>> {
+/// `std::path::absolute` calls `GetFullPathNameW`, which resolves the current directory,
+/// `.`, `..` and `/`. That matters because `\\?\` turns off Win32 path parsing.
+/// Paths that already start with `\\?\` or `\\.\` get no second prefix.
+fn resolve(path: &Path) -> io::Result<Vec<u16>> {
     let absolute = std::path::absolute(path)?;
-    let units: Vec<u16> = absolute.as_os_str().encode_wide().collect();
+    let units = encode(&absolute);
+    if units.len() <= MAX_PATH_UNITS {
+        return Ok(units);
+    }
     let Some(Component::Prefix(prefix)) = absolute.components().next() else {
-        return Ok(None);
+        return Ok(units);
     };
     let (head, rest) = match prefix.kind() {
         // C:\dir becomes \\?\C:\dir.
         Prefix::Disk(_) => (r"\\?\", &units[..]),
         // \\server\share becomes \\?\UNC\server\share. Keep the second backslash.
         Prefix::UNC(..) => (r"\\?\UNC", &units[1..]),
-        _ => return Ok(None),
+        _ => return Ok(units),
     };
-    Ok(Some(head.encode_utf16().chain(rest.iter().copied()).collect()))
+    Ok(head.encode_utf16().chain(rest.iter().copied()).collect())
 }
 
 /// Returns the bytes available to the caller and the volume's total bytes, in that order.
@@ -371,22 +380,82 @@ mod tests {
     }
 
     #[test]
-    fn long_paths_become_verbatim_and_others_stay() {
+    fn paths_resolve_and_get_a_prefix_only_when_long() {
+        let a = "a".repeat(MAX_PATH_UNITS);
         let cases = [
-            (r"C:\a\..\b", Some(r"\\?\C:\b")),
-            ("C:/a/b", Some(r"\\?\C:\a\b")),
-            (r"\\server\share\dir", Some(r"\\?\UNC\server\share\dir")),
-            (r"\\?\C:\a\..\b", None),
-            (r"\\.\pipe\name", None),
+            // Short absolute paths pass through. Win32 parses them itself.
+            (r"C:\short".to_owned(), r"C:\short".to_owned()),
+            (r"C:\a\..\b".to_owned(), r"C:\a\..\b".to_owned()),
+            (format!(r"C:\{a}"), format!(r"\\?\C:\{a}")),
+            (format!("C:/{a}/b"), format!(r"\\?\C:\{a}\b")),
+            (format!(r"\\server\share\{a}"), format!(r"\\?\UNC\server\share\{a}")),
+            (format!(r"\\?\C:\{a}\..\b"), format!(r"\\?\C:\{a}\..\b")),
+            // Long input that resolves short needs no prefix.
+            (format!(r"C:\{a}\..\b"), r"C:\b".to_owned()),
         ];
         for (path, expected) in cases {
-            let made = verbatim(Path::new(path)).unwrap().map(os);
-            assert_eq!(made.as_deref(), expected, "{path}");
+            assert_eq!(os(wide(Path::new(&path)).unwrap()), format!("{expected}\0"), "{path}");
         }
-        let short = r"C:\short";
-        assert_eq!(os(wide(Path::new(short)).unwrap()), format!("{short}\0"));
-        let long = format!(r"C:\{}", "a".repeat(MAX_PATH_UNITS));
-        assert_eq!(os(wide(Path::new(&long)).unwrap()), format!(r"\\?\{long}{}", '\0'));
+        // A short relative path resolves against the current directory.
+        let resolved = std::env::current_dir().unwrap().join("relative");
+        let expected = format!("{}\0", resolved.display());
+        assert_eq!(os(wide(Path::new("relative")).unwrap()), expected);
+    }
+
+    /// Calls MoveFileExW with the path as given, as the code did before relative paths resolved.
+    fn raw_rename(from: &str, to: &str) -> io::Result<()> {
+        let nul = |text: &str| text.encode_utf16().chain([0]).collect::<Vec<u16>>();
+        let (from, to) = (nul(from), nul(to));
+        // SAFETY: both arguments are NUL-terminated UTF-16 strings that outlive the call.
+        let ok = unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), MOVEFILE_REPLACE_EXISTING) };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Runs in a child process, because the current directory is global to the process.
+    fn short_relative_paths_under_a_deep_cwd(dir: &Path) {
+        // Windows caps the current directory below MAX_PATH, so stop at 220 units.
+        let mut deep = dir.to_path_buf();
+        while deep.as_os_str().len() < 220 {
+            let room = 220 - deep.as_os_str().len();
+            deep.push("c".repeat(room.clamp(1, 50)));
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        std::env::set_current_dir(&deep).unwrap();
+        let (from, to, sub) = ("f".repeat(60), "t".repeat(60), "s".repeat(60));
+        let full = std::path::absolute(&to).unwrap();
+        assert!(full.as_os_str().len() > MAX_PATH_UNITS, "{}", full.display());
+        std::fs::write(&from, b"new").unwrap();
+        std::fs::write(&to, b"old").unwrap();
+        // Control: Win32 rejects these paths unresolved, so this test reaches the limit.
+        assert!(raw_rename(&from, &to).is_err(), "raw relative rename should fail");
+        rename_write_through(Path::new(&from), Path::new(&to)).unwrap();
+        assert_eq!(std::fs::read(&to).unwrap(), b"new");
+        assert!(!Path::new(&from).try_exists().unwrap());
+        std::fs::create_dir(&sub).unwrap();
+        let (available, total) = free_space(Path::new(&sub)).unwrap();
+        assert!(total > 0 && available <= total, "available={available} total={total}");
+        std::fs::write(dir.join("child-ran"), b"").unwrap();
+    }
+
+    #[test]
+    fn short_relative_paths_resolve_under_a_deep_cwd() {
+        const CHILD: &str = "ATTICDB_SYS_DEEP_CWD_CHILD";
+        if let Some(dir) = std::env::var_os(CHILD) {
+            return short_relative_paths_under_a_deep_cwd(Path::new(&dir));
+        }
+        let dir = TestDir::new();
+        let name = "win::tests::short_relative_paths_resolve_under_a_deep_cwd";
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture", "--test-threads=1"])
+            .env(CHILD, &dir.0)
+            .status()
+            .unwrap();
+        assert!(status.success(), "child failed: {status}");
+        // An empty filter match would also exit 0. The marker proves the child ran.
+        assert!(dir.0.join("child-ran").try_exists().unwrap(), "child test did not run");
     }
 
     #[test]
