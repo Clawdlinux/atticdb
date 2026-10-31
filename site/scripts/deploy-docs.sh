@@ -9,8 +9,8 @@ SITE="$(cd "$(dirname "$0")/.." && pwd)"
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 
-ORG_ID="${VERCEL_ORG_ID:-$(python3 -c "import json;print(json.load(open('$SITE/.vercel/project.json'))['orgId'])")}"
-PROJECT_ID="${VERCEL_DOCS_PROJECT_ID:-$(vercel project inspect atticdb-docs 2>&1 | grep -oE 'prj_[A-Za-z0-9]+' | head -1)}"
+ORG_ID="${VERCEL_ORG_ID:-$(jq -r .orgId "$SITE/.vercel/project.json")}"
+PROJECT_ID="${VERCEL_DOCS_PROJECT_ID:-$(vercel project inspect atticdb-docs 2>&1 | grep -oE 'prj_[A-Za-z0-9]+' | head -1 || true)}"
 [ -n "$PROJECT_ID" ] || { echo "Can't find the atticdb-docs project id" >&2; exit 1; }
 
 rsync -a --exclude-from="$SITE/.vercelignore" "$SITE/" "$STAGE/"

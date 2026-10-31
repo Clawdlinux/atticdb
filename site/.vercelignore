@@ -6,3 +6,6 @@ node_modules
 .vercel
 scripts/.og-work-*
 .env*
+*.pem
+coverage
+*.tsbuildinfo

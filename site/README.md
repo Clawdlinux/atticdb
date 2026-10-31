@@ -51,6 +51,8 @@ Both main domains redirect `/docs` and `/docs/*` to `docs.atticdb.com`.
 
 ### Docs project
 
+Never connect `atticdb-docs` to Git. A Git build reads `vercel.json` and would build the main site.
+
 `atticdb-docs` uses `vercel.docs.json`, builds with `npm run build:docs`, and serves `out-docs/`.
 The build copies docs pages, their sitemap and robots file, and shared assets into that separate output.
 Main-only pages are excluded. Vercel checks static files before rewrites, so host rewrites cannot replace the main homepage.
@@ -74,6 +76,7 @@ vercel domains add docs.atticdb.com atticdb-docs
 Preview builds link shared navigation to production `https://atticdb.com`.
 For a local docs-project preview, run `VERCEL=1 npm run build:docs`, then `npx serve out-docs`.
 Normal local development keeps docs at `/docs`.
+The docs host redirects `/docs` to `/` and strips `/docs/` from nested paths.
 
 ### Cloudflare DNS
 
@@ -90,6 +93,7 @@ Wrangler can't write DNS because its OAuth scopes stop at `zone:read`.
 Create a Cloudflare API token with Zone DNS Edit for `atticdb.com`.
 Save the token outside the repository. Never commit it.
 From `site/`, run `scripts/cf-dns.sh <token-file>` to create these records through the Cloudflare API.
+`cf-dns.sh` skips records that already match and stops on proxied or conflicting ones.
 
 ### Headers
 

@@ -157,6 +157,27 @@ describe("separate docs project", () => {
     expect(config("vercel.docs.json").headers).toEqual(config().headers);
   });
 
+  it("has explicit permanent redirects for docs-prefixed paths", () => {
+    expect(config("vercel.docs.json").redirects).toEqual(expect.arrayContaining([
+      { source: "/docs", destination: "/", permanent: true },
+      { source: "/docs/:path*", destination: "/:path*", permanent: true },
+    ]));
+  });
+
+  it.each([
+    ["/docs", "/"],
+    ["/docs/", "/"],
+    ["/docs/mcp", "/mcp"],
+    ["/docs/nested/page", "/nested/page"],
+  ])("strips the docs prefix from %s", (path, destination) => {
+    for (const host of ["docs.atticdb.com", "preview.vercel.app"]) {
+      expect(routeFor(config("vercel.docs.json").redirects, host, path)).toEqual({
+        destination,
+        permanent: true,
+      });
+    }
+  });
+
   it.each(["/pricing", "/compare", "/benchmarks"])("redirects main page %s from docs and previews", (path) => {
     for (const host of ["docs.atticdb.com", "preview.vercel.app"]) {
       expect(routeFor(config("vercel.docs.json").redirects, host, path)).toEqual({
