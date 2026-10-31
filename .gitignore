@@ -8,5 +8,6 @@ __pycache__/
 site/node_modules
 site/.next
 site/out
+site/out-docs
 site/.taste-skill
 .superpowers/

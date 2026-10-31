@@ -10,6 +10,7 @@ const eslintConfig = defineConfig([
     // Default ignores of eslint-config-next:
     ".next/**",
     "out/**",
+    "out-docs/**",
     "build/**",
     "next-env.d.ts",
     // Taste skill state and screenshots (git-ignored scratch).

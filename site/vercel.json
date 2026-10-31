@@ -61,83 +61,9 @@
       ],
       "destination": "https://atticdb.com/:path*",
       "permanent": true
-    },
-    {
-      "source": "/pricing",
-      "has": [
-        {
-          "type": "host",
-          "value": "docs.atticdb.com"
-        }
-      ],
-      "destination": "https://atticdb.com/pricing",
-      "permanent": true
-    },
-    {
-      "source": "/compare",
-      "has": [
-        {
-          "type": "host",
-          "value": "docs.atticdb.com"
-        }
-      ],
-      "destination": "https://atticdb.com/compare",
-      "permanent": true
-    },
-    {
-      "source": "/benchmarks",
-      "has": [
-        {
-          "type": "host",
-          "value": "docs.atticdb.com"
-        }
-      ],
-      "destination": "https://atticdb.com/benchmarks",
-      "permanent": true
     }
   ],
-  "rewrites": [
-    {
-      "source": "/",
-      "has": [
-        {
-          "type": "host",
-          "value": "docs.atticdb.com"
-        }
-      ],
-      "destination": "/docs"
-    },
-    {
-      "source": "/sitemap.xml",
-      "has": [
-        {
-          "type": "host",
-          "value": "docs.atticdb.com"
-        }
-      ],
-      "destination": "/docs/sitemap.xml"
-    },
-    {
-      "source": "/robots.txt",
-      "has": [
-        {
-          "type": "host",
-          "value": "docs.atticdb.com"
-        }
-      ],
-      "destination": "/docs/robots.txt"
-    },
-    {
-      "source": "/:path((?!_next/|images/|fonts/|icon\\.svg|og\\.png|docs/|sitemap\\.xml|robots\\.txt).*)",
-      "has": [
-        {
-          "type": "host",
-          "value": "docs.atticdb.com"
-        }
-      ],
-      "destination": "/docs/:path"
-    }
-  ],
+  "rewrites": [],
   "headers": [
     {
       "source": "/(.*)",

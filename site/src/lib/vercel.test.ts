@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 type Route = {
   source: string;
   destination: string;
-  has: { type: string; value: string }[];
+  has?: { type: string; value: string }[];
   permanent?: boolean;
 };
 
@@ -18,12 +18,12 @@ type VercelConfig = {
   cleanUrls: boolean;
   trailingSlash: boolean;
   redirects: Route[];
-  rewrites: Route[];
+  rewrites?: Route[];
   headers: { source: string; headers: { key: string; value: string }[] }[];
 };
 
-function config(): VercelConfig {
-  return JSON.parse(readFileSync(resolve(process.cwd(), "vercel.json"), "utf8"));
+function config(file = "vercel.json"): VercelConfig {
+  return JSON.parse(readFileSync(resolve(process.cwd(), file), "utf8"));
 }
 
 function sourceRegex(source: string): RegExp {
@@ -39,7 +39,7 @@ function sourceRegex(source: string): RegExp {
 
 function routeFor(routes: Route[], host: string, path: string) {
   for (const route of routes) {
-    if (!route.has.every((condition) => condition.type === "host" && condition.value === host)) continue;
+    if (!(route.has ?? []).every((condition) => condition.type === "host" && condition.value === host)) continue;
     const match = sourceRegex(route.source).exec(path);
     if (match) {
       return {
@@ -103,13 +103,6 @@ describe("host redirects", () => {
     expect(routeFor(config().redirects, "atticdb.com", path)).toBeUndefined();
   });
 
-  it.each(["/pricing", "/compare", "/benchmarks"])("redirects main page %s from the docs host", (path) => {
-    expect(routeFor(config().redirects, "docs.atticdb.com", path)).toEqual({
-      destination: `https://atticdb.com${path}`,
-      permanent: true,
-    });
-  });
-
   it.each(["/", "/mcp", "/docs", "/docs/mcp", "/pricing"])("leaves preview-host path %s alone", (path) => {
     expect(routeFor(config().redirects, "preview.vercel.app", path)).toBeUndefined();
   });
@@ -119,42 +112,56 @@ describe("host redirects", () => {
   });
 });
 
-describe("docs host rewrites", () => {
-  it.each([
-    ["/", "/docs"],
-    ["/mcp", "/docs/mcp"],
-    ["/install", "/docs/install"],
-    ["/nested/page", "/docs/nested/page"],
-    ["/sitemap.xml", "/docs/sitemap.xml"],
-    ["/robots.txt", "/docs/robots.txt"],
-  ])("serves %s from %s", (path, destination) => {
-    expect(routeFor(config().rewrites, "docs.atticdb.com", path)?.destination).toBe(destination);
-  });
-
-  it.each([
-    "/_next/static/x.js", "/_next/static/media/font.woff2", "/images/a.jpg",
-    "/fonts/text.woff2", "/icon.svg", "/og.png", "/docs/", "/docs/mcp",
-    "/docs/sitemap.xml", "/docs/robots.txt",
-  ])("does not rewrite asset or exported docs path %s", (path) => {
-    expect(routeFor(config().rewrites, "docs.atticdb.com", path)).toBeUndefined();
-  });
-
-  it("keeps discovery rewrites before the catch-all and excludes them from it", () => {
-    const rewrites = config().rewrites;
-    const catchAll = rewrites.findIndex((route) => route.source.startsWith("/:path("));
-    expect(catchAll).toBeGreaterThan(-1);
-    for (const path of ["/sitemap.xml", "/robots.txt"]) {
-      const index = rewrites.findIndex((route) => route.source === path);
-      expect(index).toBeGreaterThan(-1);
-      expect(index).toBeLessThan(catchAll);
-      expect(sourceRegex(rewrites[catchAll].source).test(path)).toBe(false);
+describe("separate docs project", () => {
+  it("removes docs-host routing from the main project", () => {
+    const main = config();
+    for (const rule of [...main.redirects, ...(main.rewrites ?? [])]) {
+      expect(rule.has?.some((condition) => condition.type === "host" && condition.value === "docs.atticdb.com"))
+        .not.toBe(true);
     }
   });
 
-  it.each(["atticdb.com", "www.atticdb.com", "preview.vercel.app"])("leaves %s routes and discovery files alone", (host) => {
-    for (const path of ["/", "/mcp", "/docs", "/docs/mcp", "/sitemap.xml", "/robots.txt"]) {
-      expect(routeFor(config().rewrites, host, path)).toBeUndefined();
+  it("does not shadow root static files with rewrites", () => {
+    const rootStaticPaths = ["/", "/docs", "/pricing", "/compare", "/benchmarks", "/sitemap.xml", "/robots.txt"];
+    for (const rule of config().rewrites ?? []) {
+      for (const path of rootStaticPaths) {
+        expect(sourceRegex(rule.source).test(path), `The filesystem serves ${path} before rewrites`).toBe(false);
+      }
+      expect(rootStaticPaths).not.toContain(rule.destination);
     }
+  });
+
+  it("builds a docs-only export without a framework runtime", () => {
+    expect(config("vercel.docs.json")).toMatchObject({
+      $schema: "https://openapi.vercel.sh/vercel.json",
+      framework: null,
+      installCommand: "npm ci",
+      buildCommand: "npm run build:docs",
+      outputDirectory: "out-docs",
+      cleanUrls: true,
+      trailingSlash: false,
+    });
+    const pkg = JSON.parse(readFileSync(resolve(process.cwd(), "package.json"), "utf8"));
+    expect(pkg.scripts["build:docs"]).toBe("npm run build && node scripts/build-docs-out.mjs");
+  });
+
+  it("preserves the same security headers and cache policy on both projects", () => {
+    expect(config("vercel.docs.json").headers).toEqual(config().headers);
+  });
+
+  it.each(["/pricing", "/compare", "/benchmarks"])("redirects main page %s from docs and previews", (path) => {
+    for (const host of ["docs.atticdb.com", "preview.vercel.app"]) {
+      expect(routeFor(config("vercel.docs.json").redirects, host, path)).toEqual({
+        destination: `https://atticdb.com${path}`,
+        permanent: true,
+      });
+    }
+  });
+
+  it.each(["/", "/mcp", "/sitemap.xml", "/robots.txt"])("serves docs file %s without routing rules", (path) => {
+    const docs = config("vercel.docs.json");
+    expect(routeFor(docs.redirects, "docs.atticdb.com", path)).toBeUndefined();
+    expect(docs.rewrites ?? []).toEqual([]);
   });
 });
 

@@ -38,25 +38,43 @@ Docs are available at `/docs` locally.
 
 ## Deploy
 
-Use the Vercel CLI with project `atticdb-site`. Its root is `site/`.
-Build and test first. Start from the repository root:
+Use 2 Vercel projects. Both use `site/` as their root.
+Build and test first. Deploy the main project from the repository root:
 
 ```sh
-cd site
-vercel link --project atticdb-site
-vercel deploy
-vercel deploy --prod
-vercel domains add atticdb.com atticdb-site
-vercel domains add www.atticdb.com atticdb-site
-vercel domains add docs.atticdb.com atticdb-site
+cd site && vercel link --project atticdb-site && vercel deploy --prod
 ```
 
-`vercel.json` builds with `npm run build` and serves `out/` without a framework runtime.
-The same build serves the main site and docs.
+`atticdb-site` uses `vercel.json`, builds with `npm run build`, and serves `out/`.
 `www.atticdb.com` redirects to `atticdb.com`.
-The main domains redirect `/docs` and `/docs/*` to `docs.atticdb.com`.
-Host rules serve docs at that host's root, with its own sitemap and robots file.
-Shared navigation links return to `https://atticdb.com` on Vercel builds.
+Both main domains redirect `/docs` and `/docs/*` to `docs.atticdb.com`.
+
+### Docs project
+
+`atticdb-docs` uses `vercel.docs.json`, builds with `npm run build:docs`, and serves `out-docs/`.
+The build copies docs pages, their sitemap and robots file, and shared assets into that separate output.
+Main-only pages are excluded. Vercel checks static files before rewrites, so host rewrites cannot replace the main homepage.
+
+Link `atticdb-docs` to read its `orgId` and `projectId` from `.vercel/project.json`.
+You can also inspect projects with `vercel project ls`.
+Use those docs-project IDs, not the main project's IDs. Deploy from `site/`:
+
+```sh
+VERCEL_ORG_ID="<team id>" VERCEL_PROJECT_ID="<docs project id>" \
+  vercel deploy --prod --local-config vercel.docs.json
+```
+
+Set the domains on their respective projects:
+
+```sh
+vercel domains add atticdb.com atticdb-site
+vercel domains add www.atticdb.com atticdb-site
+vercel domains add docs.atticdb.com atticdb-docs
+```
+
+Preview builds link shared navigation to production `https://atticdb.com`.
+For a local docs-project preview, run `VERCEL=1 npm run build:docs`, then `npx serve out-docs`.
+Normal local development keeps docs at `/docs`.
 
 ### Cloudflare DNS
 
@@ -76,7 +94,7 @@ From the repository root, run `scripts/cf-dns.sh <token-file>` to create these r
 
 ### Headers
 
-`vercel.json` sets the CSP and security headers.
+Both Vercel configs set identical CSP and security headers.
 Hashed assets under `/_next/static/` receive immutable caching.
 Inline scripts and styles are allowed because Next.js exports them.
 Fonts and images are hosted locally.

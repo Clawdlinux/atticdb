@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "lint": "eslint",
-    "test": "vitest run"
+    "test": "vitest run",
+    "build:docs": "npm run build && node scripts/build-docs-out.mjs"
   },
   "dependencies": {
     "marked": "^18.1.2",
