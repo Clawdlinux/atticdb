@@ -198,7 +198,7 @@ fn strict_handle_checks() -> bool {
 /// wait for end of file. std still gives each child the stdio its command sets, as it
 /// duplicates those handles for that child. Best effort: values above [`MAX_HANDLE_VALUE`] are
 /// not checked, and a failed call changes nothing. A handle value above the cap stays
-/// inheritable; the cost is that the first chat after a cold start may get no memory block.
+/// inheritable. Then the first chat after a cold start may get no memory block.
 ///
 /// Under strict handle checks, by [`strict_handle_checks`], a probe of a value that is not a
 /// handle would raise an exception. Then it clears only the stdio, by [`disinherit_stdio`].
