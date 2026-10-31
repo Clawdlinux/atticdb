@@ -35,6 +35,8 @@ const USAGE: &str = "usage:
   atticdb fact set <connect> --key <key> (--content <text> | --delete)
   atticdb fact get <connect> --key <key>
   atticdb fact list <connect> --prefix <prefix> [--after <key>] [--limit <n>] [--max-bytes <n>]
+  atticdb file save <connect> --path <file> --about <text>
+  atticdb file get <connect> --path <file or folder> [--versions]
   <connect>: [--url unix:///path|http://127.0.0.1:<port>] [--data-dir <dir>] [--config <path>]
              [--tenant <name>] [--token-file <path>] [--agent <name>] [--session <name>]
              [--retry-deadline <n>s|<n>ms]
@@ -43,7 +45,7 @@ const USAGE: &str = "usage:
   ATTICDB_TOKEN is ignored. ATTICDB_HOME, when set, is the home. It must be an absolute path.
   --agent defaults to mcp. --session defaults to the repo of the current directory, named
   after the folder holding .git. A worktree takes its main repo's name.
-  append, recent, search and fact print one JSON line. They exit 1 when nothing was written,
+  append, recent, search, fact and file print one JSON line. They exit 1 when nothing was written,
   3 when a write may or may not be saved.
   studio serves a read-only page on 127.0.0.1 and opens it. It runs until Ctrl-C.
   setup finds VS Code, Copilot CLI, Claude Code and Codex, asks which to connect, shows the
@@ -52,8 +54,8 @@ const USAGE: &str = "usage:
 
 /// Commands that use the home. A relative `ATTICDB_HOME` fails them with exit 2, so none falls
 /// back to the default home. The hook prints `{}` for it, as for any error.
-const HOME_COMMANDS: [&str; 9] =
-    ["mcp", "connect", "setup", "doctor", "studio", "append", "recent", "search", "fact"];
+const HOME_COMMANDS: [&str; 10] =
+    ["mcp", "connect", "setup", "doctor", "studio", "append", "recent", "search", "fact", "file"];
 
 /// Flags of every command that talks to a server as a tenant. The first 5 pick the store.
 const CONNECT: [&str; 8] = [
@@ -143,6 +145,11 @@ fn main() -> ExitCode {
                     let valued = ["--prefix", "--after", "--limit", "--max-bytes"];
                     tool(rest, "fact_list", &valued, &[])
                 }
+                _ => None,
+            },
+            "file" => match rest.split_first().map(|(verb, rest)| (verb.as_str(), rest)) {
+                Some(("save", rest)) => tool(rest, "file_ref", &["--path", "--about"], &[]),
+                Some(("get", rest)) => tool(rest, "file_get", &["--path"], &["--versions"]),
                 _ => None,
             },
             _ => None,

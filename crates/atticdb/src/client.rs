@@ -1,5 +1,6 @@
-//! The client side of the server's HTTP memory API. It runs the 6 operations:
-//! `memory_append`, `memory_recent`, `memory_search`, `fact_set`, `fact_get` and `fact_list`.
+//! The client side of the server's HTTP memory API. It runs 8 operations:
+//! `memory_append`, `memory_recent`, `memory_search`, `fact_set`, `fact_get`, `fact_list`,
+//! and the file refs `file_ref` and `file_get`, which are facts under `file<path>`.
 //! Each one checks its arguments, hides secrets in writes, sends the request with retries,
 //! and shapes the result. The MCP adapter, the shell verbs and the session-start hook use it.
 //! The studio uses it only to find the store and token, then sends its own reads.
@@ -39,7 +40,7 @@ pub(crate) struct Client {
 /// failed, 2 for a bad flag, or 3 when a write's outcome is unknown.
 pub fn command(tool: &str, mut flags: HashMap<String, String>) -> u8 {
     let mut args = json!({});
-    for name in ["content", "role", "key", "prefix", "after", "query"] {
+    for name in ["content", "role", "key", "prefix", "after", "query", "path", "about"] {
         if let Some(value) = flags.remove(&format!("--{name}")) {
             args[name] = json!(value);
         }
@@ -58,6 +59,9 @@ pub fn command(tool: &str, mut flags: HashMap<String, String>) -> u8 {
     }
     if flags.remove("--delete").is_some() {
         args["delete"] = json!(true);
+    }
+    if flags.remove("--versions").is_some() {
+        args["versions"] = json!(true);
     }
     let result = match Client::new(flags) {
         Ok(mut client) => client.call(tool, &args).unwrap_or_default(),
@@ -278,6 +282,8 @@ impl Client {
             "fact_set" => self.fact_set(args),
             "fact_get" => self.fact_get(args),
             "fact_list" => self.fact_list(args),
+            "file_ref" => self.file_ref(args),
+            "file_get" => self.file_get(args),
             _ => return None,
         })
     }
@@ -358,6 +364,155 @@ impl Client {
             Ok(target) => self.read("fact_list", &target, "facts", facts),
             Err(message) => tool_error(message),
         }
+    }
+
+    /// Saves a reference to a local file as the fact `file<absolute path>`: `about` as content,
+    /// and size, modified time, blake3 and MIME type as meta. Each revision is a version. The
+    /// same bytes and about as the current ref write nothing.
+    fn file_ref(&mut self, args: &Value) -> Value {
+        let checked = (|| {
+            let path = string(args, "path")?.ok_or("path is required")?;
+            let about = string(args, "about")?.map(|about| about.trim().to_owned());
+            let about = about.filter(|about| !about.is_empty()).ok_or("about is required")?;
+            let path =
+                std::fs::canonicalize(&path).map_err(|_| format!("path not found: {path}"))?;
+            let (bytes, modified_ns) = stat(&path).ok_or("path must be a file")?;
+            let key = file_key(&path)?;
+            let blake3 = hash_file(&path)?;
+            let meta = json!({"file": {"bytes": bytes, "modified_ns": modified_ns,
+                                       "blake3": blake3, "mime": mime(&path)}});
+            Ok::<_, String>((key, about, blake3, meta))
+        })();
+        let (key, about, blake3, meta) = match checked {
+            Ok(checked) => checked,
+            Err(message) => return tool_error(message),
+        };
+        let current = self.fact_get(&json!({"key": key}));
+        if current["isError"] == true {
+            return current;
+        }
+        let fact = &current["structuredContent"]["fact"];
+        if fact["content"] == about.as_str() && fact["meta"]["file"]["blake3"] == blake3.as_str() {
+            let structured =
+                json!({"unchanged": true, "key": key, "lsn": fact["lsn"], "blake3": blake3});
+            return answer(format!("unchanged {key}"), structured);
+        }
+        let mut result = self.fact_set(&json!({"key": key, "content": about, "meta": meta}));
+        if let Some(structured) = result["structuredContent"].as_object_mut() {
+            structured.insert("key".into(), json!(key));
+            structured.insert("blake3".into(), json!(blake3));
+            structured.insert("unchanged".into(), json!(false));
+        }
+        result
+    }
+
+    /// Reads the ref of a file, with its status now: `ok`, `changed` or `missing`. With
+    /// `versions`, every kept revision too, newest first, and `on_disk`: the one whose bytes
+    /// are on disk now. A folder lists the refs under it.
+    fn file_get(&mut self, args: &Value) -> Value {
+        let path = match string(args, "path").and_then(|p| p.ok_or("path is required".into())) {
+            Ok(path) => path,
+            Err(message) => return tool_error(message),
+        };
+        // A deleted file is looked up by the path as given, so its history still reads.
+        let path = std::fs::canonicalize(&path)
+            .or_else(|_| std::path::absolute(&path))
+            .unwrap_or_else(|_| PathBuf::from(&path));
+        let key = match file_key(&path) {
+            Ok(key) => key,
+            Err(message) => return tool_error(message),
+        };
+        if path.is_dir() {
+            return self.file_list(&key);
+        }
+        let current = self.fact_get(&json!({"key": key}));
+        if current["isError"] == true {
+            return current;
+        }
+        let fact = &current["structuredContent"]["fact"];
+        if fact.is_null() {
+            return answer(format!("no ref for {key}"), json!({"ref": null}));
+        }
+        let mut hash = None;
+        let status = file_status(&path, &fact["meta"]["file"], &mut hash);
+        let mut text =
+            vec![format!("{key} [{status}]: {}", fact["content"].as_str().unwrap_or(""))];
+        let mut structured = json!({"ref": file_ref_json(fact, status)});
+        if args["versions"] != true {
+            return answer(text.join("\n"), structured);
+        }
+        let target = format!("/v1/facts/history?key={}&max_bytes={}", encode(&key), 1 << 20);
+        let history = self
+            .read("file_get", &target, "revisions", |reply| answer(String::new(), reply.clone()));
+        if history["isError"] == true {
+            return history;
+        }
+        let revisions = history["structuredContent"]["revisions"].as_array().cloned();
+        let versions: Vec<Value> = revisions
+            .unwrap_or_default()
+            .iter()
+            .filter(|revision| revision["deleted"] != true)
+            .map(|revision| {
+                let file = &revision["meta"]["file"];
+                json!({"lsn": revision["lsn"], "commit_time_ns": revision["commit_time_ns"],
+                       "about": revision["content"], "bytes": file["bytes"],
+                       "blake3": file["blake3"], "mime": file["mime"]})
+            })
+            .collect();
+        let on_disk = match status {
+            "missing" => None,
+            _ => hash.or_else(|| fact["meta"]["file"]["blake3"].as_str().map(str::to_owned)),
+        };
+        let on_disk = on_disk.and_then(|hash| {
+            versions
+                .iter()
+                .find(|version| version["blake3"] == hash.as_str())
+                .map(|v| v["lsn"].clone())
+        });
+        for version in &versions {
+            let short: String = version["blake3"].as_str().unwrap_or("").chars().take(12).collect();
+            let about = version["about"].as_str().unwrap_or("");
+            text.push(format!(
+                "lsn {} {} bytes {short}: {about}",
+                version["lsn"], version["bytes"]
+            ));
+        }
+        text.push(match &on_disk {
+            Some(lsn) => format!("on disk: lsn {lsn}"),
+            None => "on disk: no saved version".into(),
+        });
+        structured["versions"] = json!(versions);
+        structured["on_disk"] = on_disk.unwrap_or(Value::Null);
+        answer(text.join("\n"), structured)
+    }
+
+    /// The refs under the folder whose key is `key`, up to 200, each with its status.
+    fn file_list(&mut self, key: &str) -> Value {
+        let prefix = if key.ends_with('/') { key.to_owned() } else { format!("{key}/") };
+        let listed = self.fact_list(&json!({"prefix": prefix, "limit": 200}));
+        if listed["isError"] == true {
+            return listed;
+        }
+        let facts = listed["structuredContent"]["facts"].as_array().cloned().unwrap_or_default();
+        let mut text = Vec::new();
+        let refs: Vec<Value> = facts
+            .iter()
+            .map(|fact| {
+                let path = file_path(fact["key"].as_str().unwrap_or(""));
+                let status = file_status(&path, &fact["meta"]["file"], &mut None);
+                let about = fact["content"].as_str().unwrap_or("");
+                text.push(format!("{} [{status}]: {about}", fact["key"].as_str().unwrap_or("")));
+                file_ref_json(fact, status)
+            })
+            .collect();
+        if text.is_empty() {
+            text.push(format!("no refs under {prefix}"));
+        }
+        let next = listed["structuredContent"]["next"].clone();
+        if let Some(next) = next.as_str() {
+            text.push(format!("more: list a narrower folder, or fact_list with after={next}"));
+        }
+        answer(text.join("\n"), json!({"refs": refs, "next": next}))
     }
 
     /// Posts a write under one new retry key, judged by the outcome rule across attempts.
@@ -656,6 +811,87 @@ fn turns(reply: &Value) -> Value {
     }
     let text = if text.is_empty() { "no turns".into() } else { text.join("\n") };
     answer(text, json!({"turns": turns, "truncated": reply["truncated"]}))
+}
+
+/// The facts key of a file ref: `file` and the absolute path with `/` separators, so a folder
+/// is a key prefix. Keys are at most 1024 bytes.
+fn file_key(path: &std::path::Path) -> Result<String, String> {
+    let text = path.to_str().ok_or("path must be UTF-8")?;
+    // Windows `canonicalize` returns `\\?\C:\...`.
+    let text = text.strip_prefix(r"\\?\").unwrap_or(text).replace('\\', "/");
+    let key = if text.starts_with('/') { format!("file{text}") } else { format!("file/{text}") };
+    if key.len() > 1024 {
+        return Err("path is too long: its key is over 1024 bytes".into());
+    }
+    Ok(key)
+}
+
+/// The path of a file ref key.
+fn file_path(key: &str) -> PathBuf {
+    let rest = key.strip_prefix("file").unwrap_or(key);
+    match rest.strip_prefix('/') {
+        Some(drive) if drive.as_bytes().get(1) == Some(&b':') => PathBuf::from(drive),
+        _ => PathBuf::from(rest),
+    }
+}
+
+/// Size and modified time in ns of a regular file. `None` for anything else.
+fn stat(path: &std::path::Path) -> Option<(u64, u64)> {
+    let metadata = std::fs::metadata(path).ok().filter(std::fs::Metadata::is_file)?;
+    let modified = metadata.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
+    Some((metadata.len(), u64::try_from(modified.as_nanos()).unwrap_or(u64::MAX)))
+}
+
+fn hash_file(path: &std::path::Path) -> Result<String, String> {
+    let mut hasher = blake3::Hasher::new();
+    let file = std::fs::File::open(path).map_err(|error| format!("cannot read file: {error}"))?;
+    hasher.update_reader(file).map_err(|error| format!("cannot read file: {error}"))?;
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
+/// `missing`, `ok` or `changed`. When size or modified time differ, the hash decides, and
+/// `hash` keeps it.
+fn file_status(path: &std::path::Path, saved: &Value, hash: &mut Option<String>) -> &'static str {
+    let Some((bytes, modified_ns)) = stat(path) else { return "missing" };
+    if saved["bytes"] == bytes && saved["modified_ns"] == modified_ns {
+        return "ok";
+    }
+    *hash = hash_file(path).ok();
+    match hash {
+        Some(hash) if saved["blake3"] == hash.as_str() => "ok",
+        _ => "changed",
+    }
+}
+
+fn file_ref_json(fact: &Value, status: &str) -> Value {
+    json!({"key": fact["key"], "about": fact["content"], "lsn": fact["lsn"],
+           "commit_time_ns": fact["commit_time_ns"], "file": fact["meta"]["file"],
+           "status": status})
+}
+
+fn mime(path: &std::path::Path) -> &'static str {
+    let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    match extension.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "pdf" => "application/pdf",
+        "mp4" => "video/mp4",
+        "mov" => "video/quicktime",
+        "webm" => "video/webm",
+        "mkv" => "video/x-matroska",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "m4a" => "audio/mp4",
+        "txt" | "log" => "text/plain",
+        "md" => "text/markdown",
+        "json" => "application/json",
+        "csv" => "text/csv",
+        "zip" => "application/zip",
+        _ => "application/octet-stream",
+    }
 }
 
 fn tool_error(text: String) -> Value {
