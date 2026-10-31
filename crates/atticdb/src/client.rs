@@ -392,7 +392,9 @@ impl Client {
             return current;
         }
         let fact = &current["structuredContent"]["fact"];
-        if fact["content"] == about.as_str() && fact["meta"]["file"]["blake3"] == blake3.as_str() {
+        // The stored about is redacted, so compare it with the redacted one.
+        let stored = Redactor::from_env().text(&about, &mut Counts::new());
+        if fact["content"] == stored.as_str() && fact["meta"]["file"]["blake3"] == blake3.as_str() {
             let structured =
                 json!({"unchanged": true, "key": key, "lsn": fact["lsn"], "blake3": blake3});
             return answer(format!("unchanged {key}"), structured);
@@ -414,10 +416,7 @@ impl Client {
             Ok(path) => path,
             Err(message) => return tool_error(message),
         };
-        // A deleted file is looked up by the path as given, so its history still reads.
-        let path = std::fs::canonicalize(&path)
-            .or_else(|_| std::path::absolute(&path))
-            .unwrap_or_else(|_| PathBuf::from(&path));
+        let path = resolve(&path);
         let key = match file_key(&path) {
             Ok(key) => key,
             Err(message) => return tool_error(message),
@@ -817,8 +816,13 @@ fn turns(reply: &Value) -> Value {
 /// is a key prefix. Keys are at most 1024 bytes.
 fn file_key(path: &std::path::Path) -> Result<String, String> {
     let text = path.to_str().ok_or("path must be UTF-8")?;
-    // Windows `canonicalize` returns `\\?\C:\...`.
-    let text = text.strip_prefix(r"\\?\").unwrap_or(text).replace('\\', "/");
+    // Windows `canonicalize` returns `\\?\C:\...`, and `\\?\UNC\server\share\...` for shares and
+    // mapped drives. A share's key is `file//server/share/...`.
+    let text = match text.strip_prefix(r"\\?\UNC\") {
+        Some(share) => format!(r"\\{share}"),
+        None => text.strip_prefix(r"\\?\").unwrap_or(text).to_owned(),
+    };
+    let text = text.replace('\\', "/");
     let key = if text.starts_with('/') { format!("file{text}") } else { format!("file/{text}") };
     if key.len() > 1024 {
         return Err("path is too long: its key is over 1024 bytes".into());
@@ -829,10 +833,42 @@ fn file_key(path: &std::path::Path) -> Result<String, String> {
 /// The path of a file ref key.
 fn file_path(key: &str) -> PathBuf {
     let rest = key.strip_prefix("file").unwrap_or(key);
-    match rest.strip_prefix('/') {
-        Some(drive) if drive.as_bytes().get(1) == Some(&b':') => PathBuf::from(drive),
-        _ => PathBuf::from(rest),
+    if cfg!(windows) {
+        if rest.starts_with("//") {
+            return PathBuf::from(rest.replace('/', "\\"));
+        }
+        if let Some(drive) = rest.strip_prefix('/').filter(|d| d.as_bytes().get(1) == Some(&b':')) {
+            return PathBuf::from(drive);
+        }
     }
+    PathBuf::from(rest)
+}
+
+/// `path` as `canonicalize` gives it. A path that no longer exists keeps its nearest existing
+/// ancestor's real path, so a deleted file finds the key it was saved under.
+fn resolve(path: &str) -> PathBuf {
+    use std::path::Component;
+    if let Ok(real) = std::fs::canonicalize(path) {
+        return real;
+    }
+    let Ok(absolute) = std::path::absolute(path) else { return PathBuf::from(path) };
+    let parts: Vec<Component> = absolute.components().collect();
+    for end in (1..parts.len()).rev() {
+        let Ok(mut real) = std::fs::canonicalize(parts[..end].iter().collect::<PathBuf>()) else {
+            continue;
+        };
+        for part in &parts[end..] {
+            match part {
+                Component::ParentDir => {
+                    real.pop();
+                }
+                Component::CurDir => {}
+                part => real.push(part),
+            }
+        }
+        return real;
+    }
+    absolute
 }
 
 /// Size and modified time in ns of a regular file. `None` for anything else.
