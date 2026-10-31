@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from helpers import TOKEN, send_without_reading, trickle, turns, wait_for
-from atticdb_client import Client, Conflict, NotCommitted, OutcomeUnknown
+from atticdb_client import Client, Conflict, Error, NotCommitted, OutcomeUnknown
 
 
 def contents(client, session):
@@ -82,6 +82,29 @@ def test_fact_retry_conflict_and_list(server, listener):
     client.fact_delete(key, if_lsn=first["lsn"])
     assert client.fact_get(key) is None and client.fact_history(key)["revisions"][0]["deleted"]
     assert client.fact_list("repo/", limit=1) == {"facts": [], "next": None}
+
+
+@pytest.mark.parametrize("listener", ["http", "unix"])
+def test_search_pages_newest_first(server, listener):
+    # Client wiring only. The HTTP tests cover matching and visit caps.
+    client = Client(server.url[listener], TOKEN)
+    client.append("a", "s", turns("alpha one", "beta two", "alpha three \u00e9"))
+    client.fact_put("note/x", "alpha fact")
+    hits = client.search("alpha")["hits"]
+    assert [(h["kind"], h["content"]) for h in hits] == [
+        ("fact", "alpha fact"), ("turn", "alpha three \u00e9"), ("turn", "alpha one")]
+    assert [h["session"] for h in hits[1:]] == ["s", "s"]
+    # Spaces and non-ASCII reach the server encoded: every word must match.
+    assert [h["content"] for h in client.search("three \u00e9")["hits"]] == ["alpha three \u00e9"]
+    first = client.search("alpha", limit=1)
+    assert [h["content"] for h in first["hits"]] == ["alpha fact"] and first["next"]
+    second = client.search("alpha", limit=1, before=first["next"])
+    assert [h["content"] for h in second["hits"]] == ["alpha three \u00e9"]
+    # The first hit always fits. The page stops before going over max_bytes.
+    small = client.search("alpha", max_bytes=1)
+    assert len(small["hits"]) == 1 and small["next"]
+    with pytest.raises(Error, match="GET /v1/search failed"):
+        client.search(" ")
 
 
 def test_escaped_fact_page_fits_the_response_cap(server):

@@ -26,6 +26,7 @@ client.fact_delete("repo/payments/retry-rule")
 - `if_lsn` writes only if the key's current LSN matches. `0` means the key has no current value. A mismatch raises `Conflict`, a `NotCommitted`. After an unclear attempt the call raises `OutcomeUnknown`, never `Conflict`.
 - `if_lsn` is not part of the retry identity: a retry with the same key and payload returns the original receipt.
 - `fact_get(key)`, `fact_history(key, max_bytes=None)` and `fact_list(prefix="", after=None, limit=None, max_bytes=None)` read once, like `window`.
+- `search(query, limit=None, before=None, max_bytes=None)` finds turns and current facts by words, newest first. Pass `next` as `before=` for the next page.
 
 ## URL forms
 

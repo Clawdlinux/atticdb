@@ -199,6 +199,12 @@ class Client:
         query = _query(prefix=prefix, after=after, limit=limit, max_bytes=max_bytes)
         return self._read(f"/v1/facts/list?{query}", (200,))
 
+    def search(self, query, limit=None, before=None, max_bytes=None):
+        """Returns `{"hits", "next"}`: turns and current facts holding every word of
+        `query`, newest first. Pass `next` as `before` for the next page."""
+        query = _query(q=query, limit=limit, before=before, max_bytes=max_bytes)
+        return self._read(f"/v1/search?{query}", (200,))
+
     def health(self):
         """Returns `{"status", "instance"}`. A poisoned server answers too, with 503."""
         return self._read("/healthz", (200, 503))
