@@ -198,8 +198,10 @@ pub fn open_regular(options: &mut OpenOptions, path: &Path) -> std::io::Result<F
     Ok(file)
 }
 
-/// Checks that an open file is a regular file. Windows has no uid or mode bits to check. A
-/// file in the user's profile folder is private by its inherited access list.
+/// Checks that an open file is a regular file inside the user profile. Windows has no uid or
+/// mode bits to check. A file in the user's profile folder is private by its inherited access
+/// list. So every config, token file and server log must be there, by
+/// [`crate::platform::check_in_profile`].
 #[cfg(not(unix))]
 pub fn check_private(file: &File, path: &Path, what: &str) -> Result<(), String> {
     let fail = |message: String| format!("{what} {}: {message}", path.display());
@@ -207,6 +209,8 @@ pub fn check_private(file: &File, path: &Path, what: &str) -> Result<(), String>
     if !meta.file_type().is_file() {
         return Err(fail("must be a regular file".into()));
     }
+    #[cfg(windows)]
+    crate::platform::check_in_profile(path, what)?;
     Ok(())
 }
 

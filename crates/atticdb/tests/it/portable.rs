@@ -620,4 +620,55 @@ mod windows {
         let (code, out, err) = run(&dir.0, &profile_env, &["append", "--content", "x"]);
         assert_eq!(code, Some(0), "{out}{err}");
     }
+
+    /// The server and every token file obey the same rule. Config and token reads check the
+    /// path. `serve` checks its data dir.
+    #[test]
+    fn server_and_token_paths_outside_the_profile_are_refused() {
+        let dir = Dir::new();
+        let profile = dir.0.join("profile");
+        let local = profile.join("AppData").join("Local");
+        let outside = dir.0.join("outside");
+        for folder in [&local, &outside] {
+            std::fs::create_dir_all(folder).unwrap();
+        }
+        let tenants = json!([{"name": "me", "token": TOKEN}]);
+        let write = |path: &Path, text: String| {
+            std::fs::write(path, text).unwrap();
+            path.to_str().unwrap().to_owned()
+        };
+        let config_out =
+            write(&outside.join("server.json"), json!({"tenants": tenants}).to_string());
+        let config_in =
+            write(&profile.join("server.json"), json!({"tenants": tenants}).to_string());
+        let outside_data = outside.join("data");
+        let with_data = json!({"data_dir": outside_data, "tenants": tenants}).to_string();
+        let config_data_out = write(&profile.join("data-out.json"), with_data);
+        let token_out = write(&outside.join("token"), TOKEN.to_owned());
+        let data_in = profile.join("data");
+        let _servers = Servers(vec![data_in.clone(), outside_data.clone()]);
+        let (data_in, data_out) = (data_in.to_str().unwrap(), outside_data.to_str().unwrap());
+        fn serve<'a>(config: &'a str, data: Option<&'a str>) -> Vec<&'a str> {
+            let mut args = vec!["serve", "--config", config, "--listen", "127.0.0.1:0"];
+            args.extend(data.map(|data| ["--data-dir", data]).into_iter().flatten());
+            args
+        }
+        let append = ["append", "--data-dir", data_in, "--token-file", &token_out];
+        let append = [&append[..], &["--content", "x", "--retry-deadline", "2s"]].concat();
+        let load = ["load", "--url", "http://127.0.0.1:1", "--token-file", &token_out];
+        let cases: [(Vec<&str>, &str); 5] = [
+            (serve(&config_out, Some(data_in)), "config "),
+            (serve(&config_in, Some(data_out)), "data dir "),
+            (serve(&config_data_out, None), "data dir "),
+            (append, "token file "),
+            (load.to_vec(), "token file "),
+        ];
+        let env = [("USERPROFILE", profile.as_path()), ("LOCALAPPDATA", local.as_path())];
+        for (args, what) in cases {
+            let (code, out, err) = run(&dir.0, &env, &args);
+            assert_ne!(code, Some(0), "{args:?}: {out}{err}");
+            assert!(err.contains(what) && err.contains("(D92)"), "{args:?}: {err}");
+            assert!(!outside_data.exists(), "{args:?}: no data dir was made outside");
+        }
+    }
 }

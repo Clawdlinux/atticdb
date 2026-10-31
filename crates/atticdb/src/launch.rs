@@ -722,7 +722,8 @@ mod tcp_tests {
                     (0..99).map(other).chain([right]).collect()
                 }
             };
-            let proofs: Vec<String> = proofs.iter().map(|hash| hash.to_hex().to_string()).collect();
+            let proofs: Vec<String> =
+                proofs.iter().map(|hash| hash.unwrap().to_hex().to_string()).collect();
             let instance = if matches!(answer, Answer::WrongInstance) { "9999" } else { "0123" };
             let body = serde_json::json!({"status": "ok", "instance": instance, "proofs": proofs});
             let body = body.to_string();

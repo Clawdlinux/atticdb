@@ -273,11 +273,6 @@ impl StoreFlags {
         let config_path = config.map(std::path::absolute).transpose();
         let config_path = config_path.map_err(|error| format!("--config: {error}"))?;
         let config_path = config_path.or_else(|| home.as_ref().map(|home| home.config.clone()));
-        // Someone who can write there could pick the token, or name a server of theirs.
-        #[cfg(windows)]
-        if let Some(path) = &config_path {
-            crate::platform::check_in_profile(path, "config")?;
-        }
         let config = config_path.as_deref().map(Config::load).transpose()?;
         // Absolute against this folder, as a started server runs in `/`.
         let unix_socket = config.as_ref().and_then(|config| config.unix_socket.as_deref());

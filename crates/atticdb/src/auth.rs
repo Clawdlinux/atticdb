@@ -53,7 +53,7 @@ impl Auth {
         };
         let nonce = parse_nonce(value)?;
         let proofs = self.proof_keys.iter().map(|key| proof(key, &nonce, instance, endpoint));
-        Some(proofs.map(|hash| hash.to_hex().to_string()).collect())
+        proofs.map(|hash| Some(hash?.to_hex().to_string())).collect()
     }
 
     /// Returns the tenant whose token the request presents, or `None` for a missing,
@@ -93,21 +93,25 @@ pub fn proof_key(token: &Token) -> [u8; 32] {
     blake3::derive_key(PROOF_CONTEXT, token.expose().as_bytes())
 }
 
-/// `keyed_hash(key, nonce || instance || endpoint)`. `instance` is the id's text as in `LOCK`.
-/// `endpoint` is the server's end of the connection, as `SocketAddr` prints it, such as
-/// `127.0.0.1:54321` or `[::1]:54321`. A relay would end the connection at its own address.
-/// So proofs it forwards from the real server fail.
+/// `keyed_hash(key, nonce || len(instance) || instance || len(endpoint) || endpoint)`. Each
+/// length is 2 bytes, big-endian, so no 2 different pairs give the same message. `instance` is
+/// the id's text as in `LOCK`. `endpoint` is the server's end of the connection, as
+/// `SocketAddr` prints it, such as `127.0.0.1:54321` or `[::1]:54321`. A relay would end the
+/// connection at its own address. So proofs it forwards from the real server fail. `None`
+/// when a part is longer than 65535 bytes.
 pub fn proof(
     key: &[u8; 32],
     nonce: &[u8; NONCE_BYTES],
     instance: &str,
     endpoint: &str,
-) -> blake3::Hash {
+) -> Option<blake3::Hash> {
     let mut hasher = blake3::Hasher::new_keyed(key);
     hasher.update(nonce);
-    hasher.update(instance.as_bytes());
-    hasher.update(endpoint.as_bytes());
-    hasher.finalize()
+    for part in [instance, endpoint] {
+        hasher.update(&u16::try_from(part.len()).ok()?.to_be_bytes());
+        hasher.update(part.as_bytes());
+    }
+    Some(hasher.finalize())
 }
 
 /// Exactly [`NONCE_BYTES`] as hex digits, in either case.
@@ -134,7 +138,9 @@ pub fn verify(
     endpoint: &str,
     proofs: &Value,
 ) -> bool {
-    let expected = proof(&proof_key(token), nonce, instance, endpoint);
+    let Some(expected) = proof(&proof_key(token), nonce, instance, endpoint) else {
+        return false;
+    };
     let mut found = false;
     for entry in proofs.as_array().map_or(&[][..], Vec::as_slice) {
         let hash = entry.as_str().and_then(|hex| blake3::Hash::from_hex(hex).ok());
@@ -174,16 +180,28 @@ mod tests {
         let key = blake3::derive_key("atticdb healthz proof v2", secret.expose().as_bytes());
         assert_eq!(proof_key(&secret), key);
         let mut message = nonce.to_vec();
-        message.extend_from_slice(b"0123127.0.0.1:5");
+        message.extend_from_slice(b"\x00\x040123\x00\x0b127.0.0.1:5");
         let hash = proof(&key, &nonce, "0123", "127.0.0.1:5");
-        assert_eq!(hash, blake3::keyed_hash(&key, &message));
+        assert_eq!(hash, Some(blake3::keyed_hash(&key, &message)));
+    }
+
+    /// Without the lengths, `01` + `23x` and `012` + `3x` would hash the same bytes.
+    #[test]
+    fn the_lengths_keep_the_parts_apart() {
+        let (key, nonce) = (proof_key(&token("a")), [7; NONCE_BYTES]);
+        assert_ne!(proof(&key, &nonce, "01", "23x"), proof(&key, &nonce, "012", "3x"));
+        let long = "0".repeat(65536);
+        assert_eq!(proof(&key, &nonce, &long, "x"), None);
+        assert_eq!(proof(&key, &nonce, "x", &long), None);
+        assert!(proof(&key, &nonce, &long[1..], "x").is_some(), "65535 bytes fit");
+        assert!(!verify(&token("a"), &nonce, &long, "x", &json!([])));
     }
 
     #[test]
     fn only_the_right_token_nonce_instance_and_endpoint_verify() {
         let (a, b, nonce) = (token("a"), token("b"), [9; NONCE_BYTES]);
         let at = "127.0.0.1:5";
-        let hex = |hash: blake3::Hash| hash.to_hex().to_string();
+        let hex = |hash: Option<blake3::Hash>| hash.unwrap().to_hex().to_string();
         let proofs = json!([
             hex(proof(&proof_key(&a), &nonce, "0123", at)),
             hex(proof(&proof_key(&b), &nonce, "0123", at)),

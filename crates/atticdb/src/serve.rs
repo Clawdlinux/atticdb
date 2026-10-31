@@ -379,6 +379,9 @@ fn try_start(config: Config, exit_on_poison: bool, log_requests: bool) -> Result
     let fail = |message: String| (1, message);
     let data_dir = config.data_dir.ok_or_else(|| fail("set data_dir or --data-dir".into()))?;
     let data_dir = std::path::absolute(&data_dir).map_err(|error| fail(error.to_string()))?;
+    // Someone who can write there could rewrite `LOCK` and name a server of theirs.
+    #[cfg(windows)]
+    crate::platform::check_in_profile(&data_dir, "data dir").map_err(fail)?;
     #[cfg(unix)]
     let socket = config.unix_socket.unwrap_or_else(|| data_dir.join(listen::SOCKET_NAME));
     #[cfg(unix)]
