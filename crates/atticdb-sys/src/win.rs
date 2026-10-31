@@ -6,8 +6,9 @@ use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::AsRawHandle;
 use std::path::{Component, Path, Prefix};
 use windows_sys::Win32::Foundation::{
-    CloseHandle, SetHandleInformation, ERROR_IO_PENDING, ERROR_LOCK_VIOLATION,
-    ERROR_OPERATION_ABORTED, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+    CloseHandle, GetHandleInformation, SetHandleInformation, ERROR_IO_PENDING,
+    ERROR_LOCK_VIOLATION, ERROR_OPERATION_ABORTED, HANDLE, HANDLE_FLAG_INHERIT,
+    INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Security::Cryptography::{
     BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG,
@@ -155,6 +156,35 @@ pub fn disinherit_stdio() {
         // SAFETY: SetHandleInformation only reads the handle value and changes its flags.
         // A handle that is not open makes the call fail, which changes nothing.
         let _ = unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) };
+    }
+}
+
+/// The highest handle value [`disinherit_all`] checks. Handle values are multiples of 4, so
+/// this covers a process with up to 65,536 handles.
+const MAX_HANDLE_VALUE: usize = 1 << 18;
+
+/// Stops later child processes from inheriting any handle of this process, not only its
+/// stdio.
+///
+/// A parent may pass down more inheritable handles than stdio. PowerShell does, when it runs a
+/// program with its output redirected: the program also gets PowerShell's own stdout. A server
+/// that outlives this process would then hold that pipe open, and PowerShell's caller would
+/// wait for end of file. std still gives each child the stdio its command sets, as it
+/// duplicates those handles for that child. Best effort: values above [`MAX_HANDLE_VALUE`] are
+/// not checked, and a failed call changes nothing.
+pub fn disinherit_all() {
+    disinherit_stdio();
+    for value in (4..=MAX_HANDLE_VALUE).step_by(4) {
+        let handle: HANDLE = std::ptr::without_provenance_mut(value);
+        let mut flags = 0;
+        // SAFETY: GetHandleInformation only reads the flags of `handle` into `flags`. A value
+        // that is not an open handle makes the call fail, which changes nothing.
+        let inheritable = unsafe { GetHandleInformation(handle, &mut flags) } != 0
+            && flags & HANDLE_FLAG_INHERIT != 0;
+        if inheritable {
+            // SAFETY: SetHandleInformation only changes the flags of `handle`, which is open.
+            let _ = unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) };
+        }
     }
 }
 
@@ -505,9 +535,27 @@ mod tests {
         assert!(total > 0 && available <= total, "available={available} total={total}");
     }
 
-    /// A child still gets inherited stdio afterwards, as std duplicates the handles for it.
+    /// An inheritable handle stops being inheritable. A child still gets inherited stdio
+    /// afterwards, as std duplicates the handles for it.
     #[test]
     fn disinherited_stdio_still_reaches_children() {
+        let dir = std::env::temp_dir().join(format!("atticdb-sys-inherit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = File::create(dir.join("f")).unwrap();
+        let handle = file.as_raw_handle();
+        let flags = || {
+            let mut flags = 0;
+            // SAFETY: `handle` stays open while `file` lives, and the call only reads its flags.
+            assert_ne!(unsafe { GetHandleInformation(handle, &mut flags) }, 0);
+            flags & HANDLE_FLAG_INHERIT
+        };
+        // SAFETY: `handle` is open, and the call only changes its flags.
+        unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) };
+        assert_eq!(flags(), HANDLE_FLAG_INHERIT);
+        disinherit_all();
+        assert_eq!(flags(), 0);
+        drop(file);
+        std::fs::remove_dir_all(&dir).unwrap();
         disinherit_stdio();
         disinherit_stdio();
         let root = std::env::var_os("SystemRoot").unwrap();

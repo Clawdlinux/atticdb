@@ -13,6 +13,6 @@ mod win;
 
 #[cfg(windows)]
 pub use win::{
-    disinherit_stdio, fill_random, free_space, rename_write_through, try_lock_past_eof,
-    unlock_past_eof,
+    disinherit_all, disinherit_stdio, fill_random, free_space, rename_write_through,
+    try_lock_past_eof, unlock_past_eof,
 };
