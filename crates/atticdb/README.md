@@ -633,6 +633,7 @@ Under `ATTICDB_HOME`, `args` ends with `"--home", "<path>"`. The MCP entry passe
 
 A cold server start can take longer than the hook's 3 s budget. Then the first chat after it gets no memory block.
 The next chat gets it, as the server is up by then.
+A hook handle above value 0x40000 may still reach the server, so that first chat may also miss its block.
 
 Not yet: arm64, an `install.ps1`, and Codex's hooks ([#142](https://github.com/Clawdlinux/atticdb/issues/142)). Ask in an issue if you need the others.
 

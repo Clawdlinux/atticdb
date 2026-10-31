@@ -334,7 +334,7 @@ fn set_entry(
     }
     let (add, remove) = (add_args(exe, home), REMOVE.map(String::from).to_vec());
     let by_hand = match current {
-        Some(_) => format!("{}{THEN}{}", shell_line("claude", &remove), shell_line("claude", &add)),
+        Some(_) => and_then(&shell_line("claude", &remove), &shell_line("claude", &add)),
         None => shell_line("claude", &add),
     };
     let Some(claude) = find_program("claude") else {
@@ -595,9 +595,15 @@ pub(super) fn shell_line(program: &str, args: &[String]) -> String {
     std::iter::once(program.to_owned()).chain(words).collect::<Vec<_>>().join(" ")
 }
 
-/// What joins 2 commands to type, the second to run only when the first worked. Windows
-/// PowerShell 5.1 has no `&&`, so there it is `;`.
-const THEN: &str = if cfg!(windows) { "; " } else { " && " };
+/// The command lines `first`, then `second`, which runs only when `first` worked, as typed in
+/// a shell. Windows PowerShell 5.1 has no `&&`, so there `second` runs inside `if ($?)`.
+fn and_then(first: &str, second: &str) -> String {
+    if cfg!(windows) {
+        format!("{first}; if ($?) {{ {second} }}")
+    } else {
+        format!("{first} && {second}")
+    }
+}
 
 /// What `harness`'s hook command passes the binary.
 pub(super) fn hook_args(harness: Harness) -> String {
@@ -999,6 +1005,19 @@ mod find_tests {
         let relative = std::env::join_paths(["relative"]).unwrap();
         assert_eq!(super::find_in("claude", &relative), None);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The second command runs only when the first worked: `&&` in `sh`, `if ($?)` in
+    /// PowerShell.
+    #[test]
+    fn and_then_stops_when_the_first_command_fails() {
+        let line = super::and_then("claude mcp remove", "claude mcp add");
+        let wanted = if cfg!(windows) {
+            "claude mcp remove; if ($?) { claude mcp add }"
+        } else {
+            "claude mcp remove && claude mcp add"
+        };
+        assert_eq!(line, wanted);
     }
 
     /// On Windows Claude Code's hook is in exec form, with the home in `--home`. AtticDB finds
