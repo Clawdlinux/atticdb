@@ -1,7 +1,9 @@
 "use client";
 
+import { AnimatePresence, motion, useIsPresent } from "motion/react";
 import { useId, useRef, useState, type ReactNode } from "react";
 import Reveal from "@/components/Reveal";
+import { HOVER, PRESS, SPRING, SWAP, SWAP_RISE, TAP } from "@/lib/motion";
 import { SAMPLE_MEMORY, searchMemory, type MemoryRecord } from "@/content/memory";
 import styles from "./Showcase.module.css";
 
@@ -27,9 +29,20 @@ export function markWords(text: string, query: string): ReactNode[] {
   return parts.map((part, i) => (i % 2 === 1 ? <mark key={i}>{part}</mark> : part));
 }
 
+// A result row: rises in when it starts to match, fades out when it stops, slides as others go.
 function Row({ record, query }: { record: MemoryRecord; query: string }) {
+  const present = useIsPresent();
   return (
-    <li className={styles.row}>
+    <motion.li
+      className={styles.row}
+      data-present={present}
+      aria-hidden={present ? undefined : true}
+      layout="position"
+      initial={{ opacity: 0, y: SWAP_RISE }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, transition: SWAP }}
+      transition={{ ...SWAP, layout: SPRING }}
+    >
       <span className={styles.meta}>
         <span className={styles.kind}>{record.kind}</span>
         <code>{record.session ?? record.key}</code>
@@ -38,7 +51,7 @@ function Row({ record, query }: { record: MemoryRecord; query: string }) {
         </time>
       </span>
       <span className={styles.text}>{markWords(record.text, query)}</span>
-    </li>
+    </motion.li>
   );
 }
 
@@ -86,9 +99,11 @@ export default function Showcase() {
             </p>
             {results.length ? (
               <ol className={styles.rows}>
-                {results.map((r) => (
-                  <Row key={r.at} record={r} query={query} />
-                ))}
+                <AnimatePresence initial={false} mode="popLayout">
+                  {results.map((r) => (
+                    <Row key={r.at} record={r} query={query} />
+                  ))}
+                </AnimatePresence>
               </ol>
             ) : (
               <p className={styles.none}>Nothing matches every word. Try fewer words.</p>
@@ -104,9 +119,16 @@ export default function Showcase() {
           <ul className={styles.examples}>
             {EXAMPLES.map((example) => (
               <li key={example}>
-                <button type="button" className={styles.example} onClick={() => fill(example)}>
+                <motion.button
+                  type="button"
+                  className={styles.example}
+                  onClick={() => fill(example)}
+                  whileHover={HOVER}
+                  whileTap={TAP}
+                  transition={PRESS}
+                >
                   {example}
-                </button>
+                </motion.button>
               </li>
             ))}
           </ul>

@@ -84,6 +84,20 @@ describe("Showcase", () => {
     for (const row of rows) expect(row.textContent?.toLowerCase()).toContain("ext4");
   });
 
+  it("keeps only matching rows present as the words narrow", () => {
+    const { container } = render(<Showcase />);
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search what your agent remembered" }), {
+      target: { value: "deploy region" },
+    });
+    const results = container.querySelector('[aria-live="polite"]')!;
+    const present = results.querySelectorAll('li[data-present="true"]');
+    expect(present.length).toBeGreaterThan(0);
+    for (const row of present) expect(row.textContent?.toLowerCase()).toContain("deploy");
+    for (const row of results.querySelectorAll('li[data-present="false"]')) {
+      expect(row).toHaveAttribute("aria-hidden", "true");
+    }
+  });
+
   it("refills the input from an example", () => {
     render(<Showcase />);
     fireEvent.click(screen.getByRole("button", { name: "flaky test" }));

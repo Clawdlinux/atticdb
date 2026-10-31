@@ -1,8 +1,10 @@
 "use client";
 
+import { motion } from "motion/react";
 import { useState, type CSSProperties } from "react";
 import CopyCommand from "@/components/CopyCommand";
 import { ackFor } from "@/content/bench";
+import { HOVER, PRESS, SPRING, TAP } from "@/lib/motion";
 import { WAITLIST_URL } from "@/lib/site";
 import AckChip, { formatAck } from "./AckChip";
 import { PlugResult, PowerChip, usePlugDemo } from "./PlugDemo";
@@ -21,6 +23,37 @@ const numbers = new Intl.NumberFormat("en-US");
 
 function line(i: number): CSSProperties {
   return { "--i": i } as CSSProperties;
+}
+
+type OptionProps = {
+  name: string;
+  value: string;
+  label: string;
+  checked: boolean;
+  onPick: () => void;
+};
+
+// One radio in a chip. The selected one carries the highlight, which slides between options.
+function Option({ name, value, label, checked, onPick }: OptionProps) {
+  return (
+    <motion.label
+      className={styles.option}
+      whileHover={HOVER}
+      whileTap={TAP}
+      transition={PRESS}
+    >
+      <input type="radio" name={name} value={value} checked={checked} onChange={onPick} />
+      {checked && (
+        <motion.span
+          layoutId={`${name}-highlight`}
+          className={styles.highlight}
+          transition={SPRING}
+          aria-hidden="true"
+        />
+      )}
+      <span className={styles.optionText}>{label}</span>
+    </motion.label>
+  );
 }
 
 export default function Hero() {
@@ -51,16 +84,14 @@ export default function Hero() {
           <legend className={styles.chipLabel}>Disk</legend>
           <span className={styles.options}>
             {DISKS.map((d) => (
-              <label key={d.value} className={styles.option}>
-                <input
-                  type="radio"
-                  name="hero-disk"
-                  value={d.value}
-                  checked={disk === d.value}
-                  onChange={() => setDisk(d.value)}
-                />
-                <span>{d.label}</span>
-              </label>
+              <Option
+                key={d.value}
+                name="hero-disk"
+                value={d.value}
+                label={d.label}
+                checked={disk === d.value}
+                onPick={() => setDisk(d.value)}
+              />
             ))}
           </span>
         </fieldset>
@@ -73,16 +104,14 @@ export default function Hero() {
             </span>
             <span className={styles.options}>
               {WRITERS.map((w) => (
-                <label key={w} className={styles.option}>
-                  <input
-                    type="radio"
-                    name="hero-writers"
-                    value={w}
-                    checked={writers === w}
-                    onChange={() => setWriters(w)}
-                  />
-                  <span>{w}</span>
-                </label>
+                <Option
+                  key={w}
+                  name="hero-writers"
+                  value={String(w)}
+                  label={String(w)}
+                  checked={writers === w}
+                  onPick={() => setWriters(w)}
+                />
               ))}
             </span>
           </fieldset>
@@ -102,9 +131,15 @@ export default function Hero() {
 
       <div className={styles.actions} data-load>
         <CopyCommand label="Install AtticDB" />
-        <a className={styles.waitlist} href={WAITLIST_URL}>
+        <motion.a
+          className={styles.waitlist}
+          href={WAITLIST_URL}
+          whileHover={HOVER}
+          whileTap={TAP}
+          transition={PRESS}
+        >
           Join the cloud waitlist
-        </a>
+        </motion.a>
       </div>
 
       <PlugResult state={state} />

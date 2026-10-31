@@ -1,3 +1,4 @@
+import Swap from "@/components/Swap";
 import styles from "./Hero.module.css";
 
 export function formatAck(us: number): string {
@@ -19,7 +20,10 @@ export default function AckChip({ p50us, pulse, powered }: AckChipProps) {
       <span className={styles.ackInner}>
         <span key={pulse} className={styles.light} data-on={powered} data-pulse={pulse > 0} />
         <span className={styles.ackText}>
-          acked <span className={styles.ackValue}>{formatAck(p50us)}</span>
+          acked{" "}
+          <span className={styles.ackValue}>
+            <Swap value={formatAck(p50us)} className={styles.ackSwap} />
+          </span>
         </span>
       </span>
     </span>

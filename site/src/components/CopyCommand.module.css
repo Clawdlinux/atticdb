@@ -20,22 +20,17 @@
   word-break: break-all;
 }
 
+/* Press scale comes from Framer Motion (whileTap). */
 .button {
   flex: 0 0 auto;
   min-height: 44px;
   padding: 0.5rem 1.25rem;
   font-weight: 500;
-  transition:
-    transform var(--t-press) var(--ease-out),
-    opacity var(--t-hover) ease-out;
+  transition: opacity var(--t-hover) ease-out;
 }
 
 .button:hover {
   opacity: 0.88;
-}
-
-.button:active {
-  transform: scale(0.97);
 }
 
 .bone .button {
@@ -46,6 +41,7 @@
 
 .labels {
   display: grid;
+  overflow: hidden;
 }
 
 .labels > span {
@@ -54,8 +50,12 @@
   white-space: nowrap;
 }
 
-.labels > [data-shown="false"] {
+.sizer {
   visibility: hidden;
+}
+
+.shown {
+  display: block;
 }
 
 @media (max-width: 30rem) {

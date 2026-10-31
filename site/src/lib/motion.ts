@@ -10,7 +10,21 @@ export const MOTION = {
 // Seconds between the parts of a section: heading, then text, then picture.
 export const STAGGER = 0.075;
 
-type RevealWindow = Window & { __reveal?: (el: Element) => void };
+/*
+ * The Framer Motion set for every interactive transition after hydration.
+ * One curve (MOTION.ease), one spring with no overshoot, short times for feedback.
+ * MotionConfig reducedMotion="user" (Providers) drops the travel and keeps the fades.
+ */
+export const EASE_OUT = [0.16, 1, 0.3, 1] as const;
+export const SPRING = { type: "spring", stiffness: 520, damping: 48, mass: 1 } as const;
+export const PRESS = { duration: 0.14, ease: EASE_OUT } as const;
+export const SWAP = { duration: 0.24, ease: EASE_OUT } as const;
+export const SETTLE = { duration: 0.42, ease: EASE_OUT } as const;
+export const SWAP_RISE = 8;
+export const TAP = { scale: 0.96 } as const;
+export const HOVER = { scale: 1.03 } as const;
+
+export type RevealWindow = Window & { __reveal?: (el: Element) => () => void };
 
 /*
  * Runs as an inline <head> script, so section entrances never wait for a JS chunk.
@@ -30,6 +44,11 @@ export function revealBoot(cfg: typeof MOTION) {
   const onScreen = (el: Element) => {
     const r = el.getBoundingClientRect();
     return r.top < window.innerHeight && r.bottom > 0;
+  };
+
+  const forget = (el: Element) => {
+    waiting.delete(el as HTMLElement);
+    io?.unobserve(el);
   };
 
   const show = (el: HTMLElement) => {
@@ -54,7 +73,8 @@ export function revealBoot(cfg: typeof MOTION) {
 
   const check = () => {
     waiting.forEach((el) => {
-      if (onScreen(el)) show(el);
+      if (!el.isConnected) forget(el);
+      else if (onScreen(el)) show(el);
     });
   };
 
@@ -88,8 +108,10 @@ export function revealBoot(cfg: typeof MOTION) {
   };
   const start = () => requestAnimationFrame(scan);
 
+  // Returns the unregister for the element, so an unmount drops it from the observer and the checks.
   w.__reveal = (el) => {
     if (ready) add(el);
+    return () => forget(el);
   };
   window.addEventListener("scroll", check, { passive: true });
   window.addEventListener("resize", check);

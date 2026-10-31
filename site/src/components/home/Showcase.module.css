@@ -75,22 +75,12 @@
   list-style: none;
 }
 
+/* Press and hover scale come from Framer Motion. */
 .example {
   padding: 0.5rem 1rem;
   background: var(--field-1-ink);
   color: var(--field-1);
   font-size: var(--step-body);
-  transition:
-    transform var(--t-press) var(--ease-out),
-    opacity var(--t-hover) ease-out;
-}
-
-.example:hover {
-  opacity: 0.85;
-}
-
-.example:active {
-  transform: scale(0.97);
 }
 
 /* The product's answer: a fragment of its interface. */
@@ -106,7 +96,9 @@
   font-size: var(--step-small);
 }
 
+/* popLayout pins leaving rows inside the list while they fade. */
 [data-ui] .rows {
+  position: relative;
   margin-top: 0.5rem;
   padding: 0;
   list-style: none;

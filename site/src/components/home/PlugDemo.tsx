@@ -1,6 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useReducer, useRef } from "react";
+import { motion } from "motion/react";
+import { useCallback, useEffect, useReducer, useRef, type ReactNode } from "react";
+import { HOVER, PRESS, SETTLE, SPRING, SWAP, SWAP_RISE, TAP } from "@/lib/motion";
 import { initialPlug, stepPlug, type PlugState } from "./plug";
 import styles from "./Hero.module.css";
 
@@ -51,7 +53,7 @@ export function PowerChip({ state, running, onRun, className }: PowerChipProps) 
     <div className={`${styles.chip} ${className ?? ""}`} data-ui="power">
       <span className={styles.chipLabel}>Power</span>
       <span className={styles.readout}>{on ? "On" : "Off"}</span>
-      <button
+      <motion.button
         type="button"
         className={styles.switch}
         data-on={on}
@@ -59,25 +61,77 @@ export function PowerChip({ state, running, onRun, className }: PowerChipProps) 
         onClick={() => {
           if (!running) onRun();
         }}
+        whileHover={HOVER}
+        whileTap={TAP}
+        transition={PRESS}
       >
         <span className={styles.track} aria-hidden="true">
-          <span className={styles.knob} />
+          <motion.span
+            className={styles.knob}
+            initial={false}
+            animate={{ x: on ? KNOB_TRAVEL : 0 }}
+            transition={SPRING}
+          />
         </span>
         {action}
-      </button>
+      </motion.button>
     </div>
   );
 }
 
+// 1rem: the track's inner width less the knob.
+const KNOB_TRAVEL = 16;
+// Lost blocks drop one after another, this many seconds apart.
+const LOST_STAGGER = 0.06;
+
 type CellKind = "pending" | "acked" | "lost";
 
+// Each write drops a block into its slot as it is sent. Kept blocks hold; lost ones fade and drop.
 function Cells({ kinds, label }: { kinds: CellKind[]; label: string }) {
+  const firstLost = kinds.indexOf("lost");
   return (
     <span className={styles.cells} aria-hidden="true" data-label={label}>
-      {Array.from({ length: WRITES }, (_, i) => (
-        <span key={i} className={styles.cell} data-kind={kinds[i] ?? "empty"} />
-      ))}
+      {Array.from({ length: WRITES }, (_, i) => {
+        const kind = kinds[i];
+        const lost = kind === "lost";
+        return (
+          <span key={i} className={styles.cell} data-kind={kind ?? "empty"}>
+            {kind && (
+              <motion.span
+                className={styles.block}
+                data-kind={kind}
+                initial={{ opacity: 0, y: -SWAP_RISE }}
+                animate={lost ? { opacity: 0.25, y: SWAP_RISE, scale: 0.6 } : { opacity: 1, y: 0, scale: 1 }}
+                transition={lost ? { ...SETTLE, delay: (i - firstLost) * LOST_STAGGER } : SWAP}
+              />
+            )}
+          </span>
+        );
+      })}
     </span>
+  );
+}
+
+const resultMotion = {
+  idle: { opacity: 0, y: SWAP_RISE },
+  shown: { opacity: 1, y: 0, transition: { ...SETTLE, staggerChildren: 0.08 } },
+};
+
+const lineMotion = {
+  idle: { opacity: 0, y: SWAP_RISE },
+  shown: { opacity: 1, y: 0, transition: SETTLE },
+};
+
+// A result line that fades up whenever its words change from the running count to the outcome.
+function Line({ done, children }: { done: boolean; children: ReactNode }) {
+  return (
+    <motion.span
+      initial={done ? { opacity: 0, y: SWAP_RISE } : false}
+      animate={{ opacity: 1, y: 0 }}
+      transition={SETTLE}
+    >
+      {children}
+    </motion.span>
   );
 }
 
@@ -110,29 +164,37 @@ export function PlugResult({ state }: { state: PlugState }) {
     ? `A store that acks before sync: ${state.keptAckBeforeSync} of ${state.sent} acked writes kept.`
     : `A store that acks before sync: ${state.sent} acked.`;
 
+  const idle = state.phase === "idle";
   return (
-    <div
+    <motion.div
       ref={ref}
       className={styles.result}
       data-phase={state.phase}
-      hidden={state.phase === "idle"}
+      hidden={idle}
+      initial={false}
+      animate={idle ? "idle" : "shown"}
+      variants={resultMotion}
     >
       <div className={styles.rows} aria-live="polite">
-        <p className={styles.row} data-store="atticdb">
+        <motion.p className={styles.row} data-store="atticdb" variants={lineMotion}>
           <Cells kinds={atticCells(state)} label="AtticDB" />
-          <span>{done ? attic : <span aria-hidden="true">{attic}</span>}</span>
-        </p>
-        <p className={styles.row} data-store="ack-before-sync">
+          <Line key={done ? "done" : "live"} done={done}>
+            {done ? attic : <span aria-hidden="true">{attic}</span>}
+          </Line>
+        </motion.p>
+        <motion.p className={styles.row} data-store="ack-before-sync" variants={lineMotion}>
           <Cells kinds={ackBeforeSyncCells(state)} label="Ack before sync" />
-          <span>{done ? other : <span aria-hidden="true">{other}</span>}</span>
-        </p>
+          <Line key={done ? "done" : "live"} done={done}>
+            {done ? other : <span aria-hidden="true">{other}</span>}
+          </Line>
+        </motion.p>
       </div>
-      <p className={styles.note}>
+      <motion.p className={styles.note} variants={lineMotion}>
         An illustration of ack-after-sync, not a crash test.{" "}
         <a href={TESTING_URL}>
           The real test cuts power on LazyFS. CI runs crash simulations on 2,000 seeds.
         </a>
-      </p>
-    </div>
+      </motion.p>
+    </motion.div>
   );
 }

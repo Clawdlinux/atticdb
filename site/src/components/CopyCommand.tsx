@@ -1,6 +1,9 @@
 "use client";
 
+import { motion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
+import Swap from "@/components/Swap";
+import { PRESS, TAP } from "@/lib/motion";
 import { INSTALL_CMD } from "@/lib/site";
 import styles from "./CopyCommand.module.css";
 
@@ -58,16 +61,27 @@ export default function CopyCommand({
       <pre className={styles.code}>
         <code ref={codeRef}>{command}</code>
       </pre>
-      <button type="button" className={styles.button} onClick={copy} data-status={status}>
-        {/* Every label sits in one grid cell so the button never changes width. */}
+      <motion.button
+        type="button"
+        className={styles.button}
+        onClick={copy}
+        data-status={status}
+        whileTap={TAP}
+        transition={PRESS}
+      >
+        {/*
+          Every label sits in one grid cell, so the button never changes width.
+          The hidden ones only size the cell; the shown one swaps in with a short rise.
+        */}
         <span className={styles.labels}>
           {[label, "Copied", "Selected"].map((text) => (
-            <span key={text} aria-hidden={text !== shown} data-shown={text === shown}>
+            <span key={text} className={styles.sizer} aria-hidden="true">
               {text}
             </span>
           ))}
+          <Swap value={shown} className={styles.shown} mode="sync" />
         </span>
-      </button>
+      </motion.button>
       <span className="visually-hidden" role="status">
         {status === "copied"
           ? "Command copied."
