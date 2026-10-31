@@ -55,107 +55,117 @@ export default function BenchChart({ disk }: { disk: Disk }) {
   const maxAcks = Math.max(...rows.map((r) => r.acksPerSec));
   const ariaLabel = buildAriaLabel(disk);
 
-  const svgWidth = 780;
-  const svgHeight = 340;
-  const topY = 66;
-  const baseY = 272;
+  const svgWidth = 872;
+  const svgHeight = 356;
+  const plotPadX = 24;
+  const topY = 74;
+  const baseY = 282;
   const maxBarH = baseY - topY;
-  const groupWidth = 232;
-  const groupGap = 42;
-  const barWidth = 38;
-  const barGap = 10;
+  const groupWidth = 248;
+  const groupGap = 40;
+  const barWidth = 40;
+  const barGap = 12;
 
   return (
     <div>
-      <svg
-        viewBox={`0 0 ${svgWidth} ${svgHeight}`}
-        role="img"
-        aria-label={ariaLabel}
-        style={{
-          width: "100%",
-          height: "auto",
-          fontFamily: "var(--font-text), Georgia, serif",
-          fontVariantNumeric: "tabular-nums lining-nums",
-        }}
+      <div
+        role="region"
+        aria-label={`${DISK_LABEL[disk]} durable acks chart`}
+        tabIndex={0}
+        data-ui={`bench-chart-${disk}`}
+        style={{ overflowX: "auto", maxWidth: "100%" }}
       >
-        <g transform="translate(0, 22)">
-          {SYSTEMS.map((sys, idx) => {
-            const x = idx * 140;
+        <svg
+          viewBox={`0 0 ${svgWidth} ${svgHeight}`}
+          role="img"
+          aria-label={ariaLabel}
+          style={{
+            width: "100%",
+            minWidth: `${svgWidth}px`,
+            height: "auto",
+            fontFamily: "var(--font-text), Georgia, serif",
+            fontVariantNumeric: "tabular-nums lining-nums",
+          }}
+        >
+          <g transform={`translate(${plotPadX}, 26)`}>
+            {SYSTEMS.map((sys, idx) => {
+              const x = idx * 140;
+              return (
+                <g key={sys.id} transform={`translate(${x}, 0)`}>
+                  <rect
+                    x={0}
+                    y={-12}
+                    width={14}
+                    height={14}
+                    fill={sys.fill}
+                    fillOpacity={sys.opacity}
+                  />
+                  <text x={22} y={0} fill="var(--ink)" fontSize="15">
+                    {sys.label}
+                  </text>
+                </g>
+              );
+            })}
+          </g>
+
+          {WRITER_GROUPS.map((writers, groupIdx) => {
+            const groupX = plotPadX + groupIdx * (groupWidth + groupGap);
+            const groupLabel = writers === 1 ? "1 writer" : `${writers} writers`;
             return (
-              <g key={sys.id} transform={`translate(${x}, 0)`}>
-                <rect
-                  x={0}
-                  y={-12}
-                  width={14}
-                  height={14}
-                  fill={sys.fill}
-                  fillOpacity={sys.opacity}
-                />
-                <text x={22} y={0} fill="var(--ink)" fontSize="15">
-                  {sys.label}
+              <g key={writers} transform={`translate(${groupX}, 0)`}>
+                {SYSTEMS.map((sys, barIdx) => {
+                  const row = findClosedRow(disk, writers, sys.id);
+                  const rawH = (row.acksPerSec / maxAcks) * maxBarH;
+                  const barH = Math.max(8, Math.round(rawH));
+                  const x = barIdx * (barWidth + barGap);
+                  const y = baseY - barH;
+                  return (
+                    <g key={sys.id}>
+                      <rect
+                        data-bar={sys.id}
+                        x={x}
+                        y={y}
+                        width={barWidth}
+                        height={barH}
+                        fill={sys.fill}
+                        fillOpacity={sys.opacity}
+                      />
+                      <text
+                        x={x + barWidth / 2}
+                        y={y - 8}
+                        fill="var(--ink)"
+                        fontSize="14"
+                        textAnchor="middle"
+                      >
+                        {fmt.format(row.acksPerSec)}
+                      </text>
+                      <text
+                        x={x + barWidth / 2}
+                        y={baseY + 24}
+                        fill="var(--muted)"
+                        fontSize="14"
+                        textAnchor="middle"
+                      >
+                        {sys.label}
+                      </text>
+                    </g>
+                  );
+                })}
+                <text
+                  x={groupWidth / 2}
+                  y={baseY + 54}
+                  fill="var(--ink)"
+                  fontSize="16"
+                  fontWeight="500"
+                  textAnchor="middle"
+                >
+                  {groupLabel}
                 </text>
               </g>
             );
           })}
-        </g>
-
-        {WRITER_GROUPS.map((writers, groupIdx) => {
-          const groupX = groupIdx * (groupWidth + groupGap);
-          const groupLabel = writers === 1 ? "1 writer" : `${writers} writers`;
-          return (
-            <g key={writers} transform={`translate(${groupX}, 0)`}>
-              {SYSTEMS.map((sys, barIdx) => {
-                const row = findClosedRow(disk, writers, sys.id);
-                const rawH = (row.acksPerSec / maxAcks) * maxBarH;
-                const barH = Math.max(8, Math.round(rawH));
-                const x = barIdx * (barWidth + barGap);
-                const y = baseY - barH;
-                return (
-                  <g key={sys.id}>
-                    <rect
-                      data-bar={sys.id}
-                      x={x}
-                      y={y}
-                      width={barWidth}
-                      height={barH}
-                      fill={sys.fill}
-                      fillOpacity={sys.opacity}
-                    />
-                    <text
-                      x={x + barWidth / 2}
-                      y={y - 8}
-                      fill="var(--ink)"
-                      fontSize="13.5"
-                      textAnchor="middle"
-                    >
-                      {fmt.format(row.acksPerSec)}
-                    </text>
-                    <text
-                      x={x + barWidth / 2}
-                      y={baseY + 22}
-                      fill="var(--muted)"
-                      fontSize="13.5"
-                      textAnchor="middle"
-                    >
-                      {sys.label}
-                    </text>
-                  </g>
-                );
-              })}
-              <text
-                x={groupWidth / 2}
-                y={baseY + 52}
-                fill="var(--ink)"
-                fontSize="16"
-                fontWeight="500"
-                textAnchor="middle"
-              >
-                {groupLabel}
-              </text>
-            </g>
-          );
-        })}
-      </svg>
+        </svg>
+      </div>
 
       <table className="visually-hidden">
         <caption>{`Closed-loop durable acks per second on ${DISK_LABEL[disk]}`}</caption>

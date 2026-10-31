@@ -59,6 +59,10 @@ describe("benchmarks page", () => {
       expect(svg.querySelectorAll('rect[data-bar="atticdb"][fill="var(--accent)"]')).toHaveLength(
         3,
       );
+      const region = svg.closest('[role="region"]');
+      expect(region).not.toBeNull();
+      expect(region).toHaveAttribute("tabindex", "0");
+      expect((svg as HTMLElement).style.minWidth).toBe("872px");
     }
     const fallbackTables = container.querySelectorAll("table.visually-hidden");
     expect(fallbackTables).toHaveLength(2);
