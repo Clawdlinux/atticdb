@@ -1,8 +1,9 @@
-import Image from "next/image";
+import ArchivalPicture from "@/components/ArchivalPicture";
 import Reveal from "@/components/Reveal";
 import { creditFor } from "@/content/credits";
 import styles from "./Intro.module.css";
 
+// sizes: the rendered width, measured at 390, 768 and 1440 px. The container stops at 1280 px.
 const PHOTOS = [
   {
     file: "/images/ibm-350-ramac-disk.jpg",
@@ -11,6 +12,7 @@ const PHOTOS = [
     alt: "A tall stack of metal disk platters beside its access arm and wiring, behind museum glass.",
     caption: "IBM 350 RAMAC disk mechanism, Computer History Museum.",
     className: styles.portrait,
+    sizes: "(min-width: 90rem) 400px, (min-width: 48rem) 28vw, 62vw",
   },
   {
     file: "/images/titan-core-memory-board.jpg",
@@ -19,6 +21,7 @@ const PHOTOS = [
     alt: "Two hinged circuit boards, each holding a dense grid of tiny ferrite rings threaded on wire.",
     caption: "Core memory board from a Titan missile guidance computer.",
     className: styles.landscape,
+    sizes: "(min-width: 90rem) 670px, (min-width: 48rem) 47vw, 78vw",
   },
   {
     file: "/images/ncr-304-tape-reel.jpg",
@@ -27,6 +30,7 @@ const PHOTOS = [
     alt: "A metal computer tape reel with three cut-outs, lying on a quilted cloth.",
     caption: "NCR 304 computer tape reel, 1959.",
     className: styles.square,
+    sizes: "(min-width: 90rem) 360px, (min-width: 48rem) 25vw, 52vw",
   },
 ];
 
@@ -54,14 +58,13 @@ export default function Intro() {
           <Reveal key={photo.file} delay={0.15 + i * 0.075} className={photo.className}>
             <figure className={styles.figure}>
               <div className={styles.frame}>
-                <Image
+                <ArchivalPicture
                   className={`archival ${styles.img}`}
                   src={photo.file}
                   width={photo.width}
                   height={photo.height}
                   alt={photo.alt}
-                  loading="lazy"
-                  sizes="(min-width: 48rem) 40vw, 80vw"
+                  sizes={photo.sizes}
                 />
               </div>
               <figcaption className={styles.caption}>

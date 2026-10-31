@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
-import Image from "next/image";
 import Link from "next/link";
+import ArchivalPicture from "@/components/ArchivalPicture";
 import Reveal from "@/components/Reveal";
 import { creditFor } from "@/content/credits";
 import { STAGGER } from "@/lib/motion";
@@ -67,13 +67,13 @@ export default function NotFound() {
             <Reveal key={photo.file} delay={i * STAGGER}>
               <figure className={styles.figure}>
                 <div className={styles.frame}>
-                  <Image
+                  <ArchivalPicture
                     className={`archival ${styles.img}`}
                     src={photo.file}
                     width={photo.width}
                     height={photo.height}
                     alt={photo.alt}
-                    sizes="(min-width: 48rem) 25vw, 50vw"
+                    sizes="(min-width: 90rem) 330px, (min-width: 48rem) 23vw, 47vw"
                   />
                 </div>
                 <figcaption className={styles.caption}>

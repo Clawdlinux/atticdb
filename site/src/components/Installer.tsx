@@ -1,6 +1,6 @@
 "use client";
 
-import { AnimatePresence, motion, useIsPresent, useReducedMotion } from "motion/react";
+import { AnimatePresence, MotionConfig, motion, useIsPresent, useReducedMotion } from "motion/react";
 import { useEffect, useId, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import CopyCommand from "@/components/CopyCommand";
 import Swap from "@/components/Swap";
@@ -179,7 +179,7 @@ function stepText(step: InstallStep): ReactNode {
   );
 }
 
-export default function Installer({ initial }: InstallerProps) {
+function InstallerBody({ initial }: InstallerProps) {
   const uid = useId();
   const reduced = useReducedMotion();
   const t = reduced ? STILL : MOVING;
@@ -345,5 +345,14 @@ export default function Installer({ initial }: InstallerProps) {
         </div>
       </div>
     </div>
+  );
+}
+
+// Its own MotionConfig: motion stays out of the root layout, so pages without motion never load it.
+export default function Installer(props: InstallerProps) {
+  return (
+    <MotionConfig reducedMotion="user">
+      <InstallerBody {...props} />
+    </MotionConfig>
   );
 }

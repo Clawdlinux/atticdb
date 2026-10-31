@@ -119,6 +119,20 @@ Run `npm test` after editing.
 Image credits live in `src/content/credits.ts` and appear in the site footer.
 Archival images live in `public/images/`.
 
+### Archival images
+
+The originals are `public/images/<name>.jpg`. They are the source of truth and the keys in `credits.ts`.
+The site never serves them. It serves resized copies: `<name>-<w>.avif` and `<name>-<w>.jpg`.
+Widths are 480, 800 and the original width, capped at 1200.
+After adding or replacing an original, regenerate the copies on macOS:
+
+```sh
+sh scripts/make-images.sh
+```
+
+The script uses `sips` only. Commit the copies with the original.
+Render a picture with `src/components/ArchivalPicture.tsx`. Give it a `sizes` that matches its rendered width.
+
 ## Social image
 
 `public/og.png` is the shared 1200×630 image.

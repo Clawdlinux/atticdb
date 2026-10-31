@@ -1,6 +1,6 @@
 "use client";
 
-import { motion } from "motion/react";
+import { MotionConfig, motion } from "motion/react";
 import { useState, type CSSProperties } from "react";
 import CopyCommand from "@/components/CopyCommand";
 import { ackFor } from "@/content/bench";
@@ -56,7 +56,7 @@ function Option({ name, value, label, checked, onPick }: OptionProps) {
   );
 }
 
-export default function Hero() {
+function HeroBody() {
   const [disk, setDisk] = useState<Disk>("nvme");
   const [writers, setWriters] = useState<Writers>(1);
   const { state, run, running } = usePlugDemo();
@@ -144,5 +144,14 @@ export default function Hero() {
 
       <PlugResult state={state} />
     </section>
+  );
+}
+
+// Its own MotionConfig: motion stays out of the root layout, so pages without motion never load it.
+export default function Hero() {
+  return (
+    <MotionConfig reducedMotion="user">
+      <HeroBody />
+    </MotionConfig>
   );
 }

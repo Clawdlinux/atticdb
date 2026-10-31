@@ -61,11 +61,27 @@ describe("CopyCommand", () => {
     expect(flag!.dataset.token).toBe("word");
     expect(flag!.className).toMatch(/token/);
     const list = [...code.querySelectorAll("span")].find((s) => s.textContent?.startsWith("copilot,"));
-    expect(list!.dataset.token).toBe("long");
+    expect(list!.dataset.token).toBe("split");
     await act(async () => {
       fireEvent.click(screen.getByRole("button"));
     });
     expect(writeText).toHaveBeenCalledWith(command);
+  });
+
+  it("breaks a long token only after commas and slashes and before =", () => {
+    const command = "atticdb setup --harness=copilot,vscode,claude-code,codex https://atticdb.example/a/b";
+    const { container } = render(<CopyCommand command={command} wrap="tokens" />);
+    const code = container.querySelector("code")!;
+    expect(code.textContent).toBe(command);
+    const split = [...code.querySelectorAll('[data-token="split"]')];
+    expect(split).toHaveLength(2);
+    const parts = (el: Element) => [...el.children].filter((c) => c.tagName === "SPAN").map((c) => c.textContent);
+    expect(parts(split[0])).toEqual(["--harness", "=copilot,", "vscode,", "claude-code,", "codex"]);
+    expect(split[0].querySelectorAll("wbr")).toHaveLength(4);
+    expect(parts(split[1])).toEqual(["https:/", "/", "atticdb.example/", "a/", "b"]);
+    // No point to break at: the last resort, anywhere.
+    const { container: bare } = render(<CopyCommand command="atticdbexampleatticdbexample" wrap="tokens" />);
+    expect(bare.querySelector('[data-token="long"]')?.textContent).toBe("atticdbexampleatticdbexample");
   });
 
   it("keeps the command as one text node by default", () => {

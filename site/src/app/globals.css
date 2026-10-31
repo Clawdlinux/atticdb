@@ -176,6 +176,11 @@ main {
   filter: grayscale(1) contrast(1.05);
 }
 
+/* <picture> only picks the file. It takes no box, so its img sizes against the frame as before. */
+picture {
+  display: contents;
+}
+
 /* A colour field that runs edge to edge from inside .container. Content keeps the container's margins. */
 .bleed {
   margin-inline: calc(50% - 50vw);

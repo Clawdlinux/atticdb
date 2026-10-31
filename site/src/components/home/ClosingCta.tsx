@@ -1,4 +1,4 @@
-import Image from "next/image";
+import ArchivalPicture from "@/components/ArchivalPicture";
 import CopyCommand from "@/components/CopyCommand";
 import Reveal from "@/components/Reveal";
 import { creditFor } from "@/content/credits";
@@ -24,14 +24,13 @@ export default function ClosingCta() {
         <Reveal delay={0.15}>
           <figure className={styles.figure}>
             <div className={styles.strip}>
-              <Image
+              <ArchivalPicture
                 className={`archival ${styles.img}`}
                 src={TAPE}
                 width={1600}
                 height={1066}
                 alt="Two coils of punched paper tape, one 5-hole and one 8-hole, on a pale ground."
-                loading="lazy"
-                sizes="100vw"
+                sizes="(min-width: 90rem) 1280px, 92vw"
               />
             </div>
             <figcaption className={styles.caption}>

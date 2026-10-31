@@ -8,8 +8,9 @@ type Props = { params: Promise<{ slug: string }> };
 
 export const dynamicParams = false;
 
+// /docs/install has its own route, so its installer stays off the other pages.
 export function generateStaticParams() {
-  return DOC_PAGES.filter(({ slug }) => slug).map(({ slug }) => ({ slug }));
+  return DOC_PAGES.filter(({ slug }) => slug && slug !== "install").map(({ slug }) => ({ slug }));
 }
 
 export async function generateMetadata({ params }: Props): Promise<Metadata> {

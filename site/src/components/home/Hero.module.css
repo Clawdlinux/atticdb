@@ -356,19 +356,23 @@
   }
 }
 
-/* The signature move: each line rises from behind its own baseline. */
+/*
+ * The signature move: each line rises from behind its own baseline.
+ * Both lines start partly risen and line 1 starts at once, so the first paint already shows
+ * the headline. Fully masked lines and a 700 ms wait on the lead held back the LCP paint.
+ */
 @media (prefers-reduced-motion: no-preference) {
   :global(.js) .rise {
-    transform: translateY(105%);
+    transform: translateY(55%);
     animation: line-up var(--t-rise) var(--ease-out) forwards;
-    animation-delay: calc(var(--i) * 110ms + 150ms);
+    animation-delay: calc(var(--i) * 90ms);
   }
 
   :global(.js) .lead,
   :global(.js) .actions {
     opacity: 0;
     transform: translateY(12px);
-    animation: fade-up 600ms var(--ease-out) 700ms forwards;
+    animation: fade-up 500ms var(--ease-out) 200ms forwards;
   }
 
   .light[data-pulse="true"] {

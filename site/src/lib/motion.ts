@@ -13,7 +13,8 @@ export const STAGGER = 0.075;
 /*
  * The Framer Motion set for every interactive transition after hydration.
  * One curve (MOTION.ease), one spring with no overshoot, short times for feedback.
- * MotionConfig reducedMotion="user" (Providers) drops the travel and keeps the fades.
+ * Each motion tree sets its own MotionConfig reducedMotion="user", which drops the travel and keeps
+ * the fades. None sits in the root layout, so pages without motion never load it.
  */
 export const EASE_OUT = [0.16, 1, 0.3, 1] as const;
 export const SPRING = { type: "spring", stiffness: 520, damping: 48, mass: 1 } as const;

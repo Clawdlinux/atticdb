@@ -20,7 +20,7 @@
   word-break: break-all;
 }
 
-/* wrap="tokens": breaks fall at spaces. Only a long token may split, and only when it can't fit a line. */
+/* wrap="tokens": breaks fall at spaces, then at a long token's <wbr> points. .long breaks anywhere, as a last resort. */
 .tokens {
   word-break: normal;
 }

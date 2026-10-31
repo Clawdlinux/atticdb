@@ -1,6 +1,6 @@
 "use client";
 
-import { AnimatePresence, motion, useIsPresent } from "motion/react";
+import { AnimatePresence, MotionConfig, motion, useIsPresent } from "motion/react";
 import { useId, useRef, useState, type ReactNode } from "react";
 import Reveal from "@/components/Reveal";
 import { SPRING, SWAP, SWAP_RISE } from "@/lib/motion";
@@ -55,7 +55,7 @@ function Row({ record, query }: { record: MemoryRecord; query: string }) {
   );
 }
 
-export default function Showcase() {
+function ShowcaseBody() {
   const [query, setQuery] = useState(START);
   const inputRef = useRef<HTMLInputElement>(null);
   const id = useId();
@@ -133,5 +133,14 @@ export default function Showcase() {
         </Reveal>
       </div>
     </section>
+  );
+}
+
+// Its own MotionConfig: motion stays out of the root layout, so pages without motion never load it.
+export default function Showcase() {
+  return (
+    <MotionConfig reducedMotion="user">
+      <ShowcaseBody />
+    </MotionConfig>
   );
 }

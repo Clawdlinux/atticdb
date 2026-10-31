@@ -1,6 +1,6 @@
 "use client";
 
-import type { Transition } from "motion/react";
+import { MotionConfig, type Transition } from "motion/react";
 import { Fragment, useEffect, useRef, useState } from "react";
 import Swap from "@/components/Swap";
 import { INSTALL_CMD } from "@/lib/site";
@@ -15,8 +15,9 @@ type CopyCommandProps = {
   tone?: "accent" | "bone" | "ink";
   // The label swap. Defaults to Swap's own.
   swap?: { transition: Transition; rise: number };
-  // "tokens" wraps only at spaces, so a flag like --dry-run never splits at its hyphen.
-  // Long tokens (URLs, paths, lists) may still break anywhere. The copied text is unchanged.
+    // "tokens" wraps only at spaces, so a flag like --dry-run never splits at its hyphen.
+  // A long token breaks after a comma or slash, or before "=". One with none of those
+  // may break anywhere. The copied text is unchanged.
   wrap?: "tokens";
 };
 
@@ -24,27 +25,55 @@ type Status = "idle" | "copied" | "selected";
 
 const RESET_MS = 2000;
 
-// Longer than this, a token may not fit a phone's line on its own, so it may break anywhere.
+// Longer than this, a token may not fit a phone's line on its own, so it gets break points.
 const LONG_TOKEN = 20;
+
+// A long token's break points: after a comma or a slash, and before an equals sign.
+export function breakPoints(token: string): string[] {
+  return token.split(/(?<=[,/])|(?==)/).filter(Boolean);
+}
+
+function longToken(token: string) {
+  const parts = breakPoints(token);
+  if (parts.length === 1) {
+    return (
+      <span className={styles.long} data-token="long">
+        {token}
+      </span>
+    );
+  }
+  // <wbr> adds no text, so the selection and the copy read back as the exact token.
+  return (
+    <span data-token="split">
+      {parts.map((part, i) => (
+        <Fragment key={i}>
+          {i > 0 && <wbr />}
+          <span className={part.length > LONG_TOKEN ? styles.long : styles.token}>{part}</span>
+        </Fragment>
+      ))}
+    </span>
+  );
+}
 
 // Joined by plain spaces, the tokens read back as the exact command.
 function tokens(command: string) {
   return command.split(" ").map((token, i) => (
     <Fragment key={i}>
       {i > 0 && " "}
-      <span
-        className={token.length > LONG_TOKEN ? styles.long : styles.token}
-        data-token={token.length > LONG_TOKEN ? "long" : "word"}
-      >
-        {token}
-      </span>
+      {token.length > LONG_TOKEN ? (
+        longToken(token)
+      ) : (
+        <span className={styles.token} data-token="word">
+          {token}
+        </span>
+      )}
     </Fragment>
   ));
 }
 
 const BUTTON_TONE = { accent: "button--accent", bone: "button--field", ink: "button--ink" } as const;
 
-export default function CopyCommand({
+function CopyCommandBody({
   command = INSTALL_CMD,
   id,
   label = "Copy",
@@ -115,5 +144,14 @@ export default function CopyCommand({
             : ""}
       </span>
     </div>
+  );
+}
+
+// Its own MotionConfig: motion stays out of the root layout, so pages without motion never load it.
+export default function CopyCommand(props: CopyCommandProps) {
+  return (
+    <MotionConfig reducedMotion="user">
+      <CopyCommandBody {...props} />
+    </MotionConfig>
   );
 }
