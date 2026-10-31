@@ -1,0 +1,83 @@
+# Counts release downloads by users for the README badge, and writes it to the badges branch.
+# Users = release archive downloads (tarballs and the zip) minus our own test installs.
+# install.sh and SHA256SUMS are left out, as each install fetches them too.
+name: badges
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_run:
+    workflows: [install-smoke]
+    types: [completed]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: badges
+  cancel-in-progress: false
+jobs:
+  downloads:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      # Writes the badges branch. main stays protected.
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Count and write
+        run: |
+          set -euo pipefail
+          # gh api with 3 tries, as GitHub sometimes answers 502. Output is held until a try
+          # succeeds, so a failed page is never printed twice.
+          api() {
+            local out
+            for _ in 1 2 3; do
+              if out=$(gh api "$@"); then printf '%s\n' "$out"; return 0; fi
+              sleep 10
+            done
+            return 1
+          }
+          get() {
+            api "repos/$REPO/contents/$1?ref=badges" --jq .content | tr -d '\n' | base64 -d
+          }
+          put() {
+            local sha
+            sha=$(api "repos/$REPO/contents/$1?ref=badges" --jq .sha)
+            api -X PUT "repos/$REPO/contents/$1" -f branch=badges -f message="badges: $2" \
+              -f sha="$sha" -f content="$(printf '%s\n' "$3" | base64 -w0)" > /dev/null
+          }
+
+          # The ledger keeps 1 line per install-smoke run, so runs stay counted after GitHub
+          # deletes them. Each install step that ran fetched 1 archive. A rerun keeps its run id,
+          # so every listed run is counted again across all its attempts.
+          old=$(get ci-installs.tsv)
+          ledger=$old
+          runs=$(api --paginate \
+            "repos/$REPO/actions/workflows/install-smoke.yml/runs?status=completed&per_page=100" \
+            --jq '.workflow_runs[].id')
+          for id in $runs; do
+            steps=$(api --paginate "repos/$REPO/actions/runs/$id/jobs?filter=all&per_page=100" \
+              --jq '.jobs[].steps[]?
+                | select(.name == "Install with curl | sh" or .name == "Install from the zip")
+                | select(.conclusion != null and .conclusion != "skipped") | 1')
+            # grep -c exits 1 when it counts 0.
+            n=$(grep -c . <<< "$steps" || true)
+            ledger=$(awk -F '\t' -v id="$id" '$1 != id' <<< "$ledger")
+            ledger+=$'\n'"$id"$'\t'"$n"
+          done
+          ledger=$(grep -v '^$' <<< "$ledger" | sort -t $'\t' -k1,1)
+          ours=$(awk -F '\t' 'NF >= 2 { s += $2 } END { print s + 0 }' <<< "$ledger")
+
+          all=$(api --paginate "repos/$REPO/releases?per_page=100" \
+            --jq '.[].assets[] | select(.name | test("\\.(tar\\.gz|zip)$")) | .download_count' \
+            | awk '{ s += $1 } END { print s + 0 }')
+          # GitHub updates download counts hours late, so a fresh test run can briefly lead.
+          users=$(( all > ours ? all - ours : 0 ))
+          echo "archive downloads $all, ours $ours, users $users"
+
+          badge=$(jq -cn --arg n "$users" \
+            '{schemaVersion: 1, label: "downloads", message: $n, color: "blue"}')
+          if [ "$ledger" != "$old" ]; then put ci-installs.tsv "count test installs" "$ledger"; fi
+          if [ "$badge" != "$(get downloads.json)" ]; then put downloads.json "$users downloads" "$badge"; fi
