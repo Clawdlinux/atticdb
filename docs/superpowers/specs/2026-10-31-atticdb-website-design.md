@@ -270,7 +270,7 @@ Every command it prints exists in the CLI at `crates/atticdb/src/main.rs` and `s
 - **Apps to connect:** Copilot CLI, VS Code, Claude Code, Codex. All checked by default. Their `--harness` names are `copilot`, `vscode`, `claude-code`, `codex`.
 - **Options:** "Preview first" (on by default, adds a `atticdb setup --dry-run` step before the real one). "Load memory when a chat starts" (on by default; off adds `--no-hook`; shown only when Claude Code or Codex is checked).
 - **Output:** an ordered list of steps. Each has 1 sentence and its command with a copy button. The last step is `atticdb doctor --harness <list>`. "Copy all" copies every command, one per line.
-- When all 4 apps are checked, `--harness` is omitted, because setup then asks. Our call: it still passes `--harness` with all 4 so the command does what it shows.
+- `--harness` always lists the checked apps, all 4 included, so the command does exactly what the page shows (Our call: without it, setup asks again).
 - With no app checked, the setup and doctor steps are replaced by 1 sentence: "Pick at least 1 app to connect."
 - Windows notes, shown only for Windows: "On Windows, Codex gets only its MCP entry for now." and "Claude Code needs version 2.1.139 or later for the chat-start hook."
 - Logic lives in a pure, tested function: `buildInstallSteps(options) -> InstallStep[]`.
