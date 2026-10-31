@@ -49,20 +49,25 @@ jobs:
               -f sha="$sha" -f content="$(printf '%s\n' "$3" | base64 -w0)" > /dev/null
           }
 
-          # The ledger keeps 1 line per counted install-smoke run, so old runs stay counted
-          # after GitHub deletes them. Each install step that ran fetched 1 archive.
+          # The ledger keeps 1 line per install-smoke run, so runs stay counted after GitHub
+          # deletes them. Each install step that ran fetched 1 archive. A rerun keeps its run id,
+          # so every listed run is counted again across all its attempts.
           old=$(get ci-installs.tsv)
           ledger=$old
           runs=$(api --paginate \
             "repos/$REPO/actions/workflows/install-smoke.yml/runs?status=completed&per_page=100" \
             --jq '.workflow_runs[].id')
           for id in $runs; do
-            if grep -q "^$id"$'\t' <<< "$ledger"; then continue; fi
-            n=$(api "repos/$REPO/actions/runs/$id/jobs?per_page=100" --jq '[.jobs[].steps[]?
-              | select(.name == "Install with curl | sh" or .name == "Install from the zip")
-              | select(.conclusion != null and .conclusion != "skipped")] | length')
+            steps=$(api --paginate "repos/$REPO/actions/runs/$id/jobs?filter=all&per_page=100" \
+              --jq '.jobs[].steps[]?
+                | select(.name == "Install with curl | sh" or .name == "Install from the zip")
+                | select(.conclusion != null and .conclusion != "skipped") | 1')
+            # grep -c exits 1 when it counts 0.
+            n=$(grep -c . <<< "$steps" || true)
+            ledger=$(awk -F '\t' -v id="$id" '$1 != id' <<< "$ledger")
             ledger+=$'\n'"$id"$'\t'"$n"
           done
+          ledger=$(grep -v '^$' <<< "$ledger" | sort -t $'\t' -k1,1)
           ours=$(awk -F '\t' 'NF >= 2 { s += $2 } END { print s + 0 }' <<< "$ledger")
 
           all=$(api --paginate "repos/$REPO/releases?per_page=100" \
