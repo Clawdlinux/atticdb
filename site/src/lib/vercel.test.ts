@@ -103,6 +103,14 @@ describe("host redirects", () => {
     expect(routeFor(config().redirects, "atticdb.com", path)).toBeUndefined();
   });
 
+  it("has an explicit www root redirect, since Vercel's /:path* skipped / in production", () => {
+    const root = config().redirects.find(
+      (rule: { source: string; has?: { value: string }[] }) =>
+        rule.source === "/" && rule.has?.[0]?.value === "www.atticdb.com",
+    );
+    expect(root).toMatchObject({ destination: "https://atticdb.com/", permanent: true });
+  });
+
   it.each(["/", "/mcp", "/docs", "/docs/mcp", "/pricing"])("leaves preview-host path %s alone", (path) => {
     expect(routeFor(config().redirects, "preview.vercel.app", path)).toBeUndefined();
   });

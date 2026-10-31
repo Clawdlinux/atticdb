@@ -52,6 +52,17 @@
       "permanent": true
     },
     {
+      "source": "/",
+      "has": [
+        {
+          "type": "host",
+          "value": "www.atticdb.com"
+        }
+      ],
+      "destination": "https://atticdb.com/",
+      "permanent": true
+    },
+    {
       "source": "/:path*",
       "has": [
         {
