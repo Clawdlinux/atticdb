@@ -145,7 +145,7 @@ In this order. Each maps to a sheet blueprint.
 5. **Works with** (blueprint "Names as one sentence", as a statement at 36px max).
    "Wires itself into Claude Code, GitHub Copilot CLI, VS Code and Codex. On macOS, Linux and Windows." The lit name cycles every 2 s.
 6. **Numbers** (blueprint "Column aligned on the decimal"). Heading "Measured, not promised".
-   Rows: `2.8` "times the durable acks of Redis, 4 writers, Premium SSD v2"; `1.3` "ms p50 under agent load, Premium SSD v2"; `94` "µs p50, 1 writer, local NVMe"; `0` "model calls per write"; `1` "binary, no other services".
+   Rows: `2.8` "times the durable acks of Redis, Valkey and DiceDB, at most. Premium SSD v2" (the range is 1.8 to 2.8; 2.8 is against DiceDB at 4 writers); `1.3` "ms p50 under agent load, Premium SSD v2"; `94` "µs p50, 1 writer, local NVMe"; `0` "model calls per write"; `1` "binary, no other services".
    Link to `/benchmarks`.
 7. **Pricing teaser** (blueprint "One plan as a sentence"). "Local is free. Cloud is [$15] a month." The price sits on a signal block.
    Supporting: "The binary is free forever. Cloud adds sync across your machines and backups. Planned pricing." Button "See pricing".
