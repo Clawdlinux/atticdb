@@ -2,7 +2,9 @@
 
 use crate::{Error, Result};
 use std::collections::BTreeMap;
-use std::fs::{File, OpenOptions, TryLockError};
+#[cfg(not(windows))]
+use std::fs::TryLockError;
+use std::fs::{File, OpenOptions};
 use std::io::Read;
 #[cfg(not(unix))]
 use std::io::{Seek, SeekFrom, Write};
@@ -220,26 +222,60 @@ impl Io for StdIo {
         Ok(file.set_len(len)?)
     }
 
+    /// Unix uses `statvfs`. Windows uses `GetDiskFreeSpaceExW`, which honors user quotas.
     fn available_bytes(&self, dir: &Path) -> Result<u64> {
-        let stat = rustix::fs::statvfs(dir).map_err(std::io::Error::from)?;
-        Ok(stat.f_bavail.saturating_mul(stat.f_frsize))
+        #[cfg(windows)]
+        {
+            Ok(atticdb_sys::free_space(dir)?.0)
+        }
+        #[cfg(not(windows))]
+        {
+            let stat = rustix::fs::statvfs(dir).map_err(std::io::Error::from)?;
+            Ok(stat.f_bavail.saturating_mul(stat.f_frsize))
+        }
     }
 
     fn total_bytes(&self, dir: &Path) -> Result<u64> {
-        let stat = rustix::fs::statvfs(dir).map_err(std::io::Error::from)?;
-        Ok(stat.f_blocks.saturating_mul(stat.f_frsize))
+        #[cfg(windows)]
+        {
+            Ok(atticdb_sys::free_space(dir)?.1)
+        }
+        #[cfg(not(windows))]
+        {
+            let stat = rustix::fs::statvfs(dir).map_err(std::io::Error::from)?;
+            Ok(stat.f_blocks.saturating_mul(stat.f_frsize))
+        }
     }
 
     fn sync_data(&self, file: FileId) -> Result<()> {
         Ok(lock(self.file(file)?.as_ref())?.sync_data()?)
     }
 
+    /// A no-op on Windows. Windows documents no directory fsync.
+    /// `File::open` also fails on a directory without `FILE_FLAG_BACKUP_SEMANTICS`.
+    /// Renames are durable because `rename` passes `MOVEFILE_WRITE_THROUGH`.
     fn sync_dir(&self, dir: &Path) -> Result<()> {
-        Ok(File::open(dir)?.sync_all()?)
+        #[cfg(windows)]
+        {
+            let _ = dir;
+            Ok(())
+        }
+        #[cfg(not(windows))]
+        {
+            Ok(File::open(dir)?.sync_all()?)
+        }
     }
 
+    /// Windows uses `MoveFileExW` with write-through, so the rename is on disk when it returns.
     fn rename(&self, from: &Path, to: &Path) -> Result<()> {
-        Ok(std::fs::rename(from, to)?)
+        #[cfg(windows)]
+        {
+            Ok(atticdb_sys::rename_write_through(from, to)?)
+        }
+        #[cfg(not(windows))]
+        {
+            Ok(std::fs::rename(from, to)?)
+        }
     }
 
     fn remove(&self, path: &Path) -> Result<()> {
@@ -258,9 +294,25 @@ impl Io for StdIo {
         Ok(path.try_exists()?)
     }
 
+    /// Windows locks a byte far past the end of file, so others can still read the holder.
+    /// The guard unlocks before closing, because Windows can release a closed handle's lock late.
     fn try_lock_exclusive(&self, path: &Path) -> Result<LockGuard> {
         let mut file =
             OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path)?;
+        #[cfg(windows)]
+        {
+            if atticdb_sys::try_lock_past_eof(&file)? {
+                return Ok(LockGuard::new(move || {
+                    // Closing releases the lock anyway, so an unlock error changes nothing.
+                    let _ = atticdb_sys::unlock_past_eof(&file);
+                    drop(file);
+                }));
+            }
+            let mut holder = String::new();
+            file.read_to_string(&mut holder)?;
+            Err(Error::DataDirLocked { holder })
+        }
+        #[cfg(not(windows))]
         match file.try_lock() {
             Ok(()) => Ok(LockGuard::new(move || drop(file))),
             Err(TryLockError::WouldBlock) => {

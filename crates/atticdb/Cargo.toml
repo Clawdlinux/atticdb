@@ -17,6 +17,9 @@ serde_json = { version = "=1.0.154", default-features = false, features = ["std"
 httparse = { version = "=1.10.1", default-features = false }
 rustix = { version = "=1.1.2", default-features = false, features = ["event", "fs", "net", "process", "std"] }
 
+[target.'cfg(windows)'.dependencies]
+atticdb-sys = { path = "../atticdb-sys" }
+
 [dev-dependencies]
 atticdb-tape = { path = "../atticdb-tape", features = ["sim"] }
 proptest = { version = "1.9", default-features = false, features = ["std"] }

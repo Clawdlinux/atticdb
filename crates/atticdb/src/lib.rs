@@ -25,6 +25,7 @@ pub mod serve;
 pub mod setup;
 pub mod studio;
 
+#[cfg(unix)]
 use std::io::Read;
 
 /// The version this binary reports. Release builds set `ATTICDB_RELEASE_VERSION` from the git
@@ -50,9 +51,13 @@ pub(crate) fn spawn(command: &mut std::process::Command) -> std::io::Result<std:
     command.spawn()
 }
 
-/// Reads `bytes` random bytes from `/dev/urandom` and returns them as lowercase hex.
+/// Returns `bytes` random bytes as lowercase hex.
+/// Unix reads `/dev/urandom`. Windows calls `BCryptGenRandom`.
 pub fn random_hex(bytes: usize) -> std::io::Result<String> {
     let mut buf = vec![0; bytes];
+    #[cfg(unix)]
     std::fs::File::open("/dev/urandom")?.read_exact(&mut buf)?;
+    #[cfg(windows)]
+    atticdb_sys::fill_random(&mut buf)?;
     Ok(buf.iter().map(|byte| format!("{byte:02x}")).collect())
 }
