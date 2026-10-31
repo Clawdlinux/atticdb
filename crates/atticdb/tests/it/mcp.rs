@@ -595,6 +595,29 @@ fn file_refs_keep_versions() {
         (2, &Value::Null)
     );
 
+    // A deleted file found through a symlink or `..` still reaches the key it was saved under.
+    std::os::unix::fs::symlink(&shots, dir.0.join("link")).unwrap();
+    let dotted = shots.join("..").join("shots ü").join("shot 1.png");
+    for (case, other) in [("symlink", dir.0.join("link/shot 1.png")), ("dot-dot", dotted)] {
+        let gone = mcp.call("file_get", json!({"path": other, "versions": true}));
+        let content = &gone["structuredContent"];
+        assert_eq!(
+            (&content["ref"]["key"], &content["ref"]["status"]),
+            (&json!(key), &json!("missing")),
+            "{case}: {gone}"
+        );
+        assert_eq!(content["versions"].as_array().unwrap().len(), 2, "{case}");
+    }
+
+    // The stored about is redacted, so the same save again still writes nothing.
+    let notes = dir.0.join("notes.txt");
+    std::fs::write(&notes, b"n").unwrap();
+    let secret = json!({"path": notes, "about": format!("key sk-{}", "a".repeat(40))});
+    let first = mcp.call("file_ref", secret.clone());
+    assert_eq!(first["structuredContent"]["unchanged"], false, "{first}");
+    let again = mcp.call("file_ref", secret);
+    assert_eq!(again["structuredContent"]["unchanged"], true, "redacted about: {again}");
+
     // A 1021-byte path: its key, `file` and the path, is 1025 bytes. macOS caps paths at 1024.
     let mut deep = std::fs::canonicalize(&shots).unwrap();
     loop {
@@ -624,7 +647,7 @@ fn file_refs_keep_versions() {
         assert!(text(&rejected).starts_with(expect), "{case}: {rejected}");
     }
     let page = mcp.call("fact_list", json!({"prefix": "file/"}));
-    assert_eq!(page["structuredContent"]["facts"].as_array().unwrap().len(), 1, "nothing else");
+    assert_eq!(page["structuredContent"]["facts"].as_array().unwrap().len(), 2, "nothing else");
     assert_eq!(mcp.close().0.code(), Some(0));
 }
 

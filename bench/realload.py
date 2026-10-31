@@ -515,8 +515,12 @@ def main():
     if not binary:
         parser.error(f"{args.atticdb} not found")
     args.atticdb = binary
-    # SIGTERM unwinds like Ctrl-C, so the server stops and the temp dir goes.
-    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+    # These unwind like Ctrl-C, so the server stops and the temp dir goes. The server runs in
+    # its own session, so a closed terminal reaches only this process.
+    for name in ("SIGTERM", "SIGHUP", "SIGQUIT"):
+        number = getattr(signal, name, None)
+        if number is not None:
+            signal.signal(number, lambda signum, _: sys.exit(128 + signum))
 
     # mkdtemp makes the dir 0700. A short base keeps the socket path under 104 bytes.
     root = tempfile.mkdtemp(prefix="realload-")
