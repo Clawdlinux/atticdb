@@ -127,7 +127,7 @@ The same nightly job runs both sims on 20,000 new seeds each night.
 
 The `install-smoke` workflow tests the live release on fresh Linux and macOS runners after each release and weekly.
 Its Windows job downloads the release's zip, checks it against `SHA256SUMS` and runs the same first-use checks in PowerShell.
-A release with no zip, such as v0.1.0, skips that job with a notice.
+Only v0.1.0, which predates Windows support, may skip that job. A later release without the zip fails it.
 
 ## Before adding a test
 
