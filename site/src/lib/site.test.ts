@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { absoluteUrl, INSTALL_CMD, WAITLIST_URL, VPC_URL } from "@/lib/site";
+import { absoluteUrl, DOCS_URL, INSTALL_CMD, WAITLIST_URL, VPC_URL } from "@/lib/site";
 
 describe("absoluteUrl", () => {
   it.each([
-    ["/", "https://atticdb.com/"],
+    ["/", "https://atticdb.com"],
     ["/pricing", "https://atticdb.com/pricing"],
     ["pricing/", "https://atticdb.com/pricing"],
-    ["", "https://atticdb.com/"],
+    ["", "https://atticdb.com"],
     ["/pricing/", "https://atticdb.com/pricing"],
   ])("normalizes %j to %s", (path, expected) => {
     expect(absoluteUrl(path)).toBe(expected);
@@ -24,6 +24,10 @@ describe("site links", () => {
     expect(WAITLIST_URL).toBe(
       "https://github.com/Clawdlinux/atticdb/issues/new?template=feature.yml&title=Cloud%20waitlist%3A%20",
     );
+  });
+
+  it("points the docs link at the README", () => {
+    expect(DOCS_URL).toBe("https://github.com/Clawdlinux/atticdb#readme");
   });
 
   it("opens the VPC request issue", () => {

@@ -120,7 +120,7 @@ describe("structured data", () => {
 describe("static discovery routes", () => {
   it("lists only the 4 public canonical URLs in the sitemap", () => {
     expect(sitemap().map(({ url }) => url)).toEqual([
-      "https://atticdb.com/",
+      "https://atticdb.com",
       "https://atticdb.com/pricing",
       "https://atticdb.com/compare",
       "https://atticdb.com/benchmarks",
