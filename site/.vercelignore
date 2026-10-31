@@ -5,3 +5,4 @@ out-docs
 node_modules
 .vercel
 scripts/.og-work-*
+.env*
