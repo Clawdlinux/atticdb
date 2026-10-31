@@ -258,7 +258,7 @@ Calls marked "Our call" are the builder's.
 - Domains on that project: `atticdb.com` (primary) and `www.atticdb.com` (redirects to apex).
 - Docs get a second Vercel project, `atticdb-docs`, built from the same `site/` code with `vercel.docs.json`. Its build assembles `out-docs/` with the docs pages at the root, plus the shared assets. Domain: `docs.atticdb.com`.
   Why not 1 project with host rewrites: Vercel checks static files before rewrites, so `docs.atticdb.com/` would serve the main home page and the main sitemap.
-- DNS stays on Cloudflare. Records are DNS-only, so Vercel issues the certificates: apex `A 76.76.21.21`, `www` and `docs` `CNAME cname.vercel-dns.com`.
+- DNS stays on Cloudflare. Records are DNS-only, so Vercel issues the certificates: `A 76.76.21.21` for the apex, `www` and `docs`, as `vercel domains inspect` recommends.
   Wrangler can't write DNS (its OAuth scopes stop at `zone:read`), so records go through the Cloudflare API with a token that has Zone DNS Edit on atticdb.com.
 - Security headers move from `public/_headers` into `vercel.json`, with the same values. `public/_headers` and `wrangler.toml` are removed (Our call: one deploy target, no drift).
 

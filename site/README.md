@@ -82,12 +82,15 @@ The docs host redirects `/docs` to `/` and strips `/docs/` from nested paths.
 
 Keep DNS on Cloudflare. Set all 3 records to **DNS only**, without the proxy.
 Vercel issues the certificates.
+These are the records `vercel domains inspect` asks for. They were added on 2026-11-01 and the site is live.
+Vercel also lists newer optional values (`216.198.79.1` or a project CNAME). The A records above work, so there's no need to switch.
+If HTTPS fails after DNS resolves, run `vercel certs issue atticdb.com www.atticdb.com docs.atticdb.com`.
 
 | Type | Name | Content | Proxy |
 | --- | --- | --- | --- |
 | A | @ | 76.76.21.21 | DNS only |
-| CNAME | www | cname.vercel-dns.com | DNS only |
-| CNAME | docs | cname.vercel-dns.com | DNS only |
+| A | www | 76.76.21.21 | DNS only |
+| A | docs | 76.76.21.21 | DNS only |
 
 Wrangler can't write DNS because its OAuth scopes stop at `zone:read`.
 Create a Cloudflare API token with Zone DNS Edit for `atticdb.com`.

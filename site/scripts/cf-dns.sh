@@ -36,8 +36,8 @@ zone_id=$(cf "$API/zones?name=$ZONE_NAME" | jq -r '.result[0].id // empty')
 # name type content
 records=(
   "atticdb.com A 76.76.21.21"
-  "www.atticdb.com CNAME cname.vercel-dns.com"
-  "docs.atticdb.com CNAME cname.vercel-dns.com"
+  "www.atticdb.com A 76.76.21.21"
+  "docs.atticdb.com A 76.76.21.21"
 )
 
 for rec in "${records[@]}"; do
