@@ -310,8 +310,16 @@ impl Io for StdIo {
                     drop(file);
                 }));
             }
+            // Another process may lock the whole file, as `File::try_lock` does. Then the read
+            // fails, but the directory is locked all the same.
+            const ERROR_LOCK_VIOLATION: i32 = 33;
             let mut holder = String::new();
-            file.read_to_string(&mut holder)?;
+            match file.read_to_string(&mut holder) {
+                Err(error) if error.raw_os_error() == Some(ERROR_LOCK_VIOLATION) => holder.clear(),
+                read => {
+                    read?;
+                }
+            }
             Err(Error::DataDirLocked { holder })
         }
         #[cfg(not(windows))]

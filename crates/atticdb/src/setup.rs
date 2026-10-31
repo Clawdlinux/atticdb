@@ -6,6 +6,7 @@ use crate::connect::{self, Harness, Line, Mode, Notes, Options, Report, State};
 use crate::home::Lookup;
 use serde_json::{json, Value};
 use std::io::{BufRead, IsTerminal, Read, Write};
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -392,7 +393,11 @@ pub(crate) fn check_hook(harness: Harness, cwd: &Path, lookup: &Lookup) -> Resul
     lookup.pass(&mut command);
     command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
     // Its own group, so a timeout kills whatever it started too.
+    #[cfg(unix)]
     command.process_group(0);
+    // `kill_group` ends its whole tree with taskkill.
+    #[cfg(windows)]
+    crate::platform::no_window(&mut command);
     let mut child = crate::spawn(&mut command).map_err(|error| format!("cannot start: {error}"))?;
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(input.to_string().as_bytes());
@@ -429,9 +434,18 @@ pub(crate) fn check_hook(harness: Harness, cwd: &Path, lookup: &Lookup) -> Resul
 /// Kills the process group that `child` leads, as `process_group(0)` made it, so whatever it
 /// started goes too, then reaps `child`. A group's id is not reused while the group has
 /// members, so this is safe after `child` exited too.
+#[cfg(unix)]
 pub(crate) fn kill_group(child: &mut std::process::Child) {
     let group = rustix::process::Pid::from_child(child);
     let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Kills `child` and every process it started, then reaps it, by `taskkill /T`.
+#[cfg(windows)]
+pub(crate) fn kill_group(child: &mut std::process::Child) {
+    crate::platform::kill_tree(child);
     let _ = child.kill();
     let _ = child.wait();
 }

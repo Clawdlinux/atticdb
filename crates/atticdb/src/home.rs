@@ -1,9 +1,13 @@
 //! The per-user home that `atticdb mcp` and the shell verbs use when given no connection
 //! flags: an owner-only directory with `atticdb.json` and `data/`, created on first use.
 
+#[cfg(unix)]
 use std::ffi::OsStr;
-use std::fs::{File, OpenOptions};
+#[cfg(unix)]
+use std::fs::File;
+use std::fs::OpenOptions;
 use std::io::{ErrorKind, Read};
+#[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
@@ -72,13 +76,27 @@ fn path_in(file: &Path, prefix: &str) -> Option<PathBuf> {
     }
     let path = text.strip_prefix(prefix.as_bytes())?;
     let end = path.iter().rposition(|byte| !matches!(byte, b'\n' | b'\r'))?;
-    Some(file.parent()?.join(OsStr::from_bytes(&path[..=end])))
+    #[cfg(unix)]
+    let path = OsStr::from_bytes(&path[..=end]);
+    // Git for Windows writes these paths as UTF-8.
+    #[cfg(not(unix))]
+    let path = std::str::from_utf8(&path[..=end]).ok()?;
+    Some(file.parent()?.join(path))
 }
 
 /// `$HOME`, which must be absolute.
+#[cfg(unix)]
 pub fn user_home() -> Result<PathBuf, String> {
     let home = std::env::var_os("HOME").map(PathBuf::from).filter(|home| home.is_absolute());
     home.ok_or_else(|| "HOME must be set to an absolute path".into())
+}
+
+/// `%USERPROFILE%`, which must be absolute. Apps keep their config dirs there.
+#[cfg(not(unix))]
+pub fn user_home() -> Result<PathBuf, String> {
+    let home = std::env::var_os("USERPROFILE").map(PathBuf::from);
+    let home = home.filter(|home| home.is_absolute());
+    home.ok_or_else(|| "USERPROFILE must be set to an absolute path".into())
 }
 
 /// `$ATTICDB_HOME` when it is set and not empty. A relative path is an error, so nothing
@@ -112,6 +130,7 @@ impl Lookup {
 
     /// The home `dir` names as `ATTICDB_HOME` would, the default home for `None`, without
     /// the legacy guards.
+    #[cfg(unix)]
     pub(crate) fn given(dir: Option<PathBuf>) -> Self {
         Self { given: Some(dir), guards: false }
     }
@@ -138,6 +157,8 @@ impl Lookup {
         if self.guards {
             crate::legacy::check_home(&dir, default)?;
         }
+        #[cfg(windows)]
+        crate::platform::check_in_profile(&dir, "home")?;
         Ok(dir)
     }
 
@@ -156,6 +177,7 @@ impl Lookup {
 }
 
 /// The home directory as [`dir`] finds it, without its checks, and whether it is the default.
+#[cfg(unix)]
 pub(crate) fn unchecked_dir() -> Result<(PathBuf, bool), String> {
     match env_dir()? {
         Some(dir) => Ok((dir, false)),
@@ -166,6 +188,7 @@ pub(crate) fn unchecked_dir() -> Result<(PathBuf, bool), String> {
 /// The default home called `name`. On macOS `$HOME/Library/Application Support/<name>`. On
 /// Linux `$XDG_DATA_HOME/<name>` when that is set and absolute, else
 /// `$HOME/.local/share/<name>`.
+#[cfg(unix)]
 pub(crate) fn default_dir(name: &str) -> Result<PathBuf, String> {
     let home = user_home()?;
     if cfg!(target_os = "macos") {
@@ -173,6 +196,16 @@ pub(crate) fn default_dir(name: &str) -> Result<PathBuf, String> {
     }
     let xdg = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from);
     Ok(xdg.filter(|xdg| xdg.is_absolute()).unwrap_or_else(|| home.join(".local/share")).join(name))
+}
+
+/// The default home called `name`: `%LOCALAPPDATA%\<name>`, the user's local app data.
+#[cfg(not(unix))]
+pub(crate) fn default_dir(name: &str) -> Result<PathBuf, String> {
+    let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    let local = local.filter(|local| local.is_absolute()).ok_or_else(|| {
+        format!("LOCALAPPDATA must be set to an absolute path, or set {HOME_ENV}")
+    })?;
+    Ok(local.join(name))
 }
 
 /// Creates the home if missing, by [`Lookup::ENV`].
@@ -229,6 +262,7 @@ impl Lookup {
 
 /// Syncs the existing home `dir` and its ancestors as [`ensure`] does, after it was moved or
 /// a file in it was renamed.
+#[cfg(unix)]
 pub(crate) fn sync(dir: &Path) -> Result<(), String> {
     let home = user_home().ok().filter(|home| dir.starts_with(home));
     let data = dir.join("data");
@@ -242,6 +276,7 @@ pub(crate) fn sync(dir: &Path) -> Result<(), String> {
 /// too. Any other home, or a `$HOME` this call made, syncs every ancestor up to `/`, since
 /// a first use may have made any of them. `holder` holds the entry of the highest directory
 /// this call made, so it is never skipped.
+#[cfg(unix)]
 fn sync_dirs(
     dir: &Path,
     data_dir: &Path,
@@ -274,11 +309,23 @@ fn sync_dirs(
     Ok(())
 }
 
+/// Does nothing on Windows, as the tape's `sync_dir` does: NTFS journals directory entries.
+#[cfg(not(unix))]
+fn sync_dirs(
+    dir: &Path,
+    data_dir: &Path,
+    stop: Option<&Path>,
+    holder: Option<&Path>,
+) -> Result<(), String> {
+    let _ = (dir, data_dir, stop, holder);
+    Ok(())
+}
+
 /// Writes a complete config to a temp file, then hard-links it to `config`, so `config`
 /// never appears empty or partial. A concurrent creator winning the race is fine. A temp
 /// file left by a killed run is ignored.
 fn publish(dir: &Path, config: &Path) -> Result<(), String> {
-    let hex = crate::random_hex(8).map_err(|error| format!("cannot read /dev/urandom: {error}"))?;
+    let hex = crate::random_hex(8).map_err(crate::platform::no_random)?;
     let tmp = dir.join(format!(".atticdb.json.{hex}"));
     crate::config::init(&tmp, TENANT)?;
     let linked = match std::fs::hard_link(&tmp, config) {

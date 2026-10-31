@@ -1,19 +1,27 @@
 //! Operator commands against a running server or a copy of a stopped data directory.
 
 use crate::config::Token;
-use crate::launch::{self, Launch, Url};
+#[cfg(unix)]
+use crate::launch;
+use crate::launch::{Launch, Url};
+#[cfg(not(unix))]
+use crate::platform::DirBuilderExt;
 use crate::serve::EXIT_LOCKED;
 use atticdb_core::{Engine, EngineOptions, ErrorKind};
 use atticdb_tape::{StdIo, SystemClock, Tape, TapeOptions};
 use serde_json::{json, Value};
-use std::fs::{DirBuilder, OpenOptions, TryLockError};
+#[cfg(unix)]
+use std::fs::TryLockError;
+use std::fs::{DirBuilder, OpenOptions};
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Prints `GET /v1/stats` as `key=value` lines. Never starts a server: that would hide an outage.
+#[cfg(unix)]
 pub fn stats(socket: Option<&Path>, data_dir: Option<&Path>) -> u8 {
     let deadline = Instant::now() + Duration::from_secs(5);
     let stream = match (socket, data_dir) {
@@ -48,6 +56,14 @@ pub fn stats(socket: Option<&Path>, data_dir: Option<&Path>) -> u8 {
     }
 }
 
+/// Stats are served on the Unix socket only, which Windows lacks. Returns 1.
+#[cfg(not(unix))]
+pub fn stats(socket: Option<&Path>, data_dir: Option<&Path>) -> u8 {
+    let _ = (socket, data_dir);
+    eprintln!("atticdb stats: stats are served on the Unix socket only, which Windows lacks");
+    1
+}
+
 /// Closed-loop append load, the way agents write: each writer waits for its ack before the
 /// next batch, on one keep-alive connection. Prints `key=value` lines, latency per ack.
 pub fn load(
@@ -63,7 +79,7 @@ pub fn load(
     let run = match crate::random_hex(4) {
         Ok(run) => run,
         Err(error) => {
-            eprintln!("atticdb load: cannot read /dev/urandom: {error}");
+            eprintln!("atticdb load: {}", crate::platform::no_random(error));
             return 1;
         }
     };
@@ -229,6 +245,18 @@ fn on_copy(
     )
 }
 
+/// Holds the tape's lock byte on `LOCK`. It releases it before the handle closes, as Windows
+/// may release a closed handle's lock late.
+#[cfg(windows)]
+struct PastEof<'a>(&'a std::fs::File);
+
+#[cfg(windows)]
+impl Drop for PastEof<'_> {
+    fn drop(&mut self) {
+        let _ = atticdb_sys::unlock_past_eof(self.0);
+    }
+}
+
 /// Copies the regular files of `dir` into a new mode 0700 directory under its `LOCK`.
 fn copy_locked(dir: &Path, scratch: Option<&Path>) -> Result<Scratch, (u8, String)> {
     let fail = |error: std::io::Error| (1, error.to_string());
@@ -239,6 +267,7 @@ fn copy_locked(dir: &Path, scratch: Option<&Path>) -> Result<Scratch, (u8, Strin
         }
         opened => opened.map_err(fail)?,
     };
+    #[cfg(unix)]
     match lock.try_lock() {
         Ok(()) => {}
         Err(TryLockError::WouldBlock) => {
@@ -248,6 +277,18 @@ fn copy_locked(dir: &Path, scratch: Option<&Path>) -> Result<Scratch, (u8, Strin
         }
         Err(TryLockError::Error(error)) => return Err(fail(error)),
     }
+    // The tape's lock byte, far past the end, so a server starting meanwhile can read `LOCK`.
+    // A whole-file lock would make its read fail.
+    #[cfg(windows)]
+    let _held = match atticdb_sys::try_lock_past_eof(&lock) {
+        Ok(true) => PastEof(&lock),
+        Ok(false) => {
+            let mut holder = String::new();
+            let _ = lock.read_to_string(&mut holder);
+            return Err((EXIT_LOCKED, format!("locked by {}", holder.trim())));
+        }
+        Err(error) => return Err(fail(error)),
+    };
     // Canonical, so `.` or a trailing slash cannot put the copy inside `dir`.
     let dir = std::fs::canonicalize(dir).map_err(fail)?;
     let parent = match scratch {
@@ -262,12 +303,16 @@ fn copy_locked(dir: &Path, scratch: Option<&Path>) -> Result<Scratch, (u8, Strin
     name.push(format!(".verify-{}", crate::random_hex(4).map_err(fail)?));
     let path = parent.join(name);
     let named = |error| (1, format!("{}: {error}", path.display()));
+    // Windows ignores the mode, so the copy gets its folder's access list.
+    #[cfg(windows)]
+    crate::platform::check_in_profile(&path, "scratch copy").map_err(|error| (1, error))?;
     DirBuilder::new().mode(0o700).create(&path).map_err(named)?;
     let copy = Scratch(path);
     for entry in std::fs::read_dir(&dir).map_err(fail)? {
         let entry = entry.map_err(fail)?;
         let kind = entry.file_type().map_err(fail)?;
         // The server's socket stays behind. Anything else would make an incomplete copy.
+        #[cfg(unix)]
         if kind.is_socket() {
             continue;
         }
@@ -278,7 +323,16 @@ fn copy_locked(dir: &Path, scratch: Option<&Path>) -> Result<Scratch, (u8, Strin
             let to = copy.0.join(entry.file_name());
             std::fs::copy(entry.path(), &to).map_err(fail)?;
             // Opening needs write access, and a backup can be read-only.
+            #[cfg(unix)]
             std::fs::set_permissions(&to, std::fs::Permissions::from_mode(0o600)).map_err(fail)?;
+            // On Windows this clears only the read-only attribute.
+            #[cfg(not(unix))]
+            #[allow(clippy::permissions_set_readonly_false)]
+            {
+                let mut permissions = std::fs::metadata(&to).map_err(fail)?.permissions();
+                permissions.set_readonly(false);
+                std::fs::set_permissions(&to, permissions).map_err(fail)?;
+            }
         }
     }
     Ok(copy)

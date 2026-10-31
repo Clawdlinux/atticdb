@@ -125,6 +125,18 @@ pub fn health(engine: &Engine, instance: &str) -> Response {
     Response::json(status, &json!({"status": text, "instance": instance}))
 }
 
+/// [`health`], plus a `proofs` array when there are `proofs`, from
+/// [`crate::auth::Auth::proofs`]. Windows only, where discovery checks them.
+#[cfg(windows)]
+pub fn health_proved(engine: &Engine, instance: &str, proofs: Option<Vec<String>>) -> Response {
+    let (status, text) = health_status(engine);
+    let mut body = json!({"status": text, "instance": instance});
+    if let Some(proofs) = proofs {
+        body["proofs"] = json!(proofs);
+    }
+    Response::json(status, &body)
+}
+
 fn health_status(engine: &Engine) -> (u16, &'static str) {
     match engine.health() {
         Health::Ok => (200, "ok"),

@@ -1,14 +1,27 @@
 //! TCP and Unix socket listeners, with the checks that keep the lock race and stale
 //! sockets safe. The Unix socket is installed only by the process that holds the lock.
+//!
+//! Windows has no Unix socket here, only loopback TCP. Its directories live in the user's
+//! profile, which Windows already keeps private, so it skips the uid and mode checks.
 
+#[cfg(unix)]
 use rustix::fs::{FlockOperation, Mode, OFlags};
+#[cfg(not(unix))]
+use std::fs;
+#[cfg(unix)]
 use std::fs::{self, DirBuilder, Permissions};
 use std::io::ErrorKind;
 use std::net::{SocketAddr, TcpListener};
+#[cfg(unix)]
 use std::os::fd::OwnedFd;
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
+#[cfg(unix)]
 use std::os::unix::net::UnixListener;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
 /// The default TCP port, on 127.0.0.1.
@@ -21,7 +34,9 @@ pub const NEEDS_TLS: &str =
                              put a TLS proxy on loopback in front";
 /// `sun_path` size, terminating NUL included.
 pub const SUN_PATH_BYTES: usize = if cfg!(target_os = "linux") { 108 } else { 104 };
+#[cfg(unix)]
 const STAGING: &str = ".zs.";
+#[cfg(unix)]
 const PROBE: Duration = Duration::from_secs(1);
 
 /// Binds a loopback TCP address. Any other address is refused.
@@ -35,6 +50,7 @@ pub fn bind_tcp(addr: SocketAddr) -> std::io::Result<TcpListener> {
 }
 
 /// Resolves `--unix-socket-group`: a numeric gid, or a name from `/etc/group`.
+#[cfg(unix)]
 pub fn resolve_group(group: &str) -> Result<u32, String> {
     if let Ok(gid) = group.parse() {
         return Ok(gid);
@@ -52,6 +68,7 @@ pub fn resolve_group(group: &str) -> Result<u32, String> {
 /// mode bits: 0o022 for a socket's directory, 0o077 for a data directory, which is
 /// first created with mode 0700 if missing. An existing entry, such as a dangling symlink,
 /// is never created over, so [`check_owned`] reports it.
+#[cfg(unix)]
 pub fn owned_dir(dir: &Path, mask: u32) -> Result<(), String> {
     let fail = |error: std::io::Error| format!("{}: {error}", dir.display());
     if mask == 0o077 && fs::symlink_metadata(dir).is_err() {
@@ -61,6 +78,7 @@ pub fn owned_dir(dir: &Path, mask: u32) -> Result<(), String> {
 }
 
 /// The check of [`owned_dir`], on an existing `dir`. It creates nothing.
+#[cfg(unix)]
 pub fn check_owned(dir: &Path, mask: u32) -> Result<(), String> {
     let fail = |error: std::io::Error| format!("{}: {error}", dir.display());
     let meta = match fs::metadata(dir) {
@@ -90,6 +108,7 @@ pub fn check_owned(dir: &Path, mask: u32) -> Result<(), String> {
 /// staging directory named after this start's `instance`, sets the mode (0600, or 0660 with
 /// `group`), then hard-links the socket onto `path`. A live socket at `path` fails, a stale
 /// one is removed first. Nobody else can connect before the mode is set.
+#[cfg(unix)]
 pub fn install_unix(
     path: &Path,
     group: Option<u32>,
@@ -157,6 +176,7 @@ pub fn install_unix(
 }
 
 /// A socket path this server installed, and the file it linked there.
+#[cfg(unix)]
 #[derive(Clone, Debug)]
 pub struct Installed {
     /// Where clients connect.
@@ -164,6 +184,7 @@ pub struct Installed {
     id: (u64, u64),
 }
 
+#[cfg(unix)]
 impl Installed {
     /// Removes the path, under the same lock as the install, if it is still our socket.
     /// A socket another server installed there later stays.
@@ -178,6 +199,7 @@ impl Installed {
 }
 
 /// An exclusive `flock` on `<path>.lock`, held until the descriptor drops.
+#[cfg(unix)]
 fn lock(path: &Path) -> std::io::Result<OwnedFd> {
     let mut name = path.as_os_str().to_owned();
     name.push(".lock");
@@ -189,4 +211,36 @@ fn lock(path: &Path) -> std::io::Result<OwnedFd> {
     }
     rustix::fs::flock(&fd, FlockOperation::LockExclusive)?;
     Ok(fd)
+}
+
+/// Makes `dir` with its parents when `mask` is 0o077 and nothing is there, then checks it by
+/// [`check_owned`]. Windows sets no mode: a folder in the user's profile is private already.
+/// So `dir` must be inside the profile, by [`crate::platform::check_in_profile`], before
+/// anything is made.
+#[cfg(not(unix))]
+pub fn owned_dir(dir: &Path, mask: u32) -> Result<(), String> {
+    #[cfg(windows)]
+    crate::platform::check_in_profile(dir, "private dir")?;
+    let fail = |error: std::io::Error| format!("{}: {error}", dir.display());
+    if mask == 0o077 && fs::symlink_metadata(dir).is_err() {
+        fs::create_dir_all(dir).map_err(fail)?;
+    }
+    check_owned(dir, mask)
+}
+
+/// Checks that `dir` is a directory. Windows has no uid or mode bits to check.
+#[cfg(not(unix))]
+pub fn check_owned(dir: &Path, mask: u32) -> Result<(), String> {
+    let _ = mask;
+    let fail = |error: std::io::Error| format!("{}: {error}", dir.display());
+    let meta = match fs::metadata(dir) {
+        Err(error) if error.kind() == ErrorKind::NotFound && fs::symlink_metadata(dir).is_ok() => {
+            return Err(format!("{} is a symlink to a path that doesn't exist", dir.display()));
+        }
+        meta => meta.map_err(fail)?,
+    };
+    if !meta.is_dir() {
+        return Err(format!("{} must be a directory", dir.display()));
+    }
+    Ok(())
 }

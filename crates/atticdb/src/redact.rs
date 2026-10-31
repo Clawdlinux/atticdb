@@ -255,7 +255,10 @@ mod tests {
     use super::{Counts, Redactor};
     use serde_json::json;
     use std::ffi::OsString;
+    #[cfg(unix)]
     use std::os::unix::ffi::OsStringExt;
+    #[cfg(windows)]
+    use std::os::windows::ffi::OsStringExt;
 
     /// `type=n` pairs, space separated.
     fn counts(text: &str) -> Counts {
@@ -279,7 +282,11 @@ mod tests {
             vars.iter().map(|(name, value)| (name.into(), value.into())).collect();
         let pad = "p".repeat(64);
         vars.push(("PAD_KEY".into(), pad.as_str().into()));
+        #[cfg(unix)]
         vars.push(("BAD_TOKEN".into(), OsString::from_vec(vec![0xff; 16])));
+        // Lone surrogates are not Unicode, as 0xff bytes are not UTF-8.
+        #[cfg(windows)]
+        vars.push(("BAD_TOKEN".into(), OsString::from_wide(&[0xd800; 16])));
         let redactor = Redactor::new(vars);
 
         let github = format!("ghp_{}", "x1".repeat(18));

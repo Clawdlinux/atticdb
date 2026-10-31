@@ -301,10 +301,17 @@ impl StoreFlags {
         let data_dir = data_dir.or(home.map(|home| home.data_dir));
         let data_dir = data_dir.or_else(|| config.and_then(|config| config.data_dir));
         let data_dir = data_dir.map(std::path::absolute).transpose().map_err(|e| e.to_string())?;
+        // Someone who can write there could name a server of theirs in `LOCK`.
+        #[cfg(windows)]
+        if let Some(path) = &data_dir {
+            crate::platform::check_in_profile(path, "data dir")?;
+        }
         if url.is_none() && data_dir.is_none() {
             return Err("set --url, or --data-dir or a config with data_dir".into());
         }
         let launch = Launch::new(url, data_dir, config_path, unix_socket);
+        #[cfg(windows)]
+        let launch = launch.with_token(token.clone());
         Ok(Store { launch, token, kind, tenant, home: home_dir })
     }
 }
@@ -551,7 +558,7 @@ impl Adapter {
     fn write(&mut self, target: &str, mut body: Value) -> Value {
         match crate::random_hex(16) {
             Ok(key) => body["idem_key"] = json!(key),
-            Err(error) => return tool_error(format!("cannot read /dev/urandom: {error}")),
+            Err(error) => return tool_error(crate::platform::no_random(error)),
         }
         let (mut merge, mut reasons) = (Merge::default(), Vec::new());
         self.retry("POST", target, body.to_string().as_bytes(), |reply| {

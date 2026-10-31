@@ -17,10 +17,14 @@ use super::{
 };
 use crate::home::{user_home, Lookup, HOME_ENV};
 use crate::jsonedit;
+#[cfg(not(unix))]
+use crate::platform::DirBuilderExt;
 use serde_json::{json, Value};
 use std::fs::OpenOptions;
 use std::io::{ErrorKind, Read};
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -458,6 +462,7 @@ fn drop_entry(state: &Path) -> Line {
 
 /// The first `name` on `PATH` that is an executable regular file. Relative `PATH` entries
 /// are skipped.
+#[cfg(unix)]
 pub(crate) fn find_program(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     let dirs = std::env::split_paths(&path).filter(|dir| dir.is_absolute());
@@ -465,6 +470,23 @@ pub(crate) fn find_program(name: &str) -> Option<PathBuf> {
         std::fs::metadata(program)
             .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
     })
+}
+
+/// The first program called `name` on `PATH`, by [`find_in`].
+// TODO(#137): part 3 checks how Claude Code and Codex install on Windows.
+#[cfg(windows)]
+pub(crate) fn find_program(name: &str) -> Option<PathBuf> {
+    find_in(name, &std::env::var_os("PATH")?)
+}
+
+/// The first `name.exe`, `name.cmd` or `name.bat` in the `PATH` value `path`, folder by
+/// folder. Relative entries are skipped. The bare name never counts. npm puts an sh script
+/// by that name beside its `.cmd` shim, and Windows cannot start it.
+#[cfg(any(windows, test))]
+fn find_in(name: &str, path: &std::ffi::OsStr) -> Option<PathBuf> {
+    let dirs = std::env::split_paths(path).filter(|dir| dir.is_absolute());
+    dirs.flat_map(|dir| ["exe", "cmd", "bat"].map(|ext| dir.join(format!("{name}.{ext}"))))
+        .find(|program| std::fs::metadata(program).is_ok_and(|meta| meta.is_file()))
 }
 
 /// Runs `claude` with `args`, by [`run`].
@@ -509,7 +531,10 @@ fn drain(mut from: impl Read + Send + 'static, keep: usize) -> Receiver<(Vec<u8>
 pub(super) fn run(command: &mut Command, line: &str, capture: bool) -> Result<Vec<u8>, String> {
     let stdout = if capture { Stdio::piped() } else { Stdio::null() };
     command.stdin(Stdio::null()).stdout(stdout).stderr(Stdio::null());
+    #[cfg(unix)]
     command.process_group(0);
+    #[cfg(windows)]
+    crate::platform::no_window(command);
     // Retries take at most 200 ms of the 10 s budget.
     let mut child =
         crate::spawn(command).map_err(|error| format!("{line} could not start: {error}"))?;
@@ -522,8 +547,12 @@ pub(super) fn run(command: &mut Command, line: &str, capture: bool) -> Result<Ve
             Ok(None) => {
                 // The group's id is the child's pid, and the child isn't reaped yet, so the
                 // id can't have been reused.
+                #[cfg(unix)]
                 let group = rustix::process::Pid::from_child(&child);
+                #[cfg(unix)]
                 let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+                #[cfg(windows)]
+                crate::platform::kill_tree(&child);
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(format!("{line} did not finish in 10 s"));
@@ -892,4 +921,28 @@ pub(super) fn edit_file(
         }
     };
     parts.iter().zip(done).map(line).collect()
+}
+
+#[cfg(test)]
+mod find_tests {
+    #![allow(clippy::unwrap_used)]
+
+    /// npm's layout: an sh script `claude` and a `claude.cmd` shim.
+    #[test]
+    fn find_in_skips_the_bare_name() {
+        let dir = std::env::temp_dir().join(format!("atticdb-find-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = std::env::join_paths([&dir]).unwrap();
+        std::fs::write(dir.join("claude"), "#!/bin/sh\n").unwrap();
+        assert_eq!(super::find_in("claude", &path), None);
+        std::fs::write(dir.join("claude.bat"), "").unwrap();
+        assert_eq!(super::find_in("claude", &path), Some(dir.join("claude.bat")));
+        std::fs::write(dir.join("claude.cmd"), "").unwrap();
+        assert_eq!(super::find_in("claude", &path), Some(dir.join("claude.cmd")));
+        std::fs::write(dir.join("claude.exe"), "").unwrap();
+        assert_eq!(super::find_in("claude", &path), Some(dir.join("claude.exe")));
+        let relative = std::env::join_paths(["relative"]).unwrap();
+        assert_eq!(super::find_in("claude", &relative), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

@@ -6,7 +6,8 @@ use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::AsRawHandle;
 use std::path::{Component, Path, Prefix};
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_IO_PENDING, ERROR_LOCK_VIOLATION, ERROR_OPERATION_ABORTED, HANDLE,
+    CloseHandle, SetHandleInformation, ERROR_IO_PENDING, ERROR_LOCK_VIOLATION,
+    ERROR_OPERATION_ABORTED, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Security::Cryptography::{
     BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG,
@@ -134,6 +135,27 @@ pub fn fill_random(buf: &mut [u8]) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Stops later child processes from inheriting this process's stdin, stdout and stderr.
+///
+/// This process inherited them, so they are inheritable here too. std starts every child
+/// with handle inheritance on. So each child gets a copy, even one whose stdio is a file.
+/// A server that outlives this process would then hold its caller's pipes open.
+/// The caller would never see end of file.
+/// std duplicates a handle for each child that should get it, so `Stdio::inherit` still works.
+/// Best effort: a null or invalid handle is skipped, and a failed call changes nothing.
+pub fn disinherit_stdio() {
+    let handles =
+        [io::stdin().as_raw_handle(), io::stdout().as_raw_handle(), io::stderr().as_raw_handle()];
+    for handle in handles {
+        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+            continue;
+        }
+        // SAFETY: SetHandleInformation only reads the handle value and changes its flags.
+        // A handle that is not open makes the call fail, which changes nothing.
+        let _ = unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) };
+    }
 }
 
 /// A manual-reset event that one lock request signals when it completes.
@@ -481,5 +503,16 @@ mod tests {
         assert_eq!(std::fs::read(deep.join("back")).unwrap(), b"new");
         let (available, total) = free_space(&deep).unwrap();
         assert!(total > 0 && available <= total, "available={available} total={total}");
+    }
+
+    /// A child still gets inherited stdio afterwards, as std duplicates the handles for it.
+    #[test]
+    fn disinherited_stdio_still_reaches_children() {
+        disinherit_stdio();
+        disinherit_stdio();
+        let root = std::env::var_os("SystemRoot").unwrap();
+        let cmd = PathBuf::from(root).join("System32").join("cmd.exe");
+        let status = std::process::Command::new(cmd).args(["/C", "exit 7"]).status().unwrap();
+        assert_eq!(status.code(), Some(7));
     }
 }

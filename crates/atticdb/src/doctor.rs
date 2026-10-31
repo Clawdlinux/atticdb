@@ -233,7 +233,7 @@ fn stale(harness: Harness, exe: &str) -> Vec<String> {
     for (file, named) in connect::binaries(harness) {
         let file = file.display();
         // A link to this binary runs it too.
-        match std::fs::canonicalize(&named) {
+        match crate::platform::real_path(Path::new(&named)) {
             Err(_) => found.push(format!("{file} runs {named}, which no longer exists")),
             Ok(real) if real != Path::new(exe) => {
                 found.push(format!("{file} runs {named}, not this atticdb, {exe}"));

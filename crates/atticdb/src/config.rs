@@ -3,11 +3,14 @@
 //! Errors name the path and the mode, never file content, so a token cannot leak
 //! through an error message.
 
+#[cfg(not(unix))]
+use crate::platform::OpenOptionsExt;
 use serde_json::{json, Value};
 use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::net::SocketAddr;
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
@@ -17,7 +20,7 @@ pub const MIN_TOKEN_BYTES: usize = 32;
 pub const MAX_TOKEN_BYTES: usize = 1024;
 /// Longest tenant name, in UTF-8 bytes. The engine's limit.
 pub const MAX_TENANT_BYTES: usize = 255;
-const MAX_FILE_BYTES: u64 = 1 << 20;
+pub(crate) const MAX_FILE_BYTES: u64 = 1 << 20;
 const FIELDS: &str = "data_dir, listen, unix_socket, unix_socket_group, tenants";
 
 /// A tenant's bearer token. `Debug` never shows it.
@@ -118,8 +121,11 @@ pub fn read_token_file(path: &Path) -> Result<Token, String> {
 pub fn init(path: &Path, tenant: &str) -> Result<Token, String> {
     let fail = |message: String| format!("config {}: {message}", path.display());
     check_tenant_name(tenant).map_err(|message| fail(message.into()))?;
+    // Windows ignores the mode, so the new token file gets its folder's access list.
+    #[cfg(windows)]
+    crate::platform::check_in_profile(path, "config")?;
     let token = crate::random_hex(MIN_TOKEN_BYTES)
-        .map_err(|error| fail(format!("cannot read /dev/urandom: {error}")))
+        .map_err(|error| fail(crate::platform::no_random(error)))
         .and_then(|hex| Token::new(hex).map_err(|message| fail(message.into())))?;
     let tenants = json!([{"name": tenant, "token": token.expose()}]);
     let mut text = serde_json::to_string_pretty(&json!({ "tenants": tenants }))
@@ -141,6 +147,7 @@ pub fn init(path: &Path, tenant: &str) -> Result<Token, String> {
 
 /// Opens with `O_NONBLOCK`, so a FIFO cannot block the open, then refuses anything but a
 /// regular file, checked with `fstat` on the handle. Read or write through that handle.
+#[cfg(unix)]
 pub fn open_regular(options: &mut OpenOptions, path: &Path) -> std::io::Result<File> {
     let file = options.custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32).open(path)?;
     if !file.metadata()?.is_file() {
@@ -167,6 +174,7 @@ fn read_private(path: &Path, what: &str) -> Result<String, String> {
 
 /// Checks an open file with `fstat`: a regular file owned by the effective uid, with no
 /// group or other bits. The error names the path and the mode, never content.
+#[cfg(unix)]
 pub fn check_private(file: &File, path: &Path, what: &str) -> Result<(), String> {
     let fail = |message: String| format!("{what} {}: {message}", path.display());
     let meta = file.metadata().map_err(|error| fail(format!("cannot stat: {error}")))?;
@@ -179,6 +187,33 @@ pub fn check_private(file: &File, path: &Path, what: &str) -> Result<(), String>
             meta.uid()
         )));
     }
+    Ok(())
+}
+
+/// Opens `path`, then refuses anything but a regular file, checked on the handle. Windows
+/// has no FIFO that could block the open.
+#[cfg(not(unix))]
+pub fn open_regular(options: &mut OpenOptions, path: &Path) -> std::io::Result<File> {
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::other("must be a regular file"));
+    }
+    Ok(file)
+}
+
+/// Checks that an open file is a regular file inside the user profile. Windows has no uid or
+/// mode bits to check. A file in the user's profile folder is private by its inherited access
+/// list. So every config, token file and server log must be there, by
+/// [`crate::platform::check_in_profile`].
+#[cfg(not(unix))]
+pub fn check_private(file: &File, path: &Path, what: &str) -> Result<(), String> {
+    let fail = |message: String| format!("{what} {}: {message}", path.display());
+    let meta = file.metadata().map_err(|error| fail(format!("cannot stat: {error}")))?;
+    if !meta.file_type().is_file() {
+        return Err(fail("must be a regular file".into()));
+    }
+    #[cfg(windows)]
+    crate::platform::check_in_profile(path, what)?;
     Ok(())
 }
 

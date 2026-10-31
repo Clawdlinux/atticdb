@@ -258,3 +258,21 @@ fn retry_persists_orphan_removal_after_directory_sync_failure() {
         }
     }
 }
+
+/// A lock over the whole file, as `File::try_lock` takes, also blocks reading the holder.
+/// The directory still counts as locked, with an empty holder.
+#[cfg(windows)]
+#[test]
+fn a_whole_file_lock_reports_locked_with_no_holder() {
+    let dir = TestDir::new();
+    let path = dir.0.join("LOCK");
+    std::fs::write(&path, "pid=1 x\n").unwrap();
+    let whole = std::fs::File::open(&path).unwrap();
+    whole.try_lock().unwrap();
+    match StdIo::new().try_lock_exclusive(&path) {
+        Err(Error::DataDirLocked { holder }) => assert_eq!(holder, ""),
+        other => panic!("expected DataDirLocked, got {:?}", other.map(drop)),
+    }
+    whole.unlock().unwrap();
+    assert!(StdIo::new().try_lock_exclusive(&path).is_ok());
+}
