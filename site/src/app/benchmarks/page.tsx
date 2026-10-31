@@ -1,17 +1,13 @@
-import type { Metadata } from "next";
 import type { CSSProperties } from "react";
 import BenchChart from "@/components/BenchChart";
 import dataStyles from "@/components/DataTable.module.css";
 import Reveal from "@/components/Reveal";
 import { BENCH_META, BENCH_ROWS, type BenchRow, type Disk } from "@/content/bench";
 import { GITHUB_URL } from "@/lib/site";
+import { pageMetadata } from "@/lib/seo";
 import styles from "./benchmarks.module.css";
 
-export const metadata: Metadata = {
-  title: "AtticDB benchmarks: durable acks vs Redis and SQLite",
-  description:
-    "Head-to-head fdatasync append throughput and tail latency across AtticDB, Redis, Valkey, DiceDB and SQLite on Azure Premium SSD v2 and local NVMe.",
-};
+export const metadata = pageMetadata("/benchmarks");
 
 const fmt = new Intl.NumberFormat("en-US");
 

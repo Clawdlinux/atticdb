@@ -1,17 +1,14 @@
-import type { Metadata } from "next";
 import type { CSSProperties } from "react";
 import CopyCommand from "@/components/CopyCommand";
 import Faq from "@/components/home/Faq";
+import JsonLd from "@/components/JsonLd";
 import Reveal from "@/components/Reveal";
 import { PRICING_FAQ } from "@/content/faq";
 import { PLAN_FEATURES, PLANS, PRICING_NOTES } from "@/content/pricing";
+import { faqJsonLd, pageMetadata } from "@/lib/seo";
 import styles from "./pricing.module.css";
 
-export const metadata: Metadata = {
-  title: "AtticDB pricing: free locally, cloud planned",
-  description:
-    "Run AtticDB free forever on your own machine. Cloud Pro, Cloud Team and VPC plans are planned with storage-based pricing and no per-call fees.",
-};
+export const metadata = pageMetadata("/pricing");
 
 function step(i: number): CSSProperties {
   return { "--i": i } as CSSProperties;
@@ -20,6 +17,7 @@ function step(i: number): CSSProperties {
 export default function PricingPage() {
   return (
     <>
+      <JsonLd data={faqJsonLd(PRICING_FAQ)} />
       <section className={styles.hero} aria-labelledby="pricing-hero-title">
         <h1 id="pricing-hero-title" className={styles.title}>
           <span className={styles.line}>

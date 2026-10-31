@@ -1,15 +1,11 @@
-import type { Metadata } from "next";
 import type { CSSProperties } from "react";
 import dataStyles from "@/components/DataTable.module.css";
 import Reveal from "@/components/Reveal";
 import { COMPARE_ROWS, PICK_ATTIC, PICK_OTHER, PRODUCTS } from "@/content/compare";
+import { pageMetadata } from "@/lib/seo";
 import styles from "./compare.module.css";
 
-export const metadata: Metadata = {
-  title: "AtticDB vs Mem0, Zep, Letta and Supermemory",
-  description:
-    "Side-by-side comparison of AtticDB, Mem0, Zep, Letta, Supermemory, Redis Agent Memory, Cognee, Engram and CLAUDE.md, with links to each source.",
-};
+export const metadata = pageMetadata("/compare");
 
 type SourceEntry = {
   index: number;

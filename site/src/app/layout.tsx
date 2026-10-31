@@ -3,6 +3,7 @@ import { Bebas_Neue, EB_Garamond, JetBrains_Mono } from "next/font/google";
 import Providers from "@/components/Providers";
 import SiteFooter from "@/components/SiteFooter";
 import SiteNav from "@/components/SiteNav";
+import { pageMetadata } from "@/lib/seo";
 import { SITE_URL } from "@/lib/site";
 import "./globals.css";
 
@@ -30,6 +31,8 @@ const code = JetBrains_Mono({
 export const metadata: Metadata = {
   metadataBase: new URL(SITE_URL),
   title: "AtticDB",
+  openGraph: pageMetadata("/").openGraph,
+  twitter: pageMetadata("/").twitter,
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>AtticDB social image</title>
+    <style>
+      @font-face {
+        font-family: "Bebas Neue";
+        font-style: normal;
+        font-weight: 400;
+        src: url("fonts/bebas-neue-latin.woff2") format("woff2");
+      }
+      @font-face {
+        font-family: "EB Garamond";
+        font-style: normal;
+        font-weight: 400 500;
+        src: url("fonts/eb-garamond-latin.woff2") format("woff2");
+      }
+      :root {
+        --bg: #16110E;
+        --surface: #221B17;
+        --ink: #EDE6D8;
+        --muted: #A89C8C;
+        --accent: #C8F03C;
+        --step-small: 24px;
+        --step-body: 28px;
+        --step-lead: 40px;
+        --step-head: 48px;
+        --step-display: 160px;
+      }
+      * { box-sizing: border-box; margin: 0; }
+      body {
+        width: 1200px;
+        height: 630px;
+        overflow: hidden;
+        background: var(--bg);
+        color: var(--ink);
+        font-family: "EB Garamond", Georgia, serif;
+        font-size: var(--step-body);
+        -webkit-font-smoothing: antialiased;
+      }
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 42px 64px 0;
+      }
+      .brand {
+        font-family: "Bebas Neue", Impact, sans-serif;
+        font-size: var(--step-head);
+      }
+      .domain { color: var(--muted); }
+      main { padding-top: 74px; text-align: center; }
+      h1 {
+        font-family: "Bebas Neue", Impact, sans-serif;
+        font-size: var(--step-display);
+        font-weight: 400;
+        line-height: 0.85;
+        letter-spacing: -0.02em;
+      }
+      .line { display: block; white-space: nowrap; }
+      .ack {
+        display: inline-block;
+        overflow: hidden;
+        width: 1.66em;
+        height: 0.85em;
+        margin-left: 0.14em;
+        vertical-align: baseline;
+        background: var(--surface);
+        letter-spacing: 0;
+      }
+      .ack-inner {
+        display: flex;
+        height: 100%;
+        align-items: center;
+        justify-content: center;
+        gap: 0.09em;
+        padding-inline: 0.12em;
+      }
+      .light {
+        flex: none;
+        width: 0.1em;
+        height: 0.1em;
+        border-radius: 50%;
+        background: var(--accent);
+      }
+      .ack-text {
+        font-family: "EB Garamond", Georgia, serif;
+        font-size: var(--step-lead);
+        line-height: 1;
+        font-variant-numeric: tabular-nums lining-nums;
+      }
+      .summary { margin-top: 42px; font-size: var(--step-lead); }
+    </style>
+  </head>
+  <body>
+    <header>
+      <span class="brand">ATTICDB</span>
+      <span class="domain">atticdb.com</span>
+    </header>
+    <main>
+      <h1>
+        <span class="line">MEMORY THAT<span class="ack"><span class="ack-inner"><span class="light"></span><span class="ack-text">acked 94 µs</span></span></span></span>
+        <span class="line">HITS THE DISK</span>
+      </h1>
+      <p class="summary">Durable memory for coding agents.</p>
+    </main>
+  </body>
+</html>

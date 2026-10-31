@@ -1,0 +1,46 @@
+.page {
+  display: flex;
+  min-height: 65vh;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2rem;
+  padding-block: var(--space-section);
+  background: var(--bg);
+  text-align: center;
+}
+
+.title {
+  font-size: min(var(--step-display), 22vw);
+  line-height: 0.9;
+  letter-spacing: -0.02em;
+}
+
+.title span {
+  display: block;
+}
+
+.page p {
+  max-width: 34rem;
+  font-size: var(--step-lead);
+}
+
+.home {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  padding: 0.65rem 1.25rem;
+  background: var(--accent);
+  color: var(--accent-ink);
+  text-decoration: none;
+  transition: transform 180ms var(--ease-out), opacity 180ms var(--ease-out);
+}
+
+.home:hover {
+  transform: translateY(-2px);
+}
+
+.home:active {
+  transform: translateY(1px);
+  opacity: 0.85;
+}
