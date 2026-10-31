@@ -104,6 +104,12 @@ describe("pricing page", () => {
 
     const bodyRows = table.querySelectorAll("tbody tr");
     expect(bodyRows).toHaveLength(PLAN_FEATURES.length);
+    for (const row of PLAN_FEATURES) {
+      for (const value of Object.values(row.values)) {
+        expect(value).not.toBe("Not specified");
+      }
+    }
+    expect(within(table).queryByText("Not specified")).toBeNull();
   });
 
   it("renders all 4 pricing FAQ questions and answers visibly", () => {

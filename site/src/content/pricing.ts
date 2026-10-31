@@ -84,23 +84,23 @@ export const PLAN_FEATURES: { feature: string; values: Record<Plan["id"], string
   },
   {
     feature: "Sync across machines",
-    values: { local: "No", pro: "All your machines", team: "Shared team memory", vpc: "Not specified" },
+    values: { local: "No", pro: "All your machines", team: "Shared team memory", vpc: "Across your network" },
   },
   {
     feature: "Storage",
-    values: { local: "Your disk", pro: "10 GB", team: "25 GB per seat, pooled", vpc: "Not specified" },
+    values: { local: "Your disk", pro: "10 GB", team: "25 GB per seat, pooled", vpc: "Your hardware" },
   },
   {
     feature: "Backups",
-    values: { local: "You manage backups", pro: "Daily snapshots, 30-day restore", team: "Not specified", vpc: "Not specified" },
+    values: { local: "You manage backups", pro: "Daily snapshots, 30-day restore", team: "Daily snapshots, 30-day restore", vpc: "Your backup policy" },
   },
   {
     feature: "Team sharing",
-    values: { local: "No cloud sharing", pro: "1 person", team: "Shared team memory", vpc: "Not specified" },
+    values: { local: "No cloud sharing", pro: "1 person", team: "Shared team memory", vpc: "Shared team memory" },
   },
   {
     feature: "SSO",
-    values: { local: "Not included", pro: "Not specified", team: "GitHub and Google sign-in", vpc: "SAML SSO" },
+    values: { local: "Not included", pro: "Not included", team: "GitHub and Google sign-in", vpc: "SAML SSO" },
   },
 ];
 

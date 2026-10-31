@@ -30,7 +30,7 @@
   line-height: 1.35;
 }
 
-/* Plans band: 1 col at 390, 2x2 at 768, 4 cols at 1024+. */
+/* Plans band: 1 col at 390, 2x2 from 768, 4 cols from 1280 (80rem). */
 
 .plansSection {
   padding-block: 1rem var(--space-section);
@@ -45,7 +45,7 @@
 .plan {
   display: flex;
   flex-direction: column;
-  padding: 2rem 1.25rem 1.75rem;
+  padding: 2rem 1.5rem 1.75rem;
   background: var(--surface);
   color: var(--ink);
 }
@@ -77,12 +77,11 @@
 .price {
   margin-top: 0.75rem;
   font-family: var(--font-display), Impact, sans-serif;
-  font-size: var(--step-head);
+  font-size: min(var(--step-head), 4.25rem);
   line-height: 0.92;
-  letter-spacing: -0.035em;
+  letter-spacing: -0.02em;
   text-transform: uppercase;
   font-variant-numeric: tabular-nums lining-nums;
-  white-space: nowrap;
 }
 
 .planMeta {
@@ -298,9 +297,9 @@
   }
 }
 
-@media (min-width: 64rem) {
+@media (min-width: 80rem) {
   .plans {
     grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 1rem;
+    gap: 1.25rem;
   }
 }
