@@ -279,7 +279,7 @@ jobs:
       github.event.workflow_run.conclusion == 'success')
     name: smoke windows-latest
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
     defaults:
       run:
         shell: pwsh
@@ -292,26 +292,9 @@ jobs:
       RELEASES: https://github.com/Clawdlinux/atticdb/releases
       ZIP: atticdb-x86_64-pc-windows-msvc.zip
     steps:
-      - uses: actions/checkout@v4
-      - run: rustup toolchain install
-      - name: TEMP build a local zip
-        env:
-          ATTICDB_RELEASE_VERSION: 9.9.9
-        run: |
-          cargo build --locked --release -p atticdb
-          $stage = Join-Path $env:RUNNER_TEMP 'stage'
-          New-Item -ItemType Directory -Path $stage | Out-Null
-          Copy-Item -Path target\release\atticdb.exe, README.md, LICENSE-APACHE, LICENSE-MIT -Destination $stage
-          Compress-Archive -Path (Join-Path $stage '*') -DestinationPath (Join-Path $env:RUNNER_TEMP "local-$env:ZIP")
       - name: Find the release
         id: release
         run: |
-          $local = Join-Path $env:RUNNER_TEMP "local-$env:ZIP"
-          if (Test-Path $local) {
-            $sha = (Get-FileHash -Algorithm SHA256 -LiteralPath $local).Hash.ToLowerInvariant()
-            Add-Content -Path $env:GITHUB_OUTPUT -Value 'skip=false', 'version=9.9.9', "sha256=$sha"
-            exit 0
-          }
           switch ($env:EVENT) {
             'release' { $want = $env:RELEASE_TAG }
             # A tag push names its tag. A scheduled or manual run ran on main, so test latest.
@@ -354,7 +337,7 @@ jobs:
           $folders = "$user\proj", "$user\AppData\Roaming", "$user\AppData\Local", $bin, "$dir\tmp"
           New-Item -ItemType Directory -Force -Path $folders | Out-Null
           $zip = Join-Path $dir $env:ZIP
-          Copy-Item -LiteralPath (Join-Path $env:RUNNER_TEMP "local-$env:ZIP") -Destination $zip
+          Invoke-WebRequest -Uri "$env:RELEASES/download/v$env:WANT/$env:ZIP" -OutFile $zip -MaximumRetryCount 3 -RetryIntervalSec 5
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
           if ($hash -ne $env:WANT_SHA) {
             Write-Output "::error::$env:ZIP has SHA-256 $hash, but SHA256SUMS says $env:WANT_SHA"
