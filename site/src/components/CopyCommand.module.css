@@ -20,6 +20,19 @@
   word-break: break-all;
 }
 
+/* wrap="tokens": breaks fall at spaces. Only a long token may split, and only when it can't fit a line. */
+.tokens {
+  word-break: normal;
+}
+
+.token {
+  white-space: nowrap;
+}
+
+.long {
+  overflow-wrap: anywhere;
+}
+
 .action {
   flex: 0 0 auto;
 }

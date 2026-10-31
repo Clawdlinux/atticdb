@@ -1,7 +1,7 @@
 "use client";
 
 import type { Transition } from "motion/react";
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import Swap from "@/components/Swap";
 import { INSTALL_CMD } from "@/lib/site";
 import styles from "./CopyCommand.module.css";
@@ -15,11 +15,32 @@ type CopyCommandProps = {
   tone?: "accent" | "bone" | "ink";
   // The label swap. Defaults to Swap's own.
   swap?: { transition: Transition; rise: number };
+  // "tokens" wraps only at spaces, so a flag like --dry-run never splits at its hyphen.
+  // Long tokens (URLs, paths, lists) may still break anywhere. The copied text is unchanged.
+  wrap?: "tokens";
 };
 
 type Status = "idle" | "copied" | "selected";
 
 const RESET_MS = 2000;
+
+// Longer than this, a token may not fit a phone's line on its own, so it may break anywhere.
+const LONG_TOKEN = 20;
+
+// Joined by plain spaces, the tokens read back as the exact command.
+function tokens(command: string) {
+  return command.split(" ").map((token, i) => (
+    <Fragment key={i}>
+      {i > 0 && " "}
+      <span
+        className={token.length > LONG_TOKEN ? styles.long : styles.token}
+        data-token={token.length > LONG_TOKEN ? "long" : "word"}
+      >
+        {token}
+      </span>
+    </Fragment>
+  ));
+}
 
 const BUTTON_TONE = { accent: "button--accent", bone: "button--field", ink: "button--ink" } as const;
 
@@ -29,6 +50,7 @@ export default function CopyCommand({
   label = "Copy",
   tone = "accent",
   swap,
+  wrap,
 }: CopyCommandProps) {
   const [status, setStatus] = useState<Status>("idle");
   const codeRef = useRef<HTMLElement>(null);
@@ -63,8 +85,8 @@ export default function CopyCommand({
 
   return (
     <div className={`${styles.box} ${tone === "bone" ? styles.bone : ""}`} id={id}>
-      <pre className={styles.code}>
-        <code ref={codeRef}>{command}</code>
+      <pre className={`${styles.code} ${wrap === "tokens" ? styles.tokens : ""}`}>
+        <code ref={codeRef}>{wrap === "tokens" ? tokens(command) : command}</code>
       </pre>
       <button
         type="button"

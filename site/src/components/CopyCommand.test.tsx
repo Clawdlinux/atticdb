@@ -48,4 +48,28 @@ describe("CopyCommand", () => {
     const { container } = render(<CopyCommand tone="bone" />);
     expect(container.firstElementChild?.className).toMatch(/bone/);
   });
+
+  it("wraps on spaces only when asked, and copies the exact command", async () => {
+    const command = "atticdb setup --harness copilot,vscode,claude-code,codex --dry-run";
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    const { container } = render(<CopyCommand command={command} wrap="tokens" />);
+    const code = container.querySelector("code")!;
+    expect(code.textContent).toBe(command);
+    const flag = [...code.querySelectorAll("span")].find((s) => s.textContent === "--dry-run");
+    expect(flag).toBeDefined();
+    expect(flag!.dataset.token).toBe("word");
+    expect(flag!.className).toMatch(/token/);
+    const list = [...code.querySelectorAll("span")].find((s) => s.textContent?.startsWith("copilot,"));
+    expect(list!.dataset.token).toBe("long");
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button"));
+    });
+    expect(writeText).toHaveBeenCalledWith(command);
+  });
+
+  it("keeps the command as one text node by default", () => {
+    const { container } = render(<CopyCommand command="atticdb setup --dry-run" />);
+    expect(container.querySelector("code span")).toBeNull();
+  });
 });

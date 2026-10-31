@@ -11,6 +11,11 @@ const WINDOWS_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36";
 const SETUP = "atticdb setup --harness copilot,vscode,claude-code,codex";
 
+// Commands render as tokens, so match the whole <code> by its text.
+function codeWith(text: string) {
+  return (_: string, el: Element | null) => el?.tagName === "CODE" && el.textContent === text;
+}
+
 function setUserAgent(ua: string) {
   vi.spyOn(navigator, "userAgent", "get").mockReturnValue(ua);
 }
@@ -44,7 +49,7 @@ describe("Installer", () => {
     const boxes = within(apps).getAllByRole("checkbox");
     expect(boxes).toHaveLength(4);
     for (const box of boxes) expect(box).toBeChecked();
-    expect(screen.getByText(SETUP)).toBeVisible();
+    expect(screen.getByText(codeWith(SETUP))).toBeVisible();
   });
 
   it("renders the steps as an ordered list, with the doctor last", () => {
@@ -54,6 +59,23 @@ describe("Installer", () => {
     expect(presentCommands(container)).toEqual(
       buildInstallSteps(DEFAULT_OPTIONS).flatMap((s) => s.commands),
     );
+  });
+
+  it("wraps its commands on spaces", () => {
+    const { container } = render(<Installer />);
+    const flag = [...container.querySelectorAll('[data-ui="steps"] code span')].find(
+      (s) => s.textContent === "--dry-run",
+    );
+    expect((flag as HTMLElement | undefined)?.dataset.token).toBe("word");
+  });
+
+  it("marks every tile with a tick shape that only a checked input shows", () => {
+    const { container } = render(<Installer />);
+    for (const input of container.querySelectorAll("input")) {
+      const tick = input.closest("label")!.querySelector('svg[data-ui="tick"]');
+      expect(tick, input.getAttribute("value") ?? "checkbox").not.toBeNull();
+      expect(tick).toHaveAttribute("aria-hidden", "true");
+    }
   });
 
   it("asks for an app when every app is unchecked", () => {
@@ -126,8 +148,8 @@ describe("Installer", () => {
   });
 
   it("renders the macOS steps on the server", () => {
-    const html = renderToString(<Installer />);
-    expect(html).toContain(SETUP);
-    expect(html).toContain(INSTALL_CMD);
+    const text = renderToString(<Installer />).replace(/<[^>]+>/g, "");
+    expect(text).toContain(SETUP);
+    expect(text).toContain(INSTALL_CMD);
   });
 });

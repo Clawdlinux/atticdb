@@ -40,8 +40,9 @@
   --cols: 2;
 }
 
+/* 3 across while a tile fits its tick and "Windows" (7rem). On the narrowest phones it drops to 2. */
 .tiles[data-count="3"] {
-  --cols: 3;
+  grid-template-columns: repeat(auto-fit, minmax(7rem, 1fr));
 }
 
 .tile {
@@ -113,16 +114,35 @@
   transition: none;
 }
 
-/* A solid square says "pick any". It goes from faint to full. */
-.mark {
+/* The checked state as a shape. Checkbox: a square, faint until checked, then solid with a tick cut in. */
+.mark,
+.radioMark {
   flex: none;
   width: 0.75rem;
   height: 0.75rem;
-  background: currentColor;
+  overflow: visible;
+}
+
+.square {
+  fill: currentColor;
   opacity: 0.3;
 }
 
-.input:checked ~ .text .mark {
+.tick {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: square;
+  opacity: 0;
+}
+
+/* In the checkbox the tick takes the tile's fill colour, so it reads as a cut in the solid square. */
+.mark .tick {
+  stroke: var(--installer-tile-fill, var(--ink));
+}
+
+.input:checked ~ .text .square,
+.input:checked ~ .text .tick {
   opacity: 1;
 }
 
@@ -170,12 +190,6 @@
 .line {
   grid-area: 1 / 1;
   min-width: 0;
-}
-
-/* Long commands break at a space first. A URL splits only when it can't fit on its own line. */
-.line pre {
-  word-break: normal;
-  overflow-wrap: anywhere;
 }
 
 .foot {
@@ -234,7 +248,9 @@
   }
 }
 
+/* Reduced motion: every installer swap is instant, the checkbox fill included. */
 @media (prefers-reduced-motion: reduce) {
+  .boxFill,
   .input:checked ~ .text {
     transition: none;
   }

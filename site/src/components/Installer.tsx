@@ -59,6 +59,23 @@ const WINDOWS_NOTES: { app: App; text: string }[] = [
 
 const RESET_MS = 2000;
 
+// The checked state as a shape, not only a fill: a tick that shows only for a checked input.
+// In a checkbox it is cut out of a solid square; in a radio it stands alone.
+function Tick({ boxed }: { boxed?: boolean }) {
+  return (
+    <svg
+      className={boxed ? styles.mark : styles.radioMark}
+      data-ui="tick"
+      viewBox="0 0 12 12"
+      aria-hidden="true"
+      focusable="false"
+    >
+      {boxed && <rect className={styles.square} width="12" height="12" />}
+      <path className={styles.tick} d="M2.5 6.25 5 8.75 9.5 3.5" />
+    </svg>
+  );
+}
+
 // The system never changes under a page, so there is nothing to subscribe to.
 const noSubscribe = () => () => {};
 const clientOs = () => detectOs(navigator.userAgent, navigator.platform);
@@ -99,7 +116,10 @@ function Choice<T extends string>({ legend, name, values, labels, value, onPick,
                 aria-hidden="true"
               />
             )}
-            <span className={styles.text}>{labels[v]}</span>
+            <span className={styles.text}>
+              <Tick />
+              {labels[v]}
+            </span>
           </label>
         ))}
       </div>
@@ -109,14 +129,14 @@ function Choice<T extends string>({ legend, name, values, labels, value, onPick,
 
 type CheckProps = { label: string; checked: boolean; onToggle: () => void };
 
-// A checkbox as a solid tile. The fill fades in, and the mark goes solid.
+// A checkbox as a solid tile. The fill fades in, and the square goes solid with a tick cut in it.
 function Check({ label, checked, onToggle }: CheckProps) {
   return (
     <label className={`${styles.tile} ${styles.check}`}>
       <input className={styles.input} type="checkbox" checked={checked} onChange={onToggle} />
       <span className={styles.boxFill} aria-hidden="true" />
       <span className={styles.text}>
-        <span className={styles.mark} aria-hidden="true" />
+        <Tick boxed />
         {label}
       </span>
     </label>
@@ -136,7 +156,12 @@ function Line({ command, t }: { command: string; t: Timing }) {
       animate={{ opacity: 1, y: 0, transition: t.standard }}
       exit={{ opacity: 0, transition: t.exit }}
     >
-      <CopyCommand command={command} tone="ink" swap={{ transition: t.quick, rise: t.rise }} />
+      <CopyCommand
+        command={command}
+        tone="ink"
+        wrap="tokens"
+        swap={{ transition: t.quick, rise: t.rise }}
+      />
     </motion.div>
   );
 }

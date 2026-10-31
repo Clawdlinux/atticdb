@@ -66,7 +66,8 @@ describe("home page", () => {
     const section = anchors[0] as HTMLElement;
     expect(section.tagName).toBe("SECTION");
     expect(within(section).getByRole("heading", { level: 2, name: "Install it your way" })).toBeInTheDocument();
-    expect(within(section).getByText(INSTALL_CMD).tagName).toBe("CODE");
+    const codes = [...section.querySelectorAll("code")].map((c) => c.textContent);
+    expect(codes).toContain(INSTALL_CMD);
     expect(section.previousElementSibling?.querySelector("#how-title")).not.toBeNull();
     expect(screen.getByRole("link", { name: "Star on GitHub" })).toHaveAttribute(
       "href",
