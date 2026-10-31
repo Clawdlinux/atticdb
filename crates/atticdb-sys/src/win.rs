@@ -4,8 +4,10 @@ use std::fs::File;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::AsRawHandle;
-use std::path::Path;
-use windows_sys::Win32::Foundation::{ERROR_IO_PENDING, ERROR_LOCK_VIOLATION};
+use std::path::{Component, Path, Prefix};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, ERROR_IO_PENDING, ERROR_LOCK_VIOLATION, ERROR_OPERATION_ABORTED, HANDLE,
+};
 use windows_sys::Win32::Security::Cryptography::{
     BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG,
 };
@@ -13,26 +15,60 @@ use windows_sys::Win32::Storage::FileSystem::{
     GetDiskFreeSpaceExW, LockFileEx, MoveFileExW, UnlockFileEx, LOCKFILE_EXCLUSIVE_LOCK,
     LOCKFILE_FAIL_IMMEDIATELY, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
 };
-use windows_sys::Win32::System::IO::{OVERLAPPED, OVERLAPPED_0, OVERLAPPED_0_0};
+use windows_sys::Win32::System::Threading::CreateEventW;
+use windows_sys::Win32::System::IO::{
+    CancelIoEx, GetOverlappedResult, OVERLAPPED, OVERLAPPED_0, OVERLAPPED_0_0,
+};
 
 /// The 1 byte region the data directory lock covers. It sits far past any real end of file.
 const LOCK_OFFSET: u64 = 0x7FFF_FFFF_FFFF_FFFE;
 
+/// The longest path, in UTF-16 units without the NUL, that Win32 accepts without `\\?\`.
+const MAX_PATH_UNITS: usize = 259;
+
 /// Converts a path to a NUL-terminated UTF-16 string. Interior NULs are rejected.
+///
+/// Paths longer than `MAX_PATH_UNITS` get the `\\?\` prefix, as std does internally.
 fn wide(path: &Path) -> io::Result<Vec<u16>> {
     let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
     if wide.contains(&0) {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL character"));
     }
+    if wide.len() > MAX_PATH_UNITS {
+        if let Some(long) = verbatim(path)? {
+            wide = long;
+        }
+    }
     wide.push(0);
     Ok(wide)
+}
+
+/// Returns `path` as a `\\?\` path, or `None` if it already has a `\\?\` or `\\.\` prefix.
+///
+/// `\\?\` turns off Win32 path parsing. So the path is made absolute and normalized first.
+/// `std::path::absolute` calls `GetFullPathNameW`, which resolves `.`, `..` and `/`.
+fn verbatim(path: &Path) -> io::Result<Option<Vec<u16>>> {
+    let absolute = std::path::absolute(path)?;
+    let units: Vec<u16> = absolute.as_os_str().encode_wide().collect();
+    let Some(Component::Prefix(prefix)) = absolute.components().next() else {
+        return Ok(None);
+    };
+    let (head, rest) = match prefix.kind() {
+        // C:\dir becomes \\?\C:\dir.
+        Prefix::Disk(_) => (r"\\?\", &units[..]),
+        // \\server\share becomes \\?\UNC\server\share. Keep the second backslash.
+        Prefix::UNC(..) => (r"\\?\UNC", &units[1..]),
+        _ => return Ok(None),
+    };
+    Ok(Some(head.encode_utf16().chain(rest.iter().copied()).collect()))
 }
 
 /// Returns the bytes available to the caller and the volume's total bytes, in that order.
 ///
 /// Uses `GetDiskFreeSpaceExW`. The available count honors per-user quotas.
+/// `path` must name a directory. A trailing separator is added, which UNC shares require.
 pub fn free_space(path: &Path) -> io::Result<(u64, u64)> {
-    let path = wide(path)?;
+    let path = wide(&path.join(""))?;
     let (mut available, mut total) = (0u64, 0u64);
     // SAFETY: `path` is a NUL-terminated UTF-16 string that outlives the call.
     // Both out pointers refer to live locals. The API allows a null third pointer.
@@ -89,8 +125,34 @@ pub fn fill_random(buf: &mut [u8]) -> io::Result<()> {
     Ok(())
 }
 
-/// Builds the request for the lock region. Every other field stays zero.
-fn lock_region() -> OVERLAPPED {
+/// A manual-reset event that one lock request signals when it completes.
+struct Event(HANDLE);
+
+impl Event {
+    fn new() -> io::Result<Self> {
+        // SAFETY: null security attributes and a null name are both allowed.
+        // The call creates a new, unnamed, nonsignaled manual-reset event.
+        let event = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
+        if event.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self(event))
+    }
+}
+
+impl Drop for Event {
+    fn drop(&mut self) {
+        // SAFETY: `self.0` came from CreateEventW and is closed only here, once.
+        unsafe { CloseHandle(self.0) };
+    }
+}
+
+/// Builds the request for the lock region. `event` must outlive any wait on the request.
+///
+/// A request with its own event can be waited on safely. Other I/O can signal the file handle.
+/// The event's low bit is set, so a completion port bound to the handle queues no packet.
+/// Windows ignores the low 2 bits of a handle value.
+fn lock_region(event: &Event) -> OVERLAPPED {
     OVERLAPPED {
         Anonymous: OVERLAPPED_0 {
             Anonymous: OVERLAPPED_0_0 {
@@ -98,8 +160,37 @@ fn lock_region() -> OVERLAPPED {
                 OffsetHigh: (LOCK_OFFSET >> 32) as u32,
             },
         },
+        hEvent: event.0.map_addr(|addr| addr | 1),
         ..Default::default()
     }
+}
+
+/// Waits until a request that returned ERROR_IO_PENDING completes, and returns its result.
+///
+/// Only a handle opened with `FILE_FLAG_OVERLAPPED` returns ERROR_IO_PENDING.
+/// The kernel then owns `region` until the request completes.
+/// So `region` must not be dropped before this returns.
+/// With `cancel`, it first asks the kernel to cancel the request.
+fn finish_pending(file: &File, region: &mut OVERLAPPED, cancel: bool) -> io::Result<()> {
+    if cancel {
+        // SAFETY: `file` keeps the handle open, and `region` is the pending request's live
+        // OVERLAPPED. CancelIoEx only uses it to find the request. It fails if the request
+        // already completed, and the wait below covers both cases.
+        unsafe { CancelIoEx(file.as_raw_handle(), region) };
+    }
+    let mut transferred = 0u32;
+    // SAFETY: `file` keeps the handle open. `region` and `transferred` are live. `region`
+    // names its own event, so a wait of TRUE returns only once this request completes.
+    // After that the kernel holds no reference to `region`.
+    let ok = unsafe { GetOverlappedResult(file.as_raw_handle(), region, &mut transferred, 1) };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn is(error: &io::Error, code: u32) -> bool {
+    error.raw_os_error() == Some(code as i32)
 }
 
 /// Tries to take an exclusive lock on a 1 byte region far past the end of `file`.
@@ -114,13 +205,18 @@ fn lock_region() -> OVERLAPPED {
 /// AtticDB keeps the holder's details at offset 0 of its LOCK file.
 /// `File::try_lock` would lock the whole file and block those reads.
 ///
+/// Any `File` works, including one opened with `FILE_FLAG_OVERLAPPED`.
+/// On such a handle a pending request is cancelled and awaited before this returns.
+/// A cancelled request reports `Ok(false)`. One that completed first reports its own result.
+///
 /// Locks belong to the handle. Release one with [`unlock_past_eof`] before closing the file.
 /// Windows may release a closed handle's locks only after a delay.
 pub fn try_lock_past_eof(file: &File) -> io::Result<bool> {
-    let mut region = lock_region();
-    // SAFETY: `file` owns the handle and keeps it open for the call. `region` is a live
-    // local. The flags make the call fail at once instead of waiting, so no request stays
-    // pending after it returns.
+    let event = Event::new()?;
+    let mut region = lock_region(&event);
+    // SAFETY: `file` keeps the handle open, and `region` and `event` are live locals.
+    // A synchronous handle finishes the request before returning. An overlapped handle can
+    // leave it pending, and then `finish_pending` waits for it before `region` is dropped.
     let ok = unsafe {
         LockFileEx(
             file.as_raw_handle(),
@@ -134,26 +230,34 @@ pub fn try_lock_past_eof(file: &File) -> io::Result<bool> {
     if ok != 0 {
         return Ok(true);
     }
-    let error = io::Error::last_os_error();
-    match error.raw_os_error() {
-        // A synchronous handle reports contention as ERROR_LOCK_VIOLATION.
-        // A handle opened for overlapped I/O reports it as ERROR_IO_PENDING.
-        Some(code) if code == ERROR_LOCK_VIOLATION as i32 || code == ERROR_IO_PENDING as i32 => {
-            Ok(false)
+    let mut error = io::Error::last_os_error();
+    if is(&error, ERROR_IO_PENDING) {
+        match finish_pending(file, &mut region, true) {
+            Ok(()) => return Ok(true),
+            Err(finished) => error = finished,
         }
-        _ => Err(error),
     }
+    if is(&error, ERROR_LOCK_VIOLATION) || is(&error, ERROR_OPERATION_ABORTED) {
+        return Ok(false);
+    }
+    Err(error)
 }
 
 /// Releases the lock that [`try_lock_past_eof`] took on this handle.
 pub fn unlock_past_eof(file: &File) -> io::Result<()> {
-    let mut region = lock_region();
-    // SAFETY: `file` owns the handle and keeps it open for the call. `region` is a live local.
+    let event = Event::new()?;
+    let mut region = lock_region(&event);
+    // SAFETY: `file` keeps the handle open, and `region` and `event` are live locals.
+    // A pending request is awaited below before `region` is dropped.
     let ok = unsafe { UnlockFileEx(file.as_raw_handle(), 0, 1, 0, &mut region) };
-    if ok == 0 {
-        return Err(io::Error::last_os_error());
+    if ok != 0 {
+        return Ok(());
     }
-    Ok(())
+    let error = io::Error::last_os_error();
+    if is(&error, ERROR_IO_PENDING) {
+        return finish_pending(file, &mut region, false);
+    }
+    Err(error)
 }
 
 #[cfg(test)]
@@ -240,5 +344,71 @@ mod tests {
         assert!(!try_lock_past_eof(&a).unwrap());
         unlock_past_eof(&b).unwrap();
         assert!(unlock_past_eof(&b).is_err(), "unlocking an unheld region fails");
+    }
+
+    #[test]
+    fn lock_past_eof_works_on_overlapped_handles() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OVERLAPPED;
+        let dir = TestDir::new();
+        let path = dir.0.join("LOCK");
+        std::fs::write(&path, b"pid=1 holder").unwrap();
+        let mut options = std::fs::OpenOptions::new();
+        let sync = options.read(true).write(true).open(&path).unwrap();
+        let overlapped = options.custom_flags(FILE_FLAG_OVERLAPPED).open(&path).unwrap();
+        assert!(try_lock_past_eof(&sync).unwrap());
+        assert!(!try_lock_past_eof(&overlapped).unwrap());
+        unlock_past_eof(&sync).unwrap();
+        assert!(try_lock_past_eof(&overlapped).unwrap());
+        assert!(!try_lock_past_eof(&sync).unwrap());
+        unlock_past_eof(&overlapped).unwrap();
+        assert!(try_lock_past_eof(&sync).unwrap());
+        unlock_past_eof(&sync).unwrap();
+    }
+
+    fn os(units: Vec<u16>) -> String {
+        String::from_utf16(&units).unwrap()
+    }
+
+    #[test]
+    fn long_paths_become_verbatim_and_others_stay() {
+        let cases = [
+            (r"C:\a\..\b", Some(r"\\?\C:\b")),
+            ("C:/a/b", Some(r"\\?\C:\a\b")),
+            (r"\\server\share\dir", Some(r"\\?\UNC\server\share\dir")),
+            (r"\\?\C:\a\..\b", None),
+            (r"\\.\pipe\name", None),
+        ];
+        for (path, expected) in cases {
+            let made = verbatim(Path::new(path)).unwrap().map(os);
+            assert_eq!(made.as_deref(), expected, "{path}");
+        }
+        let short = r"C:\short";
+        assert_eq!(os(wide(Path::new(short)).unwrap()), format!("{short}\0"));
+        let long = format!(r"C:\{}", "a".repeat(MAX_PATH_UNITS));
+        assert_eq!(os(wide(Path::new(&long)).unwrap()), format!(r"\\?\{long}{}", '\0'));
+    }
+
+    #[test]
+    fn long_paths_work_for_rename_and_free_space() {
+        let dir = TestDir::new();
+        let mut deep = dir.0.clone();
+        for _ in 0..5 {
+            deep.push("d".repeat(60));
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        let (from, to) = (deep.join("from"), deep.join("to"));
+        assert!(to.as_os_str().len() > 260, "{}", to.display());
+        std::fs::write(&from, b"new").unwrap();
+        std::fs::write(&to, b"old").unwrap();
+        rename_write_through(&from, &to).unwrap();
+        assert_eq!(std::fs::read(&to).unwrap(), b"new");
+        assert!(!from.try_exists().unwrap());
+        // Separators and `..` are resolved before the `\\?\` prefix turns parsing off.
+        let back = PathBuf::from(format!("{}/x/../back", deep.display()));
+        rename_write_through(&to, &back).unwrap();
+        assert_eq!(std::fs::read(deep.join("back")).unwrap(), b"new");
+        let (available, total) = free_space(&deep).unwrap();
+        assert!(total > 0 && available <= total, "available={available} total={total}");
     }
 }

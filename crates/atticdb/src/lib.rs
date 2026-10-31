@@ -55,9 +55,24 @@ pub(crate) fn spawn(command: &mut std::process::Command) -> std::io::Result<std:
 /// Unix reads `/dev/urandom`. Windows calls `BCryptGenRandom`.
 pub fn random_hex(bytes: usize) -> std::io::Result<String> {
     let mut buf = vec![0; bytes];
-    #[cfg(unix)]
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut buf)?;
-    #[cfg(windows)]
-    atticdb_sys::fill_random(&mut buf)?;
+    fill_random(&mut buf)?;
     Ok(buf.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+/// Fills `buf` from the OS random source.
+/// Other targets get an error, never a predictable token.
+fn fill_random(buf: &mut [u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::fs::File::open("/dev/urandom")?.read_exact(buf)
+    }
+    #[cfg(windows)]
+    {
+        atticdb_sys::fill_random(buf)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = buf;
+        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "no random source on this target"))
+    }
 }
