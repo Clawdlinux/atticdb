@@ -1,8 +1,8 @@
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { INSTALL_CMD, WAITLIST_URL } from "@/lib/site";
 import Hero from "./Hero";
-import { RESTART_AT_MS } from "./PlugDemo";
+import { RESTART_MS, runToCut, stillFrame, tapeParams } from "./tape-sim";
 
 // The chip's text as it reads at rest: a leaving value may still be fading out beside it.
 function ackText(container: HTMLElement) {
@@ -17,11 +17,18 @@ function highlightIn(container: HTMLElement, name: string) {
 }
 
 describe("Hero", () => {
-  beforeEach(() => vi.useFakeTimers());
+  // jsdom has no 2D context (see vitest.setup.ts). The canvas then never starts and the poster stays.
+  beforeEach(() => vi.useRealTimers());
   afterEach(() => {
     cleanup();
     vi.useRealTimers();
   });
+
+  // The canvas module loads after hydration.
+  async function loaded(container: HTMLElement) {
+    await waitFor(() => expect(container.querySelector("canvas")).not.toBeNull());
+    return container.querySelector("canvas")!;
+  }
 
   it("names the h1 by the sentence alone", () => {
     render(<Hero />);
@@ -73,25 +80,58 @@ describe("Hero", () => {
     );
   });
 
-  it("pulls the plug and reports what each store kept", () => {
+  it("shows the build-time poster first, then one labelled canvas", async () => {
     const { container } = render(<Hero />);
-    fireEvent.click(screen.getByRole("button", { name: "Pull the plug" }));
-    act(() => {
-      vi.advanceTimersByTime(RESTART_AT_MS + 10);
-    });
-    expect(screen.getByText("AtticDB: 9 of 9 acked writes kept.")).toBeInTheDocument();
+    const poster = container.querySelector('[data-ui="poster"]')!;
+    expect(poster).toHaveAttribute("role", "img");
+    expect(poster).toHaveAttribute("aria-label", expect.stringMatching(/^The tape\. 1 writer on Local NVMe/));
+    expect(poster.querySelectorAll("svg rect").length).toBeGreaterThan(5);
+    expect(poster).toHaveTextContent("Claude Code");
+    const canvas = await loaded(container);
+    expect(canvas).toHaveAttribute("role", "img");
+    expect(canvas).toHaveAttribute("aria-label", poster.getAttribute("aria-label"));
+    fireEvent.click(screen.getByRole("radio", { name: "16" }));
+    expect(canvas).toHaveAttribute("aria-label", expect.stringMatching(/^The tape\. 16 writers on Local NVMe/));
+  });
+
+  it("states the slowdown against the real p50", () => {
+    const { container } = render(<Hero />);
+    const caption = () => container.querySelector("[class*=timeCaption]");
+    expect(caption()).toHaveTextContent("Time slowed 2,500x. Real p50 on Local NVMe: 94 µs");
+    fireEvent.click(screen.getByRole("radio", { name: "Premium SSD v2" }));
+    expect(caption()).toHaveTextContent("Time slowed 1,500x. Real p50 on Premium SSD v2: 817 µs");
+  });
+
+  it("pulls the plug mid-group and reports what each store kept, from the simulation", async () => {
+    const p = tapeParams("nvme", 1);
+    const outcome = runToCut(stillFrame(p), p).lastRun!;
+    const { container } = render(<Hero />);
+    await loaded(container);
+    vi.useFakeTimers();
     expect(
-      screen.getByText("A store that acks before sync: 7 of 10 acked writes kept."),
+      screen.getByText("Pull the plug. Frames not yet synced drop away. Acked writes stay."),
     ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Pull the plug" }));
+    expect(screen.getByText("Power off. Frames not yet synced drop away.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Pull the plug" })).toHaveAttribute("aria-disabled", "true");
+    act(() => {
+      vi.advanceTimersByTime(RESTART_MS + 10);
+    });
+    const { attic, ackBeforeSync } = outcome;
+    expect(attic.kept).toBe(attic.acked);
+    expect(ackBeforeSync.acked).toBeGreaterThan(ackBeforeSync.kept);
+    expect(
+      screen.getByText(`AtticDB: ${attic.kept} of ${attic.acked} acked writes kept.`),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        `A store that acks before sync: ${ackBeforeSync.kept} of ${ackBeforeSync.acked} acked writes kept.`,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Pull it again" })).not.toHaveAttribute("aria-disabled");
     expect(
       screen.getByText("An illustration of ack-after-sync, not a crash test.", { exact: false }),
     ).toBeInTheDocument();
-    // AtticDB's 9 acked blocks hold; the other store drops its 3 unsynced ones.
-    const attic = container.querySelector('[data-label="AtticDB"]')!;
-    const other = container.querySelector('[data-label="Ack before sync"]')!;
-    expect(attic.querySelectorAll('[class*=block][data-kind="acked"]')).toHaveLength(9);
-    expect(attic.querySelectorAll('[data-kind="lost"]')).toHaveLength(0);
-    expect(other.querySelectorAll('[class*=block][data-kind="lost"]')).toHaveLength(3);
     expect(
       screen.getByRole("link", {
         name: "The real test cuts power on LazyFS. CI runs crash simulations on 2,000 seeds.",

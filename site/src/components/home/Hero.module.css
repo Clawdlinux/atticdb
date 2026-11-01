@@ -1,15 +1,15 @@
 /*
- * Geometry from the direction sheet, "Controls on the sentence".
- * --d is the display size. Line widths are measured in Bebas Neue at -0.02em:
- * "MEMORY THAT" 4.063em, "HITS THE DISK" 3.939em.
+ * --d is the display size. It also bows to the screen's height, so the headline, the tape,
+ * the sentence and the install command share one first screen.
  */
 .hero {
-  --d: min(var(--step-display), 22vw);
-  --line-2: calc(3.939 * var(--d));
+  --d: min(var(--step-display), 22vw, 15svh);
   /* Headline line-height. The ack chip is exactly one of these tall. */
   --lh: 0.85;
-  --chip-gap: 0.5rem;
-  padding-block: 0 3rem;
+  /* The content column of .container, measured inside the full-bleed band. */
+  --column: min(80rem, 100% - 2 * clamp(1rem, 4vw, 4rem));
+  margin-top: -1.5rem;
+  padding-block: 0 2rem;
   text-align: center;
 }
 
@@ -103,41 +103,37 @@
   display: inline-block;
 }
 
-/* Chips */
+/* Controls, docked to the band's top left */
 
 .chip {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  grid-template-areas:
-    "label readout"
-    "control control";
-  align-items: baseline;
-  gap: 0.375rem 1rem;
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 0.75rem;
   min-width: 0;
   margin: 0;
-  padding: 0.625rem 0.75rem 0.75rem;
+  padding: 0;
   border: 0;
   border-radius: 0;
-  background: var(--surface);
   font-size: var(--step-small);
   line-height: 1.2;
   text-align: left;
 }
 
 .chipLabel {
-  grid-area: label;
+  /* A floated legend is an ordinary flex item, so it sits inline with the options. */
   float: left;
   padding: 0;
   color: var(--muted);
 }
 
 .readout {
-  grid-area: readout;
-  color: var(--ink);
+  order: 2;
+  color: var(--muted);
 }
 
 .options {
-  grid-area: control;
+  order: 1;
   display: flex;
   gap: 0.25rem;
 }
@@ -203,8 +199,7 @@
 
 .switch {
   --button-focus: var(--accent);
-  grid-area: control;
-  justify-self: start;
+  order: 1;
   gap: 0.625rem;
   font-size: var(--step-body);
   white-space: nowrap;
@@ -236,20 +231,148 @@
   opacity: 0.4;
 }
 
-.pair {
-  display: flex;
-  gap: var(--chip-gap);
+/* The band: full bleed, under the headline. The canvas and the poster share one fixed box. */
+
+.band {
+  position: relative;
+  margin-top: clamp(1rem, 2.5svh, 1.75rem);
+  margin-inline: calc(50% - 50vw);
+  background: var(--surface);
+  text-align: left;
 }
 
-.chipDisk {
-  order: -1;
+.strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.375rem 2.25rem;
+  width: var(--column);
+  margin-inline: auto;
+  padding-top: 0.75rem;
+}
+
+.tape {
+  --tape-h: 196px;
+  --gutter: calc((100% - var(--column)) / 2);
+  position: relative;
+  height: var(--tape-h);
+  overflow: hidden;
+}
+
+.tape canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* Until the canvas has drawn, the poster is the picture. Same frame, so the swap is invisible. */
+.tape:not([data-live="true"]) canvas,
+.tape[data-live="true"] .posters {
+  visibility: hidden;
+}
+
+.posters,
+.poster {
+  position: absolute;
+  inset: 0;
+}
+
+.poster text {
+  font-variant-numeric: tabular-nums lining-nums;
+}
+
+.poster[data-mode="narrow"] {
+  display: none;
+}
+
+.poster svg {
+  max-width: none;
+  height: var(--tape-h);
+}
+
+.posterLeft {
+  position: absolute;
+  top: 0;
+  left: var(--gutter);
+}
+
+.posterTape {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: calc(var(--gutter) + var(--tx));
+  overflow: hidden;
+}
+
+/* The head rests min(240px, 30%) in from the right edge, as on the canvas. */
+.posterTape svg {
+  position: absolute;
+  top: 0;
+  right: calc(min(240px, 30%) - 240px);
+}
+
+.timeCaption {
+  position: absolute;
+  right: calc((100% - var(--column)) / 2);
+  bottom: 0.625rem;
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--step-small);
+}
+
+/* Pull the plug: the words, right under the band */
+
+.result {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.25rem 2rem;
+  margin-top: 0.625rem;
+  font-size: var(--step-small);
+  line-height: 1.4;
+  text-align: left;
+}
+
+.outcome {
+  display: flex;
+  min-height: 2.8em;
+  flex-direction: column;
+  transition: opacity 200ms ease-out;
+}
+
+.outcomeLine {
+  display: block;
+}
+
+.result[data-phase="idle"] .outcome,
+.result[data-phase="armed"] .outcome {
+  color: var(--muted);
+}
+
+.note {
+  max-width: 34rem;
+  color: var(--muted);
+}
+
+@media (min-width: 64rem) {
+  .note {
+    text-align: right;
+  }
+}
+
+.note a {
+  color: var(--ink);
 }
 
 /* Supporting sentence and actions */
 
 .lead {
-  max-width: 44ch;
-  margin: 3rem auto 0;
+  max-width: 62ch;
+  margin: clamp(1rem, 3svh, 2rem) auto 0;
 }
 
 .actions {
@@ -258,7 +381,7 @@
   align-items: center;
   justify-content: center;
   gap: 1rem 1.75rem;
-  margin-top: 2rem;
+  margin-top: 1.25rem;
 }
 
 .waitlist {
@@ -271,69 +394,6 @@
 
 .waitlist:hover {
   text-decoration-thickness: 2px;
-}
-
-
-
-/* Pull the plug result */
-
-.result {
-  max-width: 46rem;
-  margin: 2rem auto 0;
-  text-align: left;
-}
-
-.rows {
-  display: grid;
-  gap: 0.5rem;
-  transition: opacity 200ms ease-out;
-}
-
-/* The power is out: everything on the stores goes dark until the restart. */
-.result[data-phase="cut"] .rows {
-  opacity: 0.45;
-}
-
-.row {
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-}
-
-.cells {
-  display: grid;
-  flex: none;
-  grid-template-columns: repeat(10, 0.75rem);
-  gap: 0.1875rem;
-}
-
-/* An empty slot; a written block drops into it (Framer Motion). */
-.cell {
-  position: relative;
-  height: 0.75rem;
-  background: var(--surface);
-}
-
-.block {
-  position: absolute;
-  inset: 0;
-  background: var(--ink);
-  transition: background-color var(--t-hover) ease;
-}
-
-.block[data-kind="pending"],
-.block[data-kind="lost"] {
-  background: var(--muted);
-}
-
-.note {
-  margin-top: 1rem;
-  color: var(--muted);
-  font-size: var(--step-small);
-}
-
-.note a {
-  color: var(--ink);
 }
 
 @keyframes pulse {
@@ -369,7 +429,9 @@
   }
 
   :global(.js) .lead,
-  :global(.js) .actions {
+  :global(.js) .actions,
+  :global(.js) .strip,
+  :global(.js) .result {
     opacity: 0;
     transform: translateY(12px);
     animation: fade-up 500ms var(--ease-out) 200ms forwards;
@@ -380,49 +442,7 @@
   }
 }
 
-/* Desktop: the chips sit on the sentence, tilted. */
-@media (min-width: 64rem) {
-  .stage {
-    display: block;
-    width: fit-content;
-    margin-inline: auto;
-    padding-top: 6.25rem;
-  }
-
-  .pair {
-    display: contents;
-  }
-
-  .chip {
-    position: absolute;
-    min-width: clamp(12.5rem, 25vw - 7rem, 15rem);
-  }
-
-  .chipDisk {
-    top: 0;
-    left: 0;
-    transform: rotate(-3deg);
-  }
-
-  .chipWriters {
-    /* Line 1 is 0.975d tall: the chip rises 0.125d above the 0.725d baseline. Centre on line 2. */
-    top: calc(6.25rem + 1.4 * var(--d));
-    right: calc(50% + var(--line-2) / 2 + 0.1 * var(--d));
-    transform: translateY(-50%) rotate(2.5deg);
-  }
-
-  .chipPower {
-    top: calc(6.25rem + 1.575 * var(--d));
-    left: calc(50% + var(--line-2) / 2 + 0.1 * var(--d));
-    transform: rotate(-2deg);
-  }
-
-  .lead {
-    margin-top: clamp(3rem, 8vh, 4.5rem);
-  }
-}
-
-/* Phone: the ack chip drops to its own line between the halves. */
+/* Phone: the ack chip drops to its own line between the halves, and the band stacks. */
 @media (max-width: 47.99rem) {
   .line:first-child .rise {
     display: flex;
@@ -445,41 +465,38 @@
     font-size: 0.24em;
   }
 
-  .pair {
-    width: 100%;
-    justify-content: center;
+  .strip {
+    gap: 0.375rem 1.25rem;
+    padding-top: 0.625rem;
   }
 
-  .pair .chip {
-    flex: 1 1 0;
-    max-width: 14rem;
+  .tape {
+    --tape-h: 204px;
   }
 
-  .pair .options {
-    justify-content: space-between;
+  .poster[data-mode="wide"] {
+    display: none;
+  }
+
+  .poster[data-mode="narrow"] {
+    display: block;
+  }
+
+  .posterTape svg {
+    right: 0;
   }
 
   .stage {
     gap: 0.875rem;
   }
 
-  .lead {
-    margin-top: 1.5rem;
-  }
 
   .actions {
-    margin-top: 1.25rem;
-  }
-
-  /* The final lines run to 2 lines here. Reserve them so the result never grows after it scrolls into view. */
-  .row > :last-child {
-    display: flex;
-    min-height: 3em;
-    align-items: center;
+    margin-top: 1rem;
   }
 }
 
-/* Under 360px the two chips share 288px: tighten the switch so it stays inside its chip. */
+/* Under 360px: tighten the switch so the strip keeps its rows. */
 @media (max-width: 22.49rem) {
   .switch {
     gap: 0.375rem;
