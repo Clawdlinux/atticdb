@@ -11,6 +11,8 @@ sim = ["atticdb-tape/sim"]
 [dependencies]
 atticdb-tape = { path = "../atticdb-tape" }
 blake3 = "=1.8.7"
+# Safe Rust (`forbid(unsafe_code)`), the version std pins. Raw deflate for turn content (D95).
+miniz_oxide = { version = "=0.9.1", default-features = false, features = ["with-alloc"] }
 
 [dev-dependencies]
 proptest = { version = "1.9", default-features = false, features = ["std"] }

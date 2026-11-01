@@ -7,7 +7,7 @@ use crate::machine::{Machine, REPLY_DEDUPLICATED};
 use crate::session::{address, Key};
 use crate::state::State;
 use crate::turn::{decode, encode};
-use crate::{EngineError, EngineOptions, ErrorKind, NewTurn, Role};
+use crate::{CompressionMode, EngineError, EngineOptions, ErrorKind, NewTurn, Role};
 use atticdb_tape::{
     Clock, Committed, Digest, Durability, Frame, Header, Io, Kind, RecordInput, StdIo, SystemClock,
     Tape,
@@ -304,7 +304,7 @@ pub struct Metrics {
     pub checkpoint_saves: u64,
     /// Maximum occupied encoding buffer among completed checkpoints, bounded at 4 MiB.
     pub checkpoint_buffer_peak_bytes: usize,
-    /// Published encoded-byte accounting since the installed checkpoint, within this process.
+    /// Published bytes since the installed checkpoint, turns uncompressed, within this process.
     pub checkpoint_pending_bytes: u64,
     /// Writer steps containing queued requests.
     pub writer_groups: u64,
@@ -335,6 +335,12 @@ pub struct Metrics {
     pub facts: usize,
     /// Revision pointers held, at most `fact_history + 2` per key.
     pub fact_revisions: usize,
+    /// MANIFEST version: 3 once the store may hold compressed turns.
+    pub manifest_version: u32,
+    /// Whether new turns are compressed.
+    pub compressing: bool,
+    /// Turns this process wrote compressed.
+    pub compressed_turns: u64,
 }
 
 /// Writer availability. Reads retain the last durable view.
@@ -359,6 +365,10 @@ pub struct Engine {
     tenant_creation: Mutex<()>,
     reads: AtomicU64,
     fact_reads: AtomicU64,
+    /// Deflate level and smallest content, when this store compresses turns.
+    compress: Option<(u8, usize)>,
+    manifest_version: u32,
+    compressed_turns: AtomicU64,
 }
 impl std::fmt::Debug for Engine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -410,9 +420,15 @@ impl Engine {
             || opts.checkpoint_interval.is_zero()
             || opts.max_facts == 0
             || !(1..=4096).contains(&opts.fact_history)
+            || opts.compression.level > 10
         {
             return Err(EngineError::rejected(ErrorKind::InvalidInput));
         }
+        (opts.tape.manifest_new, opts.tape.manifest_min) = match opts.compression.mode {
+            CompressionMode::Auto => (3, 2),
+            CompressionMode::On => (3, 3),
+            CompressionMode::Off => (2, 2),
+        };
         let dir = path.as_ref().to_owned();
         let state = Arc::new(Mutex::new(checkpoint::load(io.as_ref(), &dir, &opts)));
         opts.tape.replay_from_lsn = lock(&state)?.watermark;
@@ -441,10 +457,12 @@ impl Engine {
                 &dir,
                 opts.tape.clone(),
             )?
-            .0
         } else {
-            opened?.0
+            opened?
         };
+        let (tape, manifest_version) = (tape.0, tape.1.manifest_version);
+        let compress = (opts.compression.mode != CompressionMode::Off && manifest_version >= 3)
+            .then_some((opts.compression.level, opts.compression.min_content));
         let chain = lock(&state)?.chain.clone();
         checkpoint::sweep(io.as_ref(), &dir, &chain)?;
         let worker = Worker::start(io.clone(), dir.clone(), state.clone(), &opts)?;
@@ -460,7 +478,18 @@ impl Engine {
             tenant_creation: Mutex::new(()),
             reads: AtomicU64::new(0),
             fact_reads: AtomicU64::new(0),
+            compress,
+            manifest_version,
+            compressed_turns: AtomicU64::new(0),
         })
+    }
+
+    /// Compresses turn payloads when this store allows it. Runs on the caller's thread, after
+    /// the retry digest, which covers the version 1 bytes.
+    fn pack(&self, payloads: Vec<Vec<u8>>) -> Result<Vec<Vec<u8>>> {
+        let Some((level, min)) = self.compress else { return Ok(payloads) };
+        let packed = payloads.into_iter().map(|payload| crate::turn::compress(payload, level, min));
+        Ok(packed.collect::<std::result::Result<_, _>>()?)
     }
 
     /// Atomically appends turns and returns only after durable publication.
@@ -483,6 +512,8 @@ impl Engine {
         };
         let payloads = encode_all()?;
         let digest = idem_key.map(|_| digest(payloads.iter().map(Vec::as_slice)));
+        let payloads = self.pack(payloads)?;
+        let compressed = payloads.iter().filter(|payload| payload[0] == 2).count() as u64;
         let retry = idem_key
             .zip(digest)
             .map(|(id, digest)| (dedup::Scope::Session(scope.session.clone()), id, digest));
@@ -508,8 +539,8 @@ impl Engine {
             }));
             records
         };
-        // The first write moves the payloads. A hot-page retry re-encodes the same inputs, which
-        // yields the same bytes the digest covers, so the common path never copies a payload.
+        // The first write moves the payloads. A hot-page retry re-encodes and re-packs the same
+        // inputs, which yields the same bytes, so the common path never copies a payload.
         let mut payloads = Some(payloads);
         for attempt in 0..2 {
             let pin = tenant
@@ -526,7 +557,7 @@ impl Engine {
             };
             let payloads = match payloads.take() {
                 Some(payloads) => payloads,
-                None => encode_all()?,
+                None => self.pack(encode_all()?)?,
             };
             let result = self
                 .tape
@@ -541,6 +572,7 @@ impl Engine {
                 }
                 Err(error) => return Err(error),
                 Ok(Committed::Durable { txn, last_lsn, reply, .. }) => {
+                    self.compressed_turns.fetch_add(compressed, Ordering::Relaxed);
                     return self.receipt(turns.len() as u64, txn, last_lsn, &reply, false);
                 }
             }
@@ -739,15 +771,14 @@ impl Engine {
             .ok_or_else(|| EngineError::rejected(ErrorKind::InvalidInput))?;
         let records = turns
             .iter()
-            .map(|turn| {
-                Ok(RecordInput {
-                    kind: Kind::Turn,
-                    tenant_id: tenant,
-                    content: encode(&scope.agent, &scope.session, 0, turn, idem_key)?,
-                })
-            })
+            .map(|turn| Ok(encode(&scope.agent, &scope.session, 0, turn, idem_key)?))
             .collect::<Result<Vec<_>>>()?;
-        let digest = idem_key.map(|_| digest(records.iter().map(|r| r.content.as_slice())));
+        let digest = idem_key.map(|_| digest(records.iter().map(Vec::as_slice)));
+        let records = self
+            .pack(records)?
+            .into_iter()
+            .map(|content| RecordInput { kind: Kind::Turn, tenant_id: tenant, content })
+            .collect();
         let key = Key(tenant, scope.agent.clone(), scope.session.clone());
         let pin = match self.pin(key.clone()) {
             Err(EngineError { kind: ErrorKind::ResourceExhausted("hot_pages"), .. }) => {
@@ -1306,6 +1337,9 @@ impl Engine {
             fact_reads: self.fact_reads.load(Ordering::Relaxed),
             facts: state.facts.map.len(),
             fact_revisions: state.facts.revisions,
+            manifest_version: self.manifest_version,
+            compressing: self.compress.is_some(),
+            compressed_turns: self.compressed_turns.load(Ordering::Relaxed),
         })
     }
 }

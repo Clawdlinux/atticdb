@@ -44,7 +44,8 @@ Every error carries `Outcome`. Receipt reconstruction failures after sync report
 Preparation preserves `InvalidInput`, `CorruptIndex`, and `Poisoned` error kinds through the tape hook.
 
 Retry keys use `(tenant, session, key)`, without agent.
-The digest covers the ordered encoded turns, with sequences normalized to 0.
+The digest covers the ordered encoded turns, with sequences normalized to 0, in payload version 1.
+So a retry matches its original whether either side was compressed, and replay inflates compressed turns to rebuild it.
 Each payload includes its byte length in that digest.
 Keyless appends skip the retry digest. Keyed appends compute it on the caller.
 Preparation and publication parse borrowed payload views without copying turn content.
@@ -170,6 +171,23 @@ if present: idem_key length + UTF-8, <=128 bytes
 ```
 
 Unknown versions, invalid tags, malformed UTF-8, trailing bytes, and oversized fields are rejected.
+
+Version 2 stores content as a raw deflate stream (`miniz_oxide`, D95). Only `turn::compress` writes it, when content is at least `Compression::min_content` bytes and the stream is smaller. Everything else matches version 1:
+
+```text
+u8 version = 2
+agent_id, session_id, seq, role, meta: as in version 1
+u32 raw_len: 1 to 4194304, the content's size
+stream: length + raw deflate bytes, <=4194304 bytes
+u8 key_present, idem_key: as in version 1
+```
+
+Inflating stops at `raw_len` and must produce exactly `raw_len` bytes. Replay never inflates, except to rebuild a retry digest.
+The tape batch limit counts stored bytes, so a compressible 4 MiB turn, which can't fit plain, fits once compressed.
+Checkpoint pacing counts turns at their version 1 size, so replay work after a crash doesn't grow with compression.
+
+A data directory holding version 2 has MANIFEST version 3. `CompressionMode` picks when that happens:
+`Auto` compresses new directories and leaves version 2 ones alone, `On` raises an existing directory after recovery, and `Off` writes plain turns.
 
 ## Bounds and cold pages
 

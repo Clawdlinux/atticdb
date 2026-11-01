@@ -103,6 +103,11 @@ pub struct TapeOptions {
     pub lsn_index_bytes: usize,
     /// Bytes kept free after group bytes and any new segments. Defaults to min(1 GiB, 5% of capacity).
     pub free_space_floor: Option<u64>,
+    /// MANIFEST version of a new directory, in [`crate::dir::MANIFEST_VERSIONS`].
+    pub manifest_new: u32,
+    /// After recovery and before the first write, an older MANIFEST is raised to this version.
+    /// At most `manifest_new`.
+    pub manifest_min: u32,
     /// Runs the writer inline. Only for deterministic simulations.
     #[cfg(feature = "sim")]
     pub inline_sim: bool,
@@ -127,6 +132,8 @@ impl Default for TapeOptions {
             superblock_bytes: 256 * 1024 * 1024,
             lsn_index_bytes: DEFAULT_BUDGET,
             free_space_floor: None,
+            manifest_new: 2,
+            manifest_min: 2,
             #[cfg(feature = "sim")]
             inline_sim: false,
             #[cfg(feature = "sim")]
@@ -509,8 +516,17 @@ impl<S: StateMachine> WriterCore<S> {
         {
             return Err(Error::Configuration("segment cannot hold a transaction".into()));
         }
-        let mut dir =
-            DataDir::open(io.clone(), path, opts.server_address.as_deref(), opts.segment_size)?;
+        let versions = crate::dir::MANIFEST_VERSIONS;
+        if !versions.contains(&opts.manifest_min) || opts.manifest_min > opts.manifest_new {
+            return Err(Error::Configuration("invalid manifest versions".into()));
+        }
+        let mut dir = DataDir::open_versioned(
+            io.clone(),
+            path,
+            opts.server_address.as_deref(),
+            opts.segment_size,
+            opts.manifest_new,
+        )?;
         let free_space_floor = opts
             .free_space_floor
             .or_else(|| io.total_bytes(&dir.path).ok().map(default_free_space_floor));
@@ -538,6 +554,9 @@ impl<S: StateMachine> WriterCore<S> {
                 state_machine.replay(&record?)?;
             }
         }
+        // Recovery and replay are done and nothing is written yet.
+        dir.raise_manifest_version(opts.manifest_min)?;
+        recovered.report.manifest_version = dir.manifest_version();
         let segments = SegmentWriter::new(dir, opts.segment_size, recovered.offset)?;
         // Finish recovery before optional reservations consume any remaining headroom.
         let highest_lsn = recovered.report.durable_lsn.max(1);

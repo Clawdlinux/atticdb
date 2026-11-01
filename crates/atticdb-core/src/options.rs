@@ -1,6 +1,35 @@
 use atticdb_tape::TapeOptions;
 use std::time::Duration;
 
+/// When the engine compresses turn content. See [`Compression`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CompressionMode {
+    /// New stores compress. An existing store compresses only once its MANIFEST is version 3.
+    Auto,
+    /// Compress. An existing store's MANIFEST is raised to version 3 after recovery, so v0.2.0
+    /// and earlier refuse it from then on.
+    On,
+    /// Never compress new turns. Compressed turns stay readable.
+    Off,
+}
+
+/// Turn compression at write time: raw deflate on the caller's thread, after the retry digest.
+#[derive(Clone, Copy, Debug)]
+pub struct Compression {
+    /// When to compress.
+    pub mode: CompressionMode,
+    /// Deflate level, 0 to 10.
+    pub level: u8,
+    /// Smallest content compressed, in bytes. Shorter turns stay plain.
+    pub min_content: usize,
+}
+
+impl Default for Compression {
+    fn default() -> Self {
+        Self { mode: CompressionMode::Auto, level: 3, min_content: 256 }
+    }
+}
+
 /// Storage and memory bounds. Limits apply before reserving a write.
 #[derive(Clone, Debug)]
 pub struct EngineOptions {
@@ -18,7 +47,8 @@ pub struct EngineOptions {
     pub dedup_per_tenant: usize,
     /// Retained retry keys across tenants.
     pub dedup_global: usize,
-    /// Tape bytes between incremental checkpoints.
+    /// Bytes published between incremental checkpoints. Turns count uncompressed, so this bounds
+    /// replay work after a crash.
     pub checkpoint_bytes: u64,
     /// Maximum idle interval before the checkpoint worker wakes.
     pub checkpoint_interval: Duration,
@@ -26,6 +56,8 @@ pub struct EngineOptions {
     pub max_facts: usize,
     /// Revisions reported per fact key, 1 to 4,096. The tape keeps every revision.
     pub fact_history: usize,
+    /// Turn compression.
+    pub compression: Compression,
 }
 impl Default for EngineOptions {
     fn default() -> Self {
@@ -41,6 +73,7 @@ impl Default for EngineOptions {
             checkpoint_interval: Duration::from_secs(60),
             max_facts: 100_000,
             fact_history: 16,
+            compression: Compression::default(),
         }
     }
 }

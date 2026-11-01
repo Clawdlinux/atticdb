@@ -1,6 +1,16 @@
-//! Version 1 turn payloads. Length prefixes are little-endian u32 values.
+//! Turn payloads. Length prefixes are little-endian u32 values.
+//!
+//! Version 1: version, agent, session, seq, role, meta, content, retry key.
+//! Version 2: the same, except content is `raw_len: u32` and a raw deflate stream. Only
+//! [`compress`] writes it, and only when the stream is smaller. Stores holding it have
+//! MANIFEST version 3, which v0.2.0 and earlier refuse to open.
 
+use std::borrow::Cow;
 use std::fmt;
+
+const PLAIN: u8 = 1;
+const DEFLATE: u8 = 2;
+const MAX_CONTENT: usize = 4 * 1024 * 1024;
 
 /// The speaker's role.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -123,7 +133,7 @@ pub fn encode(
         + 1
         + idem_key.map_or(0, |key| 4 + key.len());
     let mut out = Vec::with_capacity(len);
-    out.push(1);
+    out.push(PLAIN);
     bytes(&mut out, agent.as_bytes());
     bytes(&mut out, session.as_bytes());
     out.extend_from_slice(&seq.to_le_bytes());
@@ -138,7 +148,8 @@ pub fn encode(
     Ok(out)
 }
 
-/// Decodes an exact payload, rejecting trailing bytes and unknown tags or versions.
+/// Decodes an exact payload of either version, rejecting trailing bytes and unknown tags or
+/// versions. Inflates version 2 content.
 pub fn decode(payload: &[u8]) -> Result<DecodedTurn, CodecError> {
     let parsed = decode_ref(payload)?;
     Ok(DecodedTurn {
@@ -147,11 +158,80 @@ pub fn decode(payload: &[u8]) -> Result<DecodedTurn, CodecError> {
         seq: parsed.seq,
         turn: NewTurn {
             role: parsed.role,
-            content: parsed.content.to_vec(),
+            content: parsed.content.bytes()?.into_owned(),
             meta: parsed.meta.to_vec(),
         },
         idem_key: parsed.idem_key.map(str::to_owned),
     })
+}
+
+/// Rewrites a version 1 payload as version 2 when its content is at least `min_content` bytes
+/// and the deflate stream at `level` (0 to 10) is smaller. Otherwise returns it unchanged.
+pub fn compress(payload: Vec<u8>, level: u8, min_content: usize) -> Result<Vec<u8>, CodecError> {
+    let parsed = decode_ref(&payload)?;
+    let Content::Plain(content) = parsed.content else { return Err(CodecError) };
+    if content.len() < min_content.max(1) {
+        return Ok(payload);
+    }
+    let stream = miniz_oxide::deflate::compress_to_vec(content, level);
+    // Version 2 adds `raw_len`, so it must save more than those 4 bytes.
+    if stream.len() + 4 >= content.len() {
+        return Ok(payload);
+    }
+    let tail = tail_len(parsed.idem_key);
+    let prefix = payload.len() - (4 + content.len()) - tail;
+    let mut out = Vec::with_capacity(prefix + 8 + stream.len() + tail);
+    out.push(DEFLATE);
+    out.extend_from_slice(&payload[1..prefix]);
+    out.extend_from_slice(&(content.len() as u32).to_le_bytes());
+    bytes(&mut out, &stream);
+    out.extend_from_slice(&payload[payload.len() - tail..]);
+    debug_assert_eq!(out.capacity(), out.len());
+    Ok(out)
+}
+
+/// The version 1 bytes of a payload: itself for version 1, re-encoded for version 2. Retry
+/// digests cover these, so a retry matches its original whether either side was compressed.
+pub fn canonical(payload: &[u8]) -> Result<Cow<'_, [u8]>, CodecError> {
+    let parsed = decode_ref(payload)?;
+    if let Content::Plain(_) = parsed.content {
+        return Ok(Cow::Borrowed(payload));
+    }
+    let turn = NewTurn {
+        role: parsed.role,
+        content: parsed.content.bytes()?.into_owned(),
+        meta: parsed.meta.to_vec(),
+    };
+    let (agent, session) = (parsed.agent_id, parsed.session_id);
+    encode(agent, session, parsed.seq, &turn, parsed.idem_key).map(Cow::Owned)
+}
+
+/// Bytes after the content field: the retry key's presence byte and its blob.
+fn tail_len(idem_key: Option<&str>) -> usize {
+    1 + idem_key.map_or(0, |key| 4 + key.len())
+}
+
+/// Turn content as stored. Replay never inflates it.
+pub(crate) enum Content<'a> {
+    Plain(&'a [u8]),
+    Deflate { raw_len: usize, stream: &'a [u8] },
+}
+
+impl<'a> Content<'a> {
+    /// The content bytes. Inflating stops at `raw_len` and must produce exactly that many.
+    pub(crate) fn bytes(&self) -> Result<Cow<'a, [u8]>, CodecError> {
+        match *self {
+            Self::Plain(content) => Ok(Cow::Borrowed(content)),
+            Self::Deflate { raw_len, stream } => {
+                let out = miniz_oxide::inflate::decompress_to_vec_with_limit(stream, raw_len)
+                    .map_err(|_| CodecError)?;
+                if out.len() != raw_len {
+                    return Err(CodecError);
+                }
+                Ok(Cow::Owned(out))
+            }
+        }
+    }
 }
 
 pub(crate) struct ParsedTurn<'a> {
@@ -159,13 +239,24 @@ pub(crate) struct ParsedTurn<'a> {
     pub(crate) session_id: &'a str,
     pub(crate) seq: u64,
     role: Role,
-    content: &'a [u8],
+    content: Content<'a>,
     meta: &'a [u8],
     pub(crate) idem_key: Option<&'a str>,
 }
+
+impl ParsedTurn<'_> {
+    /// The version 1 size of a payload whose stored size is `stored`, without inflating.
+    pub(crate) fn logical_len(&self, stored: usize) -> usize {
+        match self.content {
+            Content::Plain(_) => stored,
+            Content::Deflate { raw_len, stream } => stored - 4 - stream.len() + raw_len,
+        }
+    }
+}
 pub(crate) fn decode_ref(payload: &[u8]) -> Result<ParsedTurn<'_>, CodecError> {
     let mut cur = Cursor(payload);
-    if cur.byte()? != 1 {
+    let version = cur.byte()?;
+    if version != PLAIN && version != DEFLATE {
         return Err(CodecError);
     }
     let agent_id = std::str::from_utf8(cur.blob(255)?).map_err(|_| CodecError)?;
@@ -179,7 +270,15 @@ pub(crate) fn decode_ref(payload: &[u8]) -> Result<ParsedTurn<'_>, CodecError> {
         _ => return Err(CodecError),
     };
     let meta = cur.blob(65536)?;
-    let content = cur.blob(4 * 1024 * 1024)?;
+    let content = if version == PLAIN {
+        Content::Plain(cur.blob(MAX_CONTENT)?)
+    } else {
+        let raw_len = cur.u32()? as usize;
+        if raw_len == 0 || raw_len > MAX_CONTENT {
+            return Err(CodecError);
+        }
+        Content::Deflate { raw_len, stream: cur.blob(MAX_CONTENT)? }
+    };
     let idem_key = match cur.byte()? {
         0 => None,
         1 => Some(std::str::from_utf8(cur.blob(128)?).map_err(|_| CodecError)?),

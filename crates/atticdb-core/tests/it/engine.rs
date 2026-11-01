@@ -87,6 +87,88 @@ fn windows_are_dense_and_read_cost_depends_only_on_returned_turns() {
 }
 
 #[test]
+fn compression_migrates_one_way_and_retries_match_across_modes() {
+    use atticdb_core::{CompressionMode, SearchQuery};
+    let disk = Arc::new(SimDisk::new(3));
+    let with = |mode| {
+        let mut opts = options();
+        opts.compression.mode = mode;
+        opts
+    };
+    let long = |word: &str| NewTurn { content: format!("{word} ").repeat(200).into(), ..turn(0) };
+    let manifest = |disk: &SimDisk| {
+        let file = disk.open(Path::new("db/MANIFEST")).unwrap();
+        let mut version = [0; 4];
+        disk.read_at(file, 8, &mut version).unwrap();
+        disk.close(file).unwrap();
+        u32::from_le_bytes(version)
+    };
+    let state = |engine: &Engine| {
+        let m = engine.metrics().unwrap();
+        (m.manifest_version, m.compressing, m.compressed_turns)
+    };
+    let s = scope("s");
+
+    let engine = open(disk.clone(), with(CompressionMode::Off));
+    assert_eq!(state(&engine), (2, false, 0), "off keeps a new store readable by v0.2.0");
+    let plain = engine.append(&s, vec![long("alpha")], Some("a")).unwrap();
+    drop(engine);
+    let engine = open(disk.clone(), with(CompressionMode::Auto));
+    assert_eq!(state(&engine), (2, false, 0), "auto never migrates an existing store");
+    drop(engine);
+    assert_eq!(manifest(&disk), 2);
+
+    let engine = open(disk.clone(), with(CompressionMode::On));
+    assert_eq!(state(&engine), (3, true, 0), "on migrates after recovery");
+    assert_eq!(manifest(&disk), 3);
+    let retry = engine.append(&s, vec![long("alpha")], Some("a")).unwrap();
+    assert_deduplicated(&plain, retry, "plain original, compressed retry");
+    let pending = || engine.metrics().unwrap().checkpoint_pending_bytes;
+    let before = pending();
+    let packed = engine.append(&s, vec![long("bravo"), turn(7)], Some("b")).unwrap();
+    assert_eq!(state(&engine).2, 1, "only the long turn compresses");
+    assert!(pending() - before > 1200, "checkpoints pace by uncompressed bytes");
+    drop(engine);
+
+    let engine = open(disk.clone(), with(CompressionMode::Off));
+    assert_eq!(state(&engine), (3, false, 0), "off never lowers the version");
+    let retry = engine.append(&s, vec![long("bravo"), turn(7)], Some("b")).unwrap();
+    assert_deduplicated(&packed, retry, "compressed original, plain retry");
+    let conflict = engine.append(&s, vec![long("bravo!")], Some("b")).unwrap_err();
+    assert!(matches!(conflict.kind, ErrorKind::IdempotencyConflict), "{conflict:?}");
+    engine.append(&s, vec![long("charlie")], None).unwrap();
+    engine.checkpoint().unwrap();
+    drop(engine);
+
+    let expected = [long("alpha").content, long("bravo").content, turn(7).content];
+    let expected = [&expected[..], &[long("charlie").content]].concat();
+    for (case, mode) in
+        [("from a checkpoint", CompressionMode::Auto), ("again", CompressionMode::On)]
+    {
+        let engine = open(disk.clone(), with(mode));
+        assert_eq!(state(&engine), (3, true, 0), "{case}: auto compresses a version 3 store");
+        let window = engine.window(&s, WindowQuery::Last(10)).unwrap();
+        let got: Vec<_> = window.into_iter().map(|turn| turn.content).collect();
+        assert_eq!(got, expected, "{case}: plain and compressed turns read back");
+        let query = SearchQuery {
+            query: "bravo".into(),
+            before: None,
+            limit: 10,
+            max_bytes: 1 << 20,
+            visits: 1000,
+        };
+        let hits = engine.search("tenant", query).unwrap().hits;
+        assert_eq!(hits.len(), 1, "{case}: search reads compressed content");
+    }
+    // The batch limit counts stored bytes, so a compressible 4 MiB turn now fits.
+    let engine = open(disk.clone(), with(CompressionMode::On));
+    let big = NewTurn { content: vec![b'a'; 4 * 1024 * 1024], ..turn(0) };
+    engine.append(&scope("big"), vec![big.clone()], None).unwrap();
+    let window = engine.window_budget(&scope("big"), WindowQuery::Last(1), 8 << 20).unwrap();
+    assert_eq!(window.turns[0].content, big.content);
+}
+
+#[test]
 fn retries_conflicts_scope_isolation_and_replay() {
     let disk = Arc::new(SimDisk::new(2));
     let engine = open(disk.clone(), options());
@@ -602,7 +684,9 @@ fn concurrent_same_key_writes_once() {
 
 #[test]
 fn invalid_and_over_limit_writes_are_typed_and_write_nothing() {
-    let opts = EngineOptions { max_sessions: 1, max_pages: 1, ..options() };
+    // Compression would shrink the 4 MiB turn below the batch limit. See the compression test.
+    let mut opts = EngineOptions { max_sessions: 1, max_pages: 1, ..options() };
+    opts.compression.mode = atticdb_core::CompressionMode::Off;
     let engine = open(Arc::new(SimDisk::new(9)), opts);
     let s = scope("s");
     let too_big = NewTurn { content: vec![0; 4 * 1024 * 1024], ..turn(1) };

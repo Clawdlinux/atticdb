@@ -22,9 +22,16 @@ atticdb verify --data-dir ./data                  # checks a stopped data dir on
 atticdb recover --truncate-at <lsn> --data-dir ./data
 ```
 
-The config is JSON: `{"data_dir", "listen", "unix_socket", "unix_socket_group", "tenants": [{"name", "token"}]}`.
+The config is JSON: `{"data_dir", "listen", "unix_socket", "unix_socket_group", "compression", "tenants": [{"name", "token"}]}`.
 Flags override fields. It must be a regular file owned by you with no group or other bits.
 Tenant names are 1 to 255 bytes. Tokens are 32 to 1024 bytes of visible ASCII, so the `Authorization` header fits the 16 KiB request head. Duplicate names or tokens fail.
+
+`compression` is `"auto"` (the default), `"on"` or `"off"`. Turns of 256 bytes or more are stored as raw deflate when that's smaller. On real agent transcripts that saves about 62% of disk (D95).
+- `auto`: a new data directory compresses. An existing one written by v0.2.0 or earlier stays as it is, so those builds can still open it.
+- `on`: compresses, and upgrades an existing directory once. From then on v0.2.0 and earlier refuse to open it with `invalid metadata magic, version, or CRC`. Nothing is damaged. Use v0.3.0 or later.
+- `off`: new turns are stored plain. Compressed turns stay readable.
+
+`/v1/stats` shows `manifest_version` (3 once a directory may hold compressed turns), `compressing` and `compressed_turns`.
 
 ## Run a server by hand
 

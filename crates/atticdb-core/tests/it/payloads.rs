@@ -5,6 +5,10 @@ use proptest::prelude::*;
 
 const MIB4: usize = 4 * 1024 * 1024;
 
+fn value_len(payload: &[u8]) -> usize {
+    turn::decode(payload).unwrap().turn.content.len()
+}
+
 proptest! {
     #[test]
     fn payloads_round_trip(
@@ -34,6 +38,15 @@ proptest! {
         let decoded = turn::decode(&bytes).unwrap();
         prop_assert_eq!((decoded.agent_id, decoded.session_id, decoded.seq), (a, b, n));
         prop_assert_eq!((decoded.turn, decoded.idem_key), (value, key));
+        // Compression never grows a payload, and reads back as the same turn and v1 bytes.
+        for min in [0, 64, 4096] {
+            let packed = turn::compress(bytes.clone(), 3, min).unwrap();
+            prop_assert!(packed.len() <= bytes.len());
+            prop_assert!(packed[0] == 2 || packed == bytes, "plain payloads stay as they are");
+            prop_assert!(packed[0] == 1 || value_len(&bytes) >= min, "small content stays plain");
+            prop_assert_eq!(turn::decode(&packed).unwrap(), turn::decode(&bytes).unwrap());
+            prop_assert_eq!(&*turn::canonical(&packed).unwrap(), &bytes[..]);
+        }
     }
 
     #[test]
@@ -52,11 +65,16 @@ fn payloads_reject_truncation_trailing_bytes_and_unknown_versions() {
         up_to_lsn: Some(1),
     };
     let user = NewTurn { role: Role::User, content: b"hello".to_vec(), meta: vec![] };
+    let long = NewTurn { role: Role::Tool, content: b"ab".repeat(400), meta: b"m".to_vec() };
+    let packed = turn::compress(turn::encode("a", "s", 4, &long, Some("k")).unwrap(), 3, 256);
+    let packed = packed.unwrap();
+    assert_eq!(packed[0], 2, "800 repetitive bytes compress");
     type Decodes = fn(&[u8]) -> bool;
-    let cases: [(&str, Vec<u8>, Decodes); 3] = [
+    let cases: [(&str, Vec<u8>, Decodes); 4] = [
         ("fact", fact::encode(&fact()).unwrap(), |b| fact::decode(b).is_ok()),
         ("forget", forget::encode(&forget).unwrap(), |b| forget::decode(b).is_ok()),
         ("turn", turn::encode("a", "s", 4, &user, None).unwrap(), |b| turn::decode(b).is_ok()),
+        ("compressed turn", packed.clone(), |b| turn::decode(b).is_ok()),
     ];
     for (case, mut data, ok) in cases {
         assert!(ok(&data), "{case}");
@@ -64,8 +82,23 @@ fn payloads_reject_truncation_trailing_bytes_and_unknown_versions() {
         data.push(0);
         assert!(!ok(&data), "{case}: trailing byte");
         data.pop();
-        data[0] = 2;
+        data[0] = 3;
         assert!(!ok(&data), "{case}: unknown version");
+    }
+    // Version 2 layout: version, agent, session, seq, role, meta, raw_len, stream, retry key.
+    let raw_len_at = 1 + (4 + 1) + (4 + 1) + 8 + 1 + (4 + 1);
+    assert_eq!(packed[raw_len_at..raw_len_at + 4], 800u32.to_le_bytes());
+    let stream_at = raw_len_at + 8;
+    for (case, edit) in [
+        ("raw_len short", (raw_len_at, 799u32.to_le_bytes().to_vec())),
+        ("raw_len long", (raw_len_at, 801u32.to_le_bytes().to_vec())),
+        ("raw_len over 4 MiB", (raw_len_at, (MIB4 as u32 + 1).to_le_bytes().to_vec())),
+        ("bad stream", (stream_at, vec![0xff, 0xff, 0xff])),
+    ] {
+        let mut data = packed.clone();
+        data[edit.0..edit.0 + edit.1.len()].copy_from_slice(&edit.1);
+        assert!(turn::decode(&data).is_err(), "{case}");
+        assert!(turn::canonical(&data).is_err(), "{case}");
     }
     let mut data = fact::encode(&fact()).unwrap();
     for (case, at) in [("tombstone flag", data.len() - 1), ("retry key tag", 21)] {

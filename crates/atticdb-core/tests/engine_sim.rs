@@ -2,8 +2,9 @@
 #![allow(clippy::unwrap_used)]
 
 use atticdb_core::{
-    turn::decode, Appended, Engine, EngineError, EngineOptions, ErrorKind, FactQuery, FactWritten,
-    Health, NewFact, NewTurn, Outcome, Role, Scope, SimFact, Turn, WindowQuery,
+    turn::decode, Appended, CompressionMode, Engine, EngineError, EngineOptions, ErrorKind,
+    FactQuery, FactWritten, Health, NewFact, NewTurn, Outcome, Role, Scope, SimFact, Turn,
+    WindowQuery,
 };
 use atticdb_tape::sim::{CapacityError, CapacityPlan, PublishPause, SimClock, StorageFullFault};
 use atticdb_tape::{Clock, Error, HookIo, Io, Kind, Op, SimDisk, Tape, TapeOptions};
@@ -26,6 +27,14 @@ impl Rng {
     }
     fn bytes(&mut self, n: usize) -> Vec<u8> {
         (0..n).map(|_| self.next() as u8).collect()
+    }
+    /// Random bytes half the time, else 2-symbol text that deflate shrinks, so both turn
+    /// payload versions reach the tape.
+    fn content(&mut self, n: usize) -> Vec<u8> {
+        if self.below(2) == 0 {
+            return self.bytes(n);
+        }
+        (0..n).map(|_| b"ab"[self.below(2)]).collect()
     }
 }
 
@@ -521,7 +530,7 @@ fn random_batch(
             metadata.extend(rng.bytes(meta));
             NewTurn {
                 role: [Role::System, Role::User, Role::Assistant, Role::Tool][rng.below(4)],
-                content: rng.bytes(size),
+                content: rng.content(size),
                 meta: metadata,
             }
         })
@@ -570,7 +579,7 @@ fn run_seed(seed: u64) -> Vec<Vec<Turn>> {
 
 fn run_seed_with_capacity(seed: u64, plan: &CapacityPlan) -> Vec<Vec<Turn>> {
     let mut rng = Rng(seed);
-    let opts = EngineOptions {
+    let mut opts = EngineOptions {
         tape: TapeOptions {
             segment_size: 64 * 1024,
             inline_sim: true,
@@ -588,6 +597,9 @@ fn run_seed_with_capacity(seed: u64, plan: &CapacityPlan) -> Vec<Vec<Turn>> {
     let mut oracle = Oracle::new();
     oracle.fact_history = opts.fact_history;
     for generation in 0..3 {
+        // Later reopens switch modes, so stores mix plain and compressed turns and migrate.
+        let modes = [CompressionMode::Auto, CompressionMode::Off, CompressionMode::On];
+        opts.compression.mode = modes[(seed as usize + generation) % 3];
         for step in 0..40 {
             clock.advance(1 + rng.below(2_000_000_000) as u64);
             // Seeded points replace the checkpoint timer. Memory-pressure flushes remain automatic.

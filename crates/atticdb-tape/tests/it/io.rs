@@ -193,6 +193,36 @@ fn manifest_round_trips_and_damage_is_corruption() {
         let reopened = DataDir::open(image, "db", None, 1024);
         assert!(matches!(reopened, Err(Error::CorruptionDetected { .. })), "{case}");
     }
+
+    // Version 3 has version 2's layout. Raising is atomic and one-way, and keeps the segments.
+    let mut dir = DataDir::open(io.clone(), "db", None, 1024).unwrap();
+    assert_eq!(dir.manifest_version(), 2, "opening never raises the version");
+    dir.raise_manifest_version(3).unwrap();
+    dir.raise_manifest_version(2).unwrap();
+    drop(dir);
+    let manifest = read(&*io, "db/MANIFEST");
+    assert_eq!(manifest[8..12], 3u32.to_le_bytes(), "a version 2 reader refuses this store");
+    let dir = DataDir::open(io.clone(), "db", None, 1024).unwrap();
+    assert_eq!((dir.manifest_version(), dir.segments()), (3, &[1, 2][..]));
+    drop(dir);
+    let fresh = DataDir::open_versioned(io.clone(), "new", None, 1024, 3).unwrap();
+    assert_eq!(fresh.manifest_version(), 3);
+    drop(fresh);
+    assert_eq!(read(&*io, "new/MANIFEST")[8..12], 3u32.to_le_bytes());
+    let unknown = DataDir::open_versioned(io.clone(), "other", None, 1024, 4);
+    assert!(matches!(unknown, Err(Error::Configuration(_))), "{unknown:?}");
+    // A version this build doesn't know is refused, even with a valid CRC.
+    let mut future = manifest.clone();
+    future[8..12].copy_from_slice(&4u32.to_le_bytes());
+    let end = future.len() - 4;
+    let crc = atticdb_tape::crc32c(&future[..end]).to_le_bytes();
+    future[end..].copy_from_slice(&crc);
+    let image = image(&io);
+    let file = image.open(Path::new("db/MANIFEST")).unwrap();
+    image.write_at(file, 0, &future).unwrap();
+    image.close(file).unwrap();
+    let reopened = DataDir::open(image, "db", None, 1024);
+    assert!(matches!(reopened, Err(Error::CorruptionDetected { .. })), "version 4");
 }
 
 #[test]
