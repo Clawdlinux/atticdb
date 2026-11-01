@@ -85,8 +85,15 @@ describe("Hero", () => {
     const poster = container.querySelector('[data-ui="poster"]')!;
     expect(poster).toHaveAttribute("role", "img");
     expect(poster).toHaveAttribute("aria-label", expect.stringMatching(/^The tape\. 1 writer on Local NVMe/));
-    expect(poster.querySelectorAll("svg rect").length).toBeGreaterThan(5);
-    expect(poster).toHaveTextContent("Claude Code");
+    // One static SVG, four parts by reference; the page's HTML carries no drawing of its own.
+    const refs = [...poster.querySelectorAll("use")].map((u) => u.getAttribute("href"));
+    expect(refs).toEqual([
+      "/tape-poster.svg#wide-left",
+      "/tape-poster.svg#wide-tape",
+      "/tape-poster.svg#narrow-left",
+      "/tape-poster.svg#narrow-tape",
+    ]);
+    expect(poster.querySelectorAll("rect, text, img")).toHaveLength(0);
     const canvas = await loaded(container);
     expect(canvas).toHaveAttribute("role", "img");
     expect(canvas).toHaveAttribute("aria-label", poster.getAttribute("aria-label"));
@@ -97,9 +104,9 @@ describe("Hero", () => {
   it("states the slowdown against the real p50", () => {
     const { container } = render(<Hero />);
     const caption = () => container.querySelector("[class*=timeCaption]");
-    expect(caption()).toHaveTextContent("Time slowed 2,500x. Real p50 on Local NVMe: 94 µs");
+    expect(caption()).toHaveTextContent("Time slowed 8,000x. Real p50 on Local NVMe: 94 µs");
     fireEvent.click(screen.getByRole("radio", { name: "Premium SSD v2" }));
-    expect(caption()).toHaveTextContent("Time slowed 1,500x. Real p50 on Premium SSD v2: 817 µs");
+    expect(caption()).toHaveTextContent("Time slowed 2,000x. Real p50 on Premium SSD v2: 817 µs");
   });
 
   it("pulls the plug mid-group and reports what each store kept, from the simulation", async () => {

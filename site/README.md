@@ -24,6 +24,8 @@ npm run build
 
 The build exports static files to `out/`. No Node.js server runs in production.
 The build downloads Google Fonts. The exported site serves those fonts locally.
+Before `dev` and `build`, `npm run poster` writes `public/tape-poster.svg`, the hero tape's still frame.
+It runs the tape sim with plain Node through `scripts/ts-hooks.mjs`. The file is git-ignored.
 
 ## Preview
 

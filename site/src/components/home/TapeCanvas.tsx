@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { NARROW_BELOW, geometry, scene, type Prim, type Tone } from "./tape-scene";
 import {
+  CUT_AT,
   RESTART_MS,
   cutTape,
   initTape,
@@ -11,6 +12,7 @@ import {
   runToCut,
   stepTape,
   stillFrame,
+  syncProgress,
   tapeParams,
   type TapeParams,
   type TapeState,
@@ -86,7 +88,7 @@ function useTape(disk: Disk, writers: Writers): Tape {
       const p = paramsRef.current;
       const before = stateRef.current;
       let s = stepTape(before, dt, p);
-      if (armed.current && s.syncing && s.t >= s.syncing.start + (s.syncing.end - s.syncing.start) * 0.4) {
+      if (armed.current && syncProgress(s) >= CUT_AT) {
         s = cutTape(s);
         stateRef.current = s;
         onCut(s);
@@ -170,13 +172,15 @@ function paint(ctx: CanvasRenderingContext2D, prims: Prim[], colors: Palette, fa
         cell = Math.max(...Array.from("0123456789", (d) => ctx.measureText(d).width));
         digitW.set(p.size, cell);
       }
-      const total = cell * p.s.length;
+      // Letters keep their own width; only digits sit in fixed cells.
+      const widths = Array.from(p.s, (ch) => (ch >= "0" && ch <= "9" ? cell! : ctx.measureText(ch).width));
+      const total = widths.reduce((a, b) => a + b, 0);
       let x = p.align === "center" ? p.x - total / 2 : p.align === "right" ? p.x - total : p.x;
       ctx.textAlign = "center";
-      for (const ch of p.s) {
-        ctx.fillText(ch, x + cell / 2, p.y);
-        x += cell;
-      }
+      Array.from(p.s).forEach((ch, i) => {
+        ctx.fillText(ch, x + widths[i] / 2, p.y);
+        x += widths[i];
+      });
     }
   }
   ctx.globalAlpha = 1;
@@ -203,10 +207,6 @@ export default function TapeCanvas(props: TapeCanvasProps) {
   const ref = useRef<HTMLCanvasElement>(null);
   const tape = useTape(disk, writers);
   const { stateRef, attach, advance, still } = tape;
-  const writersRef = useRef(writers);
-  useEffect(() => {
-    writersRef.current = writers;
-  }, [writers]);
   const kick = useRef<(() => void) | null>(null);
   const onLiveRef = useRef(onLive);
   useEffect(() => {
@@ -240,8 +240,10 @@ export default function TapeCanvas(props: TapeCanvasProps) {
       if (!w || !h) return;
       c2d.setTransform(dpr, 0, 0, dpr, 0, 0);
       c2d.clearRect(0, 0, w, h);
-      const G = geometry(w < NARROW_BELOW ? "narrow" : "wide", w, writersRef.current);
-      paint(c2d, scene(stateRef.current, writersRef.current, G, { still }), colors, family);
+      // Lanes, not the writers prop: a settings change redraws before the prop's effect runs.
+      const lanes = stateRef.current.lanes.length || 1;
+      const G = geometry(w < NARROW_BELOW ? "narrow" : "wide", w, lanes);
+      paint(c2d, scene(stateRef.current, lanes, G, { still }), colors, family);
     };
 
     const size = () => {

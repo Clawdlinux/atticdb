@@ -4,15 +4,16 @@ import { ackFor } from "@/content/bench";
 export type Disk = "nvme" | "premium-v2";
 export type Writers = 1 | 4 | 16;
 
-// Real fsync time to screen time. 94 µs on NVMe reads as about a quarter second.
-export const SLOWDOWN = 2500;
-// Premium SSD v2 would sweep for 2 s at that rate. The cap keeps it watchable.
-export const SYNC_CAP_MS = 1200;
+// The writer lays a group on the tape in this long. Shared by the sim and the clock below.
+export const LAY_MS = 360;
 
-// The on-screen sync time for a disk, from its 1-writer p50.
-export function syncMsFor(disk: Disk): number {
-  return Math.min(SYNC_CAP_MS, Math.round((ackFor(disk, 1).p50us * SLOWDOWN) / 1000));
-}
+/*
+ * Screen time for one lone ack (lay plus fdatasync) is the real 1-writer p50 times the slowdown.
+ * 8,000x makes NVMe's 94 µs a 752 ms commit. Premium SSD v2 would take 6.5 s at that rate,
+ * so it takes the largest clean factor that keeps the commit under ACK_CAP_MS.
+ */
+export const SLOWDOWN = 8000;
+export const ACK_CAP_MS = 1700;
 
 const CLEAN = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10];
 
@@ -25,9 +26,23 @@ export function cleanFactor(x: number): number {
   return Math.round(best * mag);
 }
 
-// How much slower than real the sync on screen runs, for the caption.
-export function slowdownFor(disk: Disk, syncMs = syncMsFor(disk)): number {
-  return cleanFactor((syncMs * 1000) / ackFor(disk, 1).p50us);
+// The largest clean factor at or under x.
+function cleanFloor(x: number): number {
+  const mag = 10 ** Math.floor(Math.log10(x));
+  const n = x / mag;
+  const best = CLEAN.filter((c) => c <= n + 1e-9).pop() ?? 1;
+  return Math.round(best * mag);
+}
+
+// How much slower than real the picture runs, for the caption. Exact, not rounded after the fact.
+export function slowdownFor(disk: Disk): number {
+  const p50ms = ackFor(disk, 1).p50us / 1000;
+  return p50ms * SLOWDOWN <= ACK_CAP_MS ? SLOWDOWN : cleanFloor(ACK_CAP_MS / p50ms);
+}
+
+// The on-screen fdatasync: the commit time less the lay.
+export function syncMsFor(disk: Disk): number {
+  return Math.round((ackFor(disk, 1).p50us * slowdownFor(disk)) / 1000) - LAY_MS;
 }
 
 // What each store kept when the power went out. Counted by the sim.

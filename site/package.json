@@ -3,7 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "poster": "node --import ./scripts/ts-hooks.mjs scripts/build-tape-poster.mjs",
+    "predev": "npm run poster",
     "dev": "next dev",
+    "prebuild": "npm run poster",
     "build": "next build",
     "lint": "eslint",
     "test": "vitest run",

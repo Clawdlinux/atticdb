@@ -3,7 +3,7 @@
  * the sentence and the install command share one first screen.
  */
 .hero {
-  --d: min(var(--step-display), 22vw, 15svh);
+  --d: min(var(--step-display), 22vw, 13.5svh);
   /* Headline line-height. The ack chip is exactly one of these tall. */
   --lh: 0.85;
   /* The content column of .container, measured inside the full-bleed band. */
@@ -252,7 +252,7 @@
 }
 
 .tape {
-  --tape-h: 196px;
+  --tape-h: 240px;
   --gutter: calc((100% - var(--column)) / 2);
   position: relative;
   height: var(--tape-h);
@@ -267,51 +267,59 @@
   height: 100%;
 }
 
-/* Until the canvas has drawn, the poster is the picture. Same frame, so the swap is invisible. */
-.tape:not([data-live="true"]) canvas,
-.tape[data-live="true"] .posters {
+/* Until the canvas has drawn, the poster is the picture. Then it fades out over the first frame. */
+.tape:not([data-live="true"]) canvas {
   visibility: hidden;
 }
 
-.posters,
-.poster {
+.tape[data-live="true"] .posters {
+  opacity: 0;
+  visibility: hidden;
+  transition:
+    opacity 200ms linear,
+    visibility 0s linear 200ms;
+}
+
+.posters {
   position: absolute;
   inset: 0;
 }
 
-.poster text {
+.posters svg {
+  display: block;
+  max-width: none;
+  height: var(--tape-h);
   font-variant-numeric: tabular-nums lining-nums;
 }
 
-.poster[data-mode="narrow"] {
-  display: none;
-}
-
-.poster svg {
-  max-width: none;
-  height: var(--tape-h);
-}
-
-.posterLeft {
-  position: absolute;
-  top: 0;
-  left: var(--gutter);
-}
-
+.posterLeft,
 .posterTape {
   position: absolute;
   top: 0;
+}
+
+/* The writers part starts 400px left of the gutter, so the tracks reach the band's edge. */
+.posterLeft {
+  left: calc(var(--gutter) - 400px);
+}
+
+.posterTape {
   right: 0;
   bottom: 0;
   left: calc(var(--gutter) + var(--tx));
   overflow: hidden;
 }
 
-/* The head rests min(240px, 30%) in from the right edge, as on the canvas. */
+/* The head rests min(220px, 30%) in from the right edge, as on the canvas. */
 .posterTape svg {
   position: absolute;
   top: 0;
-  right: calc(min(240px, 30%) - 240px);
+  right: calc(min(220px, 30%) - 220px);
+}
+
+.posterLeft[data-mode="narrow"],
+.posterTape[data-mode="narrow"] {
+  display: none;
 }
 
 .timeCaption {
@@ -471,14 +479,16 @@
   }
 
   .tape {
-    --tape-h: 204px;
+    --tape-h: 262px;
   }
 
-  .poster[data-mode="wide"] {
+  .posterLeft[data-mode="wide"],
+  .posterTape[data-mode="wide"] {
     display: none;
   }
 
-  .poster[data-mode="narrow"] {
+  .posterLeft[data-mode="narrow"],
+  .posterTape[data-mode="narrow"] {
     display: block;
   }
 

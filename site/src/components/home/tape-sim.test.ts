@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
+import { ackFor } from "@/content/bench";
 import {
   FRAME_GAP,
+  LAY_MS,
   PULSE_MS,
+  SEGMENT_UNITS,
+  segmentStart,
   cleanFactor,
   cutTape,
   initTape,
@@ -98,8 +102,32 @@ describe.each([1, 4, 16] as Writers[])("the tape with %i writers", (writers) => 
   it("never pulses more than a third of the lanes in one frame", () => {
     const cap = pulseCap(writers);
     for (const s of states) {
-      const lit = s.pulses.filter((u) => s.t >= u.start && s.t < u.start + PULSE_MS);
+      const lit = s.pulses.filter((u) => s.t >= u.arrive && s.t < u.arrive + PULSE_MS);
       expect(lit.length).toBeLessThanOrEqual(cap);
+    }
+  });
+
+  it("sends an ack only after its group's sync has ended, and the light flashes after it arrives", () => {
+    let seen = 0;
+    for (const s of states) {
+      for (const u of s.pulses) {
+        const g = end.history.find((h) => h.group === u.group) ?? s.history.find((h) => h.group === u.group);
+        expect(g).toBeDefined();
+        expect(u.start).toBeGreaterThanOrEqual(g!.syncEnd);
+        expect(u.arrive).toBeGreaterThan(u.start);
+        seen += 1;
+      }
+    }
+    expect(seen).toBeGreaterThan(0);
+  });
+
+  it("never lets a batch span two segments", () => {
+    const segOf = new Map<number, Set<number>>();
+    for (const f of end.frames) segOf.set(f.write, (segOf.get(f.write) ?? new Set()).add(f.segment));
+    for (const segs of segOf.values()) expect(segs.size).toBe(1);
+    for (const f of end.frames) {
+      expect(f.x).toBeGreaterThanOrEqual(segmentStart(f.segment));
+      expect(f.x + f.w).toBeLessThanOrEqual(segmentStart(f.segment) + SEGMENT_UNITS);
     }
   });
 
@@ -117,8 +145,12 @@ describe("group commit", () => {
   it("commits a lone write alone, with no timer", () => {
     const end = last(run(tapeParams("nvme", 1), 20000));
     expect(end.history.every((g) => g.writes.length === 1)).toBe(true);
-    // Lay plus sync plus the slide in: a lone write never waits on a timer.
-    for (const g of end.history) expect(g.syncEnd - g.layStart).toBeLessThan(600);
+    // Lay plus sync, nothing more: a lone write never waits on a timer.
+    for (const g of end.history) expect(g.syncEnd - g.layStart).toBe(LAY_MS + syncMsFor("nvme"));
+  });
+
+  it("groups writes at 4 writers too: more than 1.3 a group on average", () => {
+    expect(meanGroup(4)).toBeGreaterThan(1.3);
   });
 
   it("makes bigger groups with more writers", () => {
@@ -192,6 +224,21 @@ describe("pulling the plug", () => {
     expect(wound.feed).toBe(lastSynced.x + lastSynced.w + FRAME_GAP);
   });
 
+  it("never lights a writer green for a write the cut dropped", () => {
+    expect(before.lost.length).toBeGreaterThan(0);
+    const lostIds = new Set(before.lost);
+    let s = before;
+    for (let i = 0; i < 300; i += 1) {
+      s = stepTape(s, 16, p);
+      if (i === 100) s = restartTape(s, p);
+      for (const u of s.pulses) {
+        expect(lostIds.has(u.write)).toBe(false);
+        if (s.cut) expect(u.arrive + PULSE_MS).toBeLessThanOrEqual(before.t);
+      }
+    }
+    expect(s.acked).toBeGreaterThan(0);
+  });
+
   it("stops writing while the power is out, then recovers from the last synced frame", () => {
     const frozen = stepTape(before, 800, p);
     expect(frozen.frames.filter((f) => f.state === "synced")).toEqual(
@@ -211,15 +258,19 @@ describe("pulling the plug", () => {
 });
 
 describe("settings", () => {
-  it("syncs slower on Premium SSD v2, by the p50 ratio until the cap", () => {
-    expect(syncMsFor("nvme")).toBe(235);
-    expect(syncMsFor("premium-v2")).toBeGreaterThan(syncMsFor("nvme") * 4);
-    expect(syncMsFor("premium-v2")).toBeLessThanOrEqual(1200);
+  it("syncs slower on Premium SSD v2, and keeps the commit watchable", () => {
+    expect(syncMsFor("nvme")).toBe(752 - LAY_MS);
+    expect(syncMsFor("premium-v2")).toBeGreaterThan(syncMsFor("nvme") * 2);
+    expect(syncMsFor("premium-v2") + LAY_MS).toBeLessThanOrEqual(1700);
   });
 
-  it("states the slowdown as a clean number", () => {
-    expect(slowdownFor("nvme", syncMsFor("nvme"))).toBe(2500);
-    expect(slowdownFor("premium-v2", syncMsFor("premium-v2"))).toBe(1500);
+  it("states an exact slowdown: lay plus sync on screen is the real 1-writer p50 times it", () => {
+    expect(slowdownFor("nvme")).toBe(8000);
+    expect(slowdownFor("premium-v2")).toBe(2000);
+    for (const d of ["nvme", "premium-v2"] as const) {
+      const screen = syncMsFor(d) + LAY_MS;
+      expect(Math.abs(screen - (ackFor(d, 1).p50us * slowdownFor(d)) / 1000)).toBeLessThan(1);
+    }
     expect(cleanFactor(2660)).toBe(2500);
     expect(cleanFactor(1469)).toBe(1500);
   });

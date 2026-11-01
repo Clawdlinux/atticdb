@@ -11,3 +11,6 @@ site/out
 site/out-docs
 site/.taste-skill
 .superpowers/
+
+# Written by site/scripts/build-tape-poster.mjs before each build
+site/public/tape-poster.svg
