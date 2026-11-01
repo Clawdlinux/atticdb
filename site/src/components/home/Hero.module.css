@@ -298,13 +298,14 @@
   top: 0;
 }
 
-/* The writers part starts 400px left of the gutter, so the tracks reach the band's edge. */
+/* The poster is drawn with a 400px gutter; this puts it back on the content column. */
 .posterLeft {
   left: calc(var(--gutter) - 400px);
 }
 
+/* Like the canvas, the tape stops at the content column's right edge. */
 .posterTape {
-  right: 0;
+  right: var(--gutter);
   bottom: 0;
   left: calc(var(--gutter) + var(--tx));
   overflow: hidden;

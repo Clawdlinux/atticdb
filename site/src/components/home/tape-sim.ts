@@ -12,7 +12,7 @@
 import { LAY_MS, syncMsFor, type Disk, type PlugOutcome, type Writers } from "./tape-time";
 
 export type { Disk, PlugOutcome, Writers } from "./tape-time";
-export { LAY_MS, SLOWDOWN, cleanFactor, slowdownFor, syncMsFor } from "./tape-time";
+export { LAY_MS, SLOWDOWN, cleanFactor, commitMsFor, slowdownFor, syncMsFor } from "./tape-time";
 
 export type TapeParams = {
   writers: Writers;
@@ -160,7 +160,7 @@ export function writeEveryFor(writers: Writers): number {
 }
 
 export function tapeParams(disk: Disk, writers: Writers, seed = 7): TapeParams {
-  return { writers, syncMs: syncMsFor(disk), writeEveryMs: writeEveryFor(writers), seed };
+  return { writers, syncMs: syncMsFor(disk, writers), writeEveryMs: writeEveryFor(writers), seed };
 }
 
 function newLane(s: { rng: number }, p: TapeParams, t: number): Lane {

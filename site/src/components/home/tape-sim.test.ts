@@ -7,6 +7,7 @@ import {
   SEGMENT_UNITS,
   segmentStart,
   cleanFactor,
+  commitMsFor,
   cutTape,
   initTape,
   midGroup,
@@ -146,7 +147,7 @@ describe("group commit", () => {
     const end = last(run(tapeParams("nvme", 1), 20000));
     expect(end.history.every((g) => g.writes.length === 1)).toBe(true);
     // Lay plus sync, nothing more: a lone write never waits on a timer.
-    for (const g of end.history) expect(g.syncEnd - g.layStart).toBe(LAY_MS + syncMsFor("nvme"));
+    for (const g of end.history) expect(g.syncEnd - g.layStart).toBe(LAY_MS + syncMsFor("nvme", 1));
   });
 
   it("groups writes at 4 writers too: more than 1.3 a group on average", () => {
@@ -258,18 +259,26 @@ describe("pulling the plug", () => {
 });
 
 describe("settings", () => {
-  it("syncs slower on Premium SSD v2, and keeps the commit watchable", () => {
-    expect(syncMsFor("nvme")).toBe(752 - LAY_MS);
-    expect(syncMsFor("premium-v2")).toBeGreaterThan(syncMsFor("nvme") * 2);
-    expect(syncMsFor("premium-v2") + LAY_MS).toBeLessThanOrEqual(1700);
+  it("syncs slower on Premium SSD v2, and keeps every commit watchable", () => {
+    expect(syncMsFor("nvme", 1)).toBe(752 - LAY_MS);
+    expect(syncMsFor("premium-v2", 1)).toBeGreaterThan(syncMsFor("nvme", 1) * 2);
+    for (const d of ["nvme", "premium-v2"] as const) {
+      for (const w of [1, 4, 16] as const) expect(commitMsFor(d, w)).toBeLessThanOrEqual(1700);
+    }
   });
 
-  it("states an exact slowdown: lay plus sync on screen is the real 1-writer p50 times it", () => {
-    expect(slowdownFor("nvme")).toBe(8000);
-    expect(slowdownFor("premium-v2")).toBe(2000);
+  it("times every selection from its own p50, exactly", () => {
+    expect(slowdownFor("nvme", 1)).toBe(8000);
+    expect(slowdownFor("premium-v2", 1)).toBe(2000);
     for (const d of ["nvme", "premium-v2"] as const) {
-      const screen = syncMsFor(d) + LAY_MS;
-      expect(Math.abs(screen - (ackFor(d, 1).p50us * slowdownFor(d)) / 1000)).toBeLessThan(1);
+      for (const w of [1, 4, 16] as const) {
+        const p = tapeParams(d, w);
+        const real = (ackFor(d, w).p50us * slowdownFor(d, w)) / 1000;
+        expect(Math.abs(LAY_MS + p.syncMs - real) / real).toBeLessThan(0.01);
+        // And the sim spends exactly that long on each group commit.
+        const end = stepTape(initTape(p), 15000, p);
+        for (const g of end.history) expect(g.syncEnd - g.layStart).toBe(LAY_MS + p.syncMs);
+      }
     }
     expect(cleanFactor(2660)).toBe(2500);
     expect(cleanFactor(1469)).toBe(1500);

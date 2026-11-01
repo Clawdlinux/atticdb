@@ -232,8 +232,9 @@ function HeroBody() {
           </KeepPoster>
         </div>
         <p className={styles.timeCaption}>
-          Time slowed {numbers.format(slowdownFor(disk))}x. Real p50 on {diskLabel}:{" "}
-          <span className={styles.readout}>{formatAck(ack.p50us)}</span>
+          Time slowed {numbers.format(slowdownFor(disk, writers))}x. Real p50, {diskLabel},{" "}
+          {writers === 1 ? "1 writer" : `${writers} writers`}:{" "}
+          <span className={styles.readout}>{numbers.format(ack.p50us)} µs</span>
         </p>
       </div>
 

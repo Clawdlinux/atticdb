@@ -8,9 +8,10 @@ export type Writers = 1 | 4 | 16;
 export const LAY_MS = 360;
 
 /*
- * Screen time for one lone ack (lay plus fdatasync) is the real 1-writer p50 times the slowdown.
- * 8,000x makes NVMe's 94 µs a 752 ms commit. Premium SSD v2 would take 6.5 s at that rate,
- * so it takes the largest clean factor that keeps the commit under ACK_CAP_MS.
+ * Each selection is timed from its own p50. On screen, one commit (lay plus fdatasync) takes
+ * the real p50 for that disk and writer count times the slowdown, so the caption is true for
+ * whatever is selected. 8,000x makes NVMe's 94 µs (1 writer) a 752 ms commit. Where that would
+ * pass ACK_CAP_MS, the selection takes the largest clean factor that fits, to stay watchable.
  */
 export const SLOWDOWN = 8000;
 export const ACK_CAP_MS = 1700;
@@ -34,15 +35,20 @@ function cleanFloor(x: number): number {
   return Math.round(best * mag);
 }
 
-// How much slower than real the picture runs, for the caption. Exact, not rounded after the fact.
-export function slowdownFor(disk: Disk): number {
-  const p50ms = ackFor(disk, 1).p50us / 1000;
+// How much slower than real the picture runs for this selection. Exact, not rounded after the fact.
+export function slowdownFor(disk: Disk, writers: Writers): number {
+  const p50ms = ackFor(disk, writers).p50us / 1000;
   return p50ms * SLOWDOWN <= ACK_CAP_MS ? SLOWDOWN : cleanFloor(ACK_CAP_MS / p50ms);
 }
 
+// One commit on screen: the selection's real p50 times its slowdown.
+export function commitMsFor(disk: Disk, writers: Writers): number {
+  return Math.round((ackFor(disk, writers).p50us * slowdownFor(disk, writers)) / 1000);
+}
+
 // The on-screen fdatasync: the commit time less the lay.
-export function syncMsFor(disk: Disk): number {
-  return Math.round((ackFor(disk, 1).p50us * slowdownFor(disk)) / 1000) - LAY_MS;
+export function syncMsFor(disk: Disk, writers: Writers): number {
+  return commitMsFor(disk, writers) - LAY_MS;
 }
 
 // What each store kept when the power went out. Counted by the sim.

@@ -2,6 +2,9 @@
   "name": "atticdb-site",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": ">=22.18.0"
+  },
   "scripts": {
     "poster": "node --import ./scripts/ts-hooks.mjs scripts/build-tape-poster.mjs",
     "predev": "npm run poster",

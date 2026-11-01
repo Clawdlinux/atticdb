@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { INSTALL_CMD, WAITLIST_URL } from "@/lib/site";
 import Hero from "./Hero";
-import { RESTART_MS, runToCut, stillFrame, tapeParams } from "./tape-sim";
+import { LAY_MS, RESTART_MS, runToCut, stillFrame, tapeParams } from "./tape-sim";
 
 // The chip's text as it reads at rest: a leaving value may still be fading out beside it.
 function ackText(container: HTMLElement) {
@@ -101,12 +101,22 @@ describe("Hero", () => {
     expect(canvas).toHaveAttribute("aria-label", expect.stringMatching(/^The tape\. 16 writers on Local NVMe/));
   });
 
-  it("states the slowdown against the real p50", () => {
+  it("states a slowdown that is true for every selection: factor × real p50 = commit on screen", () => {
     const { container } = render(<Hero />);
-    const caption = () => container.querySelector("[class*=timeCaption]");
-    expect(caption()).toHaveTextContent("Time slowed 8,000x. Real p50 on Local NVMe: 94 µs");
-    fireEvent.click(screen.getByRole("radio", { name: "Premium SSD v2" }));
-    expect(caption()).toHaveTextContent("Time slowed 2,000x. Real p50 on Premium SSD v2: 817 µs");
+    const caption = () => container.querySelector("[class*=timeCaption]")!.textContent!.replace(/\s+/g, " ");
+    expect(caption()).toBe("Time slowed 8,000x. Real p50, Local NVMe, 1 writer: 94 µs");
+    for (const disk of ["nvme", "premium-v2"] as const) {
+      fireEvent.click(screen.getByRole("radio", { name: disk === "nvme" ? "Local NVMe" : "Premium SSD v2" }));
+      for (const writers of [1, 4, 16] as const) {
+        fireEvent.click(screen.getByRole("radio", { name: String(writers) }));
+        const m = caption().match(/Time slowed ([\d,]+)x\. Real p50, .+, \d+ writers?: ([\d,]+) µs/)!;
+        expect(m).not.toBeNull();
+        const factor = Number(m[1].replace(/,/g, ""));
+        const p50ms = Number(m[2].replace(/,/g, "")) / 1000;
+        const screenMs = LAY_MS + tapeParams(disk, writers).syncMs;
+        expect(Math.abs(factor * p50ms - screenMs) / screenMs).toBeLessThan(0.01);
+      }
+    }
   });
 
   it("pulls the plug mid-group and reports what each store kept, from the simulation", async () => {

@@ -11,7 +11,7 @@ import { stillFrame, tapeParams } from "../src/components/home/tape-sim.ts";
 
 const ROOT = new URL("../", import.meta.url);
 
-// The writers part reaches this far left of the gutter, so tracks run to the band's edge.
+// The geometry is drawn with this gutter; the hero places the parts back at the real one.
 export const POSTER_PAD = 400;
 // The tape part: wide enough for a 2560 px screen, and for the stacked band under 768 px.
 export const POSTER_SPAN = { wide: 1800, narrow: 800 };
@@ -51,7 +51,8 @@ export function posterParts() {
   for (const mode of ["wide", "narrow"]) {
     const tx0 = geometry(mode, 10000, p.writers, POSTER_PAD).tx;
     const span = POSTER_SPAN[mode];
-    const G = geometry(mode, tx0 + span, p.writers, POSTER_PAD);
+    // The tape ends at the content column's right edge, a gutter in from the band's.
+    const G = geometry(mode, tx0 + span + POSTER_PAD, p.writers, POSTER_PAD);
     // Wide: the writers part ends where the tape begins. Narrow: the tape runs underneath it.
     const leftW = Math.max(G.tx, G.qx + G.colW + 40);
     parts.push({ id: `${mode}-left`, mode, layer: "left", G, x: 0, w: leftW, h: G.h, y });
@@ -68,9 +69,10 @@ export function posterSvg(css) {
   const still = stillFrame(params);
   const body = parts
     .map((q) => {
-      // Segment labels stick where the tape starts on a 1440 px (wide) or 390 px (narrow) screen.
-      const shown = q.mode === "wide" ? 1440 - 80 - (q.G.tx - POSTER_PAD) : 390 - 16;
-      const prims = scene(still, params.writers, q.G, { still: true, stickyX: q.G.w - shown });
+      // Segment labels stick where the tape starts on a 1440 px (wide) or 360 px (narrow) screen,
+      // so they are never cut off at the narrowest phones.
+      const shown = q.mode === "wide" ? 1440 - 2 * 80 - (q.G.tx - POSTER_PAD) : 360 - 2 * 16;
+      const prims = scene(still, params.writers, q.G, { still: true, stickyX: q.G.right - shown });
       return `<g id="${q.id}" transform="translate(${r1(-q.x)} ${q.y})">${shapes(prims, q.layer, colors)}</g>`;
     })
     .join("");

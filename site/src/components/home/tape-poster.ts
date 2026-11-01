@@ -1,7 +1,7 @@
 // The still-frame poster's parts in public/tape-poster.svg (written by scripts/build-tape-poster.mjs).
 // Sizes are checked against the generator in its test.
 export const POSTER_SRC = "/tape-poster.svg";
-// The writers part starts this far left of the gutter, so its tracks reach the band's edge.
+// The poster's parts are drawn with this gutter; the hero shifts them onto the real one.
 export const POSTER_PAD = 400;
 
 // y: where the group sits in the stacked file, for the viewBox that shows it.
