@@ -104,22 +104,22 @@ export const PLAN_FEATURES: { feature: string; values: Record<Plan["id"], string
   },
   {
     feature: "Per-agent tokens",
-    values: { local: "Not announced", pro: "Not announced", team: "Included", vpc: "Not announced" },
+    values: { local: "No", pro: "No", team: "Included", vpc: "Talk to us" },
   },
   {
     feature: "Roles",
-    values: { local: "Not announced", pro: "Not announced", team: "Included", vpc: "Not announced" },
+    values: { local: "No", pro: "No", team: "Included", vpc: "Talk to us" },
   },
   {
     feature: "GitHub and Google sign-in",
-    values: { local: "Not announced", pro: "Not announced", team: "Included", vpc: "Not announced" },
+    values: { local: "No", pro: "No", team: "Included", vpc: "Talk to us" },
   },
   {
     feature: "Audit log",
-    values: { local: "Not announced", pro: "Not announced", team: "Included", vpc: "Not announced" },
+    values: { local: "No", pro: "No", team: "Included", vpc: "Talk to us" },
   },
   {
     feature: "Support SLA",
-    values: { local: "Not announced", pro: "Not announced", team: "Not announced", vpc: "Included" },
+    values: { local: "No", pro: "No", team: "No", vpc: "Included" },
   },
 ];

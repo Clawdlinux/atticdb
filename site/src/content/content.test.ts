@@ -92,7 +92,7 @@ describe("pricing content", () => {
     for (const row of PLAN_FEATURES) {
       expect(Object.keys(row.values).sort()).toEqual(["local", "pro", "team", "vpc"]);
       for (const value of Object.values(row.values)) {
-        expect(value).not.toBe("Not specified");
+        expect(value).not.toMatch(/Not (specified|announced)/);
       }
     }
   });
