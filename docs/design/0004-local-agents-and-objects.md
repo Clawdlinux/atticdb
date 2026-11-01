@@ -135,7 +135,7 @@ Why not the S3 protocol: SigV4 auth, multipart upload and bucket semantics are a
 | P1 (#71) | Track A: install, home, `connect`, `doctor`, README storage guidance | Q1 answered | No |
 | P2 (#72) | Track B: Claude Code capture, A-sessions | P1 shipped, Q2 answered | No |
 | P3 (#73) | Track C: links, then objects | S5 forget (#45) designed, so object refs follow I10. Q3 to Q5 answered | Yes, a new record kind |
-| P4 (#74) | Track D: compression | Dogfood numbers from #46 meet the gate | Yes, a frame flag |
+| P4 (#74) | Track D: compression. Turns shipped in D95: raw deflate in a turn payload version, not a frame flag | Real-transcript numbers met the gate: 62% saved (`bench/realload.py`) | Yes, turn payload version 2 and MANIFEST version 3 |
 
 Deferred, with the evidence that would reopen each:
 - **Remote object tiering:** a user's object store outgrows a local disk.
