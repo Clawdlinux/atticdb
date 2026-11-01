@@ -3,7 +3,7 @@ import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import PricingPage, { metadata } from "@/app/pricing/page";
 import { PRICING_FAQ } from "@/content/faq";
 import { PLAN_FEATURES, PLANS } from "@/content/pricing";
-import { INSTALL_CMD, VPC_URL, WAITLIST_URL } from "@/lib/site";
+import { INSTALL_CMD, VPC_URL, waitlistUrl } from "@/lib/site";
 
 beforeAll(() => {
   globalThis.IntersectionObserver ??= class {
@@ -73,10 +73,10 @@ describe("pricing page", () => {
     const waitlistLinks = within(plansRegion).getAllByRole("link", {
       name: "Join the cloud waitlist",
     });
-    expect(waitlistLinks).toHaveLength(2);
-    for (const link of waitlistLinks) {
-      expect(link).toHaveAttribute("href", WAITLIST_URL);
-    }
+    expect(waitlistLinks.map((link) => link.getAttribute("href"))).toEqual([
+      waitlistUrl("pro"),
+      waitlistUrl("team"),
+    ]);
 
     const vpcLink = within(plansRegion).getByRole("link", { name: "Talk to us" });
     expect(vpcLink).toHaveAttribute("href", VPC_URL);

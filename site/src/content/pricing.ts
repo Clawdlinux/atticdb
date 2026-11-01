@@ -1,4 +1,4 @@
-import { VPC_URL, WAITLIST_URL } from "@/lib/site";
+import { VPC_URL, waitlistUrl } from "@/lib/site";
 
 export type Plan = {
   name: string;
@@ -35,7 +35,7 @@ export const PLANS: Plan[] = [
       "10 GB of synced memory.",
       "Daily snapshots, 30-day restore.",
     ],
-    cta: { label: "Join the cloud waitlist", href: WAITLIST_URL },
+    cta: { label: "Join the cloud waitlist", href: waitlistUrl("pro") },
   },
   {
     id: "team",
@@ -48,7 +48,7 @@ export const PLANS: Plan[] = [
       "Per-agent tokens and roles.",
       "25 GB per seat, pooled.",
     ],
-    cta: { label: "Join the cloud waitlist", href: WAITLIST_URL },
+    cta: { label: "Join the cloud waitlist", href: waitlistUrl("team") },
   },
   {
     id: "vpc",

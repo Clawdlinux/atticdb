@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { SITE_URL, VPC_URL, WAITLIST_URL } from "@/lib/site";
+import { SITE_URL, VPC_URL, waitlistUrl } from "@/lib/site";
 import * as bench from "./bench";
 import * as pricing from "./pricing";
 import * as compare from "./compare";
@@ -77,8 +77,8 @@ describe("pricing content", () => {
   it("uses the planned prices, availability, and destination URLs", () => {
     expect(PLANS.map((plan) => plan.price)).toEqual(["$0", "$15", "$29", "Talk to us"]);
     expect(PLANS.map((plan) => plan.status)).toEqual(["Available", "Planned", "Planned", "Planned"]);
-    expect(PLANS.find((plan) => plan.id === "pro")?.cta.href).toBe(WAITLIST_URL);
-    expect(PLANS.find((plan) => plan.id === "team")?.cta.href).toBe(WAITLIST_URL);
+    expect(PLANS.find((plan) => plan.id === "pro")?.cta.href).toBe(waitlistUrl("pro"));
+    expect(PLANS.find((plan) => plan.id === "team")?.cta.href).toBe(waitlistUrl("team"));
     expect(PLANS.find((plan) => plan.id === "vpc")?.cta.href).toBe(VPC_URL);
     expect(PLANS.find((plan) => plan.id === "local")?.cta).toEqual({ label: "Install AtticDB" });
   });
@@ -160,7 +160,7 @@ describe("FAQ content", () => {
       "The bytes of your turns, facts and fact history on disk. Forgotten records stop counting after compaction.",
       "That's the plan. Same API and MCP tools, so your agents won't notice. The import tool ships with cloud.",
       "Planned: $1 per extra GB per month. Nothing is deleted and writes never stop for billing.",
-      "When enough people ask. Each waitlist issue counts, so open one from the buttons above.",
+      "When enough people ask. Join the waitlist from the buttons above and we'll email you when it opens.",
     ]);
   });
 

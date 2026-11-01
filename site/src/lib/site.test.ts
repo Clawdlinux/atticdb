@@ -1,5 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { absoluteUrl, siteHref, DOCS_ORIGIN, DOCS_URL, INSTALL_CMD, WAITLIST_URL, VPC_URL } from "@/lib/site";
+import {
+  absoluteUrl,
+  siteHref,
+  waitlistUrl,
+  DOCS_ORIGIN,
+  DOCS_URL,
+  INSTALL_CMD,
+  WAITLIST_PLAN_CHOICES,
+  WAITLIST_URL,
+  VPC_URL,
+} from "@/lib/site";
 
 describe("absoluteUrl", () => {
   it.each([
@@ -20,10 +30,17 @@ describe("site links", () => {
     );
   });
 
-  it("opens the cloud waitlist issue", () => {
+  it("opens the cloud waitlist form", () => {
     expect(WAITLIST_URL).toBe(
-      "https://github.com/Clawdlinux/atticdb/issues/new?template=feature.yml&title=Cloud%20waitlist%3A%20",
+      "https://docs.google.com/forms/d/e/1FAIpQLSfliAcFY85SBQAiUpZnllibyhD3xhFpjWmTk1ynmpUWGRIVcQ/viewform",
     );
+  });
+
+  it.each(["pro", "team", "vpc"] as const)("prefills the %s plan with the form's exact choice", (plan) => {
+    const url = new URL(waitlistUrl(plan));
+    expect(`${url.origin}${url.pathname}`).toBe(WAITLIST_URL);
+    expect(url.searchParams.get("usp")).toBe("pp_url");
+    expect(url.searchParams.get("entry.690882465")).toBe(WAITLIST_PLAN_CHOICES[plan]);
   });
 
   it("points the docs link at the docs host", () => {
@@ -31,10 +48,9 @@ describe("site links", () => {
     expect(DOCS_ORIGIN).toBe("https://docs.atticdb.com");
   });
 
-  it("opens the VPC request issue", () => {
-    expect(VPC_URL).toBe(
-      "https://github.com/Clawdlinux/atticdb/issues/new?template=feature.yml&title=Cloud%20in%20my%20VPC%3A%20",
-    );
+  it("opens the form with Your cloud picked for VPC requests", () => {
+    expect(VPC_URL).toBe(waitlistUrl("vpc"));
+    expect(new URL(VPC_URL).searchParams.get("entry.690882465")).toBe("Your cloud: your VPC or air-gapped");
   });
 });
 

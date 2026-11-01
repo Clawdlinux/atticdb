@@ -170,14 +170,14 @@ In this order. Each maps to a sheet blueprint.
 
 - Line under the plans: "No per-memory or per-call fees. AtticDB makes no model calls when it writes, so we have no tokens to resell. Storage is the meter."
 - Line: "Cloud pricing is planned and may change before launch. Local stays free."
-- Cloud buttons go to the waitlist: `https://github.com/Clawdlinux/atticdb/issues/new?template=feature.yml&title=Cloud%20waitlist%3A%20`.
-  "Your cloud" goes to the same URL with title `Cloud%20in%20my%20VPC%3A%20`.
+- Cloud buttons go to the waitlist Google Form (`WAITLIST_FORM_URL` in `site/src/lib/site.ts`, owned by 007ssancheti@gmail.com). Each plan button prefills its plan; generic waitlist links open the form blank. Changed from a GitHub issue link on 2026-11-01 at the owner's request.
+  "Your cloud" opens the same form with "Your cloud: your VPC or air-gapped" picked.
 - A feature table across the 4 plans (a real `<table>`).
 - A pricing FAQ: 4 questions. Answers (Our call, planned and labeled so):
   - What counts as storage? "The bytes of your turns, facts and fact history on disk. Forgotten records stop counting after compaction."
   - Can I move from local to cloud? "That's the plan. Same API and MCP tools, so your agents won't notice. The import tool ships with cloud."
   - What if I exceed 10 GB? "Planned: $1 per extra GB per month. Nothing is deleted and writes never stop for billing."
-  - When does cloud launch? "When enough people ask. Each waitlist issue counts, so open one from the buttons above."
+  - When does cloud launch? "When enough people ask. Join the waitlist from the buttons above and we'll email you when it opens."
 
 ### `/compare`
 
