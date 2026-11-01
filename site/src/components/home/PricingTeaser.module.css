@@ -1,10 +1,8 @@
-/* "One plan as a sentence": the price sits on a signal block one line-height tall. */
 .pricing {
   display: flex;
-  min-height: 80svh;
   flex-direction: column;
   justify-content: center;
-  padding-block: var(--space-section);
+  padding-block: calc(var(--space-section) * 0.5);
 }
 
 /* Heading size until the second line fits one line at the display size. */
@@ -19,19 +17,10 @@
   display: block;
 }
 
-.price {
-  display: inline-block;
-  height: 0.95em;
-  padding-inline: 0.15em;
-  background: var(--accent);
-  color: var(--accent-ink);
-  font-variant-numeric: lining-nums;
-}
-
 .foot {
   display: grid;
   gap: 1.5rem;
-  margin-top: 2.5rem;
+  margin-top: 1.5rem;
 }
 
 .support p {
@@ -59,18 +48,12 @@
   text-decoration-thickness: 2px;
 }
 
-@media (min-width: 90rem) {
-  .title {
-    font-size: var(--step-display);
-  }
-}
-
 @media (min-width: 64rem) {
   .foot {
     grid-template-columns: repeat(12, minmax(0, 1fr));
     column-gap: 2rem;
     align-items: end;
-    margin-top: 4rem;
+    margin-top: 1.5rem;
   }
 
   .support {

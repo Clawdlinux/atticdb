@@ -144,49 +144,42 @@ export default function ComparePage() {
         </Reveal>
       </section>
 
-      <section className={styles.splitSection} aria-labelledby="pick-attic-title">
-        <Reveal className={styles.splitHead}>
-          <h2 id="pick-attic-title" className={styles.sectionTitle}>
-            Pick AtticDB if
-          </h2>
+      <section className={styles.pickSection} aria-labelledby="pick-title">
+        <Reveal>
+          <h2 id="pick-title" className={styles.sectionTitle}>Which to pick</h2>
         </Reveal>
-        <ul className={`${styles.splitBody} ${styles.pickList}`}>
-          {PICK_ATTIC.map((item, i) => (
-            <Reveal as="li" key={item} delay={0.075 * (i + 1)} className={styles.pickItem}>
-              {item}
-            </Reveal>
-          ))}
-        </ul>
-      </section>
-
-      <section
-        className={`bleed ${styles.surfaceBand}`}
-        aria-labelledby="pick-other-title"
-      >
-        <div className={styles.splitInner}>
-          <Reveal className={styles.splitHead}>
-            <h2 id="pick-other-title" className={styles.sectionTitle}>
-              Pick something else if
-            </h2>
-          </Reveal>
-          <dl className={`${styles.splitBody} ${styles.otherList}`}>
-            {PICK_OTHER.map(({ when, product }, i) => (
-              <Reveal key={when} delay={0.075 * (i + 1)} className={styles.otherRow}>
-                <dt className={styles.otherWhen}>{when}</dt>
-                <dd className={styles.otherProduct}>{product}</dd>
-              </Reveal>
-            ))}
-          </dl>
+        <div className={styles.pickColumns}>
+          <div>
+            <h3 className={styles.pickHeading}>Pick AtticDB if</h3>
+            <ul className={styles.pickList}>
+              {PICK_ATTIC.map((item, i) => (
+                <Reveal as="li" key={item} delay={0.075 * (i + 1)} className={styles.pickItem}>
+                  {item}
+                </Reveal>
+              ))}
+            </ul>
+          </div>
+          <div>
+            <h3 className={styles.pickHeading}>Pick something else if</h3>
+            <dl className={styles.otherList}>
+              {PICK_OTHER.map(({ when, product }, i) => (
+                <Reveal key={when} delay={0.075 * (i + 1)} className={styles.otherRow}>
+                  <dt className={styles.otherWhen}>{when}</dt>
+                  <dd className={styles.otherProduct}>{product}</dd>
+                </Reveal>
+              ))}
+            </dl>
+          </div>
         </div>
       </section>
 
-      <section className={styles.splitSection} aria-labelledby="sources-title">
-        <Reveal className={styles.splitHead}>
+      <section className={`bleed ${styles.sourcesSection}`} aria-labelledby="sources-title">
+        <Reveal>
           <h2 id="sources-title" className={styles.sectionTitle}>
             Sources
           </h2>
         </Reveal>
-        <ol className={`${styles.splitBody} ${styles.sourcesList}`}>
+        <ol className={styles.sourcesList}>
           {entries.map((entry, i) => (
             <Reveal
               as="li"

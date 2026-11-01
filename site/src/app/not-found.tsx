@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import ArchivalPicture from "@/components/ArchivalPicture";
 import Reveal from "@/components/Reveal";
-import { creditFor } from "@/content/credits";
+import { CREDITS, creditFor } from "@/content/credits";
 import { STAGGER } from "@/lib/motion";
 import { siteHref } from "@/lib/site";
 import styles from "./not-found.module.css";
@@ -12,7 +12,7 @@ export const metadata: Metadata = {
   openGraph: null,
 };
 
-// What is in the attic: the same archival pictures as the home page, in one row.
+// Archival photos live only on this page.
 const PHOTOS = [
   {
     file: "/images/ibm-350-ramac-disk.jpg",
@@ -83,6 +83,18 @@ export default function NotFound() {
             </Reveal>
           );
         })}
+      </div>
+
+      <div className={styles.credits}>
+        <p>Pictures, via Wikimedia Commons:</p>
+        <ul>
+          {CREDITS.map((c) => (
+            <li key={c.file}>
+              <a href={c.source}>{c.title}</a>, {c.creator},{" "}
+              <a href={c.licenceUrl}>{c.licence}</a>
+            </li>
+          ))}
+        </ul>
       </div>
     </section>
   );

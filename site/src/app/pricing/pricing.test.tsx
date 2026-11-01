@@ -2,7 +2,7 @@ import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import PricingPage, { metadata } from "@/app/pricing/page";
 import { PRICING_FAQ } from "@/content/faq";
-import { PLAN_FEATURES, PLANS, PRICING_NOTES } from "@/content/pricing";
+import { PLAN_FEATURES, PLANS } from "@/content/pricing";
 import { INSTALL_CMD, VPC_URL, WAITLIST_URL } from "@/lib/site";
 
 beforeAll(() => {
@@ -34,7 +34,7 @@ describe("pricing page", () => {
     expect(h1s[0]).toHaveTextContent("Cloud when you want it.");
     expect(
       screen.getByText(
-        "Run AtticDB free on your own machine. The cloud is planned, and you can join the waitlist now.",
+        "Local stays free. Cloud pricing is planned, with storage as the meter and no per-memory or per-call fees.",
       ),
     ).toBeInTheDocument();
   });
@@ -42,7 +42,7 @@ describe("pricing page", () => {
   it("gives every section after the hero an h2", () => {
     const { container } = render(<PricingPage />);
     const sections = [...container.querySelectorAll("section")];
-    expect(sections.length).toBeGreaterThanOrEqual(5);
+    expect(sections).toHaveLength(4);
     for (const section of sections) {
       if (section.querySelector("h1")) continue;
       expect(section.querySelector("h2"), section.className).not.toBeNull();
@@ -82,17 +82,16 @@ describe("pricing page", () => {
     expect(vpcLink).toHaveAttribute("href", VPC_URL);
   });
 
-  it("heads the notes with a fact, not a repeat of the note", () => {
-    render(<PricingPage />);
-    expect(screen.getByRole("heading", { level: 2, name: "No per-call fees" })).toBeInTheDocument();
-  });
-
-  it("renders both pricing notes as statement paragraphs", () => {
-    render(<PricingPage />);
-    for (const note of PRICING_NOTES) {
-      const el = screen.getByText(note);
-      expect(el.tagName).toBe("P");
+  it("keeps cards to 3 includes and folds the fee note into the lead", () => {
+    const { container } = render(<PricingPage />);
+    for (const card of container.querySelectorAll("article")) {
+      expect(card.querySelectorAll("li").length).toBeLessThanOrEqual(3);
     }
+    expect(container.querySelector("#notes-title")).toBeNull();
+    expect(container.querySelector("h1")?.parentElement).toHaveTextContent("no per-memory or per-call fees");
+    const table = screen.getByRole("region", { name: "Plan comparison" });
+    for (const detail of ["Per-agent tokens", "Roles", "GitHub and Google sign-in", "Audit log", "Support SLA"])
+      expect(within(table).getByRole("rowheader", {name: detail})).toBeInTheDocument();
   });
 
   it("renders the feature comparison table inside a keyboard-scrollable region", () => {

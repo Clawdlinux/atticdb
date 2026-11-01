@@ -13,7 +13,7 @@ export default function PricingTeaser() {
         <h2 id="pricing-title" className={styles.title}>
           <span className={styles.line}>Local is free.</span>{" "}
           <span className={styles.line}>
-            Cloud is <span className={styles.price}>{pro.price}</span> a month.
+            Cloud is {pro.price} a month.
           </span>
         </h2>
       </Reveal>
@@ -21,8 +21,7 @@ export default function PricingTeaser() {
       <div className={styles.foot}>
         <Reveal delay={0.075} className={styles.support}>
           <p>
-            The binary is free forever. Cloud adds sync across your machines and backups. Planned
-            pricing.
+            Cloud sync and backups are planned. Local stays free.
           </p>
         </Reveal>
         <Reveal delay={0.15} className={styles.actions}>

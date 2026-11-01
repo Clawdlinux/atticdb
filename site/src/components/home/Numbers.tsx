@@ -31,11 +31,6 @@ export function homeFigures() {
   };
 }
 
-function split(figure: string) {
-  const [whole, decimals] = figure.split(".");
-  return { whole, decimals: decimals ? `.${decimals}` : "" };
-}
-
 export default function Numbers() {
   const f = homeFigures();
   const rows = [
@@ -53,8 +48,8 @@ export default function Numbers() {
     <section className={`bleed ${styles.numbers}`} aria-labelledby="numbers-title">
       <div className={styles.side}>
         <Reveal>
-          <h2 id="numbers-title" className={styles.title}>
-            <span className={styles.soft}>Measured,</span> <span>not promised</span>
+          <h2 id="numbers-title">
+            Measured, not promised
           </h2>
         </Reveal>
         <Reveal delay={0.075}>
@@ -68,20 +63,14 @@ export default function Numbers() {
         </Reveal>
       </div>
 
-      <Reveal delay={0.15} className={styles.ledger}>
+      <Reveal delay={0.15}>
         <dl className={styles.list}>
-          {rows.map(({ figure, caption }) => {
-            const { whole, decimals } = split(figure);
-            return (
-              <div key={caption} className={styles.row}>
-                <dt className={styles.figure}>
-                  <span className={styles.whole}>{whole}</span>
-                  <span className={styles.decimals}>{decimals}</span>
-                </dt>
-                <dd className={styles.caption}>{caption}</dd>
-              </div>
-            );
-          })}
+          {rows.map(({ figure, caption }) => (
+            <div key={caption} className={styles.row}>
+              <dt className={styles.figure}>{figure}</dt>
+              <dd className={styles.caption}>{caption}</dd>
+            </div>
+          ))}
         </dl>
       </Reveal>
     </section>

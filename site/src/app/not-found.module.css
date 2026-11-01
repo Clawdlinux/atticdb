@@ -128,3 +128,18 @@
     animation-delay: -3s;
   }
 }
+
+.credits {
+  width: 100%;
+  text-align: left;
+}
+
+.credits ul {
+  margin: 0.25rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.credits a {
+  text-decoration-thickness: 1px;
+}

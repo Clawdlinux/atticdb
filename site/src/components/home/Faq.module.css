@@ -1,18 +1,17 @@
-/* "Large questions, answers beside": every answer open, the heading is the table's first cell. */
 .faq {
   display: grid;
-  row-gap: 3.5rem;
-  padding-block: var(--space-section);
-  background: var(--field-1);
-  color: var(--field-1-ink);
+  gap: 2rem;
+  padding-block: calc(var(--space-section) * 0.5);
+  background: var(--bg);
+  color: var(--ink);
 }
 
 .faq :focus-visible {
-  outline-color: var(--field-1-ink);
+  outline-color: var(--accent);
 }
 
 .title {
-  color: color-mix(in srgb, var(--field-1-ink) 62%, var(--field-1));
+  color: var(--ink);
 }
 
 .pair {
@@ -36,26 +35,15 @@
 
 @media (min-width: 48rem) {
   .faq {
-    grid-template-columns: repeat(12, minmax(0, 1fr));
-    column-gap: 2rem;
-    row-gap: 4.5rem;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: 4rem;
   }
 
   .head {
-    grid-column: 1 / 7;
+    grid-column: 1 / -1;
   }
 
   .pair {
-    grid-column: 1 / -1;
-    grid-template-columns: subgrid;
-    align-items: baseline;
-  }
-
-  .q {
-    grid-column: 1 / 7;
-  }
-
-  .a {
-    grid-column: 8 / 13;
+    align-content: start;
   }
 }

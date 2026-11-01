@@ -111,15 +111,17 @@ describe("compare page", () => {
 
   it("renders Pick AtticDB if and Pick something else if headings with all cases", () => {
     render(<ComparePage />);
-    expect(screen.getByRole("heading", { level: 2, name: "Pick AtticDB if" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 2, name: "Which to pick" })).toBeVisible();
+    expect(screen.getAllByRole("heading", { level: 2 })).toHaveLength(3);
+    expect(screen.getByRole("heading", { level: 3, name: "Pick AtticDB if" })).toBeInTheDocument();
     for (const item of PICK_ATTIC) {
       expect(screen.getByText(item)).toBeInTheDocument();
     }
 
     expect(
-      screen.getByRole("heading", { level: 2, name: "Pick something else if" }),
+      screen.getByRole("heading", { level: 3, name: "Pick something else if" }),
     ).toBeInTheDocument();
-    const otherSection = screen.getByRole("region", { name: "Pick something else if" });
+    const otherSection = screen.getByRole("region", { name: "Which to pick" });
     expect(PICK_OTHER).toHaveLength(3);
     for (const { when, product } of PICK_OTHER) {
       expect(within(otherSection).getByText(when)).toBeInTheDocument();

@@ -1,13 +1,11 @@
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import Home from "@/app/page";
 import SiteFooter from "@/components/SiteFooter";
 import { CREDITS } from "@/content/credits";
-import { HOME_FAQ } from "@/content/faq";
-import { GITHUB_URL, INSTALL_CMD } from "@/lib/site";
-import Faq from "./Faq";
+import NotFound from "@/app/not-found";
+import { INSTALL_CMD } from "@/lib/site";
 import Numbers, { homeFigures } from "./Numbers";
-import Showcase from "./Showcase";
 
 beforeAll(() => {
   // jsdom has no IntersectionObserver. Motion's whileInView needs one.
@@ -32,34 +30,34 @@ describe("home page", () => {
   it("gives every section after the hero an h2", () => {
     const { container } = render(<Home />);
     const sections = [...container.querySelectorAll("section")];
-    expect(sections.length).toBeGreaterThanOrEqual(9);
+    expect(sections).toHaveLength(4);
+    expect(sections.map((section) => section.querySelector("h1,h2")?.id)).toEqual([
+      "hero-title", "install-title", "numbers-title", "pricing-title",
+    ]);
     for (const section of sections) {
       if (section.querySelector("h1")) continue;
       expect(section.querySelector("h2"), section.className).not.toBeNull();
     }
   });
 
-  it("puts alt text on every picture and carries at least 4", () => {
-    const { container } = render(
-      <>
-        <Home />
-        <SiteFooter />
-      </>,
-    );
-    const imgs = [...container.querySelectorAll("img")];
-    expect(imgs.length).toBeGreaterThanOrEqual(4);
-    for (const img of imgs) expect(img.getAttribute("alt")?.trim()).toBeTruthy();
+  it("keeps archival photos and their credits off home", () => {
+    const { container } = render(<><Home /><SiteFooter /></>);
+    expect(container.querySelector("picture")).toBeNull();
+    expect(container.textContent).not.toContain("Pictures, via Wikimedia Commons:");
+    const data = [...container.querySelectorAll('script[type="application/ld+json"]')]
+      .map((script) => JSON.parse(script.textContent!)["@type"]);
+    expect(data).toEqual(["SoftwareApplication"]);
   });
 
   it("uses the shared button shape for every solid action", () => {
     render(<Home />);
     for (const button of screen.getAllByRole("button")) expect(button).toHaveClass("button");
-    for (const name of ["See pricing", "Star on GitHub"]) {
+    for (const name of ["See pricing"]) {
       expect(screen.getByRole("link", { name })).toHaveClass("button", "button--ink");
     }
   });
 
-  it("anchors #install once, on the installer section right after How it works", () => {
+  it("anchors #install once, on the installer section right after the hero", () => {
     const { container } = render(<Home />);
     const anchors = container.querySelectorAll("#install");
     expect(anchors).toHaveLength(1);
@@ -68,64 +66,8 @@ describe("home page", () => {
     expect(within(section).getByRole("heading", { level: 2, name: "Install it your way" })).toBeInTheDocument();
     const codes = [...section.querySelectorAll("code")].map((c) => c.textContent);
     expect(codes).toContain(INSTALL_CMD);
-    expect(section.previousElementSibling?.querySelector("#how-title")).not.toBeNull();
-    expect(screen.getByRole("link", { name: "Star on GitHub" })).toHaveAttribute(
-      "href",
-      GITHUB_URL,
-    );
-  });
-});
-
-describe("Showcase", () => {
-  it("starts on the ext4 question with matching results", () => {
-    render(<Showcase />);
-    expect(screen.getByRole("searchbox", { name: "Search what your agent remembered" })).toHaveValue(
-      "why did we pick ext4",
-    );
-  });
-
-  it("filters the sample store by words as you type", () => {
-    const { container } = render(<Showcase />);
-    fireEvent.change(screen.getByRole("searchbox", { name: "Search what your agent remembered" }), {
-      target: { value: "ext4" },
-    });
-    const results = container.querySelector('[aria-live="polite"]');
-    expect(results).not.toBeNull();
-    const rows = results!.querySelectorAll("li");
-    expect(rows.length).toBeGreaterThan(0);
-    expect(rows.length).toBeLessThanOrEqual(3);
-    for (const row of rows) expect(row.textContent?.toLowerCase()).toContain("ext4");
-  });
-
-  it("counts all matches while displaying only the newest 3", () => {
-    const { container } = render(<Showcase />);
-    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "atticdb" } });
-    expect(screen.getByText("15 of 16 records match, newest first")).toBeInTheDocument();
-    const rows = container.querySelectorAll('[data-ui="results"] li[data-present="true"]');
-    expect(rows).toHaveLength(3);
-    expect([...rows].map((row) => row.querySelector("time")?.getAttribute("datetime"))).toEqual([
-      "2026-10-30T10:00:00.000Z", "2026-10-29T16:05:00.000Z", "2026-10-29T08:50:00.000Z",
-    ]);
-  });
-
-  it("keeps only matching rows present as the words narrow", () => {
-    const { container } = render(<Showcase />);
-    fireEvent.change(screen.getByRole("searchbox", { name: "Search what your agent remembered" }), {
-      target: { value: "deploy region" },
-    });
-    const results = container.querySelector('[aria-live="polite"]')!;
-    const present = results.querySelectorAll('li[data-present="true"]');
-    expect(present.length).toBeGreaterThan(0);
-    for (const row of present) expect(row.textContent?.toLowerCase()).toContain("deploy");
-    for (const row of results.querySelectorAll('li[data-present="false"]')) {
-      expect(row).toHaveAttribute("aria-hidden", "true");
-    }
-  });
-
-  it("refills the input from an example", () => {
-    render(<Showcase />);
-    fireEvent.click(screen.getByRole("button", { name: "flaky test" }));
-    expect(screen.getByRole("searchbox", { name: "Search what your agent remembered" })).toHaveValue("flaky test");
+    expect(section.previousElementSibling?.querySelector("h1")).not.toBeNull();
+    expect(section.textContent).toContain("Claude Code, GitHub Copilot CLI, VS Code and Codex");
   });
 });
 
@@ -148,22 +90,9 @@ describe("Numbers", () => {
   });
 });
 
-describe("Faq", () => {
-  it("shows all 6 questions with their answers open", () => {
-    const { container } = render(<Faq />);
-    expect(container.querySelector("details")).toBeNull();
-    expect(container.querySelector("[hidden]")).toBeNull();
-    expect(screen.getAllByRole("heading", { level: 3 })).toHaveLength(6);
-    for (const { q, a } of HOME_FAQ) {
-      expect(screen.getByRole("heading", { level: 3, name: q })).toBeVisible();
-      expect(screen.getByText(a)).toBeVisible();
-    }
-  });
-});
-
 describe("SiteFooter", () => {
-  it("credits every picture with its creator, licence and source", () => {
-    render(<SiteFooter />);
+  it("credits every 404 picture with its creator, licence and source", () => {
+    render(<NotFound />);
     for (const c of CREDITS) {
       const link = screen.getByRole("link", { name: c.title });
       expect(link).toHaveAttribute("href", c.source);
@@ -178,5 +107,6 @@ describe("SiteFooter", () => {
       expect(screen.getByRole("link", { name })).toBeInTheDocument();
     }
     expect(screen.getByText("AtticDB is Apache-2.0 or MIT.")).toBeInTheDocument();
+    expect(screen.getByText("It's early. Don't run it in production.")).toBeVisible();
   });
 });

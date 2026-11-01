@@ -5,13 +5,11 @@ import * as bench from "./bench";
 import * as pricing from "./pricing";
 import * as compare from "./compare";
 import * as faq from "./faq";
-import * as memory from "./memory";
 
 const { ackFor, BENCH_META, BENCH_ROWS } = bench;
-const { PLANS, PLAN_FEATURES, PRICING_NOTES } = pricing;
+const { PLANS, PLAN_FEATURES } = pricing;
 const { PRODUCTS, COMPARE_ROWS, PICK_OTHER } = compare;
-const { HOME_FAQ, PRICING_FAQ } = faq;
-const { SAMPLE_MEMORY, searchMemory } = memory;
+const { PRICING_FAQ } = faq;
 
 describe("benchmark content", () => {
   it("returns the published AtticDB closed-loop ack values", () => {
@@ -85,8 +83,8 @@ describe("pricing content", () => {
     expect(PLANS.find((plan) => plan.id === "local")?.cta).toEqual({ label: "Install AtticDB" });
   });
 
-  it("covers each plan in 10 feature rows and keeps both pricing notes", () => {
-    expect(PLAN_FEATURES).toHaveLength(10);
+  it("covers each plan in the full feature table", () => {
+    expect(PLAN_FEATURES).toHaveLength(15);
     expect(PLAN_FEATURES[0]).toEqual({
       feature: "Status",
       values: { local: "Available", pro: "Planned", team: "Planned", vpc: "Planned" },
@@ -94,15 +92,14 @@ describe("pricing content", () => {
     for (const row of PLAN_FEATURES) {
       expect(Object.keys(row.values).sort()).toEqual(["local", "pro", "team", "vpc"]);
       for (const value of Object.values(row.values)) {
-        expect(value).not.toBe("Not specified");
+        expect(value).not.toMatch(/Not (specified|announced)/);
       }
     }
-    expect(PRICING_NOTES).toHaveLength(2);
   });
 
   it("does not describe Team social sign-in as SSO", () => {
     expect(PLAN_FEATURES.find((row) => row.feature === "SSO")?.values.team).toBe("Not included");
-    expect(PLANS.find((plan) => plan.id === "team")?.includes).toContain("GitHub and Google sign-in.");
+    expect(PLAN_FEATURES.find((row) => row.feature === "GitHub and Google sign-in")?.values.team).toBe("Included");
   });
 });
 
@@ -157,12 +154,7 @@ describe("comparison content", () => {
 });
 
 describe("FAQ content", () => {
-  it("provides all 6 home questions in spec order and 4 pricing answers", () => {
-    expect(HOME_FAQ).toHaveLength(6);
-    expect(HOME_FAQ.map((item) => item.q)).toEqual([
-      "Is it production ready?", "Does it call a model?", "Where is my data?",
-      "How is it different from Mem0 or Zep?", "What happens if the disk fills?", "What will the cloud add?",
-    ]);
+  it("provides 4 pricing answers", () => {
     expect(PRICING_FAQ).toHaveLength(4);
     expect(PRICING_FAQ.map((item) => item.a)).toEqual([
       "The bytes of your turns, facts and fact history on disk. Forgotten records stop counting after compaction.",
@@ -173,54 +165,8 @@ describe("FAQ content", () => {
   });
 
   it("has no em dashes in any content module string", () => {
-    for (const content of [bench, pricing, compare, faq, memory]) {
+    for (const content of [bench, pricing, compare, faq]) {
       expect(JSON.stringify(content)).not.toContain("\u2014");
     }
-  });
-});
-
-describe("sample memory search", () => {
-  it("includes 12 to 20 dated records with turns and keyed facts", () => {
-    expect(SAMPLE_MEMORY.length).toBeGreaterThanOrEqual(12);
-    expect(SAMPLE_MEMORY.length).toBeLessThanOrEqual(20);
-    expect(new Set(SAMPLE_MEMORY.map((record) => record.kind))).toEqual(new Set(["turn", "fact"]));
-    for (const record of SAMPLE_MEMORY) {
-      expect(new Date(record.at).toISOString()).toBe(record.at);
-      expect(record.at >= "2026-10-20T00:00:00.000Z").toBe(true);
-      expect(record.at < "2026-10-31T00:00:00.000Z").toBe(true);
-      expect(record.kind === "turn" ? record.session : record.key).toBeTruthy();
-    }
-    expect(SAMPLE_MEMORY.filter((record) => record.text.includes("ext4")).length).toBeGreaterThanOrEqual(2);
-    expect(searchMemory("flaky test").length).toBeGreaterThan(0);
-    expect(searchMemory("user prefs").length).toBeGreaterThan(0);
-  });
-
-  it("finds ext4 records and rejects missing words", () => {
-    const results = searchMemory("ext4");
-    expect(results.length).toBeGreaterThan(0);
-    for (const record of results) expect(record.text.toLowerCase()).toContain("ext4");
-    expect(searchMemory("zzzz")).toEqual([]);
-    expect(searchMemory("ext4 zzzz")).toEqual([]);
-  });
-
-  it("matches every word case-insensitively across text, key, and session", () => {
-    expect(searchMemory("DEPLOY region").length).toBeGreaterThan(0);
-    expect(searchMemory("DEPLOY region")).toEqual(searchMemory("  deploy\tREGION\n"));
-    expect(searchMemory("repo/atticdb/fs").length).toBeGreaterThan(0);
-    expect(searchMemory("atticdb@main").length).toBeGreaterThan(0);
-    expect(searchMemory("why did we pick ext4").length).toBeGreaterThan(0);
-  });
-
-  it("returns newest first with the default or requested limit, without mutating the sample", () => {
-    const original = structuredClone(SAMPLE_MEMORY);
-    const all = searchMemory("", 20);
-    expect(all.map((record) => record.at)).toEqual(SAMPLE_MEMORY.map((record) => record.at).sort().reverse());
-    expect(searchMemory("")).toEqual(all.slice(0, 3));
-    expect(searchMemory("  \n\t", 2)).toEqual(all.slice(0, 2));
-    expect(searchMemory("", 0)).toEqual([]);
-    expect(searchMemory("ext4").map((record) => record.at)).toEqual(
-      searchMemory("ext4").map((record) => record.at).sort().reverse(),
-    );
-    expect(SAMPLE_MEMORY).toEqual(original);
   });
 });
