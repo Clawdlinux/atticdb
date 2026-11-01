@@ -302,3 +302,75 @@ Every command it prints exists in the CLI at `crates/atticdb/src/main.rs` and `s
 
 `npm test`, `npm run lint` and `npm run build` pass. Screenshots at 1440 and 390 of home's install section and 3 docs pages are checked by eye.
 The taste skill's scripts are not run: SkillSpector rated that skill DO_NOT_INSTALL, and the owner hasn't approved it.
+
+## Addendum 2026-11-01: the hero motion graphic, "The tape"
+
+The owner asked where the hero's motion graphic is. There isn't one. The hero is type plus 3 floating controls, and "Pull the plug" only prints a line of text.
+This addendum adds the graphic. It is drawn from scratch in code, with no video, no 3D library and no stock asset.
+
+### The idea
+
+On this page, AtticDB's write path becomes the hero's picture.
+Source: `docs/design/0001-architecture.md` lines 81-140 and `crates/atticdb-tape`.
+- Agents send writes. They wait in a queue.
+- The writer drains the queue, lays every pending write onto the tape as frames, and closes each batch with a footer frame.
+- It calls fdatasync once for the whole group. Then it acks every write in the group. There's no timer, so a lone write commits alone.
+- Frames have strictly increasing LSNs. Segments are 64 MiB.
+
+Competitor test: Mem0, Zep and Supermemory don't publish ack-after-sync, so this picture can't be theirs.
+
+### What's on screen
+
+A full-bleed band under the headline, about 30% of the first screen on desktop, drawn on one `<canvas>` sized by CSS so nothing shifts.
+- **Left: writers.** One lane per writer, labeled with the real apps: Claude Code, Copilot CLI, VS Code, Codex. With 16 writers, the labels repeat with a number, like "Codex 2". Each lane has a small light.
+- **Middle: the queue.** Writes slide from their lane into a short queue.
+- **Right: the tape.** A horizontal strip that scrolls left as it fills. Each frame is a filled block showing its LSN. A narrower block in another tone marks each batch footer.
+- **The sync.** When a group is on the tape, a solid bar sweeps across the group's frames. Frames turn from the unsynced tone to the synced tone.
+- **The ack.** Only after the sweep does each waiting lane's light turn signal green, for a short pulse.
+- **Time label:** a small caption at the band's lower right, for example "Time slowed 10,000x. Real p50 on Local NVMe: 94 µs". It uses the same `ackFor` numbers as the chip.
+
+### Controls drive the machine
+
+The existing Disk, Writers and Power controls move from floating around the headline into a control strip docked to the band's top left. Same components, same state, same tests.
+- **Writers 1 / 4 / 16** sets the number of lanes and the write rate. Groups get bigger as writers grow. That's group commit, and it's why acks/s rises with writers in the benchmarks.
+- **Disk** sets the sync sweep's duration, from each disk's p50 ratio: NVMe 94 µs and Premium SSD v2 817 µs at 1 writer, from `ackFor`. Premium SSD v2 sweeps visibly slower.
+- **Power, "Pull the plug"** cuts the tape mid-group. Frames written but not yet synced drop away and fade. Synced frames stay. No lane that was acked loses its write.
+  - The existing result lines and the "An illustration of ack-after-sync, not a crash test." caption stay under the band.
+  - Their numbers must come from the simulation: acked writes kept versus written.
+  - The comparison store that acks before sync is no longer drawn. Its line stays text only, computed by the same simulation.
+
+### Rules
+
+- **Palette:**
+  - Ground `--bg`, band on `--surface`.
+  - Unsynced frames: `--ink` at reduced opacity. Synced frames: `--ink`. Footer frames: `--muted`.
+  - Signal `--accent` only for ack lights and the ack chip.
+  - No gradients, glows, outlines or shadows.
+- **Type:** the text face at 13px or more for labels. LSN numbers use tabular figures. No monospace.
+- **Motion (from the motion-design skill):**
+  - Personality is Corporate. Material is Rigid: tape and metal, no overshoot.
+  - Easing `cubic-bezier(0.2, 0, 0, 1)` for slides. Linear only for the tape's constant scroll and the sweep, which are mechanical.
+  - Ack pulse 240 ms. Never more than 1/3 of the lanes pulse in the same frame.
+- **Performance:**
+  - The canvas starts after hydration and after the headline reveal. It must not become the LCP element or delay it.
+  - It pauses when off screen (IntersectionObserver) or when the tab is hidden.
+  - devicePixelRatio is capped at 2.
+  - No new dependencies.
+- **Reduced motion:** a still frame of one finished group commit, with lanes, frames, a synced group and lit acks. Controls still change the still frame.
+- **No JS:** the same still frame as an inline SVG drawn at build time, so the band is never empty.
+- **Accessibility:**
+  - The canvas has `role="img"` and an `aria-label` that names what it shows.
+  - Controls stay real radios and a switch.
+  - The text result lines are the accessible output of the plug demo.
+- **Phone:** the band stacks writers above the tape. It shows 4 lanes at most, with a "+12 more" label for 16. The tape height is at least 96 px.
+
+### Logic
+
+A pure, deterministic simulation module, `tape-sim.ts`, unit-tested apart from drawing. Required invariants:
+- every acked write is on a synced frame
+- LSNs strictly increase
+- each batch ends with a footer
+- one sync per group
+- a write that arrives while a sync runs waits for the next group
+- a cut drops exactly the frames written after the last sync
+- average group size at 16 writers is greater than at 1 writer
