@@ -1,6 +1,6 @@
 /*
  * "Contact as the headline", on the signal field: the name itself is the display line.
- * The name sits at the display step; on desktop the links and credits close the line beside it.
+ * The name sits at the display step. Desktop links close the line beside it.
  */
 .footer {
   background: var(--accent);
@@ -41,8 +41,7 @@
 }
 
 .back:hover,
-.links a:hover,
-.credits a:hover {
+.links a:hover {
   text-decoration-thickness: 2px;
 }
 
@@ -90,16 +89,6 @@
   align-items: center;
 }
 
-.credits ul {
-  margin: 0.25rem 0 0;
-  padding: 0;
-  list-style: none;
-}
-
-.credits a {
-  text-decoration-thickness: 1px;
-}
-
 @media (min-width: 64rem) {
   .inner {
     display: grid;
@@ -121,7 +110,7 @@
 
   .meta {
     grid-column: 7 / 13;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1.6fr);
+    grid-template-columns: minmax(0, 1fr);
     align-self: end;
     align-items: start;
     column-gap: 2rem;

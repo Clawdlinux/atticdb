@@ -1,6 +1,7 @@
 import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import BenchmarksPage, { metadata } from "@/app/benchmarks/page";
+import { BENCH_ROWS } from "@/content/bench";
 import { GITHUB_URL } from "@/lib/site";
 
 beforeAll(() => {
@@ -70,9 +71,15 @@ describe("benchmarks page", () => {
 
   it("renders 4 benchmark data tables with formatted numbers, including 9,799 and 94 in the NVMe 1-writer AtticDB row", () => {
     const { container } = render(<BenchmarksPage />);
-    const dataTables = [...container.querySelectorAll("table")].filter(
-      (t) => !t.closest(".visually-hidden"),
-    );
+    const details = [...container.querySelectorAll("details")];
+    expect(details).toHaveLength(2);
+    expect(details.map((item) => item.querySelector("summary")?.textContent)).toEqual(["All rows, Premium SSD v2", "All rows, Local NVMe"]);
+    for (const item of details) {
+      expect(item.open).toBe(false);
+      item.open = true;
+    }
+    const dataTables = [...container.querySelectorAll("details table")];
+    expect(dataTables.reduce((n, table) => n + table.querySelectorAll("tbody tr").length, 0)).toBe(50);
     expect(dataTables).toHaveLength(4);
     for (const table of dataTables) {
       expect(table.querySelector("caption")).not.toBeNull();
@@ -91,6 +98,30 @@ describe("benchmarks page", () => {
     expect(firstBodyRow).toHaveTextContent("atticdb");
     expect(firstBodyRow).toHaveTextContent("9,799");
     expect(firstBodyRow).toHaveTextContent("94");
+  });
+
+  it("summarizes each load against the best server per metric and SQLite", () => {
+    const { container } = render(<BenchmarksPage />);
+    const format = (n: number) => new Intl.NumberFormat("en-US").format(n);
+    for (const disk of ["premium-v2", "nvme"] as const) {
+      const table = container.querySelector(`[data-ui="bench-summary-${disk}"] table`)!;
+      expect(table).not.toBeNull();
+      const rows = [...table.querySelectorAll("tbody tr")];
+      const attic = BENCH_ROWS.filter(r => r.disk === disk && r.system === "atticdb");
+      expect(rows).toHaveLength(5);
+      attic.forEach((ours, i) => {
+        const peers = BENCH_ROWS.filter(r => r.disk === disk && r.load === ours.load && r.writers === ours.writers);
+        const servers = peers.filter(r => ["redis", "valkey", "dicedb"].includes(r.system));
+        const fastest = servers.find(row => row.acksPerSec === Math.max(...servers.map(r => r.acksPerSec)))!;
+        const lowest = servers.find(row => row.p99us === Math.min(...servers.map(r => r.p99us)))!;
+        const sqlite = peers.find(r => r.system === "sqlite")!;
+        expect([...rows[i].querySelectorAll("td")].map(td => td.textContent)).toEqual([
+          format(ours.acksPerSec), format(ours.p99us),
+          `${format(fastest.acksPerSec)} (${fastest.system})`, `${format(lowest.p99us)} (${lowest.system})`,
+          format(sqlite.acksPerSec), format(sqlite.p99us),
+        ]);
+      });
+    }
   });
 
   it("renders the Where we lose section with SQLite lower p50 and links to the raw TSVs, runbook, and write-up", () => {

@@ -34,7 +34,7 @@
 }
 
 .matrixSection {
-  padding-block: var(--space-section);
+  padding-block: calc(var(--space-section) * 0.5);
   background: var(--field-1);
   color: var(--field-1-ink);
 }
@@ -64,21 +64,27 @@
   opacity: 0.65;
 }
 
-.splitSection {
-  display: grid;
-  gap: 2rem;
-  padding-block: var(--space-section);
+.pickSection,
+.sourcesSection {
+  padding-block: calc(var(--space-section) * 0.5);
 }
 
-.surfaceBand {
-  padding-block: var(--space-section);
+.sourcesSection {
   background: var(--surface);
-  color: var(--ink);
 }
 
-.splitInner {
+.pickColumns {
   display: grid;
-  gap: 2rem;
+  gap: 2.5rem;
+}
+
+.pickHeading {
+  margin-bottom: 1.25rem;
+  font-family: var(--font-text), Georgia, serif;
+  font-size: var(--step-lead);
+  font-weight: 500;
+  line-height: 1.2;
+  text-transform: none;
 }
 
 .pickList {
@@ -96,7 +102,7 @@
 
 .otherList {
   display: grid;
-  gap: 1.75rem;
+  gap: 1.25rem;
 }
 
 .otherRow {
@@ -120,6 +126,7 @@
   display: grid;
   gap: 0.875rem;
   padding-left: 1.5rem;
+  font-size: var(--step-small);
 }
 
 .sourceItem {
@@ -172,23 +179,10 @@
 }
 
 @media (min-width: 64rem) {
-  .splitSection,
-  .splitInner {
-    grid-template-columns: repeat(12, minmax(0, 1fr));
-    column-gap: 2rem;
-    align-items: start;
-  }
-
-  .splitHead {
-    grid-column: 1 / 6;
-  }
-
-  .splitHead .sectionTitle {
-    margin-bottom: 0;
-  }
-
-  .splitBody {
-    grid-column: 6 / 13;
+  .pickColumns,
+  .sourcesList {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: 4rem;
   }
 
   .otherRow {

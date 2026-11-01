@@ -32,10 +32,8 @@ export const PLANS: Plan[] = [
     status: "Planned",
     includes: [
       "1 person, all your machines.",
-      "Same API and MCP.",
-      "Synced memory.",
-      "10 GB.",
-      "Daily snapshots, 30-day restore",
+      "10 GB of synced memory.",
+      "Daily snapshots, 30-day restore.",
     ],
     cta: { label: "Join the cloud waitlist", href: WAITLIST_URL },
   },
@@ -47,11 +45,8 @@ export const PLANS: Plan[] = [
     status: "Planned",
     includes: [
       "Shared team memory.",
-      "Per-agent tokens.",
-      "Roles.",
-      "GitHub and Google sign-in.",
-      "Audit log.",
-      "25 GB per seat, pooled",
+      "Per-agent tokens and roles.",
+      "25 GB per seat, pooled.",
     ],
     cta: { label: "Join the cloud waitlist", href: WAITLIST_URL },
   },
@@ -107,9 +102,24 @@ export const PLAN_FEATURES: { feature: string; values: Record<Plan["id"], string
     feature: "SSO",
     values: { local: "Not included", pro: "Not included", team: "Not included", vpc: "SAML SSO" },
   },
-];
-
-export const PRICING_NOTES: string[] = [
-  "No per-memory or per-call fees. AtticDB makes no model calls when it writes, so we have no tokens to resell. Storage is the meter.",
-  "Cloud pricing is planned and may change before launch. Local stays free.",
+  {
+    feature: "Per-agent tokens",
+    values: { local: "Not announced", pro: "Not announced", team: "Included", vpc: "Not announced" },
+  },
+  {
+    feature: "Roles",
+    values: { local: "Not announced", pro: "Not announced", team: "Included", vpc: "Not announced" },
+  },
+  {
+    feature: "GitHub and Google sign-in",
+    values: { local: "Not announced", pro: "Not announced", team: "Included", vpc: "Not announced" },
+  },
+  {
+    feature: "Audit log",
+    values: { local: "Not announced", pro: "Not announced", team: "Included", vpc: "Not announced" },
+  },
+  {
+    feature: "Support SLA",
+    values: { local: "Not announced", pro: "Not announced", team: "Not announced", vpc: "Included" },
+  },
 ];

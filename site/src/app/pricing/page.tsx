@@ -4,7 +4,7 @@ import Faq from "@/components/home/Faq";
 import JsonLd from "@/components/JsonLd";
 import Reveal from "@/components/Reveal";
 import { PRICING_FAQ } from "@/content/faq";
-import { PLAN_FEATURES, PLANS, PRICING_NOTES } from "@/content/pricing";
+import { PLAN_FEATURES, PLANS } from "@/content/pricing";
 import { faqJsonLd, pageMetadata } from "@/lib/seo";
 import styles from "./pricing.module.css";
 
@@ -32,8 +32,7 @@ export default function PricingPage() {
           </span>
         </h1>
         <p className={styles.lead}>
-          Run AtticDB free on your own machine. The cloud is planned, and you can join the waitlist
-          now.
+          Local stays free. Cloud pricing is planned, with storage as the meter and no per-memory or per-call fees.
         </p>
       </section>
 
@@ -75,21 +74,6 @@ export default function PricingPage() {
               </article>
             );
           })}
-        </div>
-      </section>
-
-      <section className={styles.notesSection} aria-labelledby="notes-title">
-        <Reveal className={styles.notesHead}>
-          <h2 id="notes-title" className={styles.notesTitle}>
-            No per-call fees
-          </h2>
-        </Reveal>
-        <div className={styles.notesBody}>
-          {PRICING_NOTES.map((note, i) => (
-            <Reveal key={note} delay={0.075 * (i + 1)}>
-              <p className={styles.note}>{note}</p>
-            </Reveal>
-          ))}
         </div>
       </section>
 

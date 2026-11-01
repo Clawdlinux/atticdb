@@ -36,6 +36,23 @@ Stop the server with Ctrl+C.
 The preview does not apply Vercel's host rules or security headers.
 Docs are available at `/docs` locally.
 
+## Page length budgets
+
+Measure the built export with Chrome's CDP `Emulation.setDeviceMetricsOverride`.
+Divide `document.documentElement.scrollHeight` by `innerHeight`. Keep benchmark disclosures closed for this measurement.
+
+| Page | 1440 × 900 maximum | 390 × 844 target |
+| --- | --- | --- |
+| Home | 4 screens | 8 screens |
+| Pricing | 3.5 screens | 7 screens |
+| Compare | 4 screens | 8 screens |
+| Benchmarks | 4.5 screens | 9 screens |
+
+Home keeps the hero, installer, benchmark figures and pricing line. Docs pages have no length budget.
+Benchmarks summarize each disk from `BENCH_ROWS`. Each metric picks its best Redis, Valkey or DiceDB result independently.
+The 50 full rows remain in 2 native disclosures. They work without JavaScript.
+Archival pictures and their linked credits appear only on the 404 page.
+
 ## Deploy
 
 Use 2 Vercel projects. Both use `site/` as their root.

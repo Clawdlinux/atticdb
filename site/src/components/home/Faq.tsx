@@ -1,15 +1,15 @@
 import Reveal from "@/components/Reveal";
-import { HOME_FAQ, type Qa } from "@/content/faq";
+import { type Qa } from "@/content/faq";
 import styles from "./Faq.module.css";
 
 type FaqProps = {
-  items?: Qa[];
+  items: Qa[];
   heading?: string;
   id?: string;
 };
 
 export default function Faq({
-  items = HOME_FAQ,
+  items,
   heading = "Questions",
   id = "faq-title",
 }: FaqProps) {

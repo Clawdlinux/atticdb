@@ -1,5 +1,4 @@
 import Link from "next/link";
-import { CREDITS } from "@/content/credits";
 import { DOCS_URL, GITHUB_URL, siteHref } from "@/lib/site";
 import styles from "./SiteFooter.module.css";
 
@@ -46,18 +45,6 @@ export default function SiteFooter() {
               ))}
             </ul>
           </nav>
-
-          <div className={styles.credits}>
-            <p>Pictures, via Wikimedia Commons:</p>
-            <ul>
-              {CREDITS.map((c) => (
-                <li key={c.file}>
-                  <a href={c.source}>{c.title}</a>, {c.creator},{" "}
-                  <a href={c.licenceUrl}>{c.licence}</a>
-                </li>
-              ))}
-            </ul>
-          </div>
 
           <p className={styles.licence}>AtticDB is Apache-2.0 or MIT.</p>
         </div>

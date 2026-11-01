@@ -2,7 +2,6 @@ import Installer from "@/components/Installer";
 import Reveal from "@/components/Reveal";
 import styles from "./InstallSection.module.css";
 
-// A bone field, so it parts from How it works on the dark page above.
 export default function InstallSection() {
   return (
     <section id="install" className={`bleed ${styles.install}`} aria-labelledby="install-title">
@@ -11,7 +10,8 @@ export default function InstallSection() {
           Install it your way
         </h2>
         <p className={styles.lead}>
-          Pick your system and your apps. The commands below are exactly what to run.
+          Wires itself into Claude Code, GitHub Copilot CLI, VS Code and Codex.
+          Pick your system and apps for the exact commands to run.
         </p>
       </Reveal>
       <Reveal delay={0.075}>

@@ -16,7 +16,6 @@ vi.mock("motion/react", async (importOriginal) => {
 const { default: CopyCommand } = await import("./CopyCommand");
 const { default: Installer } = await import("./Installer");
 const { default: Hero } = await import("./home/Hero");
-const { default: Showcase } = await import("./home/Showcase");
 
 afterEach(() => {
   cleanup();
@@ -27,7 +26,6 @@ afterEach(() => {
 describe("motion trees honour reduced motion on their own", () => {
   it.each([
     ["Hero", () => <Hero />],
-    ["Showcase", () => <Showcase />],
     ["Installer", () => <Installer />],
     ["CopyCommand", () => <CopyCommand />],
   ])("%s sets reducedMotion to user at its root", (_, view) => {
