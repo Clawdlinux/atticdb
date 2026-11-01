@@ -124,10 +124,49 @@ describe("benchmarks page", () => {
     }
   });
 
-  it("renders the Where we lose section with SQLite lower p50 and links to the raw TSVs, runbook, and write-up", () => {
+  it("derives win comparisons from benchmark rows, not copied figures", () => {
+    render(<BenchmarksPage />);
+    const section = screen.getByRole("region", { name: "Where we win, where we lose" });
+    expect(within(section).getAllByRole("heading", { level: 2 })).toHaveLength(1);
+    const winHeading = within(section).getByRole("heading", { level: 3, name: "We win" });
+    const loseHeading = within(section).getByRole("heading", { level: 3, name: "We lose" });
+    expect(winHeading.compareDocumentPosition(loseHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const wins = winHeading.parentElement!;
+    const premium = BENCH_ROWS.filter(row => row.disk === "premium-v2");
+    const servers = premium.filter(row => ["redis", "valkey", "dicedb"].includes(row.system));
+    const ratios = servers.filter(row => row.load === "closed").map(row => {
+      const ours = premium.find(ours => ours.system === "atticdb" && ours.load === row.load && ours.writers === row.writers)!;
+      return ours.acksPerSec / row.acksPerSec;
+    });
+    expect(wins).toHaveTextContent(`${Math.min(...ratios).toFixed(1)}x to ${Math.max(...ratios).toFixed(1)}x their closed-loop acks/s`);
+    const agentP50s = servers.filter(row => row.load === "agent").map(row => row.p50us / 1000);
+    const ourAgentP50 = premium.find(row => row.system === "atticdb" && row.load === "agent")!.p50us / 1000;
+    expect(wins).toHaveTextContent(`agent-load p50 is ${ourAgentP50.toFixed(1)} ms versus ${Math.min(...agentP50s).toFixed(1)} to ${Math.max(...agentP50s).toFixed(1)} ms`);
+
+    const nvme = BENCH_ROWS.filter(row => row.disk === "nvme" && row.load === "closed" && row.writers === 16);
+    const ours = nvme.find(row => row.system === "atticdb")!;
+    const peers = nvme.filter(row => ["redis", "valkey", "dicedb"].includes(row.system));
+    const format = (n: number) => new Intl.NumberFormat("en-US").format(n);
+    expect(wins).toHaveTextContent(`${format(ours.acksPerSec)} versus ${format(Math.min(...peers.map(row => row.acksPerSec)))} to ${format(Math.max(...peers.map(row => row.acksPerSec)))} acks/s`);
+    expect(wins).toHaveTextContent(`p99 ${format(ours.p99us)} versus ${format(Math.min(...peers.map(row => row.p99us)))} to ${format(Math.max(...peers.map(row => row.p99us)))} µs`);
+    expect(wins).toHaveTextContent("worst p99 rep beats their best");
+    expect(wins).toHaveTextContent("best p50 and p99.9");
+    expect(wins).toHaveTextContent("Preallocated, zero-filled segments need 1 device round trip per ack instead of 2.");
+    expect(wins).toHaveTextContent("Group commit syncs queued writers with no timer.");
+  });
+
+  it("keeps the loss sentences and raw benchmark links beside the wins", () => {
     const { container } = render(<BenchmarksPage />);
-    expect(screen.getByRole("heading", { level: 2, name: "Where we lose" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 2, name: "Where we win, where we lose" })).toBeInTheDocument();
     expect(container.textContent).toContain("SQLite has a lower p50");
+    const losses = screen.getByRole("heading", { level: 3, name: "We lose" }).parentElement!;
+    expect([...losses.querySelectorAll("li")].map(item => item.textContent)).toEqual([
+      "SQLite has a lower p50 in closed loop at every writer count on both disks. It runs in-process, without sockets.",
+      "On Premium SSD v2, SQLite has lower closed-loop p99 and p99.9 at 4 and 16 writers.",
+      "On NVMe, SQLite has lower closed-loop p99 at 4 and 16 writers, and lower p99.9 at 16. Its agent-load p50 is lower too.",
+      "On NVMe at 16 closed-loop writers, Redis and DiceDB beat AtticDB on p50, p99.9 and max latency.",
+      "On NVMe under agent load, Redis has lower p99 at 64 writers. DiceDB and Valkey win at 256.",
+    ]);
 
     const expectedHrefs = [
       `${GITHUB_URL}/blob/main/bench/h2h-nvme.tsv`,

@@ -20,6 +20,34 @@ const METHOD_ITEMS = [
   "AtticDB groups commits with fdatasync. Other servers use appendfsync always; SQLite uses WAL and synchronous=FULL.",
 ];
 
+const premiumClosed = getRows("premium-v2", "closed");
+const premiumAgent = getRows("premium-v2", "agent");
+const isRedisFamily = (row: BenchRow) => ["redis", "valkey", "dicedb"].includes(row.system);
+const premiumAckRatios = premiumClosed.filter(isRedisFamily).map((peer) => {
+  const ours = premiumClosed.find((row) => row.system === "atticdb" && row.writers === peer.writers)!;
+  return ours.acksPerSec / peer.acksPerSec;
+});
+const premiumAgentP50 = premiumAgent.filter((row) => row.system === "atticdb").map((row) => row.p50us / 1000);
+const premiumPeerP50 = premiumAgent.filter(isRedisFamily).map((row) => row.p50us / 1000);
+const nvmeClosed = getRows("nvme", "closed").filter((row) => row.system === "atticdb");
+const nvmeHigh = nvmeClosed.reduce((highest, row) => row.writers > highest.writers ? row : highest);
+const nvmeLowWriters = nvmeClosed.filter((row) => row.writers < nvmeHigh.writers).map((row) => row.writers);
+const nvmePeers = getRows("nvme", "closed").filter((row) => row.writers === nvmeHigh.writers && isRedisFamily(row));
+const nvmeServerCount = new Set(BENCH_ROWS.filter((row) => row.disk === "nvme" && row.system !== "sqlite").map((row) => row.system)).size;
+
+const WHERE_WE_WIN = [
+  `On Premium SSD v2, we beat Redis, Valkey and DiceDB in every cell: ${Math.min(...premiumAckRatios).toFixed(1)}x to ${Math.max(...premiumAckRatios).toFixed(1)}x their closed-loop acks/s.`,
+  `Our worst p99 rep beats their best; agent-load p50 is ${Math.max(...premiumAgentP50).toFixed(1)} ms versus ${Math.min(...premiumPeerP50).toFixed(1)} to ${Math.max(...premiumPeerP50).toFixed(1)} ms.`,
+  `On Local NVMe, we beat the Redis family on every closed-loop median at ${nvmeLowWriters.join(" and ")} writers.`,
+  `At ${nvmeHigh.writers} writers: ${fmt.format(nvmeHigh.acksPerSec)} versus ${fmt.format(Math.min(...nvmePeers.map((row) => row.acksPerSec)))} to ${fmt.format(Math.max(...nvmePeers.map((row) => row.acksPerSec)))} acks/s; p99 ${fmt.format(nvmeHigh.p99us)} versus ${fmt.format(Math.min(...nvmePeers.map((row) => row.p99us)))} to ${fmt.format(Math.max(...nvmePeers.map((row) => row.p99us)))} µs.`,
+  `Under agent load, we have the best p50 and p99.9 of the ${nvmeServerCount} servers.`,
+];
+
+const WHY_WE_WIN = [
+  "Preallocated, zero-filled segments need 1 device round trip per ack instead of 2.",
+  "Group commit syncs queued writers with no timer.",
+];
+
 const WHERE_WE_LOSE = [
   "SQLite has a lower p50 in closed loop at every writer count on both disks. It runs in-process, without sockets.",
   "On Premium SSD v2, SQLite has lower closed-loop p99 and p99.9 at 4 and 16 writers.",
@@ -273,20 +301,36 @@ export default function BenchmarksPage() {
         </section>
       ))}
 
-      <section className={`bleed ${styles.loseSection}`} aria-labelledby="lose-title">
-        <div className={styles.splitInner}>
-          <Reveal className={styles.splitHead}>
-            <h2 id="lose-title" className={styles.sectionTitle}>
-              Where we lose
-            </h2>
-          </Reveal>
-          <ul className={`${styles.splitBody} ${styles.loseList}`}>
-            {WHERE_WE_LOSE.map((item, i) => (
-              <Reveal as="li" key={item} delay={0.07 * (i + 1)} className={styles.loseItem}>
-                {item}
-              </Reveal>
-            ))}
-          </ul>
+      <section className={`bleed ${styles.tradeoffSection}`} aria-labelledby="tradeoff-title">
+        <Reveal>
+          <h2 id="tradeoff-title" className={styles.sectionTitle}>
+            Where we win, where we lose
+          </h2>
+        </Reveal>
+        <div className={styles.tradeoffColumns}>
+          <div>
+            <h3 className={styles.columnTitle}>We win</h3>
+            <ul className={styles.tradeoffList}>
+              {WHERE_WE_WIN.map((item, i) => (
+                <Reveal as="li" key={item} delay={0.07 * (i + 1)} className={styles.tradeoffItem}>
+                  {item}
+                </Reveal>
+              ))}
+            </ul>
+            <div className={styles.whyLines}>
+              {WHY_WE_WIN.map((item) => <p key={item}>{item}</p>)}
+            </div>
+          </div>
+          <div>
+            <h3 className={styles.columnTitle}>We lose</h3>
+            <ul className={styles.tradeoffList}>
+              {WHERE_WE_LOSE.map((item, i) => (
+                <Reveal as="li" key={item} delay={0.07 * (i + 1)} className={styles.tradeoffItem}>
+                  {item}
+                </Reveal>
+              ))}
+            </ul>
+          </div>
         </div>
       </section>
 

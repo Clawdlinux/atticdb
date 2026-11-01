@@ -33,8 +33,7 @@
   margin-bottom: 2rem;
 }
 
-.splitSection,
-.splitInner {
+.splitSection {
   display: grid;
   gap: 2rem;
 }
@@ -138,27 +137,48 @@
   margin-top: 1rem;
 }
 
-.loseSection {
-  padding-block: calc(var(--space-section) * 0.5);
+.tradeoffSection {
+  padding-block: 2rem;
   background: var(--field-1);
   color: var(--field-1-ink);
 }
 
-.loseSection :focus-visible {
+.tradeoffSection :focus-visible {
   outline-color: var(--field-1-ink);
 }
 
-.loseList {
+.tradeoffSection .sectionTitle {
+  margin-bottom: 1.5rem;
+  font-size: clamp(2.5rem, 1.2rem + 4vw, 4.5rem);
+}
+
+.tradeoffColumns {
   display: grid;
-  gap: 1.25rem;
+  gap: 2rem;
+}
+
+.columnTitle {
+  margin-bottom: 0.75rem;
+  font-size: var(--step-lead);
+}
+
+.tradeoffList {
+  display: grid;
+  gap: 0.75rem;
   padding: 0;
   list-style: none;
 }
 
-.loseItem {
-  max-width: 56ch;
+.tradeoffItem,
+.whyLines {
   font-size: var(--step-body);
   line-height: 1.35;
+}
+
+.whyLines {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 1rem;
 }
 
 .linksList {
@@ -219,7 +239,11 @@
 
 @media (min-width: 64rem) {
   .splitSection,
-  .splitInner {
+  .diskSection {
+    padding-block: calc(var(--space-section) * 0.35);
+  }
+
+  .splitSection {
     grid-template-columns: repeat(12, minmax(0, 1fr));
     column-gap: 2rem;
     align-items: start;
@@ -242,9 +266,9 @@
     gap: 1.25rem 2rem;
   }
 
-  .loseList {
+  .tradeoffColumns {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 1.25rem 2.5rem;
+    gap: 2.5rem;
   }
 
   .linksList {
