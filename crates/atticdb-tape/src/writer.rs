@@ -424,6 +424,28 @@ pub struct Reader<'a> {
     open: Option<(u64, Handle)>,
 }
 
+/// See [`Tape::durable_reads`].
+#[derive(Clone)]
+pub struct DurableReads(Arc<ReadState>);
+
+impl std::fmt::Debug for DurableReads {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DurableReads").field("durable_lsn", &self.durable_lsn()).finish()
+    }
+}
+
+impl DurableReads {
+    /// The last record visible to readers.
+    pub fn durable_lsn(&self) -> u64 {
+        self.0.durable_lsn.load(Ordering::Acquire)
+    }
+
+    /// A reader, as [`Tape::reader`] gives.
+    pub fn reader(&self) -> Reader<'_> {
+        Reader { reads: &self.0, open: None }
+    }
+}
+
 impl std::fmt::Debug for Reader<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Reader").field("segment", &self.open.as_ref().map(|(s, _)| s)).finish()
@@ -1355,6 +1377,12 @@ impl<S: StateMachine> Tape<S> {
     /// through 1 segment opens it once. Use it within 1 call; don't keep it.
     pub fn reader(&self) -> Reader<'_> {
         Reader { reads: &self.reads, open: None }
+    }
+
+    /// An owned, read-only handle to durable records, for a background thread such as an
+    /// index builder. It never writes. Stop its users before dropping the tape.
+    pub fn durable_reads(&self) -> DurableReads {
+        DurableReads(self.reads.clone())
     }
 
     /// Scans durable application records at or above `from_lsn`, in LSN order.

@@ -12,6 +12,7 @@ mod facts;
 pub mod forget;
 mod machine;
 mod options;
+mod search_index;
 mod session;
 mod state;
 mod tenant;

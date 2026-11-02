@@ -451,6 +451,9 @@ fn write_outages_report_health_preserve_reads_and_retry_keys() {
             opts.tape.free_space_floor = Some(4096);
             if matches!(fault, ColdFloor | ReopenDirtyFull) {
                 opts.tape.lsn_index_bytes = 4224;
+                // These cases test which tape index pages a cold read loads. The word index
+                // reads the tape in the background and would load them first.
+                opts.search_index_bytes = 0;
             }
             let mut engine = open(io.clone(), opts.clone());
             assert_eq!(engine.health(), Health::Ok, "{case}");
@@ -775,7 +778,11 @@ fn receipts_need_no_reads_and_background_io_stays_off_the_writer() {
     let io = Arc::new(HookIo::sim(15));
     let clock = Arc::new(SimClock::default());
     let engine = Engine::open_with(io.clone(), clock.clone(), "db", options()).unwrap();
-    let (reads, writes) = (io.tally(|op| matches!(op, Op::Read(..)) as u64), writes(&io));
+    // The word index reads durable records on its own thread, by design. This counts the rest.
+    let caller = |op: &Op| {
+        matches!(op, Op::Read(..)) && std::thread::current().name() != Some("atticdb-index")
+    };
+    let (reads, writes) = (io.tally(move |op| caller(op) as u64), writes(&io));
     let receipt = engine.append(&scope("s"), vec![turn(1)], Some("key")).unwrap();
     assert_eq!(receipt.seqs, vec![1]);
     let retry = engine.append(&scope("s"), vec![turn(1)], Some("key")).unwrap();

@@ -3,8 +3,8 @@
 
 use atticdb_core::{
     turn::decode, Appended, CompressionMode, Engine, EngineError, EngineOptions, ErrorKind,
-    FactQuery, FactWritten, Health, NewFact, NewTurn, Outcome, Role, Scope, SimFact, Turn,
-    WindowQuery,
+    FactQuery, FactWritten, Health, Hit, NewFact, NewTurn, Outcome, Role, Scope, SearchQuery,
+    SimFact, Turn, WindowQuery,
 };
 use atticdb_tape::sim::{CapacityError, CapacityPlan, PublishPause, SimClock, StorageFullFault};
 use atticdb_tape::{Clock, Error, HookIo, Io, Kind, Op, SimDisk, Tape, TapeOptions};
@@ -302,6 +302,65 @@ impl Oracle {
                 }
             }
         }
+        // Half the time keeps the nightly 20,000-seed run affordable.
+        if rng.below(2) == 0 {
+            self.check_search(engine, rng);
+        }
+    }
+
+    /// Search, through the word index that simulations build inline, finds exactly the
+    /// oracle's turns and current facts that hold the word, newest first.
+    fn check_search(&self, engine: &Engine, rng: &mut Rng) {
+        let has =
+            |text: &[u8], word: &str| String::from_utf8_lossy(text).to_lowercase().contains(word);
+        let tenants: Vec<&str> = self
+            .scopes
+            .iter()
+            .map(|s| s.tenant.as_str())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        // 1 tenant per check keeps the nightly run short. Seeds cover the others.
+        for tenant in [tenants[rng.below(tenants.len())]] {
+            let word = ["abab", "bba", "aaaa"][rng.below(3)];
+            let mut expected: Vec<(u64, Vec<u8>)> = self
+                .scopes
+                .iter()
+                .zip(&self.history)
+                .filter(|(scope, _)| scope.tenant == tenant)
+                .flat_map(|(_, turns)| turns.iter())
+                .filter(|turn| has(&turn.content, word))
+                .map(|turn| (turn.lsn, turn.content.clone()))
+                .collect();
+            for ((owner, key), revs) in &self.facts {
+                if let Some((lsn, Some(content))) = revs.last() {
+                    if owner == tenant && (has(key.as_bytes(), word) || has(content, word)) {
+                        expected.push((*lsn, content.clone()));
+                    }
+                }
+            }
+            expected.sort_by_key(|(lsn, _)| std::cmp::Reverse(*lsn));
+            let (mut got, mut before) = (Vec::new(), None);
+            loop {
+                let query = SearchQuery {
+                    query: word.into(),
+                    before,
+                    limit: 1 + rng.below(40),
+                    max_bytes: usize::MAX,
+                    visits: usize::MAX,
+                };
+                let page = engine.search(tenant, query).unwrap();
+                got.extend(page.hits.into_iter().map(|hit| match hit {
+                    Hit::Turn { turn, .. } => (turn.lsn, turn.content),
+                    Hit::Fact(fact) => (fact.lsn, fact.content),
+                }));
+                match page.next {
+                    Some(next) => before = Some(next),
+                    None => break,
+                }
+            }
+            assert_eq!(got, expected, "tenant={tenant} word={word}");
+        }
     }
     // Only the unresolved batch may extend the acknowledged prefix, and only as a whole.
     fn recover(
@@ -589,6 +648,8 @@ fn run_seed_with_capacity(seed: u64, plan: &CapacityPlan) -> Vec<Vec<Turn>> {
         hot_page_bytes: if seed.is_multiple_of(2) { 4096 } else { 1024 * 1024 },
         checkpoint_bytes: 4096,
         fact_history: 1 + (seed % 3) as usize,
+        // Small stores: walking fewer records first makes search use the word index.
+        search_walk_first: [0, 16, 1024][(seed % 3) as usize],
         ..EngineOptions::default()
     };
     let clock = Arc::new(SimClock::default());

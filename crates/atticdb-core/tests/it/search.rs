@@ -343,3 +343,190 @@ fn sessions_and_records_list_what_a_tenant_wrote() {
     assert_eq!(sessions(&engine, "tenant", 1000), listed, "a reserved-only session");
     assert_eq!(records(&engine, "tenant", rq()), all, "only durable records");
 }
+
+/// Words chosen to hit the matcher's edges: case folding, final sigma, accents, punctuation
+/// inside tokens, plurals with a singular, and words inside longer words.
+const WORDS: [&str; 22] = [
+    "Deploy",
+    "deployment",
+    "keys",
+    "key",
+    "policies",
+    "policy",
+    "café",
+    "CAFÉ",
+    "naïve",
+    "ΣΟΦΙΑΣ",
+    "σοφια",
+    "foo.bar",
+    "foo",
+    "bar",
+    "a",
+    "x",
+    "path/to/file.rs",
+    "ERROR:",
+    "error",
+    "404",
+    "über",
+    "Übers",
+];
+const SEPARATORS: [&str; 6] = [" ", "\n", "\t", ", ", ".", "  "];
+const QUERIES: [&str; 18] = [
+    "deploy",
+    "ploy",
+    "keys",
+    "policies",
+    "oli",
+    "café",
+    "CAFÉ",
+    "ΣΟΦΙΑΣ",
+    "σοφιας",
+    "o.b",
+    "/to/",
+    "error: 404",
+    "a",
+    "x bar",
+    "übers",
+    "nothing-matches",
+    "é",
+    "key deploy",
+];
+
+struct Rng(u64);
+impl Rng {
+    fn below(&mut self, n: usize) -> usize {
+        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        ((self.0 >> 33) % n as u64) as usize
+    }
+    fn text(&mut self) -> Vec<u8> {
+        let mut text = Vec::new();
+        for _ in 0..self.below(12) {
+            text.extend_from_slice(WORDS[self.below(WORDS.len())].as_bytes());
+            text.extend_from_slice(SEPARATORS[self.below(SEPARATORS.len())].as_bytes());
+        }
+        if self.below(10) == 0 {
+            text.push(0xff);
+        }
+        if self.below(4) == 0 {
+            // Long and repetitive, so it compresses.
+            text = text.repeat(40);
+        }
+        text
+    }
+}
+
+/// Waits until the word index covers every durable record or stopped growing.
+fn indexed(engine: &Engine) {
+    let started = std::time::Instant::now();
+    loop {
+        let m = engine.metrics().unwrap();
+        if m.search_index_lsn == m.durable_lsn || m.search_index_stopped.is_some() {
+            return;
+        }
+        assert!(started.elapsed().as_secs() < 20, "the index never caught up: {m:?}");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+/// Every page of every query, walked with `next`, hits and cursors included.
+fn pages(engine: &Engine, tenant: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for query in QUERIES {
+        for (limit, max_bytes) in [(1, 1 << 20), (3, 64), (100, 1 << 20)] {
+            let mut before = None;
+            loop {
+                let query = SearchQuery { before, limit, max_bytes, ..q(query) };
+                let page = engine.search(tenant, query.clone()).unwrap();
+                out.push(format!("{query:?}: {:?} next={:?}", page.hits, page.next));
+                match page.next {
+                    Some(next) => before = Some(next),
+                    None => break,
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The word index only proposes candidates, so search must return exactly what a full walk
+/// returns: same hits, same pages, same cursors. Before the index catches up, after it, when
+/// its budget stops it, on compressed turns, and while it rebuilds after a reopen.
+#[test]
+fn search_with_the_index_equals_a_full_scan() {
+    use atticdb_core::CompressionMode::{Off, On};
+    for seed in 0..4 {
+        let disks: [Arc<SimDisk>; 3] = std::array::from_fn(|_| Arc::new(SimDisk::new(seed)));
+        let open_all = || {
+            let opts = |bytes, mode, walk_first| {
+                let mut opts = options();
+                (opts.search_index_bytes, opts.compression.mode) = (bytes, mode);
+                opts.search_walk_first = walk_first;
+                opts
+            };
+            [
+                open(disks[0].clone(), opts(0, Off, 0)),
+                open(disks[1].clone(), opts(256 << 20, On, 0)),
+                open(disks[2].clone(), opts(2048, Off, 7)),
+            ]
+        };
+        let check = |engines: &[Engine; 3], case: &str| {
+            for tenant in ["tenant", "other"] {
+                let scan = pages(&engines[0], tenant);
+                for (name, engine) in [("index", &engines[1]), ("tiny budget", &engines[2])] {
+                    assert_eq!(
+                        pages(engine, tenant),
+                        scan,
+                        "seed {seed}, {name}, {tenant}: {case}"
+                    );
+                }
+            }
+        };
+        let engines = open_all();
+        let mut rng = Rng(seed);
+        for step in 0..300 {
+            let tenant = ["tenant", "other"][rng.below(2)];
+            if rng.below(4) == 0 {
+                let key = ["repo/deploy-rule", "user/policies", "café/notes"][rng.below(3)];
+                let (delete, content) = (rng.below(5) == 0, rng.text());
+                for engine in &engines {
+                    if delete {
+                        let _ = engine.fact_delete(tenant, key, "a", None, None);
+                    } else {
+                        let fact = NewFact {
+                            key: key.into(),
+                            content: content.clone(),
+                            meta: vec![],
+                            agent: "a".into(),
+                        };
+                        engine.fact_put(tenant, fact, None, None).unwrap();
+                    }
+                }
+            } else {
+                let scope = Scope { tenant: tenant.into(), ..scope(&format!("s{}", rng.below(5))) };
+                let turns: Vec<NewTurn> = (0..1 + rng.below(3))
+                    .map(|_| NewTurn { role: Role::User, content: rng.text(), meta: vec![] })
+                    .collect();
+                for engine in &engines {
+                    engine.append(&scope, turns.clone(), None).unwrap();
+                }
+            }
+            if step % 100 == 99 {
+                check(&engines, &format!("step {step}, catching up"));
+            }
+        }
+        engines.iter().for_each(indexed);
+        check(&engines, "caught up");
+        let m = engines[1].metrics().unwrap();
+        assert!(m.search_index_terms > 0 && m.search_index_stopped.is_none(), "{m:?}");
+        assert!(m.compressed_turns > 0, "candidates come from compressed turns too");
+        let stopped = engines[2].metrics().unwrap().search_index_stopped.unwrap_or_default();
+        assert!(stopped.contains("budget"), "{stopped}");
+        let off = engines[0].metrics().unwrap().search_index_stopped;
+        assert_eq!(off.as_deref(), Some("off"));
+        drop(engines);
+        let engines = open_all();
+        check(&engines, "rebuilding after a reopen");
+        engines.iter().for_each(indexed);
+        check(&engines, "rebuilt");
+    }
+}
