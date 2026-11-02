@@ -279,6 +279,10 @@ struct ReadState {
     io: Arc<dyn Io>,
     path: PathBuf,
     index: Mutex<LsnIndex>,
+    /// Segment files opened for reads, kept open for the life of the tape. A segment id is
+    /// never reused while the tape is open, so a handle never goes stale. Every read path
+    /// shares them, so a request doesn't pay an `open` per call.
+    handles: Mutex<std::collections::HashMap<u64, Arc<Handle>>>,
     durable_lsn: AtomicU64,
     poisoned: AtomicBool,
     read_only: AtomicBool,
@@ -357,6 +361,18 @@ impl ReadState {
         self.read_with(&mut None, lsn, |_| true)
     }
 
+    /// The shared read handle of `segment`, opened on first use.
+    fn handle(&self, segment: u64) -> Result<Arc<Handle>> {
+        let mut handles = lock(&self.handles)?;
+        if let Some(handle) = handles.get(&segment) {
+            return Ok(handle.clone());
+        }
+        let path = self.path.join(format!("seg-{segment:016}.zdb"));
+        let handle = Arc::new(Handle::open(self.io.clone(), &path)?);
+        handles.insert(segment, handle.clone());
+        Ok(handle)
+    }
+
     /// Reads through `open`, the last segment handle this caller used, and keeps the one it
     /// read from there. Durable bytes never change while the tape is open, and a handle stays
     /// valid across rename, so a held handle reads what a fresh open would.
@@ -366,7 +382,7 @@ impl ReadState {
     /// and decoded in full, also one whose header does not parse, so errors match `read`.
     fn read_with(
         &self,
-        open: &mut Option<(u64, Handle)>,
+        open: &mut Option<(u64, Arc<Handle>)>,
         lsn: u64,
         keep: impl FnOnce(&Header) -> bool,
     ) -> Result<Option<Frame>> {
@@ -378,10 +394,7 @@ impl ReadState {
         };
         let (_, file) = match open.take() {
             Some(held) if held.0 == segment => open.insert(held),
-            _ => {
-                let path = self.path.join(format!("seg-{segment:016}.zdb"));
-                open.insert((segment, Handle::open(self.io.clone(), &path)?))
-            }
+            _ => open.insert((segment, self.handle(segment)?)),
         };
         let mut header = [0; HEADER_LEN];
         read_exact(self.io.as_ref(), file.id, offset, &mut header)?;
@@ -421,7 +434,7 @@ impl ReadState {
 /// Reads durable records, keeping the last segment it read open. See [`Tape::reader`].
 pub struct Reader<'a> {
     reads: &'a ReadState,
-    open: Option<(u64, Handle)>,
+    open: Option<(u64, Arc<Handle>)>,
 }
 
 /// See [`Tape::durable_reads`].
@@ -560,6 +573,7 @@ impl<S: StateMachine> WriterCore<S> {
             io,
             path: dir.path.clone(),
             index: Mutex::new(recovered.index.take().ok_or(Error::Poisoned)?),
+            handles: Mutex::default(),
             durable_lsn: AtomicU64::new(recovered.report.durable_lsn),
             poisoned: AtomicBool::new(false),
             read_only: AtomicBool::new(false),
