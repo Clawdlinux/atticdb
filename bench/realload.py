@@ -205,7 +205,7 @@ def timed(call):
 class Server:
     """`atticdb serve` on a Unix socket in the temp dir."""
 
-    def __init__(self, binary, root):
+    def __init__(self, binary, root, compression=None):
         self.binary, self.root = binary, root
         self.config = os.path.join(root, "c.json")
         self.data = os.path.join(root, "data")
@@ -220,7 +220,38 @@ class Server:
                            umask=0o077)
         with open(token_path) as file:
             self.token = file.read().strip()
+        if compression:
+            with open(self.config) as file:
+                config = json.load(file)
+            config["compression"] = compression
+            with open(self.config, "w") as file:
+                json.dump(config, file)
         os.mkdir(self.data, 0o700)
+
+    def stats(self):
+        """`atticdb stats` as a dict of strings."""
+        out = subprocess.run([self.binary, "stats", "--url", f"unix://{self.socket}"],
+                             capture_output=True, text=True, check=True, timeout=60).stdout
+        return dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+
+    def rss_mib(self):
+        out = subprocess.run(["ps", "-o", "rss=", "-p", str(self.process.pid)],
+                             capture_output=True, text=True, timeout=10).stdout
+        return int(out.strip() or 0) / 1024
+
+    def wait_indexed(self, timeout=900.0):
+        """Seconds until the word index covers every durable record, or None without one."""
+        started = time.perf_counter()
+        while True:
+            stats = self.stats()
+            if "search_index_lsn" not in stats:
+                return None
+            if stats["search_index_lsn"] == stats["durable_lsn"] or \
+                    stats.get("search_index_stopped", "null") not in ("null", "None", ""):
+                return time.perf_counter() - started
+            if time.perf_counter() - started > timeout:
+                raise RuntimeError("the word index did not catch up in time")
+            time.sleep(0.05)
 
     def start(self):
         with open(self.log, "ab") as log:
@@ -312,12 +343,20 @@ def run(args, root, metrics):
     names = [f"realload-{n}" for n in range(len(plan))]
 
     # 2. Fill.
-    server = Server(args.atticdb, root)
+    server = Server(args.atticdb, root, args.compression)
     client = Client(f"unix://{server.socket}", server.token)
     server.start()
     try:
         metrics["start_s"] = server.wait_answer(client.health)
         fill(args, client, corpus, plan, names, metrics)
+        lag = server.wait_indexed()
+        if lag is not None:
+            stats = server.stats()
+            metrics["index_lag_after_fill_s"] = lag
+            metrics["index_mib"] = int(stats["search_index_bytes"]) / MIB
+            metrics["index_terms"] = int(stats["search_index_terms"])
+            metrics["index_stopped"] = stats.get("search_index_stopped", "null")
+        metrics["server_rss_mib"] = server.rss_mib()
 
         # 3. Disk, while the server runs: nothing more is written until phase 5.
         allocated, apparent = disk_usage(server.data)
@@ -350,6 +389,9 @@ def run(args, root, metrics):
         server.stop(signal.SIGKILL)
         server.start()
         metrics["reload_after_kill_s"] = server.wait_answer(read)
+        rebuild = server.wait_indexed()
+        if rebuild is not None:
+            metrics["index_rebuild_after_kill_s"] = metrics["reload_after_kill_s"] + rebuild
         intact = [t["seq"] for t in read()["turns"]] == before
         metrics["reload_clean_stop_s"] = server.stop(signal.SIGTERM)
         server.start()
@@ -489,6 +531,8 @@ def table(metrics):
             shown = "yes" if value else "no"
         elif isinstance(value, float):
             shown = f"{value:,.3f}" if abs(value) < 100 else f"{value:,.1f}"
+        elif isinstance(value, str):
+            shown = value
         else:
             shown = f"{value:,}"
         lines.append(f"| {key} | {shown} |")
@@ -507,6 +551,8 @@ def main():
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--out", help="write the metrics as JSON here")
     parser.add_argument("--keep", action="store_true", help="keep the temp dir")
+    parser.add_argument("--compression", choices=["off", "auto", "on"],
+                        help="the server config's compression field; unset leaves the default")
     args = parser.parse_args()
     args.source = args.source or DEFAULT_SOURCES
     if args.target_mib < 1 or args.writers < 1 or not 1 <= args.batch <= 1024 or args.refs < 0:
