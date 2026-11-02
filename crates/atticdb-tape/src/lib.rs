@@ -31,7 +31,7 @@ pub(crate) mod simdisk;
 mod state_machine;
 pub(crate) mod writer;
 
-pub use crc32c::crc32c;
+pub use crc32c::{crc32c, Crc32c};
 pub use error::{Error, Result};
 pub use frame::{Digest, Frame, Header, Kind};
 #[cfg(any(test, feature = "sim"))]

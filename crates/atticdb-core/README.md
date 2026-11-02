@@ -196,9 +196,20 @@ A query word has no whitespace, so a match lies inside 1 whitespace-delimited to
 `search_index` keeps, per tenant, a dictionary of those tokens and per token the ascending LSNs that hold it, as LEB128 deltas.
 
 - **Build:** a background thread reads durable records in LSN order from `Tape::durable_reads`, from plain text, so a compressed turn is inflated once, here. It never runs on the writer. Simulations build it inline before each search, so runs stay deterministic.
-- **Query:** walk the newest `search_walk_first` records, then every record above the index watermark. Then scan the dictionary for tokens holding each word or its singular, union their postings, and intersect across words, rarest first. A word 8 times commoner than the candidates left is skipped.
+- **Query:** walk the newest `search_walk_first` records (64), then every record above the index watermark. Then find the tokens holding each word or its singular, union their postings, and intersect across words, rarest first. A word 8 times commoner than the candidates left is skipped.
+- **Token lookup:** per 3-byte window, the ids of the tokens holding it, as delta postings. A word of 3 bytes or more intersects its 2 rarest windows and checks each token with `contains`. Shorter words scan the dictionary.
 - **Check:** every visited record goes through the same read and match as a full walk. So a stale, partial or stopped index changes cost, never results. `search_with_the_index_equals_a_full_scan` compares every page and cursor. The engine simulation compares search with its oracle after crashes and mode changes.
 - **Bounds:** it stops growing at `search_index_bytes` (512 MiB). `0` turns it off. After a restart it rebuilds from LSN 1, and until then search walks what it doesn't cover.
+
+## Hot cache
+
+`window` reads through a cache of decoded turns, so a repeated window skips the tape read, the CRC check and the inflate (0007).
+An entry is an immutable copy of a turn that passed every tape check: kind, tenant, agent, session and seq.
+A CRC32C over all its fields is taken on insert and checked on every hit. A mismatch drops the entry, counts it in `hot_cache_dropped`, and reads the tape.
+A hit runs the same identity checks as a tape read.
+It holds `hot_cache_bytes` (64 MiB), least recently used out first, and skips turns over 1/8 of that. `0` turns it off. It lives per process.
+
+Segment files are opened once per tape and shared by every read. A segment id is never reused while a tape is open.
 
 ## Bounds and cold pages
 

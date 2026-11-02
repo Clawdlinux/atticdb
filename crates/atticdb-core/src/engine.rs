@@ -323,7 +323,7 @@ pub struct Metrics {
     /// Maximum State hold across checkpoint snapshot, install chunks, and watermark publication.
     /// Excludes lock acquisition and includes all work inside each critical section.
     pub checkpoint_state_lock_ns: u64,
-    /// Tape::read calls issued by windows, excluding append receipts.
+    /// Turns windows read, from the tape or the hot cache, excluding append receipts.
     /// A budget-cut window adds 1 read for the turn it left out.
     pub window_reads: u64,
     /// Registered tenants.
@@ -349,6 +349,14 @@ pub struct Metrics {
     pub search_index_terms: usize,
     /// Why the word index stopped growing, if it did: `off`, its memory budget, or an error.
     pub search_index_stopped: Option<String>,
+    /// Bytes the hot cache of decoded turns holds.
+    pub hot_cache_bytes: usize,
+    /// Window turns served from the hot cache.
+    pub hot_cache_hits: u64,
+    /// Window turns the hot cache didn't hold, read from the tape.
+    pub hot_cache_misses: u64,
+    /// Hot cache entries whose checksum failed on a hit. They were read from the tape instead.
+    pub hot_cache_dropped: u64,
 }
 
 /// Writer availability. Reads retain the last durable view.
@@ -368,6 +376,8 @@ pub struct Engine {
     indexer: crate::search_index::Indexer,
     /// See [`EngineOptions::search_walk_first`].
     walk_first: u64,
+    /// Decoded recent turns for `window`, checked on every hit.
+    hot: crate::hot_cache::HotCache,
     worker: Worker,
     tape: Tape<Machine>,
     state: Arc<Mutex<State>>,
@@ -493,6 +503,7 @@ impl Engine {
         Ok(Self {
             indexer,
             walk_first: opts.search_walk_first,
+            hot: crate::hot_cache::HotCache::new(opts.hot_cache_bytes),
             worker,
             tape,
             state,
@@ -945,19 +956,60 @@ impl Engine {
                 }
             }
             self.reads.fetch_add(1, Ordering::Relaxed);
-            let frame =
-                reader.read(lsn)?.ok_or_else(|| EngineError::rejected(ErrorKind::CorruptIndex))?;
-            let decoded = decode(&frame.payload)
-                .map_err(|_| EngineError::rejected(ErrorKind::CorruptIndex))?;
-            if frame.header.kind != Kind::Turn
-                || frame.header.tenant_id != tenant
-                || decoded.agent_id != scope.agent
-                || decoded.session_id != scope.session
-                || decoded.seq != seq
-            {
-                return Err(EngineError::rejected(ErrorKind::CorruptIndex));
-            }
-            let size = decoded.turn.content.len().saturating_add(decoded.turn.meta.len());
+            let turn = match self.hot.get(lsn) {
+                Some(cached) => {
+                    // The same identity checks as a tape read. A cached entry passed them once,
+                    // so a mismatch here means a wrong session index, not a bad entry.
+                    if cached.tenant != tenant
+                        || *cached.agent != *scope.agent
+                        || *cached.session != *scope.session
+                        || cached.seq != seq
+                    {
+                        return Err(EngineError::rejected(ErrorKind::CorruptIndex));
+                    }
+                    Turn {
+                        lsn,
+                        seq,
+                        commit_time_ns: cached.commit_time_ns,
+                        role: cached.role,
+                        content: cached.content.clone(),
+                        meta: cached.meta.clone(),
+                    }
+                }
+                None => {
+                    let frame = reader
+                        .read(lsn)?
+                        .ok_or_else(|| EngineError::rejected(ErrorKind::CorruptIndex))?;
+                    let decoded = decode(&frame.payload)
+                        .map_err(|_| EngineError::rejected(ErrorKind::CorruptIndex))?;
+                    if frame.header.kind != Kind::Turn
+                        || frame.header.tenant_id != tenant
+                        || decoded.agent_id != scope.agent
+                        || decoded.session_id != scope.session
+                        || decoded.seq != seq
+                    {
+                        return Err(EngineError::rejected(ErrorKind::CorruptIndex));
+                    }
+                    let commit_time_ns = frame.header.commit_time_ns;
+                    let (role, content, meta) =
+                        (decoded.turn.role, decoded.turn.content, decoded.turn.meta);
+                    self.hot.insert(
+                        lsn,
+                        crate::hot_cache::Cached::new(
+                            tenant,
+                            &scope.agent,
+                            &scope.session,
+                            seq,
+                            commit_time_ns,
+                            role,
+                            content.clone(),
+                            meta.clone(),
+                        ),
+                    );
+                    Turn { lsn, seq, commit_time_ns, role, content, meta }
+                }
+            };
+            let size = turn.content.len().saturating_add(turn.meta.len());
             match bytes.checked_add(size).filter(|&total| total <= max_bytes) {
                 Some(total) => bytes = total,
                 None => {
@@ -965,14 +1017,7 @@ impl Engine {
                     break;
                 }
             }
-            turns.push(Turn {
-                lsn,
-                seq: decoded.seq,
-                commit_time_ns: frame.header.commit_time_ns,
-                role: decoded.turn.role,
-                content: decoded.turn.content,
-                meta: decoded.turn.meta,
-            });
+            turns.push(turn);
         }
         if matches!(query, WindowQuery::Last(_)) {
             turns.reverse();
@@ -1387,6 +1432,7 @@ impl Engine {
             .indexer
             .with(|index| (index.lsn, index.bytes, index.terms, index.stopped.clone()))
             .ok_or_else(|| EngineError::rejected(ErrorKind::Poisoned))?;
+        let hot = self.hot.counts();
         let state = lock(&self.state)?;
         Ok(Metrics {
             durable_lsn: self.tape.durable_lsn(),
@@ -1419,6 +1465,10 @@ impl Engine {
             search_index_bytes,
             search_index_terms,
             search_index_stopped,
+            hot_cache_bytes: hot.bytes,
+            hot_cache_hits: hot.hits,
+            hot_cache_misses: hot.misses,
+            hot_cache_dropped: hot.dropped,
         })
     }
 }
