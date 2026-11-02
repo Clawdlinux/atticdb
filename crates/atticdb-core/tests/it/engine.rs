@@ -73,6 +73,13 @@ fn windows_are_dense_and_read_cost_depends_only_on_returned_turns() {
         let reads = engine.metrics().unwrap().window_reads - before;
         assert_eq!(reads, got.len() as u64 + u64::from(truncated), "case: {case}");
     }
+    // A repeated window comes from the hot cache, and reads back the same.
+    let first = engine.window(&scope, WindowQuery::Last(32)).unwrap();
+    let before = engine.metrics().unwrap();
+    assert_eq!(engine.window(&scope, WindowQuery::Last(32)).unwrap(), first);
+    let after = engine.metrics().unwrap();
+    assert_eq!(after.hot_cache_hits - before.hot_cache_hits, 32, "{after:?}");
+    assert_eq!((after.window_reads - before.window_reads, after.hot_cache_dropped), (32, 0));
     // A huge `last` with no budget after a reopen reads one turn and loads only the
     // newest index page, not one slot per requested turn.
     engine.checkpoint().unwrap();
@@ -451,8 +458,10 @@ fn write_outages_report_health_preserve_reads_and_retry_keys() {
             opts.tape.free_space_floor = Some(4096);
             if matches!(fault, ColdFloor | ReopenDirtyFull) {
                 opts.tape.lsn_index_bytes = 4224;
-                // These cases test which tape index pages a cold read loads. The word index
-                // reads the tape in the background and would load them first.
+                // These cases test which tape index pages a cold read loads. The hot cache
+                // would skip the tape, and the word index reads it in the background and would
+                // load the pages first.
+                opts.hot_cache_bytes = 0;
                 opts.search_index_bytes = 0;
             }
             let mut engine = open(io.clone(), opts.clone());

@@ -55,12 +55,14 @@ struct Terms {
     /// Where each token starts in `blob`.
     starts: Vec<u32>,
     postings: Vec<Postings>,
+    /// Per 3-byte window, the ids of the tokens holding it.
+    grams: HashMap<u32, Postings>,
     /// Gives every token the same hash, so tests reach `collided`.
     #[cfg(test)]
     collide: bool,
 }
 
-/// Ascending LSNs as LEB128 deltas.
+/// Ascending values, such as LSNs or token ids, as LEB128 deltas.
 #[derive(Debug, Default)]
 struct Postings {
     deltas: Vec<u8>,
@@ -68,9 +70,49 @@ struct Postings {
     count: u32,
 }
 
+impl Postings {
+    /// Appends `value`, at least the last one. Returns the bytes added.
+    fn push(&mut self, value: u64) -> usize {
+        let (held, mut delta) = (self.deltas.len(), value - self.last);
+        loop {
+            let byte = (delta & 0x7f) as u8;
+            delta >>= 7;
+            if delta == 0 {
+                self.deltas.push(byte);
+                break;
+            }
+            self.deltas.push(byte | 0x80);
+        }
+        (self.last, self.count) = (value, self.count + 1);
+        self.deltas.len() - held
+    }
+
+    /// The values, ascending.
+    fn values(&self) -> impl Iterator<Item = u64> + '_ {
+        let (mut value, mut shift, mut delta) = (0u64, 0, 0u64);
+        self.deltas.iter().filter_map(move |&byte| {
+            delta |= u64::from(byte & 0x7f) << shift;
+            shift += 7;
+            if byte & 0x80 != 0 {
+                return None;
+            }
+            value += delta;
+            (shift, delta) = (0, 0);
+            Some(value)
+        })
+    }
+}
+
+/// A token's 3-byte window, as a key.
+fn gram(bytes: &[u8]) -> u32 {
+    u32::from(bytes[0]) << 16 | u32::from(bytes[1]) << 8 | u32::from(bytes[2])
+}
+
 /// Heap cost charged per new token beyond its text: the hash map entry, `starts` and
 /// `Postings`.
 const TERM_OVERHEAD: usize = 56;
+/// Heap cost charged per new trigram: its map entry and `Postings`.
+const GRAM_OVERHEAD: usize = 64;
 
 impl Index {
     fn new(budget: usize) -> Self {
@@ -116,26 +158,23 @@ impl Index {
                     terms.blob.push_str(token);
                     terms.blob.push('\n');
                     terms.postings.push(Postings::default());
+                    let mut keys: Vec<u32> = token.as_bytes().windows(3).map(gram).collect();
+                    keys.sort_unstable();
+                    keys.dedup();
+                    for key in keys {
+                        let list = terms.grams.entry(key).or_default();
+                        if list.count == 0 {
+                            self.bytes += GRAM_OVERHEAD;
+                        }
+                        self.bytes += list.push(u64::from(id));
+                    }
                     self.bytes += token.len() + 1 + TERM_OVERHEAD;
                     self.terms += 1;
                     id
                 }
             };
             let postings = &mut terms.postings[id as usize];
-            let held = postings.deltas.len();
-            let mut delta = lsn - postings.last;
-            loop {
-                let byte = (delta & 0x7f) as u8;
-                delta >>= 7;
-                if delta == 0 {
-                    postings.deltas.push(byte);
-                    break;
-                }
-                postings.deltas.push(byte | 0x80);
-            }
-            postings.last = lsn;
-            postings.count += 1;
-            self.bytes += postings.deltas.len() - held;
+            self.bytes += postings.push(lsn);
         }
         self.lsn = lsn;
         true
@@ -204,34 +243,45 @@ impl Terms {
         }
     }
 
-    /// Ids of the tokens containing `word`, ascending.
+    /// Ids of the tokens containing `word`, ascending. A word of 3 bytes or more starts from
+    /// its 2 rarest trigrams: a token holding the word holds all of them. Shorter words scan
+    /// the dictionary. Every candidate is checked with `contains`, so both give the same ids.
     fn matching(&self, word: &str) -> Vec<u32> {
-        let mut ids: Vec<u32> = self
-            .blob
-            .match_indices(word)
-            .map(|(at, _)| (self.starts.partition_point(|&start| start as usize <= at) - 1) as u32)
-            .collect();
-        ids.dedup();
-        ids
+        let bytes = word.as_bytes();
+        if bytes.len() < 3 {
+            let mut ids: Vec<u32> = self
+                .blob
+                .match_indices(word)
+                .map(|(at, _)| (self.starts.partition_point(|&s| s as usize <= at) - 1) as u32)
+                .collect();
+            ids.dedup();
+            return ids;
+        }
+        let mut keys: Vec<u32> = bytes.windows(3).map(gram).collect();
+        keys.sort_unstable();
+        keys.dedup();
+        let Some(mut lists) =
+            keys.iter().map(|key| self.grams.get(key)).collect::<Option<Vec<_>>>()
+        else {
+            return Vec::new();
+        };
+        lists.sort_by_key(|list| list.count);
+        let mut ids: Vec<u64> = lists[0].values().collect();
+        if let Some(second) = lists.get(1) {
+            let mut other = second.values().peekable();
+            ids.retain(|id| {
+                while other.next_if(|next| next < id).is_some() {}
+                other.peek() == Some(id)
+            });
+        }
+        ids.into_iter().map(|id| id as u32).filter(|&id| self.text(id).contains(word)).collect()
     }
 
     /// Ascending, deduplicated LSNs below `below` of the tokens `ids`.
     fn union(&self, ids: &[u32], below: u64) -> Vec<u64> {
         let mut lsns = Vec::new();
         for &id in ids {
-            let (mut lsn, mut shift, mut delta) = (0u64, 0, 0u64);
-            for &byte in &self.postings[id as usize].deltas {
-                delta |= u64::from(byte & 0x7f) << shift;
-                shift += 7;
-                if byte & 0x80 == 0 {
-                    lsn += delta;
-                    if lsn >= below {
-                        break;
-                    }
-                    lsns.push(lsn);
-                    (shift, delta) = (0, 0);
-                }
-            }
+            lsns.extend(self.postings[id as usize].values().take_while(|&lsn| lsn < below));
         }
         lsns.sort_unstable();
         lsns.dedup();
@@ -369,6 +419,12 @@ mod tests {
         }
         let find = |word: &str, below| index.candidates(1, &[(word.into(), None)], below);
         assert_eq!(find("alpha", u64::MAX), [1 << 40, 70_000, 1]);
+        // 3 bytes or more go through trigrams. Shorter words scan the dictionary.
+        assert_eq!(find("lph", u64::MAX), [1 << 40, 70_000, 1]);
+        assert_eq!(find("ph", u64::MAX), [1 << 40, 70_000, 1]);
+        assert_eq!(find("amma", u64::MAX), [1 << 40, 200]);
+        assert_eq!(find("\u{fffd}be", u64::MAX), [(1 << 40) + 1]);
+        assert_eq!(find("alphab", u64::MAX), Vec::<u64>::new(), "every trigram, but no token");
         assert_eq!(find("beta", u64::MAX), [(1 << 40) + 1, 200, 1]);
         assert_eq!(find("gamma", 1 << 40), [200], "below is exclusive");
         assert_eq!(find("delta", u64::MAX), Vec::<u64>::new());

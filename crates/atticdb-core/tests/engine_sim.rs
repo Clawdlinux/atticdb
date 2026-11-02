@@ -989,6 +989,8 @@ fn grouped_seed(seed: u64, plan: &CapacityPlan) -> Vec<Vec<Turn>> {
             ..TapeOptions::default()
         },
         checkpoint_bytes: 8192,
+        // Seeds with a tiny tape index prove cold reads reach it, so they skip the hot cache.
+        hot_cache_bytes: if seed.is_multiple_of(3) { 0 } else { 64 * 1024 * 1024 },
         ..EngineOptions::default()
     };
     let clock = Arc::new(SimClock::default());

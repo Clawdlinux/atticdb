@@ -65,6 +65,9 @@ pub struct EngineOptions {
     /// Newest records `search` walks 1 by 1 before it asks the word index. A common word fills
     /// its page there, cheaper than a dictionary scan.
     pub search_walk_first: u64,
+    /// Memory budget of the hot cache of decoded turns behind `window`, in bytes. 0 turns it
+    /// off. Every hit is checked against a CRC32C taken when the turn was cached.
+    pub hot_cache_bytes: usize,
 }
 impl Default for EngineOptions {
     fn default() -> Self {
@@ -83,9 +86,10 @@ impl Default for EngineOptions {
             compression: Compression::default(),
             // About 14% of the turn text on real transcripts, so this covers about 3.5 GiB.
             search_index_bytes: 512 * 1024 * 1024,
-            // On 512 MiB of real transcripts, 1,024 records cost about 1 ms to walk, against
-            // about 5 ms per word for the dictionary scan.
-            search_walk_first: 1024,
+            // With trigram lookups in the dictionary, a short walk wins: on 512 MiB of real
+            // transcripts search p50 was 2.1 ms at 64 against 3.0 ms at 1,024.
+            search_walk_first: 64,
+            hot_cache_bytes: 64 * 1024 * 1024,
         }
     }
 }

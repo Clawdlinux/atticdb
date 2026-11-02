@@ -33,11 +33,11 @@ Tenant names are 1 to 255 bytes. Tokens are 32 to 1024 bytes of visible ASCII, s
 
 `search_index_mib` is the memory budget of the word index behind `memory_search`, default 512. It holds about 9 to 14% of the turn text, so 512 MiB covers about 3.5 GiB of turns. Past the budget it stops growing and search walks the newer records, still correctly but slower. `0` turns it off. See [Search](#search).
 
-`/v1/stats` shows `manifest_version` (3 once a directory may hold compressed turns), `compressing`, `compressed_turns`, and the index's `search_index_lsn`, `search_index_bytes`, `search_index_terms` and `search_index_stopped`.
+`/v1/stats` shows `manifest_version` (3 once a directory may hold compressed turns), `compressing`, `compressed_turns`, the index's `search_index_lsn`, `search_index_bytes`, `search_index_terms` and `search_index_stopped`, and the hot cache's `hot_cache_bytes`, `hot_cache_hits`, `hot_cache_misses` and `hot_cache_dropped`.
 
 ### Search
 
-`memory_search` keeps a turn or current fact when every query word, or its singular, is a substring of its lowercased text. A query word has no whitespace, so a match lies inside 1 whitespace-delimited token. The server keeps a dictionary of those tokens per tenant, and per token the records holding it (D96). A query walks the newest 1,024 records, then scans the dictionary and reads only the candidates. It checks every record it returns again, so the index can make a search slower but never changes its result.
+`memory_search` keeps a turn or current fact when every query word, or its singular, is a substring of its lowercased text. A query word has no whitespace, so a match lies inside 1 whitespace-delimited token. The server keeps a dictionary of those tokens per tenant, and per token the records holding it (D96). A query walks the newest 64 records, then finds the candidate tokens through the trigrams of each word, and reads only the candidate records. It checks every record it returns again, so the index can make a search slower but never changes its result.
 
 The index is built in memory from plain text, off the write path. After a restart it rebuilds in the background. Until then, search walks the records it doesn't cover yet.
 

@@ -10,6 +10,7 @@ mod error;
 pub mod fact;
 mod facts;
 pub mod forget;
+mod hot_cache;
 mod machine;
 mod options;
 mod search_index;

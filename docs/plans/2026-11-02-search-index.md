@@ -20,7 +20,7 @@ Measured first, on 96,500 real turns (275 MiB): 634,059 unique tokens, a 13.2 Mi
 | False negatives | Tokens come from the text `found()` matches: lossy UTF-8, lowercased as a whole, split on whitespace. `search_with_the_index_equals_a_full_scan` compares every page and cursor with a full walk, on Unicode, final sigma, punctuation, plurals, invalid UTF-8, facts and 2 tenants |
 | False positives | Every candidate is read and checked by the same `pick` as a full walk |
 | Freshness | Records above the watermark are walked |
-| Common words | The newest 1,024 records are walked first. Unselective words are skipped when intersecting |
+| Common words | The newest records are walked first: 1,024 in this change, 64 once trigram token lookup landed (read-path plan). Unselective words are skipped when intersecting |
 | Write cost | The builder is a background thread, off the writer |
 | Memory | Each token's text is stored once, keyed by hash, with a map for collisions. Budget 512 MiB, then it stops growing |
 | Restart | Rebuilt in the background. Search walks what isn't covered yet |

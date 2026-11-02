@@ -155,7 +155,7 @@ pub fn stats(engine: &Engine, instance: &str) -> Response {
 }
 
 /// `/v1/stats` counters. Its other numbers are gauges, and other `_ns` maxima become seconds.
-const COUNTERS: [&str; 18] = [
+const COUNTERS: [&str; 21] = [
     "writer_groups",
     "writer_group_requests",
     "superblock_installs",
@@ -174,6 +174,9 @@ const COUNTERS: [&str; 18] = [
     "writer_publish_ns",
     "writer_reply_ns",
     "compressed_turns",
+    "hot_cache_hits",
+    "hot_cache_misses",
+    "hot_cache_dropped",
 ];
 
 /// A Prometheus histogram over fixed upper bounds, with one more bucket past the last.
@@ -306,6 +309,10 @@ pub fn stats_fields(engine: &Engine) -> Option<Value> {
     fields["search_index_bytes"] = json!(m.search_index_bytes);
     fields["search_index_terms"] = json!(m.search_index_terms);
     fields["search_index_stopped"] = json!(m.search_index_stopped);
+    fields["hot_cache_bytes"] = json!(m.hot_cache_bytes);
+    fields["hot_cache_hits"] = json!(m.hot_cache_hits);
+    fields["hot_cache_misses"] = json!(m.hot_cache_misses);
+    fields["hot_cache_dropped"] = json!(m.hot_cache_dropped);
     Some(fields)
 }
 
