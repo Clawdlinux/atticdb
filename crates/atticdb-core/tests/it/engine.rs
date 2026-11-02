@@ -451,6 +451,9 @@ fn write_outages_report_health_preserve_reads_and_retry_keys() {
             opts.tape.free_space_floor = Some(4096);
             if matches!(fault, ColdFloor | ReopenDirtyFull) {
                 opts.tape.lsn_index_bytes = 4224;
+                // These cases test which tape index pages a cold read loads. The word index
+                // reads the tape in the background and would load them first.
+                opts.search_index_bytes = 0;
             }
             let mut engine = open(io.clone(), opts.clone());
             assert_eq!(engine.health(), Health::Ok, "{case}");
