@@ -422,6 +422,9 @@ fn try_start(config: Config, exit_on_poison: bool, log_requests: bool) -> Result
     if let Some(mode) = config.compression {
         options.compression.mode = mode;
     }
+    if let Some(mib) = config.search_index_mib {
+        options.search_index_bytes = (mib as usize).saturating_mul(1 << 20);
+    }
     #[cfg(unix)]
     let address = format!("instance={instance} unix={} tcp={tcp_text}", socket.display());
     #[cfg(not(unix))]

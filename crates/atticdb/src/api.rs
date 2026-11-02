@@ -260,7 +260,7 @@ pub fn metrics(engine: &Engine) -> Response {
 pub fn stats_fields(engine: &Engine) -> Option<Value> {
     let m = engine.metrics().ok()?;
     let index = &m.tape_index;
-    Some(json!({
+    let mut fields = json!({
         "health": health_status(engine).1,
         "durable_lsn": m.durable_lsn,
         "tenants": m.tenants,
@@ -300,7 +300,13 @@ pub fn stats_fields(engine: &Engine) -> Option<Value> {
         "tape_index_page_reloads": index.page_reloads,
         "tape_index_page_evictions": index.page_evictions,
         "tape_index_dirty_page_evictions": index.dirty_page_evictions,
-    }))
+    });
+    // Added here: 1 `json!` with every field passes the macro recursion limit.
+    fields["search_index_lsn"] = json!(m.search_index_lsn);
+    fields["search_index_bytes"] = json!(m.search_index_bytes);
+    fields["search_index_terms"] = json!(m.search_index_terms);
+    fields["search_index_stopped"] = json!(m.search_index_stopped);
+    Some(fields)
 }
 
 /// JSON trees in memory at once: request parses and window builds. An 8 MiB body like

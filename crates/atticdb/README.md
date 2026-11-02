@@ -22,18 +22,31 @@ atticdb verify --data-dir ./data                  # checks a stopped data dir on
 atticdb recover --truncate-at <lsn> --data-dir ./data
 ```
 
-The config is JSON: `{"data_dir", "listen", "unix_socket", "unix_socket_group", "compression", "tenants": [{"name", "token"}]}`.
+The config is JSON: `{"data_dir", "listen", "unix_socket", "unix_socket_group", "compression", "search_index_mib", "tenants": [{"name", "token"}]}`.
 Flags override fields. It must be a regular file owned by you with no group or other bits.
 Tenant names are 1 to 255 bytes. Tokens are 32 to 1024 bytes of visible ASCII, so the `Authorization` header fits the 16 KiB request head. Duplicate names or tokens fail.
 
-`compression` is `"off"` (the default), `"auto"` or `"on"`. With it on, turns of 256 bytes or more are stored as raw deflate when that's smaller. On real agent transcripts that saves about 62% of disk (D95).
-- `off`: new turns are stored plain. Compressed turns stay readable.
+`compression` is `"auto"` (the default), `"on"` or `"off"`. Compressed turns of 256 bytes or more are stored as raw deflate when that's smaller. On real agent transcripts that saves about 57 to 62% of disk (D95).
 - `auto`: a new data directory compresses. An existing one written by v0.2.0 or earlier stays as it is, so those builds can still open it.
 - `on`: compresses, and upgrades an existing directory once. From then on v0.2.0 and earlier refuse to open it with `invalid metadata magic, version, or CRC`. Nothing is damaged. Use v0.3.0 or later.
+- `off`: new turns are stored plain. Compressed turns stay readable.
 
-The cost is search. `memory_search` scans the log and inflates every compressed turn it passes. On 512 MiB of real transcripts its p99 went from 185 to 660 ms. Window and fact reads add about 0.3 ms at p99. Turn it on if disk matters more to you than search latency. The default flips once search uses an index (#117).
+`search_index_mib` is the memory budget of the word index behind `memory_search`, default 512. It holds about 9 to 14% of the turn text, so 512 MiB covers about 3.5 GiB of turns. Past the budget it stops growing and search walks the newer records, still correctly but slower. `0` turns it off. See [Search](#search).
 
-`/v1/stats` shows `manifest_version` (3 once a directory may hold compressed turns), `compressing` and `compressed_turns`.
+`/v1/stats` shows `manifest_version` (3 once a directory may hold compressed turns), `compressing`, `compressed_turns`, and the index's `search_index_lsn`, `search_index_bytes`, `search_index_terms` and `search_index_stopped`.
+
+### Search
+
+`memory_search` keeps a turn or current fact when every query word, or its singular, is a substring of its lowercased text. A query word has no whitespace, so a match lies inside 1 whitespace-delimited token. The server keeps a dictionary of those tokens per tenant, and per token the records holding it (D96). A query walks the newest 1,024 records, then scans the dictionary and reads only the candidates. It checks every record it returns again, so the index can make a search slower but never changes its result.
+
+The index is built in memory from plain text, off the write path. After a restart it rebuilds in the background. Until then, search walks the records it doesn't cover yet.
+
+| Real transcripts, Apple M4 | 512 MiB, before | 512 MiB, index | 2.5 GiB, before | 2.5 GiB, index and compression |
+|---|---|---|---|---|
+| Search p99 | 602 ms | 10 ms (20 with compression) | 4,111 ms | 29 ms |
+| Disk | 647 MiB | 647 MiB (327 with compression) | 2,786 MiB | 1,186 MiB |
+| Index memory | none | 70 MiB | none | 236 MiB |
+| Index rebuild after a restart | none | 5.3 s | none | 34 s |
 
 ## Run a server by hand
 

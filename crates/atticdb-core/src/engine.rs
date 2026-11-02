@@ -341,6 +341,14 @@ pub struct Metrics {
     pub compressing: bool,
     /// Turns this process wrote compressed.
     pub compressed_turns: u64,
+    /// Every record at or below this LSN is in the word index. Search walks those above it.
+    pub search_index_lsn: u64,
+    /// Approximate memory the word index holds.
+    pub search_index_bytes: usize,
+    /// Distinct lowercase tokens in the word index.
+    pub search_index_terms: usize,
+    /// Why the word index stopped growing, if it did: `off`, its memory budget, or an error.
+    pub search_index_stopped: Option<String>,
 }
 
 /// Writer availability. Reads retain the last durable view.
@@ -356,6 +364,10 @@ pub enum Health {
 
 /// Durable session storage. Drop joins the checkpoint worker before closing the tape.
 pub struct Engine {
+    /// Declared first so its thread stops before the tape it reads is dropped.
+    indexer: crate::search_index::Indexer,
+    /// See [`EngineOptions::search_walk_first`].
+    walk_first: u64,
     worker: Worker,
     tape: Tape<Machine>,
     state: Arc<Mutex<State>>,
@@ -468,7 +480,19 @@ impl Engine {
         let worker = Worker::start(io.clone(), dir.clone(), state.clone(), &opts)?;
         lock(&state)?.notify = worker.sender.clone();
         let failed = lock(&state)?.failed.clone();
+        #[cfg(feature = "sim")]
+        let inline = opts.tape.inline_sim;
+        #[cfg(not(feature = "sim"))]
+        let inline = false;
+        let indexer = crate::search_index::Indexer::start(
+            tape.durable_reads(),
+            opts.search_index_bytes,
+            inline,
+        )
+        .map_err(atticdb_tape::Error::from)?;
         Ok(Self {
+            indexer,
+            walk_first: opts.search_walk_first,
             worker,
             tape,
             state,
@@ -1040,8 +1064,9 @@ impl Engine {
         Ok(FactPage { facts, next })
     }
 
-    /// Walks records newest first and returns turns and current facts that contain every
-    /// word of the query. Visits at most `query.visits` records; `next` resumes below them.
+    /// Returns turns and current facts that contain every word of the query, newest first.
+    /// Records above the word index's watermark are walked; below it, only its candidates.
+    /// Visits at most `query.visits` records; `next` resumes below them.
     pub fn search(&self, tenant: &str, query: SearchQuery) -> Result<SearchPage> {
         let words: Vec<String> = query.query.split_whitespace().map(str::to_lowercase).collect();
         let stems: Vec<Option<String>> = words.iter().map(|word| singular(word)).collect();
@@ -1060,21 +1085,14 @@ impl Engine {
         };
         let found = |fields: &[&[u8]]| {
             let text: Vec<String> =
-                fields.iter().map(|field| String::from_utf8_lossy(field).to_lowercase()).collect();
+                fields.iter().map(|field| crate::search_index::lower(field)).collect();
             let has = |word: &str| text.iter().any(|field| field.contains(word));
             words
                 .iter()
                 .zip(&stems)
                 .all(|(word, stem)| has(word) || stem.as_deref().is_some_and(has))
         };
-        let walk = Walk {
-            before: query.before,
-            limit: query.limit,
-            max_bytes: query.max_bytes,
-            visits: query.visits,
-        };
-        let wanted = |header: &Header| matches!(header.kind, Kind::Turn | Kind::Fact);
-        let (hits, next) = self.newest_first(tenant, walk, wanted, |frame| {
+        let pick = |frame: &Frame| -> Result<Option<(Hit, usize)>> {
             let hit = match frame.header.kind {
                 Kind::Turn => {
                     let (agent, session, turn) = turn_frame(frame)?;
@@ -1102,8 +1120,61 @@ impl Engine {
                 Hit::Fact(fact) => fact.key.len() + fact.content.len() + fact.meta.len(),
             };
             Ok(Some((hit, size)))
-        })?;
-        Ok(SearchPage { hits, next })
+        };
+        if query.limit == 0 || query.visits == 0 {
+            return Err(EngineError::rejected(ErrorKind::InvalidInput));
+        }
+        let Some((state, snapshot, id)) = self.fact_snapshot(tenant)? else {
+            return Ok(SearchPage { hits: Vec::new(), next: None });
+        };
+        // Release the state lock before any tape read.
+        drop(state);
+        let top = query.before.map_or(snapshot, |before| before.saturating_sub(1).min(snapshot));
+        // The newest records and those above the index watermark are walked 1 by 1. A common
+        // word fills its page there without the index. Below, only candidates are walked.
+        // Every visited record is checked by `pick`, so the result is the same either way.
+        let watermark = self.indexer.current(|index| index.lsn).unwrap_or(0);
+        let indexed = watermark.min(top.saturating_sub(self.walk_first));
+        let mine = |header: &Header| {
+            header.tenant_id == id && matches!(header.kind, Kind::Turn | Kind::Fact)
+        };
+        let (mut hits, mut bytes, mut visited, mut reader) =
+            (Vec::new(), 0usize, 0usize, self.tape.reader());
+        // Visits 1 record. `Some(next)` ends the page.
+        let mut visit = |lsn: u64| -> Result<Option<Option<u64>>> {
+            if visited == query.visits {
+                return Ok(Some(Some(lsn + 1)));
+            }
+            visited += 1;
+            let Some(frame) = reader.read_if(lsn, mine)? else { return Ok(None) };
+            let Some((hit, size)) = pick(&frame)? else { return Ok(None) };
+            bytes = bytes.saturating_add(size);
+            if bytes > query.max_bytes && !hits.is_empty() {
+                return Ok(Some(Some(lsn + 1)));
+            }
+            hits.push(hit);
+            Ok((hits.len() == query.limit).then_some(Some(lsn).filter(|&lsn| lsn > 1)))
+        };
+        let mut next = None;
+        for lsn in (indexed + 1..=top).rev() {
+            next = visit(lsn)?;
+            if next.is_some() {
+                break;
+            }
+        }
+        if next.is_none() && indexed > 0 {
+            let terms: Vec<(String, Option<String>)> =
+                words.iter().cloned().zip(stems.iter().cloned()).collect();
+            let candidates = self.indexer.with(|index| index.candidates(id, &terms, indexed + 1));
+            for lsn in candidates.unwrap_or_default() {
+                next = visit(lsn)?;
+                if next.is_some() {
+                    break;
+                }
+            }
+        }
+        drop(visit);
+        Ok(SearchPage { hits, next: next.flatten() })
     }
 
     /// Walks a tenant's turns and fact revisions newest first, each as written. Superseded
@@ -1312,6 +1383,10 @@ impl Engine {
     /// Returns published memory, checkpoint, and query counters.
     pub fn metrics(&self) -> Result<Metrics> {
         let tape_index = self.tape.index_stats()?;
+        let (search_index_lsn, search_index_bytes, search_index_terms, search_index_stopped) = self
+            .indexer
+            .with(|index| (index.lsn, index.bytes, index.terms, index.stopped.clone()))
+            .ok_or_else(|| EngineError::rejected(ErrorKind::Poisoned))?;
         let state = lock(&self.state)?;
         Ok(Metrics {
             durable_lsn: self.tape.durable_lsn(),
@@ -1340,6 +1415,10 @@ impl Engine {
             manifest_version: self.manifest_version,
             compressing: self.compress.is_some(),
             compressed_turns: self.compressed_turns.load(Ordering::Relaxed),
+            search_index_lsn,
+            search_index_bytes,
+            search_index_terms,
+            search_index_stopped,
         })
     }
 }

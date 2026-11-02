@@ -26,8 +26,8 @@ pub struct Compression {
 
 impl Default for Compression {
     fn default() -> Self {
-        // Off until the search index (#117): today's search inflates every turn it scans.
-        Self { mode: CompressionMode::Off, level: 3, min_content: 256 }
+        // Search reads candidates from the word index, so compression costs it little (D96).
+        Self { mode: CompressionMode::Auto, level: 3, min_content: 256 }
     }
 }
 
@@ -59,6 +59,12 @@ pub struct EngineOptions {
     pub fact_history: usize,
     /// Turn compression.
     pub compression: Compression,
+    /// Memory budget of the word index behind `search`, in bytes. 0 turns it off, so search
+    /// walks every record. Past the budget it stops growing and search walks newer records.
+    pub search_index_bytes: usize,
+    /// Newest records `search` walks 1 by 1 before it asks the word index. A common word fills
+    /// its page there, cheaper than a dictionary scan.
+    pub search_walk_first: u64,
 }
 impl Default for EngineOptions {
     fn default() -> Self {
@@ -75,6 +81,11 @@ impl Default for EngineOptions {
             max_facts: 100_000,
             fact_history: 16,
             compression: Compression::default(),
+            // About 14% of the turn text on real transcripts, so this covers about 3.5 GiB.
+            search_index_bytes: 512 * 1024 * 1024,
+            // On 512 MiB of real transcripts, 1,024 records cost about 1 ms to walk, against
+            // about 5 ms per word for the dictionary scan.
+            search_walk_first: 1024,
         }
     }
 }

@@ -21,7 +21,8 @@ pub const MAX_TOKEN_BYTES: usize = 1024;
 /// Longest tenant name, in UTF-8 bytes. The engine's limit.
 pub const MAX_TENANT_BYTES: usize = 255;
 pub(crate) const MAX_FILE_BYTES: u64 = 1 << 20;
-const FIELDS: &str = "data_dir, listen, unix_socket, unix_socket_group, compression, tenants";
+const FIELDS: &str =
+    "data_dir, listen, unix_socket, unix_socket_group, compression, search_index_mib, tenants";
 
 /// A tenant's bearer token. `Debug` never shows it.
 #[derive(Clone, Eq, PartialEq)]
@@ -91,8 +92,10 @@ pub struct Config {
     pub unix_socket: Option<PathBuf>,
     /// Group for a 0660 Unix socket, as a name or a numeric gid.
     pub unix_socket_group: Option<String>,
-    /// Turn compression: off when absent. `on` migrates an existing store one way.
+    /// Turn compression: `auto` when absent. `on` migrates an existing store one way.
     pub compression: Option<atticdb_core::CompressionMode>,
+    /// Memory budget of the search word index in MiB. 0 turns it off. 512 when absent.
+    pub search_index_mib: Option<u64>,
     /// At least one tenant. Tokens are unique.
     pub tenants: Vec<Tenant>,
 }
@@ -240,6 +243,10 @@ fn parse(text: &str) -> Result<Config, String> {
                 };
                 config.compression = Some(mode);
             }
+            "search_index_mib" => match value.as_u64().filter(|mib| *mib <= 1 << 20) {
+                Some(mib) => config.search_index_mib = Some(mib),
+                None => return Err("search_index_mib must be a whole number of MiB".into()),
+            },
             "unix_socket" => config.unix_socket = Some(non_empty(value, "unix_socket")?.into()),
             "unix_socket_group" => {
                 config.unix_socket_group = Some(non_empty(value, "unix_socket_group")?)
@@ -323,7 +330,7 @@ mod tests {
         use atticdb_core::CompressionMode::{Auto, Off, On};
         let tenants = r#""tenants": [{"name": "a", "token": "tttttttttttttttttttttttttttttttt"}]"#;
         let parse = |field: &str| super::parse(&format!("{{{field}{tenants}}}"));
-        assert_eq!(parse("").unwrap().compression, None, "absent means the engine default, off");
+        assert_eq!(parse("").unwrap().compression, None, "absent means the engine default, auto");
         for (value, mode) in [("auto", Auto), ("on", On), ("off", Off)] {
             let field = format!(r#""compression": "{value}", "#);
             assert_eq!(parse(&field).unwrap().compression, Some(mode), "{value}");
@@ -331,6 +338,14 @@ mod tests {
         for value in [r#""yes""#, r#""ON""#, "true", r#""""#] {
             let error = parse(&format!(r#""compression": {value}, "#)).unwrap_err();
             assert!(error.contains("compression"), "{value}: {error}");
+        }
+        for (value, mib) in [("0", Some(0)), ("64", Some(64))] {
+            let config = parse(&format!(r#""search_index_mib": {value}, "#)).unwrap();
+            assert_eq!(config.search_index_mib, mib, "{value}");
+        }
+        for value in ["-1", "1.5", r#""64""#, "1048577"] {
+            let error = parse(&format!(r#""search_index_mib": {value}, "#)).unwrap_err();
+            assert!(error.contains("search_index_mib"), "{value}: {error}");
         }
     }
 }
