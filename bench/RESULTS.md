@@ -1553,3 +1553,42 @@ The runs had about 3 and 6 checkpoints, at about 160K appends each. 192 is 3 × 
   - The nightly deep run on `f1338da` passed: 3 power-loss runs and 20,000 sim seeds per sim.
 
 The first of these sessions was cut off by the VM's daily auto-shutdown at 18:00 UTC, losing the raw traces. The run script now checks the time left before starting the VM. VM time across both sessions was about 20 minutes, roughly $0.27.
+
+## Real transcripts (2026-10-31)
+
+`bench/realload.py` replays real agent transcripts into a fresh server, then times fill, reads, file refs and restarts. It reports numbers only. Transcript text stays in a 0700 temp dir that is deleted at exit.
+
+Run: Apple M4, 10 cores, 16 GB, macOS 27.0.1, internal SSD (APFS), release build at 062c338.
+
+```sh
+python3 bench/realload.py --atticdb target/release/atticdb --target-mib 512 --refs 20000 --home ~/clawdlinux
+```
+
+Corpus: 40 local sessions (13 Claude Code, 27 Copilot CLI), 103 MiB of message text, 40,307 turns. They mix user and assistant text, thinking, tool calls and tool results. Sessions repeat under new names up to 512 MiB: 199 sessions, 199,833 turns. 8 writers, 16 turns per batch, 1 writer per session.
+
+| Phase | Metric | Value |
+|---|---|---|
+| Fill | turns/s | 14,327 |
+| Fill | MiB/s | 36.7 |
+| Fill | batch p50 / p99 | 8.0 / 22.2 ms |
+| Disk | allocated / logical | 645 / 512 MiB (1.26x) |
+| Reads | window of 20, p50 / p99 | 0.37 / 1.48 ms |
+| Reads | search, p50 / p99 (100 corpus words) | 0.77 / 618 ms |
+| File refs | put, 20,000 sequential, p50 / p99 | 8.0 / 10.5 ms (1,002/s) |
+| File refs | exact get by path, p50 / p99 | 0.068 / 0.197 ms |
+| File refs | folder list (mean 58 refs), p50 / p99 | 0.29 / 0.60 ms |
+| Reload | SIGKILL, then restart to first read | 1.10 s |
+| Reload | stop, then restart to first read | 0.82 s |
+| Reload | sample window identical after both | yes |
+| Compression | zlib 6 per turn, saved | 62.6% |
+| Compression | zlib 6 per 64 KiB block, first 64 MiB, saved | 69.6% at 60 MiB/s |
+| Compression | lzma per 64 KiB block, first 64 MiB, saved | 71.9% at 10 MiB/s |
+
+Read it this way:
+
+- **Compression gate (0004 Track D, #74).** The disk half passes: 62.6% saved per turn against a 30% gate. The throughput half (under 5% append cost at 16 and 64 writers on NVMe) is not measured yet. zlib per turn ran at about 285 MiB/s here, 8x the fill rate, so it is likely to fit.
+- **File refs are index lookups.** Get and folder list stay under 1 ms at p99 with 20,000 refs, on the facts B-tree. Put is bound by 1 fsync per sequential write.
+- **Search is the slow path.** It scans records newest first, so a word that only appears in old turns pays for the scan. p99 is 618 ms at 200k turns. This is the evidence for the search index in #117.
+- **Reload is about 1 s for 512 MiB.** Recovery verifies every segment on open, so it grows with data.
+- **Disk overhead is preallocation.** At 512 MiB it is 1.26x. On a small store it dominates: 132 KiB of real memory took 130 MB on disk, 2 64 MiB segments.
+- **Limits of this run.** 512 MiB, not 1 GiB: the disk had 2 GiB free and the server keeps a 1 GiB floor. Repeated sessions make block compression look a bit better than unique text would. Per-turn zlib is not affected.
