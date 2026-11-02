@@ -26,5 +26,5 @@ pub use engine::{
 #[cfg(feature = "sim")]
 pub use engine::{SimAppend, SimFact};
 pub use error::{EngineError, ErrorKind};
-pub use options::EngineOptions;
+pub use options::{Compression, CompressionMode, EngineOptions};
 pub use turn::{NewTurn, Role};

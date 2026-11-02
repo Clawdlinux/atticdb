@@ -27,6 +27,8 @@ pub struct RecoveryReport {
     pub lsns_may_be_reused: bool,
     /// Bytes cleared or removed, including preallocated tails without decodable records.
     pub dropped_bytes: u64,
+    /// MANIFEST version after open. Set by the writer once recovery is done.
+    pub manifest_version: u32,
 }
 
 /// Rebuilt writer state. Only complete transactions contribute records.
@@ -406,6 +408,7 @@ fn finish_cut(dir: &mut DataDir, size: u64, values: &[u64]) -> Result<RecoveryRe
         cut_lsn: Some(*lsn),
         lsns_may_be_reused: true,
         dropped_bytes: *cleared,
+        manifest_version: dir.manifest_version(),
     };
     eprintln!("atticdb: operator cut LSN {lsn}, dropped LSNs {:?}, dropped bytes {cleared}; dropped LSNs may be reused", report.truncated.as_ref().map(|(range, _)| range));
     Ok(report)

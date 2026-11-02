@@ -419,6 +419,9 @@ fn try_start(config: Config, exit_on_poison: bool, log_requests: bool) -> Result
     let instance = crate::random_hex(16).map_err(|error| fail(error.to_string()))?;
     listen::owned_dir(&data_dir, 0o077).map_err(fail)?;
     let mut options = EngineOptions::default();
+    if let Some(mode) = config.compression {
+        options.compression.mode = mode;
+    }
     #[cfg(unix)]
     let address = format!("instance={instance} unix={} tcp={tcp_text}", socket.display());
     #[cfg(not(unix))]

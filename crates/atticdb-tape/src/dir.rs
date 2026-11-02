@@ -142,6 +142,16 @@ pub(crate) fn read(
     magic: &[u8; 8],
     version: u32,
 ) -> Result<Vec<u64>> {
+    read_any(io, path, magic, version..=version).map(|(_, values)| values)
+}
+
+/// Reads a metadata file whose version is in `versions`. Returns the version and the values.
+pub(crate) fn read_any(
+    io: Arc<dyn Io>,
+    path: &Path,
+    magic: &[u8; 8],
+    versions: std::ops::RangeInclusive<u32>,
+) -> Result<(u32, Vec<u64>)> {
     let file = Handle::open(io.clone(), path)?;
     let len = io.len(file.id)?;
     if !(16..=16 * 1024 * 1024).contains(&len) || (len - 16) % 8 != 0 {
@@ -150,13 +160,15 @@ pub(crate) fn read(
     let mut bytes = vec![0; len as usize];
     read_exact(io.as_ref(), file.id, 0, &mut bytes)?;
     let end = bytes.len() - 4;
+    let version = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
     if &bytes[..8] != magic
-        || bytes[8..12] != version.to_le_bytes()
+        || !versions.contains(&version)
         || bytes[end..] != crc32c(&bytes[..end]).to_le_bytes()
     {
         return Err(corruption(0, 0, 0, "invalid metadata magic, version, or CRC"));
     }
-    Ok(bytes[12..end].as_chunks::<8>().0.iter().map(|value| u64::from_le_bytes(*value)).collect())
+    let values = bytes[12..end].as_chunks::<8>().0.iter().map(|value| u64::from_le_bytes(*value));
+    Ok((version, values.collect()))
 }
 
 pub(crate) fn read_exact(
@@ -211,14 +223,21 @@ pub struct DataDir {
     segments: Vec<u64>,
     segment_size: u64,
     superblock: u64,
+    manifest_version: u32,
     _lock: LockGuard,
 }
+
+/// MANIFEST versions this build reads. Version 3 has version 2's layout. It marks a store whose
+/// application payloads may use formats that v0.2.0 and earlier can't read, so those builds
+/// refuse it at open, before they read any frame.
+pub const MANIFEST_VERSIONS: std::ops::RangeInclusive<u32> = 2..=3;
 
 impl std::fmt::Debug for DataDir {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DataDir")
             .field("path", &self.path)
             .field("segments", &self.segments)
+            .field("manifest_version", &self.manifest_version)
             .finish()
     }
 }
@@ -231,11 +250,25 @@ impl DataDir {
         address: Option<&str>,
         segment_size: u64,
     ) -> Result<Self> {
-        Self::open_inner(io, path.as_ref(), address, Some(segment_size))
+        Self::open_inner(io, path.as_ref(), address, Some(segment_size), 2)
+    }
+
+    /// Like [`DataDir::open`]. A new directory gets MANIFEST version `manifest_new`.
+    pub fn open_versioned(
+        io: Arc<dyn Io>,
+        path: impl AsRef<Path>,
+        address: Option<&str>,
+        segment_size: u64,
+        manifest_new: u32,
+    ) -> Result<Self> {
+        if !MANIFEST_VERSIONS.contains(&manifest_new) {
+            return Err(Error::Configuration(format!("unknown manifest version {manifest_new}")));
+        }
+        Self::open_inner(io, path.as_ref(), address, Some(segment_size), manifest_new)
     }
 
     pub(crate) fn open_existing(io: Arc<dyn Io>, path: &Path) -> Result<Self> {
-        Self::open_inner(io, path, None, None)
+        Self::open_inner(io, path, None, None, 2)
     }
 
     fn open_inner(
@@ -243,6 +276,7 @@ impl DataDir {
         path: &Path,
         address: Option<&str>,
         configured: Option<u64>,
+        manifest_new: u32,
     ) -> Result<Self> {
         let path = path.to_owned();
         let guard = io.try_lock_exclusive(&path.join("LOCK"))?;
@@ -250,10 +284,23 @@ impl DataDir {
         if segment_size == 0 || usize::try_from(segment_size).is_err() {
             return Err(Error::Configuration("invalid segment size".into()));
         }
-        let mut dir =
-            Self { io, path, segments: Vec::new(), segment_size, superblock: 0, _lock: guard };
+        let mut dir = Self {
+            io,
+            path,
+            segments: Vec::new(),
+            segment_size,
+            superblock: 0,
+            manifest_version: manifest_new,
+            _lock: guard,
+        };
         if dir.io.exists(&dir.path.join("MANIFEST"))? {
-            let values = read(dir.io.clone(), &dir.path.join("MANIFEST"), b"ZDBMANIF", 2)?;
+            let (version, values) = read_any(
+                dir.io.clone(),
+                &dir.path.join("MANIFEST"),
+                b"ZDBMANIF",
+                MANIFEST_VERSIONS,
+            )?;
+            dir.manifest_version = version;
             let (stored, segments) =
                 values.split_first().ok_or_else(|| corruption(0, 0, 0, "missing segment size"))?;
             if *stored == 0 || usize::try_from(*stored).is_err() {
@@ -317,9 +364,28 @@ impl DataDir {
         Ok(dir)
     }
 
-    /// Returns the segment size stored in manifest version 2.
+    /// Returns the segment size stored in the manifest.
     pub fn segment_size(&self) -> u64 {
         self.segment_size
+    }
+
+    /// Returns the MANIFEST version on disk.
+    pub fn manifest_version(&self) -> u32 {
+        self.manifest_version
+    }
+
+    /// Raises the MANIFEST version to at least `version`, through an atomic install. Never
+    /// lowers it: a version 3 store may already hold payloads older builds can't read.
+    pub fn raise_manifest_version(&mut self, version: u32) -> Result<()> {
+        if !MANIFEST_VERSIONS.contains(&version) {
+            return Err(Error::Configuration(format!("unknown manifest version {version}")));
+        }
+        if version <= self.manifest_version {
+            return Ok(());
+        }
+        let (old, segments) = (self.manifest_version, self.segments.clone());
+        self.manifest_version = version;
+        self.install_manifest(&segments).inspect_err(|_| self.manifest_version = old)
     }
 
     pub(crate) fn check_segment_size(&self, configured: u64) -> Result<()> {
@@ -349,7 +415,8 @@ impl DataDir {
         }
         let mut values = vec![self.segment_size];
         values.extend_from_slice(segments);
-        atomic_install(self.io.clone(), &self.path, "MANIFEST", &encode(b"ZDBMANIF", 2, &values))?;
+        let manifest = encode(b"ZDBMANIF", self.manifest_version, &values);
+        atomic_install(self.io.clone(), &self.path, "MANIFEST", &manifest)?;
         self.segments = segments.to_vec();
         Ok(())
     }

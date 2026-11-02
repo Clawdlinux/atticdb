@@ -131,7 +131,14 @@ impl Machine {
                 {
                     self.prepare_hash_bytes += payloads().map(<[u8]>::len).sum::<usize>();
                 }
-                digest(payloads())
+                // Over version 1 bytes, as the engine digests before it compresses.
+                let canonical = payloads()
+                    .map(|payload| match session {
+                        Some(_) => crate::turn::canonical(payload),
+                        None => Ok(std::borrow::Cow::Borrowed(payload)),
+                    })
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                digest(canonical.iter().map(|payload| payload.as_ref()))
             }
             None => [0; 32],
         };
@@ -217,6 +224,8 @@ impl Machine {
         replay: bool,
     ) -> Result<()> {
         let corrupt = || EngineError::rejected(ErrorKind::CorruptIndex);
+        // Turns count uncompressed, so checkpoints bound replay work, not stored bytes.
+        let mut logical = record.payload.len();
         if self.digest_txn != record.txn {
             self.digest_txn = record.txn;
             self.first_lsn = record.lsn;
@@ -243,6 +252,7 @@ impl Machine {
             }
             Kind::Turn => {
                 let turn = decode(&record.payload).map_err(|_| corrupt())?;
+                logical = turn.logical_len(record.payload.len());
                 if self.first_seq == 0 {
                     self.first_seq = turn.seq;
                 }
@@ -261,7 +271,10 @@ impl Machine {
                 state.index.publish(&key, turn.seq, record.lsn)?;
                 state.dirty.insert((key, address(turn.seq).0));
                 if let Some(id) = turn.idem_key.filter(|_| replay) {
-                    let mut normalized = record.payload.to_vec();
+                    // Digests cover version 1 bytes, as the engine hashed them before compressing.
+                    let canonical =
+                        crate::turn::canonical(&record.payload).map_err(|_| corrupt())?;
+                    let mut normalized = canonical.into_owned();
                     set_seq(&mut normalized, 0)?;
                     let key = DedupKey(
                         record.tenant_id,
@@ -296,9 +309,9 @@ impl Machine {
                 state.dedup.insert_arc(entry);
             }
         }
-        state.bytes = state.bytes.saturating_add(
-            record.payload.len() as u64 + 40 + if state.txn != record.txn { 72 } else { 0 },
-        );
+        state.bytes = state
+            .bytes
+            .saturating_add(logical as u64 + 40 + if state.txn != record.txn { 72 } else { 0 });
         state.txn = record.txn;
         state.published_lsn = record.lsn;
         if replay {

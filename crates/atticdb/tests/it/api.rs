@@ -27,6 +27,9 @@ fn writes_reads_and_retries_over_both_listeners() {
         stats["turn_repeats"].as_u64().unwrap()
     };
     let before = repeats();
+    let (_, stats) = running.vias[1].call(None, None, "GET", "/v1/stats", None);
+    let migration = [&stats["manifest_version"], &stats["compressing"], &stats["compressed_turns"]];
+    assert_eq!(migration, [&json!(2), &json!(false), &json!(0)], "compression is opt-in");
     let mut firsts = Vec::new();
     for via in &running.vias {
         let name = via.name();
@@ -440,7 +443,11 @@ fn auth_and_host_rules() {
 fn health_tracks_engine_state() {
     let disk = SimDisk::new(3);
     let dir = Dir::new();
-    let engine = sim_engine(&disk, |o| (o.tape.free_space_floor, o.max_sessions) = (Some(4096), 1));
+    let engine = sim_engine(&disk, |o| {
+        (o.tape.free_space_floor, o.max_sessions) = (Some(4096), 1);
+        // The 2.2 MB repeated-letter turns below must not compress under the 4 MiB batch.
+        o.compression.mode = atticdb_core::CompressionMode::Off;
+    });
     let running = serve(engine, &dir, MAX_CONNECTIONS);
     let unix = &running.vias[1];
     let instance = running.instance.as_str();

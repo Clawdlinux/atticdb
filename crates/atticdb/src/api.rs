@@ -155,7 +155,7 @@ pub fn stats(engine: &Engine, instance: &str) -> Response {
 }
 
 /// `/v1/stats` counters. Its other numbers are gauges, and other `_ns` maxima become seconds.
-const COUNTERS: [&str; 17] = [
+const COUNTERS: [&str; 18] = [
     "writer_groups",
     "writer_group_requests",
     "superblock_installs",
@@ -173,6 +173,7 @@ const COUNTERS: [&str; 17] = [
     "writer_sync_ns",
     "writer_publish_ns",
     "writer_reply_ns",
+    "compressed_turns",
 ];
 
 /// A Prometheus histogram over fixed upper bounds, with one more bucket past the last.
@@ -283,6 +284,9 @@ pub fn stats_fields(engine: &Engine) -> Option<Value> {
         "replayed_records": m.replayed_records,
         "window_reads": m.window_reads,
         "fact_reads": m.fact_reads,
+        "manifest_version": m.manifest_version,
+        "compressing": m.compressing,
+        "compressed_turns": m.compressed_turns,
         "checkpoint_watermark": m.checkpoint_watermark,
         "checkpoint_files": m.checkpoint_files,
         "checkpoint_saves": m.checkpoint_saves,

@@ -21,7 +21,7 @@ pub const MAX_TOKEN_BYTES: usize = 1024;
 /// Longest tenant name, in UTF-8 bytes. The engine's limit.
 pub const MAX_TENANT_BYTES: usize = 255;
 pub(crate) const MAX_FILE_BYTES: u64 = 1 << 20;
-const FIELDS: &str = "data_dir, listen, unix_socket, unix_socket_group, tenants";
+const FIELDS: &str = "data_dir, listen, unix_socket, unix_socket_group, compression, tenants";
 
 /// A tenant's bearer token. `Debug` never shows it.
 #[derive(Clone, Eq, PartialEq)]
@@ -91,6 +91,8 @@ pub struct Config {
     pub unix_socket: Option<PathBuf>,
     /// Group for a 0660 Unix socket, as a name or a numeric gid.
     pub unix_socket_group: Option<String>,
+    /// Turn compression: off when absent. `on` migrates an existing store one way.
+    pub compression: Option<atticdb_core::CompressionMode>,
     /// At least one tenant. Tokens are unique.
     pub tenants: Vec<Tenant>,
 }
@@ -228,6 +230,16 @@ fn parse(text: &str) -> Result<Config, String> {
     for (key, value) in fields {
         match key.as_str() {
             "data_dir" => config.data_dir = Some(non_empty(value, "data_dir")?.into()),
+            "compression" => {
+                use atticdb_core::CompressionMode::{Auto, Off, On};
+                let mode = match non_empty(value, "compression")?.as_str() {
+                    "auto" => Auto,
+                    "on" => On,
+                    "off" => Off,
+                    _ => return Err("compression must be \"auto\", \"on\" or \"off\"".into()),
+                };
+                config.compression = Some(mode);
+            }
             "unix_socket" => config.unix_socket = Some(non_empty(value, "unix_socket")?.into()),
             "unix_socket_group" => {
                 config.unix_socket_group = Some(non_empty(value, "unix_socket_group")?)
@@ -303,6 +315,22 @@ mod tests {
             assert_eq!(error.is_empty(), ok, "{bytes}-byte token: {error}");
             let named = error.contains("32 to 1024 bytes") && !error.contains(&token);
             assert!(ok || named, "{bytes}: the error names the rule, not the token: {error}");
+        }
+    }
+
+    #[test]
+    fn compression_is_auto_on_or_off() {
+        use atticdb_core::CompressionMode::{Auto, Off, On};
+        let tenants = r#""tenants": [{"name": "a", "token": "tttttttttttttttttttttttttttttttt"}]"#;
+        let parse = |field: &str| super::parse(&format!("{{{field}{tenants}}}"));
+        assert_eq!(parse("").unwrap().compression, None, "absent means the engine default, off");
+        for (value, mode) in [("auto", Auto), ("on", On), ("off", Off)] {
+            let field = format!(r#""compression": "{value}", "#);
+            assert_eq!(parse(&field).unwrap().compression, Some(mode), "{value}");
+        }
+        for value in [r#""yes""#, r#""ON""#, "true", r#""""#] {
+            let error = parse(&format!(r#""compression": {value}, "#)).unwrap_err();
+            assert!(error.contains("compression"), "{value}: {error}");
         }
     }
 }

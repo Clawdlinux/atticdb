@@ -152,7 +152,7 @@ Production salts come from `/dev/urandom` on caller threads. This entropy source
 Tape keeps one entropy handle open. Each caller reads its batch's salts together before hashing.
 Storage operations still use `Io`. Simulations supply deterministic salts without accessing OS entropy.
 
-MANIFEST version 2 stores the segment size before its segment identifiers.
+MANIFEST version 2 stores the segment size before its segment identifiers. Version 3 (D95) has the same layout. It marks a directory that may hold compressed turn payloads, so v0.2.0 and earlier refuse it at open.
 Opening rejects a different configured size before recovery writes or syncs anything.
 Unshipped version 1 manifests aren't accepted.
 SimDisk settles failed writeback once when sync fails, using the seeded sector-tearing model.
