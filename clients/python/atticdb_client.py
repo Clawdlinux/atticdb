@@ -10,6 +10,7 @@ import json
 import random
 import secrets
 import socket
+import threading
 import time
 import urllib.parse
 
@@ -101,6 +102,8 @@ class Client:
         if not (token.isascii() and token.isprintable()):
             raise ValueError("token must be printable ASCII")
         self._url, self._token, self.retry_deadline = url, token, retry_deadline
+        # Each thread keeps its own read connection, so threads never share a socket.
+        self._kept = threading.local()
         parts = urllib.parse.urlsplit(url)
         if parts.scheme == "unix" and not parts.netloc and parts.path.startswith("/"):
             self._connect = lambda deadline: _connect(socket.AF_UNIX, parts.path, deadline)
@@ -211,10 +214,47 @@ class Client:
 
     def _read(self, target, ok):
         deadline = time.monotonic() + self.retry_deadline
-        _, status, reply, detail = self._attempt("GET", target, None, deadline)
+        status, reply, detail = self._read_kept(target, deadline)
         if status not in ok:
             raise Error(f"GET {target.partition('?')[0]} failed ({detail})")
         return reply
+
+    def _read_kept(self, target, deadline):
+        """A GET on this thread's kept connection, opened on first use. Reads repeat safely,
+        so if the server closed it, the request goes once more on a new one. Writes never
+        use it: a write on a closed connection could not tell lost from landed.
+        Returns (status, reply, detail)."""
+        for fresh in (False, True):
+            sock = getattr(self._kept, "sock", None)
+            if sock is None or fresh:
+                self.close()
+                if time.monotonic() > deadline - MIN_ATTEMPT:
+                    return None, None, "less than 2 s left before the deadline"
+                try:
+                    sock = self._kept.sock = self._connect(deadline - MIN_ATTEMPT)
+                except OSError as error:
+                    return None, None, f"connect failed: {error}"
+            try:
+                status, reply, keep = self._exchange(sock, "GET", target, None, deadline, True)
+            except (OSError, ValueError, IndexError) as error:
+                self.close()
+                if fresh:
+                    return None, None, f"{type(error).__name__}: {error}"
+                continue
+            if not keep:
+                self.close()
+            if not isinstance(reply, dict):
+                return None, None, "malformed response"
+            error = ": ".join(str(reply[k]) for k in ("error", "message") if k in reply)
+            return status, reply, f"{status} {error}".strip()
+        return None, None, "unreachable"
+
+    def close(self):
+        """Closes this thread's kept read connection, if any."""
+        sock = getattr(self._kept, "sock", None)
+        self._kept.sock = None
+        if sock is not None:
+            sock.close()
 
     def _attempt(self, method, target, body, deadline):
         """One request on a new connection, all by `deadline`. Nothing is sent unless
@@ -231,7 +271,7 @@ class Client:
             if time.monotonic() > deadline - MIN_ATTEMPT:
                 return late
             try:
-                status, reply = self._exchange(sock, method, target, body, deadline)
+                status, reply, _ = self._exchange(sock, method, target, body, deadline)
             except (OSError, ValueError, IndexError) as error:
                 return True, None, None, f"{type(error).__name__}: {error}"
         if not isinstance(reply, dict):
@@ -239,9 +279,11 @@ class Client:
         error = ": ".join(str(reply[k]) for k in ("error", "message") if k in reply)
         return True, status, reply, f"{status} {error}".strip()
 
-    def _exchange(self, sock, method, target, body, deadline):
-        """Sends one request and reads one `Content-Length` response by `deadline`."""
-        head = f"{method} {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n"
+    def _exchange(self, sock, method, target, body, deadline, keep=False):
+        """Sends one request and reads one `Content-Length` response by `deadline`.
+        Returns the status, the JSON reply, and whether the connection may be reused."""
+        connection = "keep-alive" if keep else "close"
+        head = f"{method} {target} HTTP/1.1\r\nHost: localhost\r\nConnection: {connection}\r\n"
         head += f"Authorization: Bearer {self._token}\r\n"
         if body is not None:
             head += f"Content-Type: application/json\r\nContent-Length: {len(body)}\r\n"
@@ -252,12 +294,18 @@ class Client:
             data += _recv(sock, deadline)
         head, _, rest = data.partition(b"\r\n\r\n")
         lines = head.decode("latin-1").split("\r\n")
-        fields = (line.partition(":") for line in lines[1:])
-        lengths = [int(v) for k, _, v in fields if k.strip().lower() == "content-length"]
+        fields = [(k.strip().lower(), v.strip().lower())
+                  for k, _, v in (line.partition(":") for line in lines[1:])]
+        lengths = [int(v) for k, v in fields if k == "content-length"]
+        keep = keep and ("connection", "close") not in fields
         if len(lengths) != 1 or not 0 <= lengths[0] <= MAX_RESPONSE:
             raise ValueError("response without one valid Content-Length")
         chunks, size = [rest], len(rest)
         while size < lengths[0]:
             chunks.append(_recv(sock, deadline))
             size += len(chunks[-1])
-        return int(lines[0].split(" ", 2)[1]), json.loads(b"".join(chunks)[: lengths[0]])
+        if size > lengths[0]:
+            # Bytes past this response: the connection can't be reused safely.
+            keep = False
+        reply = json.loads(b"".join(chunks)[: lengths[0]])
+        return int(lines[0].split(" ", 2)[1]), reply, keep
