@@ -186,8 +186,8 @@ Inflating stops at `raw_len` and must produce exactly `raw_len` bytes. Replay ne
 The tape batch limit counts stored bytes, so a compressible 4 MiB turn, which can't fit plain, fits once compressed.
 Checkpoint pacing counts turns at their version 1 size, so replay work after a crash doesn't grow with compression.
 
-A data directory holding version 2 has MANIFEST version 3. `CompressionMode` picks when that happens:
-`Auto` compresses new directories and leaves version 2 ones alone, `On` raises an existing directory after recovery, and `Off` writes plain turns.
+A data directory holding version 2 has MANIFEST version 3. `CompressionMode` picks when that happens. The default is `Off`, which writes plain turns.
+`Auto` compresses new directories and leaves version 2 ones alone, and `On` raises an existing directory after recovery.
 
 ## Bounds and cold pages
 

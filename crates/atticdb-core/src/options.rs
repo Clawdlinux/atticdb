@@ -26,7 +26,8 @@ pub struct Compression {
 
 impl Default for Compression {
     fn default() -> Self {
-        Self { mode: CompressionMode::Auto, level: 3, min_content: 256 }
+        // Off until the search index (#117): today's search inflates every turn it scans.
+        Self { mode: CompressionMode::Off, level: 3, min_content: 256 }
     }
 }
 

@@ -29,7 +29,7 @@ fn writes_reads_and_retries_over_both_listeners() {
     let before = repeats();
     let (_, stats) = running.vias[1].call(None, None, "GET", "/v1/stats", None);
     let migration = [&stats["manifest_version"], &stats["compressing"], &stats["compressed_turns"]];
-    assert_eq!(migration, [&json!(3), &json!(true), &json!(0)], "a new store compresses");
+    assert_eq!(migration, [&json!(2), &json!(false), &json!(0)], "compression is opt-in");
     let mut firsts = Vec::new();
     for via in &running.vias {
         let name = via.name();

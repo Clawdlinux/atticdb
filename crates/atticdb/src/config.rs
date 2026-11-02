@@ -91,7 +91,7 @@ pub struct Config {
     pub unix_socket: Option<PathBuf>,
     /// Group for a 0660 Unix socket, as a name or a numeric gid.
     pub unix_socket_group: Option<String>,
-    /// Turn compression: `auto` when absent. `on` migrates an existing store one way.
+    /// Turn compression: off when absent. `on` migrates an existing store one way.
     pub compression: Option<atticdb_core::CompressionMode>,
     /// At least one tenant. Tokens are unique.
     pub tenants: Vec<Tenant>,
@@ -323,7 +323,7 @@ mod tests {
         use atticdb_core::CompressionMode::{Auto, Off, On};
         let tenants = r#""tenants": [{"name": "a", "token": "tttttttttttttttttttttttttttttttt"}]"#;
         let parse = |field: &str| super::parse(&format!("{{{field}{tenants}}}"));
-        assert_eq!(parse("").unwrap().compression, None, "absent means auto");
+        assert_eq!(parse("").unwrap().compression, None, "absent means the engine default, off");
         for (value, mode) in [("auto", Auto), ("on", On), ("off", Off)] {
             let field = format!(r#""compression": "{value}", "#);
             assert_eq!(parse(&field).unwrap().compression, Some(mode), "{value}");

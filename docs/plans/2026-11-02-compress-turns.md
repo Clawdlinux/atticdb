@@ -37,7 +37,7 @@ Choice: `miniz_oxide =0.9.1`, `default-features = false`, `features = ["with-all
 
 ## Rollout and rollback
 
-Config field `compression`: `"auto"` (default), `"on"` or `"off"`.
+Config field `compression`: `"off"` (default), `"auto"` or `"on"`. The default was `auto` until the A/B below showed search p99 at 3.6x. Owner decision 2026-11-02: compression is opt-in until the search index (#117) removes that cost.
 
 | Store | auto | on | off |
 |---|---|---|---|
