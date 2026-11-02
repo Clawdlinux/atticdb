@@ -27,6 +27,7 @@ client.fact_delete("repo/payments/retry-rule")
 - `if_lsn` is not part of the retry identity: a retry with the same key and payload returns the original receipt.
 - `fact_get(key)`, `fact_history(key, max_bytes=None)` and `fact_list(prefix="", after=None, limit=None, max_bytes=None)` read once, like `window`.
 - `search(query, limit=None, before=None, max_bytes=None)` finds turns and current facts by words, newest first. Pass `next` as `before=` for the next page.
+- Reads reuse 1 kept connection per thread and retry once on a fresh one if the server closed it. Writes open a new connection each time, so an unclear write is never sent twice by accident. `close()` closes the calling thread's kept connection.
 
 ## URL forms
 
