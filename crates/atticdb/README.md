@@ -638,7 +638,7 @@ It lists facts under `user/` and under `repo/<repo>/`, 50 each, in key order.
 It reads the last 5 turns of session `<repo>` for agents `vscode-copilot`, `copilot`, `claude-code`, `codex` and `mcp`, then keeps the newest 5.
 `mcp` is the agent of the shell verbs, so a note from `atticdb append` shows too.
 A window cut short by its 8 MiB cap hides older turns, so then it may show fewer than 5.
-Forgotten notes and rules never show. A forgotten note takes no place among the 5, but its window may then show fewer.
+Forgotten notes and rules never show, and take no place among the 5. When an agent's newest notes are forgotten, the hook reads further back in its session.
 It prints 1 line, `{"additionalContext": "<block>"}`. With nothing to show, or on any error, it prints `{}`.
 With `--harness claude-code` or `--harness codex`, the line is `{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "<block>"}}`.
 `--harness vscode` or `--harness copilot` gives the first shape. Any other name, or `--harness` with no name, prints `{}` and says why on stderr. It still exits 0.

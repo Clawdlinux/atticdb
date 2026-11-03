@@ -194,10 +194,29 @@ impl HomeReader {
         // `retry` and every exchange in it end at now + `retry_deadline`.
         self.client.retry_deadline = self.deadline.saturating_duration_since(Instant::now());
         let result = self.client.call(tool, args).ok_or_else(|| format!("unknown tool {tool}"))?;
-        match result["content"][0]["text"].as_str() {
-            Some(text) if result["isError"] == true => Err(text.to_owned()),
-            _ => Ok(result["structuredContent"].clone()),
-        }
+        structured(result)
+    }
+
+    /// `agent`'s turns in this reader's session from seq `since`, at most `limit`, oldest
+    /// first, in the server's largest window. Returns `{turns, truncated}`, or the error. A
+    /// window cut by bytes drops its newest turns. The deadline is [`Self::read`]'s.
+    pub(crate) fn window(&mut self, agent: &str, since: u64, limit: u64) -> Result<Value, String> {
+        self.client.retry_deadline = self.deadline.saturating_duration_since(Instant::now());
+        let (agent, session) = (encode(agent), encode(&self.client.session));
+        let max = crate::api::MAX_WINDOW_BYTES;
+        let target = format!(
+            "/v1/window?agent={agent}&session={session}&since_seq={since}&limit={limit}\
+             &max_bytes={max}"
+        );
+        structured(self.client.read("hook", &target, "turns", turns))
+    }
+}
+
+/// A tool result's `structuredContent`, or its error text.
+fn structured(result: Value) -> Result<Value, String> {
+    match result["content"][0]["text"].as_str() {
+        Some(text) if result["isError"] == true => Err(text.to_owned()),
+        _ => Ok(result["structuredContent"].clone()),
     }
 }
 

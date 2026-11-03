@@ -87,13 +87,19 @@ fn session_start_prints_the_memory_block() {
         let (code, _, err) = atticdb(&home, &cwd, &args, &[], b"", 0);
         assert_eq!(code, Some(0), "{args:?}: {err}");
     }
-    // A forgotten rule and Copilot's newest note, forgotten, never show. The note's
-    // placeholder takes no place among the 5 newest.
-    let args = ["append", "--agent", "copilot", "--session", "app", "--content", "not shown"];
-    let (code, out, err) = atticdb(&home, &home, &args, &[], b"", 0);
-    assert_eq!(code, Some(0), "{err}");
-    let lsn = serde_json::from_str::<Value>(&out).unwrap()["lsn"].to_string();
-    seed(&home, &["forget", "lsns", "--lsns", &lsn]);
+    // A forgotten rule and forgotten notes never show. Copilot's newest note takes no place
+    // among the 5 newest. Claude Code's 5 newest, forgotten, fill its window with
+    // placeholders, so the hook reads back to its `k1`, and no floor hides older notes.
+    let mut forgotten = Vec::new();
+    for agent in
+        ["copilot", "claude-code", "claude-code", "claude-code", "claude-code", "claude-code"]
+    {
+        let args = ["append", "--agent", agent, "--session", "app", "--content", "not shown"];
+        let (code, out, err) = atticdb(&home, &home, &args, &[], b"", 0);
+        assert_eq!(code, Some(0), "{err}");
+        forgotten.push(serde_json::from_str::<Value>(&out).unwrap()["lsn"].to_string());
+    }
+    seed(&home, &["forget", "lsns", "--lsns", &forgotten.join(",")]);
     seed(&home, &["forget", "key", "--key", "user/forgotten"]);
     // A symlinked cwd names the repo it points into, as the adapter's `current_dir` does.
     std::os::unix::fs::symlink(home.join("app/src"), home.join("link")).unwrap();
