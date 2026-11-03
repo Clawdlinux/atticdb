@@ -9,7 +9,7 @@ AtticDB is local, durable memory for coding agents, written in Rust.
 It stores turn history per session and keyed facts. A write is acked only after it is synced to disk.
 It wires into Copilot CLI, VS Code, Claude Code and Codex with 1 command.
 
-Status: early. Don't run it in production. Built so far: the tape, session engine, disk-full handling, server and facts (S1 to S4).
+Status: early. Fine for your laptop. Not for production yet.
 
 ## Install
 
@@ -55,6 +55,26 @@ atticdb doctor            # checks the install; it may start the server
 `setup` finds Copilot CLI, VS Code, Claude Code and Codex. It adds the MCP entry, a chat-start hook and the guide each app reads. Every edited file is backed up first. `atticdb disconnect <app>` removes exactly what it added. Codex runs a new hook only after you approve it once in Codex. [research/setup_eval/results](research/setup_eval/results/README.md) has the eval results.
 
 `atticdb doctor` prints 1 line per check, with what to do when one fails. [Set up](crates/atticdb/README.md#set-up) and [`atticdb doctor`](crates/atticdb/README.md#atticdb-doctor) give the details.
+
+## Uninstall
+
+1. Run `atticdb disconnect <app>` for each app you connected: `copilot`, `vscode`, `claude-code` or `codex`. It removes only what setup added.
+2. Stop the background server. Its pid is in the `LOCK` file in the data folder. The data folder is `~/Library/Application Support/atticdb` on macOS and `~/.local/share/atticdb` on Linux.
+
+   ```sh
+   cat ~/Library/Application\ Support/atticdb/data/LOCK   # macOS. Linux: ~/.local/share/atticdb/data/LOCK
+   kill <pid>                                             # the number after pid=
+   ```
+
+3. Remove the binary and the data folder. The data folder holds all your memory, so this deletes it for good.
+
+   ```sh
+   rm ~/.local/bin/atticdb                         # or: cargo uninstall atticdb
+   rm -rf ~/Library/Application\ Support/atticdb   # macOS
+   rm -rf ~/.local/share/atticdb                   # Linux
+   ```
+
+If you set `ATTICDB_HOME`, that is the data folder. On Linux with `XDG_DATA_HOME` set, it is `$XDG_DATA_HOME/atticdb`. If you set `ATTICDB_INSTALL_DIR`, the binary is there.
 
 ## Where to run it
 

@@ -60,6 +60,35 @@ const HOOK_TIMEOUT: Duration = Duration::from_secs(crate::hook::HARD_STOP.as_sec
 const CODEX_HOOKS_OFF: &str = "Codex: hooks are off ([features] hooks = false in config.toml), so \
                                memory won't load at chat start. Remove that line to turn them on.";
 
+/// What setup says after "found no apps": the shell verbs need no app. `atticdb` is how to
+/// type this binary, from [`typed`].
+fn try_shell(atticdb: &str) -> String {
+    format!(
+        "You can still try memory from the shell: {atticdb} fact set --key repo/demo/rule \
+         --content \"Use pnpm\" and {atticdb} search --query pnpm"
+    )
+}
+
+/// How to type this atticdb in a shell: `atticdb` when that name on `PATH` is this binary,
+/// else its full path. A path with other than letters, digits and `/._+-` is single-quoted,
+/// as `install.sh` quotes it. On Windows, `\` and `:` count as plain too. `atticdb` when the
+/// binary can't be found.
+pub(crate) fn typed() -> String {
+    let this = std::env::current_exe().and_then(std::fs::canonicalize).ok();
+    let found = connect::program("atticdb").and_then(|path| std::fs::canonicalize(path).ok());
+    if this.is_none() || found == this {
+        return "atticdb".into();
+    }
+    let Ok(path) = connect::binary() else { return "atticdb".into() };
+    // Windows paths hold `\` and `:`, which its shells take as typed.
+    let safe = if cfg!(windows) { "/._+-\\:" } else { "/._+-" };
+    if path.chars().all(|c| c.is_ascii_alphanumeric() || safe.contains(c)) {
+        path
+    } else {
+        format!("'{}'", path.replace('\'', r"'\''"))
+    }
+}
+
 /// How long the store may take to answer `fact_list`. 2 s are kept for the read, so a
 /// server that is still starting, such as the one the hook check started, gets 13 s.
 const STORE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -201,7 +230,8 @@ fn choose(
                 println!(
                     "atticdb found no apps: none of VS Code, Copilot CLI, Claude Code or Codex has \
                      a config dir, and none of code, copilot, claude or codex is on PATH. \
-                     Install one, or name it with --harness."
+                     Install one, or name it with --harness.\n{}",
+                    try_shell(&typed())
                 );
                 return Ok(None);
             }
@@ -296,8 +326,8 @@ fn code(reports: &[Report]) -> u8 {
 }
 
 /// Connects each app with its options in turn, past any that fails. Then it checks each one
-/// and prints what to do next. Returns the highest exit code an app stopped with. Else it
-/// returns 1 when a part was skipped or a check failed.
+/// and prints what to do next, plus a "Try it" step when all went well. Returns the highest
+/// exit code an app stopped with. Else it returns 1 when a part was skipped or a check failed.
 fn apply(chosen: &[(Harness, Options)]) -> u8 {
     println!("Applying:");
     let mut reports = Vec::new();
@@ -368,7 +398,30 @@ fn apply(chosen: &[(Harness, Options)]) -> u8 {
         }
     }
     let applied: Vec<Report> = reports.into_iter().map(|(.., report)| report).collect();
-    code(&applied).max(u8::from(failed_check))
+    let exit = code(&applied).max(u8::from(failed_check));
+    if exit == 0 && !connected.is_empty() {
+        let key = try_key(cwd.ok().as_deref().and_then(crate::home::repo));
+        let atticdb = typed();
+        println!("Try it: {atticdb} fact set --key {key} --content \"Use pnpm, not npm\"");
+        println!("Then open a new chat and ask: what are this repo's rules?");
+        println!("See what your agent gets at chat start: {atticdb} studio");
+    }
+    exit
+}
+
+/// The `--key` for the "Try it" step: `repo/<repo>/rule`, under the repo the session-start
+/// hook reads for this dir, else `demo`. A name with spaces or other shell characters is
+/// double-quoted. One that double quotes can't hold as typed uses `demo`.
+fn try_key(repo: Option<String>) -> String {
+    let repo = repo.unwrap_or_else(|| "demo".into());
+    let key = format!("repo/{repo}/rule");
+    if repo.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)) {
+        key
+    } else if repo.chars().any(|c| "$`\"\\!".contains(c) || c.is_control()) {
+        "repo/demo/rule".into()
+    } else {
+        format!("\"{key}\"")
+    }
 }
 
 /// Whether a plan line says its part needs nothing.

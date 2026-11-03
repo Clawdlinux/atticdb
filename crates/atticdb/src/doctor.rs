@@ -3,7 +3,7 @@
 //! The parts check is [`connect::connect`] in [`Mode::Plan`], the code that writes.
 
 use crate::connect::{self, Harness, Mode, Notes, Options, Report};
-use crate::setup::{check_hook, check_store, title, ORDER};
+use crate::setup::{check_hook, check_store, title, typed, ORDER};
 use atticdb_tape::{Io, StdIo};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -18,8 +18,14 @@ and each app. The store check may start the home's server.
 
 Exit 0 when every check is ok or only warns, 1 when a check failed, 2 for a usage error.";
 
-/// What doctor says about a home that is missing, or lacks its config or data dir.
-const NOT_SET_UP: &str = "not set up yet, run atticdb setup";
+/// What doctor says about a home that is missing, or lacks its config or data dir. It names
+/// atticdb as the user must type it, by [`typed`].
+fn not_set_up() -> String {
+    let atticdb = typed();
+    format!(
+        "not set up yet. Run {atticdb} setup, or try memory from the shell with {atticdb} fact set"
+    )
+}
 
 /// The options a Claude Code or Codex install may have been connected with, the defaults
 /// first. Parts are in place when any of them plans no change.
@@ -81,7 +87,7 @@ pub fn run(harnesses: Option<Vec<Harness>>) -> u8 {
     let what = format!("{} ({set})", dir.display());
     let missing = |path: &Path| matches!(std::fs::symlink_metadata(path), Err(error) if error.kind() == ErrorKind::NotFound);
     if missing(&dir) {
-        checks.line(&what, Err(NOT_SET_UP.into()));
+        checks.line(&what, Err(not_set_up()));
         sandboxes(Some(&dir));
         return 1;
     }
@@ -104,7 +110,7 @@ pub fn run(harnesses: Option<Vec<Harness>>) -> u8 {
     let home_ok = checked.is_ok() && odd.is_empty();
     match checked {
         Ok(()) if !odd.is_empty() => checks.line(&what, Err(odd.join("; "))),
-        Ok(()) if partial => checks.line(&what, Err(NOT_SET_UP.into())),
+        Ok(()) if partial => checks.line(&what, Err(not_set_up())),
         checked => checks.line(&what, checked),
     }
     disk(&mut checks, &dir);

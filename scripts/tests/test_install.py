@@ -9,6 +9,7 @@ import http.server
 import io
 import os
 import platform
+import re
 import shutil
 import subprocess
 import tarfile
@@ -105,6 +106,20 @@ def install(dirs, base, path=SYSTEM_PATH, shell="sh", **env):
                           timeout=60, check=False)
 
 
+def shell_word(path):
+    """path as install.sh prints it in a command: bare, or single-quoted when it must be."""
+    if re.fullmatch(r"[A-Za-z0-9/._+-]+", str(path)):
+        return str(path)
+    return "'" + str(path).replace("'", "'\\''") + "'"
+
+
+def next_steps(run):
+    """The "Next steps" lines, with run as the command."""
+    return (f"\nNext steps:\n"
+            f"  {run} setup --dry-run   # shows what it would change, writes nothing\n"
+            f"  {run} setup             # asks which apps, then wires them\n")
+
+
 def assert_installed(dirs, result):
     home, bin_dir, tmp = dirs
     assert result.returncode == 0, result.stderr
@@ -113,7 +128,9 @@ def assert_installed(dirs, result):
     assert exe.stat().st_mode & 0o777 == 0o755
     assert sorted(os.listdir(bin_dir)) == ["atticdb"], "no temp file left beside it"
     assert f"installed atticdb 9.9.9 at {exe}" in result.stdout
-    assert "  atticdb setup" in result.stdout
+    # Off PATH, plain atticdb isn't found, so the steps name the full path.
+    run = shell_word(exe) if "is not on PATH" in result.stdout else "atticdb"
+    assert result.stdout.endswith(next_steps(run)), result.stdout
     assert os.listdir(tmp) == [], "the temp dir is removed"
     assert os.listdir(home) == [], "nothing written to HOME"
 
@@ -132,8 +149,11 @@ def test_latest(server, dirs):
     assert_installed(dirs, result)
     assert requests == [f"/releases/latest/download/{TARBALL}",
                         "/releases/latest/download/SHA256SUMS"]
-    # The install dir is not on PATH, so it prints the line to add.
+    # The install dir is not on PATH, so it prints the line to add, and which file takes it.
+    assert f"warning: {dirs[1]} is not on PATH.\n" in result.stdout
+    assert "Add this line to ~/.zshrc (zsh, the macOS default) or ~/.bashrc:\n" in result.stdout
     assert f"""  export PATH='{dirs[1]}':"$PATH"\n""" in result.stdout
+    assert next_steps(shell_word(dirs[1] / "atticdb")) in result.stdout
 
 
 @pytest.mark.parametrize("version", ["9.9.9", "v9.9.9"])
@@ -202,6 +222,13 @@ def test_printed_export_line_keeps_an_odd_dir_literal(server, dirs, tmp_path):
                          env={"PATH": SYSTEM_PATH, "x": "EXPANDED"}, capture_output=True,
                          text=True, timeout=10, check=True).stdout
     assert out == f"{odd}:{SYSTEM_PATH}"
+    # The printed setup command runs the installed file, quotes and all.
+    steps = [line for line in result.stdout.splitlines() if line.endswith("writes nothing")]
+    assert len(steps) == 1, result.stdout
+    command = steps[0].split("   #")[0].replace(" setup --dry-run", "")
+    out = subprocess.run(["sh", "-c", command], env={"PATH": SYSTEM_PATH, "x": "EXPANDED"},
+                         capture_output=True, text=True, timeout=10, check=True).stdout
+    assert out == "atticdb 9.9.9\n"
 
 
 def test_on_path_and_shadowed(server, dirs, tmp_path):
@@ -211,6 +238,7 @@ def test_on_path_and_shadowed(server, dirs, tmp_path):
     result = install(dirs, base, path=f"{bin_dir}:{SYSTEM_PATH}")
     assert_installed(dirs, result)
     assert "export PATH" not in result.stdout and "warning" not in result.stdout
+    assert result.stdout.endswith(next_steps("atticdb")), "on PATH, the bare name works"
 
     other = tmp_path / "other"
     other.mkdir()

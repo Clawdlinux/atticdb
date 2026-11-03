@@ -158,6 +158,8 @@ main() {
     say "installed $installed at $dest"
 
     found=$(command -v atticdb 2>/dev/null || true)
+    # The command "Next steps" prints. Off PATH, it is the full path, quoted only when needed.
+    run=atticdb
     case ":${PATH:-}:" in
         *":$dir:"* | *":$dir/:"*)
             # dash prints $dir//atticdb for a PATH entry with a trailing slash.
@@ -167,19 +169,24 @@ main() {
             fi
             ;;
         *)
-            say "warning: $dir is not on PATH. Add it in your shell's rc file:"
+            say "warning: $dir is not on PATH."
+            say "Add this line to ~/.zshrc (zsh, the macOS default) or ~/.bashrc:"
             # Single quotes keep $, `, " and \ in the dir literal. Each ' becomes '\''.
             quoted=$(printf '%s' "$dir" | sed "s/'/'\\\\''/g")
             printf "  export PATH='%s':\"\$PATH\"\n" "$quoted"
             if [ -n "$found" ]; then
                 say "warning: atticdb on PATH is $found, not the one just installed."
             fi
+            case "$dest" in
+                *[!A-Za-z0-9/._+-]*) run="'$quoted/atticdb'" ;;
+                *) run=$dest ;;
+            esac
             ;;
     esac
 
     printf '\nNext steps:\n'
-    printf '  atticdb setup --dry-run   # shows what it would change, writes nothing\n'
-    printf '  atticdb setup             # asks which apps, then wires them\n'
+    printf '  %s setup --dry-run   # shows what it would change, writes nothing\n' "$run"
+    printf '  %s setup             # asks which apps, then wires them\n' "$run"
 }
 
 main "$@"
