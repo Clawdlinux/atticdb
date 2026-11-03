@@ -93,6 +93,10 @@ atticdb setup --yes --harness <name>
 
 `--yes` is needed because you are not in an interactive terminal.
 Setup adds the MCP entry, a chat-start hook and the guide the app reads. It backs up every file it edits.
+For Claude Code and Codex, setup uses the app's own command (`claude` or `codex`) for some parts, so run it where that command works.
+
+If setup says it skipped a part and prints a command to run by hand, run that exact command. Then go on to step 4. That's a fix setup gave you, not a guess.
+
 The dry run also lists other apps it found on this machine. Tell the user they can connect those with the same command, as a comma list: `--harness claude-code,codex`.
 
 On Windows, Codex gets only its MCP entry for now. Claude Code needs version 2.1.139 or later for the chat-start hook.
