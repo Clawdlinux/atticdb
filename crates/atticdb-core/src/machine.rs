@@ -3,6 +3,8 @@ use crate::dedup::{digest, hash_key, Dedup, DedupKey, Entry, Scope};
 use crate::error::{lock, Result};
 use crate::fact;
 use crate::facts::{current, FactKey, Rev};
+use crate::forget::Selector;
+use crate::forgets::{cutoff, unique};
 use crate::session::{address, Key};
 use crate::state::State;
 use crate::tenant::Registry;
@@ -12,7 +14,7 @@ use atticdb_tape::{
     Committed, CommittedRecord, Error, Io, Kind, Outcome, Prepare, PreparedBatch, StateMachine,
     WriteError,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -28,6 +30,12 @@ pub(crate) struct Machine {
     tenants: Registry,
     dedup: Dedup,
     facts: HashMap<FactKey, Rev>,
+    /// Fact-key forgets staged in the open group: (highest cutoff, newest forget LSN).
+    forget_keys: HashMap<FactKey, (u64, u64)>,
+    /// LSN pairs staged in the open group and not yet published, to their forget's LSN.
+    forget_lsns: HashMap<(u32, u64), u64>,
+    /// Staged forgets' LSNs and pairs, oldest first, so publication drops them in order.
+    forget_order: VecDeque<(u64, Vec<(u32, u64)>)>,
     lsn: u64,
     txn: u64,
     digest_txn: u64,
@@ -54,6 +62,9 @@ impl Machine {
             tenants: s.tenants.clone(),
             dedup,
             facts: HashMap::new(),
+            forget_keys: HashMap::new(),
+            forget_lsns: HashMap::new(),
+            forget_order: VecDeque::new(),
             lsn: s.published_lsn,
             txn: s.txn,
             digest_txn: 0,
@@ -87,8 +98,22 @@ impl Machine {
         if tenant == 0 || (create.is_none() && tenant as usize > self.tenants.entries.len()) {
             return Err(invalid());
         }
-        // A fact write is exactly one record. Turns and facts never share a batch.
-        let (session, fact, scope, idem) = if head.kind == Kind::Fact {
+        // A fact or forget write is exactly one record. Turns, facts and forgets never share a
+        // batch.
+        let mut forget = None;
+        let (session, fact, scope, idem) = if head.kind == Kind::Forget {
+            let decoded = crate::forget::decode(&head.content)?;
+            let empty = match &decoded.selector {
+                Selector::Lsns(lsns) => lsns.is_empty() || lsns.contains(&0),
+                Selector::Session { .. } | Selector::FactKey(_) => false,
+            };
+            if body.len() != 1 || empty || decoded.up_to_lsn == Some(0) {
+                return Err(invalid());
+            }
+            let idem = decoded.idem_key.clone();
+            forget = Some(decoded);
+            (None, None, Scope::Forget, idem)
+        } else if head.kind == Kind::Fact {
             let fact = fact::decode(&head.content)?;
             if body.len() != 1
                 || fact.key.is_empty()
@@ -164,12 +189,34 @@ impl Machine {
                 .facts
                 .get(key)
                 .or_else(|| state.facts.map.get(key).and_then(|r| r.list.last()));
-            if batch.application_arg().is_some_and(|lsn| lsn != current(newest)) {
+            // A hidden newest revision is no current value, so `if_lsn = 0` passes (I9).
+            let hidden = newest.is_some_and(|rev| {
+                state.forgets.hides_fact(key, rev.lsn) || self.stages_hidden(key, rev.lsn)
+            });
+            let current = if hidden { 0 } else { current(newest) };
+            if batch.application_arg().is_some_and(|lsn| lsn != current) {
                 return Err(EngineError::rejected(ErrorKind::Conflict));
             }
             if newest.is_none() && state.facts.full(&self.facts) {
                 return Err(EngineError::rejected(ErrorKind::ResourceExhausted("facts")));
             }
+        }
+        // Pairs this forget may add, counted like `Facts::full`: held and staged pairs once.
+        let pairs = match forget.as_ref().map(|forget| &forget.selector) {
+            Some(Selector::Lsns(lsns)) => unique(lsns)
+                .into_iter()
+                .map(|lsn| (tenant, lsn))
+                .filter(|pair| {
+                    !state.forgets.lsns.contains(pair) && !self.forget_lsns.contains_key(pair)
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        if !pairs.is_empty()
+            && state.forgets.lsns.len() + self.forget_lsns.len() + pairs.len()
+                > state.forgets.max_lsns()
+        {
+            return Err(EngineError::rejected(ErrorKind::ResourceExhausted("forgets")));
         }
         let first_lsn = self
             .lsn
@@ -213,7 +260,82 @@ impl Machine {
         if let Some((key, deleted)) = fact {
             self.facts.insert(key, Rev { lsn: last_lsn, deleted });
         }
+        if let Some(forget) = forget {
+            let cut = cutoff(forget.up_to_lsn, last_lsn);
+            if let Selector::FactKey(key) = forget.selector {
+                let staged = self.forget_keys.entry((tenant, key)).or_insert((0, 0));
+                *staged = (staged.0.max(cut), last_lsn);
+            }
+            let pairs: Vec<_> = pairs.into_iter().filter(|&(_, lsn)| lsn <= cut).collect();
+            if !pairs.is_empty() {
+                for pair in &pairs {
+                    self.forget_lsns.insert(*pair, last_lsn);
+                }
+                self.forget_order.push_back((last_lsn, pairs));
+            }
+        }
         Ok(Prepare::Write)
+    }
+
+    /// True when a forget staged in the open group hides this fact revision.
+    fn stages_hidden(&self, key: &FactKey, lsn: u64) -> bool {
+        self.forget_keys.get(key).is_some_and(|&(cut, _)| lsn <= cut)
+            || self.forget_lsns.contains_key(&(key.0, lsn))
+    }
+
+    /// Applies a published forget record to the forget set.
+    fn install_forget(
+        &mut self,
+        state: &mut State,
+        record: &CommittedRecord,
+        replay: bool,
+    ) -> Result<()> {
+        let corrupt = || EngineError::rejected(ErrorKind::CorruptIndex);
+        let forget = crate::forget::decode(&record.payload).map_err(|_| corrupt())?;
+        let tenant = record.tenant_id;
+        let cut = cutoff(forget.up_to_lsn, record.lsn);
+        match &forget.selector {
+            // Only sessions with a published turn and keys in the fact index are stored, so
+            // both stay bounded by `max_sessions` and `max_facts` (I12).
+            Selector::Session { agent, session } => {
+                let key = Key(tenant, agent.clone(), session.clone());
+                if state.index.sessions.get(&key).is_some_and(|entry| entry.len > 0) {
+                    state.forgets.raise_session(key, cut);
+                }
+            }
+            Selector::FactKey(key) => {
+                let key = (tenant, key.clone());
+                if state.facts.map.contains_key(&key) {
+                    state.forgets.raise_key(key, cut);
+                }
+            }
+            Selector::Lsns(lsns) => {
+                if lsns.is_empty() || lsns.contains(&0) {
+                    return Err(corrupt());
+                }
+                for lsn in unique(lsns).into_iter().filter(|&lsn| lsn <= cut) {
+                    state.forgets.add_lsn((tenant, lsn))?;
+                }
+            }
+        }
+        if let Some(id) = forget.idem_key.filter(|_| replay) {
+            let key = DedupKey(tenant, Scope::Forget, id);
+            self.rebuild(state, record, key, &record.payload, Vec::new());
+        }
+        // Published now, so the staged overlay of this and older forgets can go.
+        if self.forget_keys.values().any(|&(_, lsn)| lsn <= record.lsn) {
+            self.forget_keys.retain(|_, &mut (_, lsn)| lsn > record.lsn);
+        }
+        while let Some((_, pairs)) = self.forget_order.front().filter(|(lsn, _)| *lsn <= record.lsn)
+        {
+            for pair in pairs {
+                if self.forget_lsns.get(pair).is_some_and(|&lsn| lsn <= record.lsn) {
+                    self.forget_lsns.remove(pair);
+                }
+            }
+            self.forget_order.pop_front();
+        }
+        Ok(())
     }
 
     fn install(
@@ -298,6 +420,7 @@ impl Machine {
                     self.rebuild(state, record, key, &record.payload, Vec::new());
                 }
             }
+            Kind::Forget => self.install_forget(state, record, replay)?,
             _ => return Err(corrupt()),
         }
         // Move this transaction's staged retry entry once its last record is published.
@@ -458,13 +581,24 @@ mod tests {
             tombstone: false,
         })
         .unwrap();
-        for (case, records) in [
-            ("forget", vec![(Kind::Forget, &turn)]),
-            ("fact then turn", vec![(Kind::Fact, &fact), (Kind::Turn, &turn)]),
-            ("turn then fact", vec![(Kind::Turn, &turn), (Kind::Fact, &fact)]),
-            ("one key twice", vec![(Kind::Fact, &fact), (Kind::Fact, &fact)]),
+        let forget = crate::forget::encode(&crate::forget::Forget {
+            selector: Selector::Lsns(vec![1]),
+            idem_key: Some("k".into()),
+            up_to_lsn: None,
+        })
+        .unwrap();
+        for (case, records, prepares) in [
+            ("lone forget", vec![(Kind::Forget, &forget)], true),
+            ("forget then turn", vec![(Kind::Forget, &forget), (Kind::Turn, &turn)], false),
+            ("turn then forget", vec![(Kind::Turn, &turn), (Kind::Forget, &forget)], false),
+            ("fact then forget", vec![(Kind::Fact, &fact), (Kind::Forget, &forget)], false),
+            ("forget then fact", vec![(Kind::Forget, &forget), (Kind::Fact, &fact)], false),
+            ("turn payload as forget", vec![(Kind::Forget, &turn)], false),
+            ("fact then turn", vec![(Kind::Fact, &fact), (Kind::Turn, &turn)], false),
+            ("turn then fact", vec![(Kind::Turn, &turn), (Kind::Fact, &fact)], false),
+            ("one key twice", vec![(Kind::Fact, &fact), (Kind::Fact, &fact)], false),
         ] {
-            let opts = EngineOptions::default();
+            let opts = EngineOptions { max_forgotten_lsns: 2, ..EngineOptions::default() };
             let mut initial = State::new(&opts);
             initial.tenants.insert("t", 1, 1, 10_000).unwrap();
             let mut machine = Machine::new(
@@ -474,17 +608,53 @@ mod tests {
                 opts,
             )
             .unwrap();
-            let records = records
-                .into_iter()
-                .map(|(kind, content)| RecordInput { kind, tenant_id: 1, content: content.clone() })
-                .collect();
-            let mut batch = PreparedBatch::new(records, Durability::Durable).unwrap();
-            let Prepare::Reject(error) = machine.prepare(&mut batch) else {
-                panic!("{case}: expected rejection");
+            let batch = |records: Vec<(Kind, &Vec<u8>)>| {
+                let records = records
+                    .into_iter()
+                    .map(|(kind, content)| RecordInput {
+                        kind,
+                        tenant_id: 1,
+                        content: content.clone(),
+                    })
+                    .collect();
+                PreparedBatch::new(records, Durability::Durable).unwrap()
             };
-            assert!(matches!(EngineError::write(error).kind, ErrorKind::InvalidInput), "{case}");
+            match machine.prepare(&mut batch(records)) {
+                Prepare::Write if prepares => {
+                    assert_eq!(machine.lsn, 1, "{case}");
+                    assert_eq!(machine.forget_lsns.len(), 1, "{case}: LSN 1 is at the cutoff");
+                    assert_eq!(machine.dedup.entries.len(), 1, "{case}");
+                    // The cap counts pairs staged in the open group, and each pair once.
+                    for (lsns, written) in [(vec![1, 2, 3], false), (vec![1, 2, 2], true)] {
+                        let forget = crate::forget::encode(&crate::forget::Forget {
+                            selector: Selector::Lsns(lsns.clone()),
+                            idem_key: None,
+                            up_to_lsn: None,
+                        })
+                        .unwrap();
+                        let prepared = machine.prepare(&mut batch(vec![(Kind::Forget, &forget)]));
+                        match prepared {
+                            Prepare::Write => assert!(written, "{case}: {lsns:?}"),
+                            Prepare::Reject(error) => {
+                                let kind = EngineError::write(error).kind;
+                                assert!(!written, "{case}: {lsns:?}");
+                                assert!(matches!(kind, ErrorKind::ResourceExhausted("forgets")));
+                            }
+                            Prepare::Reply(_) => panic!("{case}: no retry key"),
+                        }
+                    }
+                    assert_eq!(machine.forget_lsns.len(), 2, "{case}: staged across batches");
+                    continue;
+                }
+                Prepare::Reject(error) if !prepares => {
+                    let kind = EngineError::write(error).kind;
+                    assert!(matches!(kind, ErrorKind::InvalidInput), "{case}");
+                }
+                _ => panic!("{case}: unexpected prepare result"),
+            }
             assert_eq!(machine.lsn, 0, "{case}");
             assert!(machine.facts.is_empty() && machine.dedup.entries.is_empty(), "{case}");
+            assert!(machine.forget_lsns.is_empty() && machine.forget_keys.is_empty(), "{case}");
         }
     }
 

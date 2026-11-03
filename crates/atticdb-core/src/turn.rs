@@ -238,9 +238,9 @@ pub(crate) struct ParsedTurn<'a> {
     pub(crate) agent_id: &'a str,
     pub(crate) session_id: &'a str,
     pub(crate) seq: u64,
-    role: Role,
-    content: Content<'a>,
-    meta: &'a [u8],
+    pub(crate) role: Role,
+    pub(crate) content: Content<'a>,
+    pub(crate) meta: &'a [u8],
     pub(crate) idem_key: Option<&'a str>,
 }
 

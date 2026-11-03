@@ -1,7 +1,7 @@
 use crate::support::{new_fact, open, options, query};
 use atticdb_core::{
-    Engine, EngineError, EngineOptions, ErrorKind, FactHistory, FactPage, FactWritten, Outcome,
-    StoredFact,
+    forget::Selector, Engine, EngineError, EngineOptions, ErrorKind, FactHistory, FactPage,
+    FactWritten, Outcome, StoredFact,
 };
 use atticdb_tape::sim::SimClock;
 use atticdb_tape::{Io, SimDisk};
@@ -211,6 +211,64 @@ fn put_supersede_delete_condition_and_reopen() {
     let engine = open(disk, opts);
     assert_eq!(engine.metrics().unwrap().facts, 4);
     assert_eq!(engine.metrics().unwrap().checkpoint_warnings, 0);
+    drop(engine);
+
+    // Forget hides revisions up to its cutoff. A forgotten current value leaves none (I9).
+    let disk = Arc::new(SimDisk::new(64));
+    let engine = open(disk.clone(), options());
+    let k1 = engine.fact_put("f", new_fact("k", 1, "a"), None, None).unwrap();
+    let k2 = engine.fact_put("f", new_fact("k", 2, "a"), None, None).unwrap();
+    let j1 = engine.fact_put("f", new_fact("j", 1, "a"), None, None).unwrap();
+    let forget = |selector, up_to| engine.forget("f", selector, None, up_to).unwrap();
+    let key = |key: &str| Selector::FactKey(key.into());
+    let shown = |engine: &Engine, key: &str| {
+        let history = engine.fact_history("f", key, usize::MAX).unwrap();
+        history.revisions.iter().map(|rev| (rev.lsn, rev.redacted)).collect::<Vec<_>>()
+    };
+    let counts = |engine: &Engine| {
+        let m = engine.metrics().unwrap();
+        (m.facts, m.fact_revisions, m.compressed_turns)
+    };
+    let held = counts(&engine);
+    forget(key("k"), Some(k1.lsn));
+    assert_eq!(value(&engine, "f", "k"), Some((2, "a".into(), k2.lsn)), "up_to below current");
+    assert_eq!(shown(&engine, "k"), [(k2.lsn, false), (k1.lsn, true)]);
+    let before = reads(&engine);
+    let current = forget(key("k"), None);
+    assert_eq!(current.cutoff, current.lsn);
+    assert_eq!(value(&engine, "f", "k"), None, "never an older value");
+    assert_eq!(shown(&engine, "k"), [(k2.lsn, true), (k1.lsn, true)]);
+    let listed = engine.fact_list("f", query("", 100, usize::MAX)).unwrap();
+    assert_eq!(listed.facts.iter().map(|f| f.key.as_str()).collect::<Vec<_>>(), ["j"]);
+    assert_eq!(reads(&engine) - before, 1, "placeholders take no tape read");
+    assert_eq!(counts(&engine), held, "facts, fact_revisions and compressed_turns are visible");
+    assert_eq!(engine.metrics().unwrap().forgotten_fact_keys, 1);
+    assert_rejected(
+        &engine,
+        || engine.fact_put("f", new_fact("k", 3, "a"), None, Some(k2.lsn)),
+        "Conflict",
+        "a forgotten revision is not current",
+    );
+    let k3 = engine.fact_put("f", new_fact("k", 3, "a"), None, Some(0)).unwrap();
+    assert_eq!(value(&engine, "f", "k"), Some((3, "a".into(), k3.lsn)), "a later put is current");
+    // An LSN aimed at a forget record undoes nothing. `up_to_lsn` above the forget is clamped.
+    let clamped = forget(Selector::Lsns(vec![current.lsn, j1.lsn]), Some(u64::MAX));
+    assert_eq!(clamped.cutoff, clamped.lsn);
+    assert_eq!(value(&engine, "f", "k"), Some((3, "a".into(), k3.lsn)));
+    assert_eq!(value(&engine, "f", "j"), None);
+    let oracle = |engine: &Engine| {
+        let m = engine.metrics().unwrap();
+        let forgotten = (m.forgotten_sessions, m.forgotten_fact_keys, m.forgotten_lsns);
+        let listed = engine.fact_list("f", query("", 100, usize::MAX)).unwrap();
+        (value(engine, "f", "k"), shown(engine, "k"), shown(engine, "j"), listed, forgotten)
+    };
+    let expected = oracle(&engine);
+    assert_eq!(expected.4, (0, 1, 2));
+    let held = counts(&engine);
+    drop(engine);
+    let engine = open(disk, options());
+    assert_eq!(oracle(&engine), expected, "reopen keeps every forget");
+    assert_eq!(counts(&engine), held);
     drop(engine);
 
     let disk = Arc::new(SimDisk::new(63));

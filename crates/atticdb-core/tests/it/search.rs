@@ -1,7 +1,7 @@
 use crate::support::{open, options, scope, turn};
 use atticdb_core::{
-    Engine, EngineOptions, ErrorKind, Hit, NewFact, NewTurn, Outcome, Record, RecordKind,
-    RecordQuery, Role, Scope, SearchQuery, SessionQuery, WindowQuery,
+    forget::Selector, Engine, EngineOptions, ErrorKind, Hit, NewFact, NewTurn, Outcome, Record,
+    RecordKind, RecordQuery, Role, Scope, SearchQuery, SessionQuery, WindowQuery,
 };
 use atticdb_tape::SimDisk;
 use std::sync::Arc;
@@ -49,17 +49,21 @@ fn rq() -> RecordQuery {
 }
 
 /// `lsn turn agent/session#seq content` or `lsn fact key content`. A delete's content is
-/// `deleted`.
+/// `deleted`, a placeholder's `forgotten`.
 fn line(record: &Record) -> String {
     match record {
         Record::Turn { agent, session, turn } => {
-            let content = String::from_utf8_lossy(&turn.content);
+            let content = match turn.redacted {
+                true => "forgotten".into(),
+                false => String::from_utf8_lossy(&turn.content),
+            };
             format!("{} turn {agent}/{session}#{} {content}", turn.lsn, turn.seq)
         }
         Record::Fact { key, revision } => {
-            let content = match revision.deleted {
-                true => "deleted".into(),
-                false => String::from_utf8_lossy(&revision.content),
+            let content = match (revision.redacted, revision.deleted) {
+                (true, _) => "forgotten".into(),
+                (_, true) => "deleted".into(),
+                _ => String::from_utf8_lossy(&revision.content),
             };
             format!("{} fact {key} {content}", revision.lsn)
         }
@@ -127,6 +131,18 @@ fn search_finds_current_records_newest_first() {
     }
     assert_eq!(search(&engine, "other", q("retry")), ["s1:retry secret"], "tenants");
     assert!(search(&engine, "nobody", q("retry")).is_empty(), "unknown tenant");
+    // Forgets hide hits. Another tenant can't hide this tenant's records (I11).
+    let session = |name: &str| Selector::Session { agent: "agent".into(), session: name.into() };
+    for (case, tenant, selector, expected) in [
+        ("another tenant's LSNs", "other", Selector::Lsns(vec![2, 9, 10]), &all[..]),
+        ("a session", "tenant", session("s2"), &[all[0], all[2]][..]),
+        ("a fact key", "tenant", Selector::FactKey("repo/api/retry".into()), &all[2..]),
+        ("an LSN", "tenant", Selector::Lsns(vec![2]), &[][..]),
+    ] {
+        engine.forget(tenant, selector, None, None).unwrap();
+        assert_eq!(search(&engine, "tenant", q("retry")), expected, "{case}");
+        assert_eq!(search(&engine, "other", q("retry")), ["s1:retry secret"], "{case}");
+    }
     for bad in [q("  "), SearchQuery { limit: 0, ..q("x") }, SearchQuery { visits: 0, ..q("x") }] {
         let kind = engine.search("tenant", bad).unwrap_err().kind;
         assert!(matches!(kind, ErrorKind::InvalidInput));
@@ -329,19 +345,67 @@ fn sessions_and_records_list_what_a_tenant_wrote() {
         assert!(matches!(error.kind, ErrorKind::InvalidInput), "{error}");
     }
 
+    // Forgets. LSN 15: `other` names this tenant's LSNs, which stay visible (I11). 16: session
+    // agent/s2. 17: key k1 up to its first value. 18: LSNs 1 and 3, which are no turn or fact
+    // of this tenant, 13, and 14 and 1000 above `up_to_lsn`. 19 and 20: a session with no
+    // turn and a key never set store nothing.
+    let session = |name: &str| Selector::Session { agent: "agent".into(), session: name.into() };
+    for (case, tenant, selector, up_to, counts) in [
+        ("another tenant's LSNs", "other", Selector::Lsns(vec![2, 5, 6]), None, (0, 0, 3)),
+        ("a session", "tenant", session("s2"), None, (1, 0, 3)),
+        ("a key up to an LSN", "tenant", Selector::FactKey("k1".into()), Some(5), (1, 1, 3)),
+        (
+            "LSNs up to an LSN",
+            "tenant",
+            Selector::Lsns(vec![13, 1, 3, 14, 13, 1000]),
+            Some(13),
+            (1, 1, 6),
+        ),
+        ("a session with no turn", "tenant", session("none"), None, (1, 1, 6)),
+        ("a key never set", "tenant", Selector::FactKey("never".into()), None, (1, 1, 6)),
+    ] {
+        engine.forget(tenant, selector, None, up_to).unwrap();
+        let m = engine.metrics().unwrap();
+        let got = (m.forgotten_sessions, m.forgotten_fact_keys, m.forgotten_lsns);
+        assert_eq!(got, counts, "{case}");
+        // Names, counts and totals are visible metadata. A forget never changes them.
+        assert_eq!(sessions(&engine, "tenant", 1000), listed, "{case}");
+    }
+    let hidden = [
+        "14 turn agent/s1#3 a3",
+        "13 turn agent/s1#2 forgotten",
+        "12 fact k2 deleted",
+        "11 fact k1 v2",
+        "10 turn agent/s1#1 a1",
+        "8 fact k2 gone",
+        "7 turn agent/s2#2 forgotten",
+        "6 turn agent/s2#1 forgotten",
+        "5 fact k1 forgotten",
+        "2 turn bot/s1#1 b1",
+    ];
+    assert_eq!(records(&engine, "tenant", rq()), hidden);
+    assert_eq!(records(&engine, "other", rq()), theirs);
+    // A placeholder counts its identifiers only: 9, 7 and 3 bytes fill 19.
+    let page = engine.records("tenant", RecordQuery { max_bytes: 19, ..rq() }).unwrap();
+    assert_eq!(page.records.iter().map(line).collect::<Vec<_>>(), hidden[..3]);
+    let page = engine.sessions("tenant", SessionQuery { after: None, limit: 10 }).unwrap();
+    let cutoffs: Vec<_> = page.sessions.iter().map(|s| s.forgotten_up_to).collect();
+    assert_eq!(cutoffs, [None, Some(16), None]);
+    assert_eq!(page.as_of_lsn, 20, "the durable LSN after the last write");
+
     // A reopen from a checkpoint restores cold session pages. Turn counts need none of them.
     engine.checkpoint().unwrap();
     drop(engine);
     let engine = open(disk.clone(), options());
     assert_eq!(sessions(&engine, "tenant", 1000), listed, "after reopen");
-    assert_eq!(records(&engine, "tenant", rq()), all, "after reopen");
+    assert_eq!(records(&engine, "tenant", rq()), hidden, "after reopen");
 
     // A failed sync leaves a reserved turn that never publishes. Its session is not listed.
     disk.fail_next_sync().unwrap();
     let error = engine.append(&bot("s2"), vec![turn(1)], None).unwrap_err();
     assert_eq!(error.outcome, Outcome::Unknown);
     assert_eq!(sessions(&engine, "tenant", 1000), listed, "a reserved-only session");
-    assert_eq!(records(&engine, "tenant", rq()), all, "only durable records");
+    assert_eq!(records(&engine, "tenant", rq()), hidden, "only durable records");
 }
 
 /// Words chosen to hit the matcher's edges: case folding, final sigma, accents, punctuation
@@ -448,9 +512,44 @@ fn pages(engine: &Engine, tenant: &str) -> Vec<String> {
     out
 }
 
+/// Asserts no search hit is hidden: each turn reads back unredacted in its window, and each
+/// fact is its key's current value.
+fn no_hidden_hits(engine: &Engine, tenant: &str, case: &str) {
+    for query in QUERIES {
+        let mut before = None;
+        loop {
+            let page =
+                engine.search(tenant, SearchQuery { before, limit: 100, ..q(query) }).unwrap();
+            for hit in &page.hits {
+                match hit {
+                    Hit::Turn { agent, session, turn } => {
+                        let scope = Scope {
+                            tenant: tenant.into(),
+                            agent: agent.clone(),
+                            session: session.clone(),
+                        };
+                        let since = WindowQuery::Since { seq: turn.seq, limit: 1 };
+                        let read = engine.window(&scope, since).unwrap();
+                        assert!(!read[0].redacted && !turn.redacted, "{case}: {query} {turn:?}");
+                    }
+                    Hit::Fact(fact) => {
+                        let current = engine.fact_get(tenant, &fact.key).unwrap();
+                        assert_eq!(current.map(|f| f.lsn), Some(fact.lsn), "{case}: {query}");
+                    }
+                }
+            }
+            match page.next {
+                Some(next) => before = Some(next),
+                None => break,
+            }
+        }
+    }
+}
+
 /// The word index only proposes candidates, so search must return exactly what a full walk
 /// returns: same hits, same pages, same cursors. Before the index catches up, after it, when
-/// its budget stops it, on compressed turns, and while it rebuilds after a reopen.
+/// its budget stops it, on compressed turns, and while it rebuilds after a reopen. Forgets
+/// are in the corpus, and no page holds hidden content.
 #[test]
 fn search_with_the_index_equals_a_full_scan() {
     use atticdb_core::CompressionMode::{Off, On};
@@ -479,13 +578,32 @@ fn search_with_the_index_equals_a_full_scan() {
                         "seed {seed}, {name}, {tenant}: {case}"
                     );
                 }
+                no_hidden_hits(&engines[1], tenant, &format!("seed {seed}, {tenant}: {case}"));
             }
         };
         let engines = open_all();
         let mut rng = Rng(seed);
         for step in 0..300 {
             let tenant = ["tenant", "other"][rng.below(2)];
-            if rng.below(4) == 0 {
+            if rng.below(16) == 0 {
+                let durable = engines[0].metrics().unwrap().durable_lsn.max(1) as usize;
+                let selector = match rng.below(3) {
+                    0 => Selector::Session {
+                        agent: "agent".into(),
+                        session: format!("s{}", rng.below(5)),
+                    },
+                    1 => Selector::FactKey(
+                        ["repo/deploy-rule", "user/policies"][rng.below(2)].into(),
+                    ),
+                    _ => Selector::Lsns(
+                        (0..1 + rng.below(3)).map(|_| 1 + rng.below(durable) as u64).collect(),
+                    ),
+                };
+                let up_to = (rng.below(2) == 0).then(|| 1 + rng.below(durable) as u64);
+                for engine in &engines {
+                    engine.forget(tenant, selector.clone(), None, up_to).unwrap();
+                }
+            } else if rng.below(4) == 0 {
                 let key = ["repo/deploy-rule", "user/policies", "café/notes"][rng.below(3)];
                 let (delete, content) = (rng.below(5) == 0, rng.text());
                 for engine in &engines {
@@ -518,6 +636,7 @@ fn search_with_the_index_equals_a_full_scan() {
         check(&engines, "caught up");
         let m = engines[1].metrics().unwrap();
         assert!(m.search_index_terms > 0 && m.search_index_stopped.is_none(), "{m:?}");
+        assert!(m.forgotten_sessions + m.forgotten_fact_keys + m.forgotten_lsns > 0, "{m:?}");
         assert!(m.compressed_turns > 0, "candidates come from compressed turns too");
         let stopped = engines[2].metrics().unwrap().search_index_stopped.unwrap_or_default();
         assert!(stopped.contains("budget"), "{stopped}");

@@ -227,9 +227,13 @@ fn load_inner(io: &dyn Io, dir: &Path, opts: &EngineOptions) -> Result<State> {
                         Backing { file: name.clone(), offset: off, len },
                     )?;
                 }
-                tag @ (3 | 5) => {
+                tag @ (3 | 5 | 6) => {
                     let tenant = cur.u32()?;
-                    let scope = cur.string(if tag == 3 { 255 } else { 1024 })?;
+                    let scope = cur.string(match tag {
+                        3 => 255,
+                        5 => 1024,
+                        _ => 0,
+                    })?;
                     let key = cur.string(128)?;
                     let digest = cur.take(32)?.try_into().map_err(|_| corrupt())?;
                     let txn = cur.u64()?;
@@ -245,7 +249,11 @@ fn load_inner(io: &dyn Io, dir: &Path, opts: &EngineOptions) -> Result<State> {
                     {
                         return Err(corrupt());
                     }
-                    let scope = if tag == 3 { Scope::Session(scope) } else { Scope::Fact(scope) };
+                    let scope = match tag {
+                        3 => Scope::Session(scope),
+                        5 => Scope::Fact(scope),
+                        _ => Scope::Forget,
+                    };
                     state.dedup.insert(Entry::new(
                         DedupKey(tenant, scope, key),
                         digest,
@@ -279,6 +287,52 @@ fn load_inner(io: &dyn Io, dir: &Path, opts: &EngineOptions) -> Result<State> {
                         return Err(corrupt());
                     }
                     state.facts.restore((tenant, key), revs, dropped == 1)?;
+                }
+                // Forget cutoffs and pairs are at most their forget's own LSN, so at most the
+                // boundary, as tag 4 checks.
+                tag @ (7 | 8) => {
+                    let tenant = cur.u32()?;
+                    let (session, key) = if tag == 7 {
+                        (Some((cur.string(255)?, cur.string(255)?)), None)
+                    } else {
+                        (None, Some(cur.string(1024)?))
+                    };
+                    let cutoff = cur.u64()?;
+                    cur.end()?;
+                    if tenant == 0
+                        || tenant as usize > state.tenants.entries.len()
+                        || cutoff == 0
+                        || cutoff > boundary
+                    {
+                        return Err(corrupt());
+                    }
+                    match (session, key) {
+                        (Some((agent, session)), _) => {
+                            state.forgets.restore_session(Key(tenant, agent, session), cutoff);
+                        }
+                        (_, Some(key)) => state.forgets.restore_key((tenant, key), cutoff),
+                        _ => return Err(corrupt()),
+                    }
+                }
+                9 => {
+                    let tenant = cur.u32()?;
+                    let count = cur.u32()?;
+                    if tenant == 0
+                        || tenant as usize > state.tenants.entries.len()
+                        || !(1..=1024).contains(&count)
+                    {
+                        return Err(corrupt());
+                    }
+                    let lsns = (0..count)
+                        .map(|_| cur.u64())
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
+                    cur.end()?;
+                    if lsns.iter().any(|&lsn| lsn == 0 || lsn > boundary) {
+                        return Err(corrupt());
+                    }
+                    for lsn in lsns {
+                        state.forgets.restore_lsn((tenant, lsn))?;
+                    }
                 }
                 _ => return Err(corrupt()),
             }
@@ -338,6 +392,11 @@ struct Snapshot {
     dedup: Vec<Arc<Entry>>,
     facts: Vec<(FactKey, Vec<Rev>, bool)>,
     fact_history: usize,
+    /// Copies of forget entries: every one when full, else the dirty ones.
+    forget_sessions: Vec<(Key, u64)>,
+    forget_keys: Vec<(FactKey, u64)>,
+    /// Unsorted. `save` sorts them after the state lock is released.
+    forget_lsns: Vec<(u32, u64)>,
 }
 fn snapshot(state: &State) -> Snapshot {
     let full = state.chain.len() >= 8;
@@ -378,6 +437,22 @@ fn snapshot(state: &State) -> Snapshot {
     } else {
         Box::new(state.facts.dirty.iter().filter_map(|key| state.facts.map.get_key_value(key)))
     };
+    let forgets = &state.forgets;
+    let (forget_sessions, forget_keys, forget_lsns) = if full {
+        (
+            forgets.sessions.iter().map(|(key, cut)| (key.clone(), *cut)).collect(),
+            forgets.keys.iter().map(|(key, cut)| (key.clone(), *cut)).collect(),
+            forgets.lsns.iter().copied().collect(),
+        )
+    } else {
+        let session = |key: &Key| forgets.sessions.get(key).map(|cut| (key.clone(), *cut));
+        let fact = |key: &FactKey| forgets.keys.get(key).map(|cut| (key.clone(), *cut));
+        (
+            forgets.dirty_sessions.iter().filter_map(session).collect(),
+            forgets.dirty_keys.iter().filter_map(fact).collect(),
+            forgets.dirty_lsns.iter().copied().collect(),
+        )
+    };
     Snapshot {
         lsn: state.published_lsn,
         txn: state.txn,
@@ -408,6 +483,9 @@ fn snapshot(state: &State) -> Snapshot {
             })
             .collect(),
         fact_history: state.facts.history,
+        forget_sessions,
+        forget_keys,
+        forget_lsns,
     }
 }
 const BUFFER_LIMIT: usize = 4 * 1024 * 1024;
@@ -527,8 +605,10 @@ pub(crate) fn save(io: &dyn Io, dir: &Path, shared: &Mutex<State>) -> Result<u64
     }
     for entry in snap.dedup {
         let (tag, scope) = match &entry.key.1 {
-            Scope::Session(session) => (3, session),
-            Scope::Fact(key) => (5, key),
+            Scope::Session(session) => (3, session.as_str()),
+            Scope::Fact(key) => (5, key.as_str()),
+            // Tag 5's layout with an empty scope: forgets share 1 scope per tenant.
+            Scope::Forget => (6, ""),
         };
         let mut data = vec![tag];
         data.extend_from_slice(&entry.key.0.to_le_bytes());
@@ -539,7 +619,7 @@ pub(crate) fn save(io: &dyn Io, dir: &Path, shared: &Mutex<State>) -> Result<u64
         for value in [txn, first_lsn, last_lsn] {
             data.extend_from_slice(&value.to_le_bytes());
         }
-        // Fact replies are empty.
+        // Fact and forget replies are empty.
         data.extend_from_slice(reply);
         buffer.record(&data)?;
     }
@@ -555,6 +635,32 @@ pub(crate) fn save(io: &dyn Io, dir: &Path, shared: &Mutex<State>) -> Result<u64
             data.push(u8::from(rev.deleted));
         }
         buffer.record(&data)?;
+    }
+    for (key, cutoff) in &snap.forget_sessions {
+        let mut data = vec![7];
+        put_key(&mut data, key);
+        data.extend_from_slice(&cutoff.to_le_bytes());
+        buffer.record(&data)?;
+    }
+    for ((tenant, key), cutoff) in &snap.forget_keys {
+        let mut data = vec![8];
+        data.extend_from_slice(&tenant.to_le_bytes());
+        bytes(&mut data, key.as_bytes());
+        data.extend_from_slice(&cutoff.to_le_bytes());
+        buffer.record(&data)?;
+    }
+    let mut forget_lsns = snap.forget_lsns;
+    forget_lsns.sort_unstable();
+    for tenant in forget_lsns.chunk_by(|a, b| a.0 == b.0) {
+        for chunk in tenant.chunks(1024) {
+            let mut data = vec![9];
+            data.extend_from_slice(&chunk[0].0.to_le_bytes());
+            data.extend_from_slice(&(chunk.len() as u32).to_le_bytes());
+            for (_, lsn) in chunk {
+                data.extend_from_slice(&lsn.to_le_bytes());
+            }
+            buffer.record(&data)?;
+        }
     }
     buffer.flush()?;
     io.sync_data(file.1)?;
@@ -607,6 +713,42 @@ pub(crate) fn save(io: &dyn Io, dir: &Path, shared: &Mutex<State>) -> Result<u64
             if state.facts.map.get(key).and_then(|r| r.list.last()) == revs.last() {
                 state.facts.dirty.remove(key);
             }
+        }
+        state.checkpoint_lock_ns = state
+            .checkpoint_lock_ns
+            .max(start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64);
+    }
+    // A forget after the snapshot keeps its entry dirty. Cutoffs only grow, so an equal cutoff
+    // means no later forget raised it. A pair first added later isn't in the snapshot.
+    for chunk in snap.forget_sessions.chunks(1024) {
+        let mut state = lock(shared)?;
+        let start = std::time::Instant::now();
+        for (key, cutoff) in chunk {
+            if state.forgets.sessions.get(key) == Some(cutoff) {
+                state.forgets.dirty_sessions.remove(key);
+            }
+        }
+        state.checkpoint_lock_ns = state
+            .checkpoint_lock_ns
+            .max(start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64);
+    }
+    for chunk in snap.forget_keys.chunks(1024) {
+        let mut state = lock(shared)?;
+        let start = std::time::Instant::now();
+        for (key, cutoff) in chunk {
+            if state.forgets.keys.get(key) == Some(cutoff) {
+                state.forgets.dirty_keys.remove(key);
+            }
+        }
+        state.checkpoint_lock_ns = state
+            .checkpoint_lock_ns
+            .max(start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64);
+    }
+    for chunk in forget_lsns.chunks(1024) {
+        let mut state = lock(shared)?;
+        let start = std::time::Instant::now();
+        for pair in chunk {
+            state.forgets.dirty_lsns.remove(pair);
         }
         state.checkpoint_lock_ns = state
             .checkpoint_lock_ns
@@ -948,12 +1090,61 @@ mod tests {
         let disk = SimDisk::new(1);
         let dir = Path::new("db");
         let shared = state();
-        for seq in 1..=10 {
+        let session = Key(1, "a".into(), "s".into());
+        // Tag 7 to 9 records of the newest file, as (tag, LSNs in a tag 9 record).
+        let forget_records = |state: &State| {
+            let file =
+                File(&disk, disk.open(&dir.join(&state.chain.last().unwrap().name)).unwrap());
+            let (mut off, mut found) = (u64::from(read(&disk, file.1, 0).unwrap().1), Vec::new());
+            while off < disk.len(file.1).unwrap() {
+                let (data, len) = read(&disk, file.1, off).unwrap();
+                if (7..=9).contains(&data[0]) {
+                    let count = if data[0] == 9 { data[5] as usize } else { 0 };
+                    found.push((data[0], count));
+                }
+                off += u64::from(len);
+            }
+            found
+        };
+        // At 3 a session, a key and an LSN. At 6 a new LSN and a session cutoff held again.
+        // Save 9 is full. The rest have no new forget.
+        for (seq, expected) in [
+            (1, &[][..]),
+            (2, &[][..]),
+            (3, &[(7, 0), (8, 0), (9, 1)][..]),
+            (4, &[][..]),
+            (5, &[][..]),
+            (6, &[(9, 1)][..]),
+            (7, &[][..]),
+            (8, &[][..]),
+            (9, &[(7, 0), (8, 0), (9, 2)][..]),
+            (10, &[][..]),
+        ] {
             append(&shared, seq);
+            {
+                let mut state = shared.lock().unwrap();
+                if seq == 3 {
+                    state.forgets.raise_session(session.clone(), 2);
+                    state.forgets.raise_key((1, "k".into()), 2);
+                    state.forgets.add_lsn((1, 2)).unwrap();
+                }
+                if seq == 6 {
+                    state.forgets.raise_session(session.clone(), 2);
+                    state.forgets.add_lsn((1, 3)).unwrap();
+                }
+            }
             save(&disk, dir, &shared).unwrap();
+            let state = shared.lock().unwrap();
+            assert_eq!(forget_records(&state), expected, "save {seq}");
+            let forgets = &state.forgets;
+            let dirty = forgets.dirty_sessions.len() + forgets.dirty_keys.len();
+            assert_eq!(dirty + forgets.dirty_lsns.len(), 0, "save {seq}");
             let loaded = load(&disk, dir, &EngineOptions::default());
             assert_eq!(loaded.watermark, seq + 1);
-            assert_eq!(loaded.index.sessions[&Key(1, "a".into(), "s".into())].len, seq);
+            assert_eq!(loaded.index.sessions[&session].len, seq);
+            assert_eq!(loaded.forgets.sessions, forgets.sessions, "save {seq}");
+            assert_eq!(loaded.forgets.keys, forgets.keys, "save {seq}");
+            assert_eq!(loaded.forgets.lsns, forgets.lsns, "save {seq}");
         }
         let state = shared.lock().unwrap();
         assert_eq!(state.chain.len(), 2);

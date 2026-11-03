@@ -159,6 +159,24 @@ impl HotCache {
         inner.bytes += size;
     }
 
+    /// Drops every entry `hidden` selects. Readers check forgets before `get`, so this is
+    /// hygiene: correctness never depends on it.
+    pub(crate) fn purge(&self, hidden: impl Fn(u64, &Cached) -> bool) {
+        if self.budget == 0 {
+            return;
+        }
+        let Ok(mut inner) = self.inner.lock() else { return };
+        let gone: Vec<u64> = inner
+            .map
+            .iter()
+            .filter(|(lsn, (cached, _))| hidden(**lsn, cached))
+            .map(|(l, _)| *l)
+            .collect();
+        for lsn in gone {
+            inner.remove(lsn);
+        }
+    }
+
     pub(crate) fn counts(&self) -> Counts {
         self.inner.lock().map_or_else(
             |_| Counts::default(),

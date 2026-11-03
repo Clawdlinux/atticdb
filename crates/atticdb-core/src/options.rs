@@ -68,6 +68,10 @@ pub struct EngineOptions {
     /// Memory budget of the hot cache of decoded turns behind `window`, in bytes. 0 turns it
     /// off. Every hit is checked against a CRC32C taken when the turn was cached.
     pub hot_cache_bytes: usize,
+    /// Maximum `(tenant, LSN)` pairs that LSN-list forgets hold, across tenants. A forget over
+    /// it is `ResourceExhausted("forgets")`. Session and fact-key forgets are bounded by
+    /// `max_sessions` and `max_facts`.
+    pub max_forgotten_lsns: usize,
 }
 impl Default for EngineOptions {
     fn default() -> Self {
@@ -90,6 +94,7 @@ impl Default for EngineOptions {
             // transcripts search p50 was 2.1 ms at 64 against 3.0 ms at 1,024.
             search_walk_first: 64,
             hot_cache_bytes: 64 * 1024 * 1024,
+            max_forgotten_lsns: 100_000,
         }
     }
 }

@@ -120,9 +120,41 @@ Checkpoints write tag 4 fact entries and tag 5 fact retry entries.
 Tag 4 holds the newest `fact_history + 1` revisions, the `fact_history` they were written under, and a bit that says older ones were dropped.
 A larger `fact_history` at open replays the tape. A smaller one trims on load.
 Install clears a key's dirty mark only if its newest LSN did not change after the snapshot.
+Install clears a forget entry's dirty mark only if the snapshot held its cutoff, or for an LSN pair, the pair.
 When at least half the keys are dirty, the snapshot walks the whole map.
 An S3 binary aborts replay on a `Fact` frame, so it cannot open a directory with facts.
-`Forget` has a v1 codec. The engine rejects it until S5.
+
+## Forget
+
+`Engine::forget(tenant, selector, idem_key, up_to_lsn)` hides a session, a fact key or a list of LSNs inside 1 tenant.
+It is 1 durable `Forget` record, acknowledged after the sync like every write.
+It covers records at or below its cutoff: `up_to_lsn` when given and lower, else its own LSN.
+So later writes stay visible, and a retry can't move the cutoff.
+Retry keys are scoped by tenant. A changed payload with the same key is `IdempotencyConflict`.
+An empty LSN list, LSN 0 and `up_to_lsn = 0` are `InvalidInput`.
+
+Content is hidden from normal AtticDB reads. It stays on disk until purge ships (#159).
+After the ack, no engine reader returns hidden content:
+- `window` returns a placeholder for each hidden turn. It has `redacted`, seq and LSN, role `System`, and empty or 0 fields.
+  The check runs before the hot cache and the tape, so a placeholder costs no read and no budget bytes.
+- `fact_get` and `fact_list` treat a hidden newest revision as no current value, never an older one (I9).
+- `fact_history` and `records` return placeholders. `records` keeps the kind, LSN, agent, session and seq, or the key.
+- `search` parses turns without inflating them, checks them, and inflates only visible ones. The word index only proposes LSNs, and the same check decides.
+- A conditional fact write treats a hidden newest revision as LSN 0.
+
+The forget set holds session and fact-key cutoffs and `(tenant, LSN)` pairs. Every check is O(1).
+A session forget stores a cutoff only for a session with a published turn. A fact-key forget stores one only for a key in the fact index.
+So both stay bounded by `max_sessions` and `max_facts`.
+`max_forgotten_lsns` caps the pairs (default 100,000). Past it, a forget is `ResourceExhausted("forgets")`.
+A pair carries the forget's tenant, so a pair naming another tenant's record, or no turn or fact, hides nothing.
+Session counts, `facts`, `fact_revisions`, `compressed_turns` and `search_index_terms` still count hidden records.
+`forgotten_sessions`, `forgotten_fact_keys` and `forgotten_lsns` count the set.
+The hot cache drops covered entries after the ack, for hygiene only. The word index keeps hidden tokens in RAM until restart.
+
+Checkpoints write tag 6 forget retry entries, in tag 5's layout with an empty scope.
+Tag 7 holds a session cutoff and tag 8 a fact-key cutoff. Tag 9 holds up to 1,024 LSNs of 1 tenant.
+A delta writes only dirty forget entries. A full checkpoint writes them all.
+A binary from before S5 fails replay on a `Forget` frame with `corrupt_index`, and truncates nothing.
 
 ## Health
 
