@@ -8,13 +8,13 @@ import {
   APPS,
   APP_LABELS,
   DEFAULT_OPTIONS,
-  HOOK_APPS,
   METHOD_LABELS,
   OSES,
   OS_LABELS,
   RELEASES_URL,
   buildInstallSteps,
   detectOs,
+  hookApplies,
   methodsFor,
   normalize,
   type App,
@@ -195,9 +195,11 @@ function InstallerBody({ initial }: InstallerProps) {
   const options = normalize({ ...DEFAULT_OPTIONS, ...initial, ...picked.choice, os });
   const steps = buildInstallSteps(options);
   const commands = steps.flatMap((s) => s.commands);
-  const hookShown = options.apps.some((app) => HOOK_APPS.includes(app));
+  const hookShown = hookApplies(options);
   const notes =
-    options.os === "windows" ? WINDOWS_NOTES.filter((n) => options.apps.includes(n.app)) : [];
+    options.os === "windows"
+      ? WINDOWS_NOTES.filter((n) => options.apps.length === 0 || options.apps.includes(n.app))
+      : [];
 
   function pick(choice: Partial<InstallOptions>, cascade = false) {
     setPicked((p) => ({ choice: { ...p.choice, ...choice }, cascade }));
@@ -250,8 +252,13 @@ function InstallerBody({ initial }: InstallerProps) {
           onPick={(v) => pick({ method: v }, true)}
           t={t}
         />
-        <fieldset className={styles.group}>
+        <fieldset className={styles.group} aria-describedby={`${uid}-apps-hint`}>
           <legend className={styles.legend}>Apps to connect</legend>
+          <p className={styles.hint} id={`${uid}-apps-hint`}>
+            {options.apps.length === 0
+              ? "None picked: setup finds your apps. Pick some to connect only those."
+              : "Only these get connected. Uncheck all to let setup find them."}
+          </p>
           <div className={styles.tiles} data-count={2}>
             {APPS.map((app) => (
               <Check

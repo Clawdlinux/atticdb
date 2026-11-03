@@ -30,6 +30,13 @@
   font-size: var(--step-small);
 }
 
+.hint {
+  max-width: 40ch;
+  margin: 0 0 0.5rem;
+  color: var(--installer-legend, var(--muted));
+  font-size: var(--step-small);
+}
+
 .tiles {
   display: grid;
   grid-template-columns: repeat(var(--cols, 1), minmax(0, 1fr));

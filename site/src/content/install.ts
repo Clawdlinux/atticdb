@@ -44,15 +44,19 @@ export const HOOK_APPS: App[] = ["claude-code", "codex"];
 
 export const RELEASES_URL = `${GITHUB_URL}/releases/latest`;
 
+// No apps picked means plain `atticdb setup`, which finds the apps on this machine.
 export const DEFAULT_OPTIONS: InstallOptions = {
   os: "macos",
   method: "script",
-  apps: [...APPS],
+  apps: [],
   preview: true,
   hook: true,
 };
 
 const ZIP = "atticdb-x86_64-pc-windows-msvc.zip";
+export const PATH_CMD = 'export PATH="$HOME/.local/bin:$PATH"';
+export const PATH_NOTE =
+  'If your shell says "command not found", run ~/.local/bin/atticdb setup. To fix it for good, add this line to ~/.zshrc (the macOS default) or ~/.bashrc.';
 const SOURCE_CMD = "cargo install --git https://github.com/Clawdlinux/atticdb atticdb --locked";
 
 export function methodsFor(os: Os): Method[] {
@@ -79,8 +83,8 @@ function installSteps(method: Method): InstallStep[] {
         },
         {
           id: "path",
-          text: "If the installer says ~/.local/bin isn't on your PATH, add it.",
-          commands: ['export PATH="$HOME/.local/bin:$PATH"'],
+          text: PATH_NOTE,
+          commands: [PATH_CMD],
         },
       ];
     case "source":
@@ -111,31 +115,36 @@ function installSteps(method: Method): InstallStep[] {
   }
 }
 
+// Hook apps in the plan: the picked ones, or any app setup may find when none is picked.
+export function hookApplies(o: InstallOptions): boolean {
+  return o.apps.length === 0 || o.apps.some((app) => HOOK_APPS.includes(app));
+}
+
 export function buildInstallSteps(options: InstallOptions): InstallStep[] {
   const o = normalize(options);
   const steps = installSteps(o.method);
-  if (o.apps.length === 0) {
-    return [...steps, { id: "pick", text: "Pick at least 1 app to connect.", commands: [] }];
-  }
-  const list = o.apps.join(",");
-  const hookFlag = !o.hook && o.apps.some((app) => HOOK_APPS.includes(app)) ? " --no-hook" : "";
+  const picked = o.apps.length > 0;
+  const harness = picked ? ` --harness ${o.apps.join(",")}` : "";
+  const hookFlag = !o.hook && hookApplies(o) ? " --no-hook" : "";
   if (o.preview) {
     steps.push({
       id: "preview",
       text: "See what setup would change. It writes nothing.",
-      commands: [`atticdb setup --harness ${list} --dry-run${hookFlag}`],
+      commands: [`atticdb setup${harness} --dry-run${hookFlag}`],
     });
   }
   steps.push(
     {
       id: "setup",
-      text: "Connect your apps. Every edited file is backed up first.",
-      commands: [`atticdb setup --harness ${list}${hookFlag}`],
+      text: picked
+        ? "Connect your apps. Every edited file is backed up first."
+        : "Connect your apps. Setup finds them and asks which to use. Every edited file is backed up first.",
+      commands: [`atticdb setup${harness}${hookFlag}`],
     },
     {
       id: "doctor",
       text: "Check the install. It writes nothing.",
-      commands: [`atticdb doctor --harness ${list}`],
+      commands: [`atticdb doctor${harness}`],
     },
   );
   return steps;

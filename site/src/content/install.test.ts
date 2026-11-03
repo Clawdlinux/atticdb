@@ -4,8 +4,11 @@ import { INSTALL_CMD } from "@/lib/site";
 import {
   APP_LABELS,
   DEFAULT_OPTIONS,
+  PATH_CMD,
+  PATH_NOTE,
   buildInstallSteps,
   detectOs,
+  hookApplies,
   methodsFor,
   normalize,
   type InstallOptions,
@@ -20,17 +23,32 @@ function step(o: InstallOptions, id: string) {
 }
 
 describe("buildInstallSteps", () => {
-  it("lists the default steps for macOS with every app", () => {
+  it("defaults to plain setup on macOS, which finds the apps", () => {
     const steps = buildInstallSteps(DEFAULT_OPTIONS);
+    expect(DEFAULT_OPTIONS.apps).toEqual([]);
     expect(steps.map((s) => s.id)).toEqual(["install", "path", "preview", "setup", "doctor"]);
     expect(steps[0].commands).toEqual([INSTALL_CMD]);
     expect(steps[1].commands).toEqual(['export PATH="$HOME/.local/bin:$PATH"']);
-    expect(step(DEFAULT_OPTIONS, "setup").commands).toEqual([`atticdb setup --harness ${ALL}`]);
-    expect(step(DEFAULT_OPTIONS, "doctor").commands).toEqual([`atticdb doctor --harness ${ALL}`]);
-    expect(step(DEFAULT_OPTIONS, "preview").commands[0]).toMatch(/--dry-run$/);
-    expect(step(DEFAULT_OPTIONS, "preview").commands[0]).toBe(
-      `atticdb setup --harness ${ALL} --dry-run`,
-    );
+    expect(step(DEFAULT_OPTIONS, "preview").commands).toEqual(["atticdb setup --dry-run"]);
+    expect(step(DEFAULT_OPTIONS, "setup").commands).toEqual(["atticdb setup"]);
+    expect(step(DEFAULT_OPTIONS, "doctor").commands).toEqual(["atticdb doctor"]);
+  });
+
+  it("says what to do on command not found, right after the curl line", () => {
+    const [, path] = buildInstallSteps(DEFAULT_OPTIONS);
+    expect(path.id).toBe("path");
+    expect(path.text).toBe(PATH_NOTE);
+    expect(path.text).toContain('"command not found"');
+    expect(path.text).toContain("~/.local/bin/atticdb setup");
+    expect(path.text).toContain("~/.zshrc (the macOS default) or ~/.bashrc");
+    expect(path.commands).toEqual([PATH_CMD]);
+  });
+
+  it("names every picked app with --harness", () => {
+    const o = { ...DEFAULT_OPTIONS, apps: ["copilot", "vscode", "claude-code", "codex"] } as InstallOptions;
+    expect(step(o, "setup").commands).toEqual([`atticdb setup --harness ${ALL}`]);
+    expect(step(o, "doctor").commands).toEqual([`atticdb doctor --harness ${ALL}`]);
+    expect(step(o, "preview").commands).toEqual([`atticdb setup --harness ${ALL} --dry-run`]);
   });
 
   it("drops the preview step when preview is off", () => {
@@ -57,11 +75,13 @@ describe("buildInstallSteps", () => {
     expect(step(codex, "doctor").commands[0]).toBe("atticdb doctor --harness vscode,codex");
   });
 
-  it("asks for an app instead of setup and doctor when none is picked", () => {
-    const steps = buildInstallSteps({ ...DEFAULT_OPTIONS, apps: [] });
-    expect(steps.map((s) => s.id)).toEqual(["install", "path", "pick"]);
-    expect(steps[2]).toEqual({ id: "pick", text: "Pick at least 1 app to connect.", commands: [] });
-    for (const s of steps) for (const c of s.commands) expect(c).not.toContain("--harness");
+  it("adds --no-hook to plain setup when the hook is off, as setup may find Claude Code or Codex", () => {
+    const o = { ...DEFAULT_OPTIONS, hook: false };
+    expect(hookApplies(o)).toBe(true);
+    expect(step(o, "setup").commands).toEqual(["atticdb setup --no-hook"]);
+    expect(step(o, "preview").commands).toEqual(["atticdb setup --dry-run --no-hook"]);
+    expect(step(o, "doctor").commands).toEqual(["atticdb doctor"]);
+    for (const s of buildInstallSteps(o)) for (const c of s.commands) expect(c).not.toContain("--harness");
   });
 
   it("uses the release zip on Windows", () => {

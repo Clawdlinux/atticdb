@@ -2,14 +2,14 @@ import { act, cleanup, fireEvent, render, screen, within } from "@testing-librar
 import { renderToString } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { INSTALL_CMD } from "@/lib/site";
-import { DEFAULT_OPTIONS, buildInstallSteps } from "@/content/install";
+import { DEFAULT_OPTIONS, PATH_CMD, PATH_NOTE, buildInstallSteps } from "@/content/install";
 import Installer from "./Installer";
 
 const MAC_UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36";
 const WINDOWS_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36";
-const SETUP = "atticdb setup --harness copilot,vscode,claude-code,codex";
+const SETUP = "atticdb setup";
 
 // Commands render as tokens, so match the whole <code> by its text.
 function codeWith(text: string) {
@@ -43,13 +43,32 @@ describe("Installer", () => {
     expect(within(system).getByRole("radio", { name: "macOS" })).toBeChecked();
   });
 
-  it("checks all 4 apps and shows the setup command", () => {
+  it("checks no app by default and shows plain setup, which finds the apps", () => {
     render(<Installer />);
     const apps = screen.getByRole("group", { name: "Apps to connect" });
     const boxes = within(apps).getAllByRole("checkbox");
     expect(boxes).toHaveLength(4);
-    for (const box of boxes) expect(box).toBeChecked();
+    for (const box of boxes) expect(box).not.toBeChecked();
+    expect(apps).toHaveAccessibleDescription("None picked: setup finds your apps. Pick some to connect only those.");
     expect(screen.getByText(codeWith(SETUP))).toBeVisible();
+    expect(screen.getByText(codeWith("atticdb doctor"))).toBeVisible();
+  });
+
+  it("says what to do on command not found, right after the curl line", () => {
+    const { container } = render(<Installer />);
+    const steps = [...container.querySelectorAll('[data-ui="steps"] li')];
+    expect(steps[0]).toHaveTextContent(INSTALL_CMD);
+    expect(steps[1]).toHaveTextContent(PATH_NOTE);
+    expect(within(steps[1] as HTMLElement).getByText(codeWith(PATH_CMD))).toBeInTheDocument();
+  });
+
+  it("still lets you pick apps, which become --harness", () => {
+    const { container } = render(<Installer />);
+    const apps = screen.getByRole("group", { name: "Apps to connect" });
+    fireEvent.click(within(apps).getByRole("checkbox", { name: "Codex" }));
+    fireEvent.click(within(apps).getByRole("checkbox", { name: "Claude Code" }));
+    expect(presentCommands(container)).toContain("atticdb setup --harness claude-code,codex");
+    expect(apps).toHaveAccessibleDescription("Only these get connected. Uncheck all to let setup find them.");
   });
 
   it("renders the steps as an ordered list, with the doctor last", () => {
@@ -78,21 +97,24 @@ describe("Installer", () => {
     }
   });
 
-  it("asks for an app when every app is unchecked", () => {
-    render(<Installer />);
+  it("goes back to plain setup when every picked app is unchecked", () => {
+    const { container } = render(<Installer />);
     const apps = screen.getByRole("group", { name: "Apps to connect" });
-    for (const name of ["Copilot CLI", "VS Code", "Claude Code", "Codex"]) {
-      fireEvent.click(within(apps).getByRole("checkbox", { name }));
-    }
-    expect(screen.getByText("Pick at least 1 app to connect.")).toBeInTheDocument();
+    fireEvent.click(within(apps).getByRole("checkbox", { name: "VS Code" }));
+    expect(presentCommands(container)).toContain("atticdb setup --harness vscode");
+    fireEvent.click(within(apps).getByRole("checkbox", { name: "VS Code" }));
+    expect(presentCommands(container)).toContain(SETUP);
+    expect(presentCommands(container)).not.toContain("atticdb setup --harness vscode");
   });
 
-  it("shows the hook option only while Claude Code or Codex is checked", () => {
+  it("shows the hook option unless only apps without the hook are picked", () => {
     render(<Installer />);
     expect(screen.getByRole("checkbox", { name: "Load memory when a chat starts" })).toBeChecked();
     const apps = screen.getByRole("group", { name: "Apps to connect" });
     fireEvent.click(within(apps).getByRole("checkbox", { name: "Claude Code" }));
-    fireEvent.click(within(apps).getByRole("checkbox", { name: "Codex" }));
+    expect(screen.getByRole("checkbox", { name: "Load memory when a chat starts" })).toBeChecked();
+    fireEvent.click(within(apps).getByRole("checkbox", { name: "Claude Code" }));
+    fireEvent.click(within(apps).getByRole("checkbox", { name: "VS Code" }));
     expect(screen.queryByRole("checkbox", { name: "Load memory when a chat starts" })).toBeNull();
   });
 
