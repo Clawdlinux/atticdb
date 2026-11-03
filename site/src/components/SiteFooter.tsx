@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { DOCS_URL, GITHUB_URL, siteHref } from "@/lib/site";
+import { DOCS_URL, GITHUB_URL, SITE_URL, siteHref } from "@/lib/site";
 import styles from "./SiteFooter.module.css";
 
 const LINKS = [
@@ -47,7 +47,12 @@ export default function SiteFooter() {
             </ul>
           </nav>
 
-          <p className={styles.licence}>AtticDB is Apache-2.0 or MIT.</p>
+          <p className={styles.licence}>
+            <span>AtticDB is Apache-2.0 or MIT.</span>{" "}
+            <span>
+              For agents: <a href={`${SITE_URL}/llms.txt`}>llms.txt</a>
+            </span>
+          </p>
         </div>
       </div>
     </footer>

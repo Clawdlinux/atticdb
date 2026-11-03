@@ -64,6 +64,9 @@ describe("buildDocsOut", () => {
       "icon.svg": ["icon.svg", "ICON"],
       "og.png": ["og.png", "OG"],
       "404.html": ["404.html", "NOT FOUND"],
+      "llms.txt": ["llms.txt", "LLMS"],
+      "docs/index.md": ["index.md", "# Overview"],
+      "docs/mcp.md": ["mcp.md", "# MCP tools"],
     };
     for (const [source, [, content]] of Object.entries(copies)) write(join(out, source), content);
     write(join(out, "docs/unused.json"), "NOT EXPORTED");
@@ -72,6 +75,12 @@ describe("buildDocsOut", () => {
       expect(readFileSync(join(docsOut, destination), "utf8")).toBe(content);
     }
     expect(existsSync(join(docsOut, "unused.json"))).toBe(false);
+  });
+
+  it("leaves the main host's install.md off the docs host", async () => {
+    write(join(out, "install.md"), "MAIN INSTALL STEPS");
+    await assemble();
+    expect(existsSync(join(docsOut, "install.md"))).toBe(false);
   });
 
   it("clears stale files and directories before assembling again", async () => {

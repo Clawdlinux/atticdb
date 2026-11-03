@@ -14,3 +14,6 @@ site/.taste-skill
 
 # Written by site/scripts/build-tape-poster.mjs before each build
 site/public/tape-poster.svg
+# Written by site/scripts/build-agent-files.mjs before each build
+site/public/llms.txt
+site/public/docs/

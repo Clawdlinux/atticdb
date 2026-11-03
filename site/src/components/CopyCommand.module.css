@@ -1,9 +1,10 @@
+/* A field may retint the box and its prose with --copy-box and --copy-ink. */
 .box {
   display: flex;
   flex-wrap: wrap;
   align-items: stretch;
   max-width: 100%;
-  background: var(--surface);
+  background: var(--copy-box, var(--surface));
 }
 
 .code {
@@ -18,6 +19,21 @@
   text-align: left;
   white-space: pre-wrap;
   word-break: break-all;
+}
+
+/* variant="prose": a sentence in the text face. It wraps at spaces like any paragraph. */
+.prose {
+  display: flex;
+  flex: 1 1 18rem;
+  min-width: 0;
+  align-items: center;
+  min-height: 44px;
+  padding: 0.5rem 1rem;
+  color: var(--copy-ink, var(--ink));
+  font-size: var(--step-body);
+  line-height: 1.35;
+  text-align: left;
+  overflow-wrap: anywhere;
 }
 
 /* wrap="tokens": breaks fall at spaces, then at a long token's <wbr> points. .long breaks anywhere, as a last resort. */
@@ -41,6 +57,11 @@
   flex-grow: 1;
 }
 
+/* A sentence takes the room. Its button keeps its own width until the phone layout. */
+.bone .prose ~ .action {
+  flex-grow: 0;
+}
+
 .labels {
   display: grid;
   overflow: hidden;
@@ -61,7 +82,8 @@
 }
 
 @media (max-width: 30rem) {
-  .action {
+  .action,
+  .bone .prose ~ .action {
     flex-grow: 1;
   }
 }

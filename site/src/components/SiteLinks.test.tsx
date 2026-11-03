@@ -26,5 +26,8 @@ describe("shared site links", () => {
     expect(document.querySelector('a[href="#main"]')?.textContent).toBe("Back to top");
     expect(document.querySelector('[aria-label="AtticDB on GitHub"]')?.getAttribute("href"))
       .toBe("https://github.com/Clawdlinux/atticdb");
+    const llms = Array.from(document.querySelectorAll("footer a")).find((a) => a.textContent === "llms.txt");
+    expect(llms?.getAttribute("href")).toBe("https://atticdb.com/llms.txt");
+    expect(llms?.parentElement?.textContent).toContain("For agents: llms.txt");
   });
 });

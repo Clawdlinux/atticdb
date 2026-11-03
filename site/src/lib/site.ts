@@ -4,6 +4,9 @@ export const DOCS_ORIGIN = "https://docs.atticdb.com";
 export const DOCS_URL = DOCS_ORIGIN;
 export const INSTALL_CMD =
   "curl -fsSL https://github.com/Clawdlinux/atticdb/releases/latest/download/install.sh | sh";
+// The one line you paste into a coding agent. The agent follows install.md from there.
+export const INSTALL_MD_URL = "https://atticdb.com/install.md";
+export const AGENT_PROMPT = `Set up AtticDB memory for me. Follow ${INSTALL_MD_URL} step by step.`;
 export const WAITLIST_FORM_URL =
   "https://docs.google.com/forms/d/e/1FAIpQLSfliAcFY85SBQAiUpZnllibyhD3xhFpjWmTk1ynmpUWGRIVcQ/viewform";
 

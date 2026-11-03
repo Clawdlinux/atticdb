@@ -7,9 +7,10 @@
   },
   "scripts": {
     "poster": "node --import ./scripts/ts-hooks.mjs scripts/build-tape-poster.mjs",
-    "predev": "npm run poster",
+    "agent-files": "node --import ./scripts/ts-hooks.mjs scripts/build-agent-files.mjs",
+    "predev": "npm run poster && npm run agent-files",
     "dev": "next dev",
-    "prebuild": "npm run poster",
+    "prebuild": "npm run poster && npm run agent-files",
     "build": "next build",
     "lint": "eslint",
     "test": "vitest run",

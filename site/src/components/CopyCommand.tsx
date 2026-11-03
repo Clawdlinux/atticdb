@@ -1,7 +1,7 @@
 "use client";
 
 import { MotionConfig, type Transition } from "motion/react";
-import { Fragment, useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState, type RefObject } from "react";
 import Swap from "@/components/Swap";
 import { INSTALL_CMD } from "@/lib/site";
 import styles from "./CopyCommand.module.css";
@@ -19,6 +19,8 @@ type CopyCommandProps = {
   // A long token breaks after a comma or slash, or before "=". One with none of those
   // may break anywhere. The copied text is unchanged.
   wrap?: "tokens";
+  // "prose" sets the text in the text face, for a sentence such as the agent prompt.
+  variant?: "code" | "prose";
 };
 
 type Status = "idle" | "copied" | "selected";
@@ -80,6 +82,7 @@ function CopyCommandBody({
   tone = "accent",
   swap,
   wrap,
+  variant = "code",
 }: CopyCommandProps) {
   const [status, setStatus] = useState<Status>("idle");
   const codeRef = useRef<HTMLElement>(null);
@@ -111,12 +114,19 @@ function CopyCommandBody({
   }
 
   const shown = status === "copied" ? "Copied" : status === "selected" ? "Selected" : label;
+  const noun = variant === "prose" ? "Prompt" : "Command";
 
   return (
     <div className={`${styles.box} ${tone === "bone" ? styles.bone : ""}`} id={id}>
-      <pre className={`${styles.code} ${wrap === "tokens" ? styles.tokens : ""}`}>
-        <code ref={codeRef}>{wrap === "tokens" ? tokens(command) : command}</code>
-      </pre>
+      {variant === "prose" ? (
+        <p ref={codeRef as RefObject<HTMLParagraphElement>} className={styles.prose}>
+          {command}
+        </p>
+      ) : (
+        <pre className={`${styles.code} ${wrap === "tokens" ? styles.tokens : ""}`}>
+          <code ref={codeRef}>{wrap === "tokens" ? tokens(command) : command}</code>
+        </pre>
+      )}
       <button
         type="button"
         className={`button ${BUTTON_TONE[tone]} ${styles.action}`}
@@ -138,9 +148,9 @@ function CopyCommandBody({
       </button>
       <span className="visually-hidden" role="status">
         {status === "copied"
-          ? "Command copied."
+          ? `${noun} copied.`
           : status === "selected"
-            ? "Command selected. Copy it with your keyboard."
+            ? `${noun} selected. Copy it with your keyboard.`
             : ""}
       </span>
     </div>

@@ -16,12 +16,14 @@ export function buildDocsOut(outDir, docsOutDir) {
 
   const docsDir = join(outDir, "docs");
   for (const entry of readdirSync(docsDir, { withFileTypes: true })) {
-    if (entry.isDirectory() || /\.(html|txt)$/.test(entry.name) || entry.name === "sitemap.xml") {
+    // .md: the Markdown copy of each page, for agents (scripts/build-agent-files.mjs).
+    if (entry.isDirectory() || /\.(html|txt|md)$/.test(entry.name) || entry.name === "sitemap.xml") {
       cpSync(join(docsDir, entry.name), join(docsOutDir, entry.name), { recursive: true });
     }
   }
 
-  for (const asset of ["_next", "images", "fonts", "icon.svg", "og.png", "404.html"]) {
+  // llms.txt is the same index on both hosts.
+  for (const asset of ["_next", "images", "fonts", "icon.svg", "og.png", "404.html", "llms.txt"]) {
     const source = join(outDir, asset);
     if (existsSync(source)) cpSync(source, join(docsOutDir, asset), { recursive: true });
   }

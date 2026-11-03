@@ -79,7 +79,38 @@ describe("Vercel static export", () => {
         source: "/_next/static/(.*)",
         headers: [{ key: "Cache-Control", value: "public, max-age=31536000, immutable" }],
       },
+      {
+        source: "/(.*)\\.md",
+        headers: [{ key: "Content-Type", value: "text/markdown; charset=utf-8" }],
+      },
+      {
+        source: "/llms.txt",
+        headers: [{ key: "Content-Type", value: "text/plain; charset=utf-8" }],
+      },
     ]);
+  });
+
+  it.each(["vercel.json", "vercel.docs.json"])("%s serves the agent files as text, under the security headers", (file) => {
+    const rules = config(file).headers;
+    // Vercel sources are path-to-regexp. These use only groups, escapes and literals, so they read as regexes.
+    const headersFor = (path: string) =>
+      Object.fromEntries(
+        rules
+          .filter((rule) => new RegExp(`^${rule.source}$`).test(path))
+          .flatMap((rule) => rule.headers.map((h) => [h.key, h.value])),
+      );
+    for (const path of ["/install.md", "/mcp.md", "/index.md"]) {
+      expect(headersFor(path)).toMatchObject({
+        "Content-Type": "text/markdown; charset=utf-8",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": CSP,
+      });
+    }
+    expect(headersFor("/llms.txt")).toMatchObject({
+      "Content-Type": "text/plain; charset=utf-8",
+      "X-Content-Type-Options": "nosniff",
+    });
+    for (const path of ["/", "/mcp", "/robots.txt", "/mdfile"]) expect(headersFor(path)["Content-Type"]).toBeUndefined();
   });
 });
 

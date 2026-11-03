@@ -1,3 +1,4 @@
+import AgentPrompt from "@/components/AgentPrompt";
 import Installer from "@/components/Installer";
 import Reveal from "@/components/Reveal";
 import styles from "./InstallSection.module.css";
@@ -9,12 +10,14 @@ export default function InstallSection() {
         <h2 id="install-title" className={styles.title}>
           Install it your way
         </h2>
-        <p className={styles.lead}>
-          Wires itself into Claude Code, GitHub Copilot CLI, VS Code and Codex.
-          Pick your system and apps for the exact commands to run.
-        </p>
+        <div className={styles.agent}>
+          <p className={styles.lead}>Paste this into your coding agent.</p>
+          {/* The installer's Copy all is this section's accent. */}
+          <AgentPrompt tone="bone" />
+        </div>
       </Reveal>
       <Reveal delay={0.075}>
+        <p className={styles.or}>Or pick the commands yourself.</p>
         <Installer />
       </Reveal>
     </section>

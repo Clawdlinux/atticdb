@@ -1,7 +1,8 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { renderToString } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HEADLINE, HONEST, SUB, TRUST } from "@/content/hero";
-import { INSTALL_CMD, WAITLIST_URL } from "@/lib/site";
+import { AGENT_PROMPT, INSTALL_CMD, WAITLIST_URL } from "@/lib/site";
 import Hero from "./Hero";
 import { LAY_MS, RESTART_MS, runToCut, stillFrame, tapeParams } from "./tape-sim";
 
@@ -96,13 +97,13 @@ describe("Hero", () => {
 
   it("moves the one selection highlight to the picked option in each chip", () => {
     const { container } = render(<Hero />);
-    expect(container.querySelectorAll("[class*=highlight]")).toHaveLength(2);
+    expect(container.querySelectorAll("[class*=highlight]")).toHaveLength(3);
     expect(highlightIn(container, "hero-disk")).not.toBeFalsy();
     fireEvent.click(screen.getByRole("radio", { name: "Premium SSD v2" }));
     fireEvent.click(screen.getByRole("radio", { name: "4" }));
     expect(highlightIn(container, "hero-disk")?.parentElement).toHaveTextContent("Premium SSD v2");
     expect(highlightIn(container, "hero-writers")?.parentElement).toHaveTextContent("4");
-    expect(container.querySelectorAll("[class*=highlight]")).toHaveLength(2);
+    expect(container.querySelectorAll("[class*=highlight]")).toHaveLength(3);
   });
 
   it("shows the install command, the copy button and the waitlist link", () => {
@@ -113,6 +114,35 @@ describe("Hero", () => {
       "href",
       WAITLIST_URL,
     );
+  });
+
+  it("asks your agent by default, and switches to the terminal command", () => {
+    const { container } = render(<Hero />);
+    const group = screen.getByRole("group", { name: "Install with" });
+    const agent = within(group).getByRole("radio", { name: "Ask your agent" });
+    const terminal = within(group).getByRole("radio", { name: "Terminal" });
+    expect(agent).toBeChecked();
+    expect(terminal).not.toBeChecked();
+    const panel = (method: string) => container.querySelector(`[data-method="${method}"]`)!;
+    expect(agent).toHaveAttribute("aria-controls", panel("agent").id);
+    expect(terminal).toHaveAttribute("aria-controls", panel("terminal").id);
+    expect(panel("agent")).toHaveAttribute("data-active", "true");
+    expect(panel("terminal")).toHaveAttribute("data-active", "false");
+    expect(within(panel("agent") as HTMLElement).getByText(AGENT_PROMPT)).toBeInTheDocument();
+    fireEvent.click(terminal);
+    expect(terminal).toBeChecked();
+    expect(agent).not.toBeChecked();
+    expect(panel("terminal")).toHaveAttribute("data-active", "true");
+    expect(panel("agent")).toHaveAttribute("data-active", "false");
+    expect(within(panel("terminal") as HTMLElement).getByText(INSTALL_CMD).tagName).toBe("CODE");
+  });
+
+  it("keeps both install panels in the server HTML, so each shows without JS", () => {
+    const html = renderToString(<Hero />);
+    expect(html).toContain(AGENT_PROMPT);
+    expect(html).toContain(INSTALL_CMD);
+    const agentRadio = html.match(/<input[^>]*value="agent"[^>]*>/)?.[0];
+    expect(agentRadio).toMatch(/ checked=""/);
   });
 
   it("shows the build-time poster first, then one labelled canvas", async () => {

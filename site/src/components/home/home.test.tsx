@@ -6,7 +6,7 @@ import SiteFooter from "@/components/SiteFooter";
 import { CREDITS } from "@/content/credits";
 import { HOME_FAQ } from "@/content/faq";
 import NotFound from "@/app/not-found";
-import { INSTALL_CMD } from "@/lib/site";
+import { AGENT_PROMPT, INSTALL_CMD } from "@/lib/site";
 import { DEMO_ALT } from "./Demo";
 import Numbers, { homeFigures } from "./Numbers";
 
@@ -70,7 +70,19 @@ describe("home page", () => {
     const codes = [...section.querySelectorAll("code")].map((c) => c.textContent);
     expect(codes).toContain(INSTALL_CMD);
     expect(section.previousElementSibling?.querySelector("#demo-heading")).not.toBeNull();
-    expect(section.textContent).toContain("Claude Code, GitHub Copilot CLI, VS Code and Codex");
+    expect(section.textContent).toContain("Claude Code, Codex, GitHub Copilot CLI and VS Code");
+  });
+
+  it("leads the install section with the agent prompt, then the installer", () => {
+    const { container } = render(<Home />);
+    const section = container.querySelector("#install") as HTMLElement;
+    const ask = within(section).getByText("Paste this into your coding agent.");
+    const prompt = within(section).getByText(AGENT_PROMPT);
+    const or = within(section).getByText("Or pick the commands yourself.");
+    const installer = [...section.querySelectorAll("code")].find((c) => c.textContent === INSTALL_CMD)!;
+    for (const [a, b] of [[ask, prompt], [prompt, or], [or, installer]] as const) {
+      expect(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    }
   });
 });
 

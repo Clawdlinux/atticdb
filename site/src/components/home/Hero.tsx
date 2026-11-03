@@ -1,20 +1,22 @@
 "use client";
 
-import { MotionConfig, motion } from "motion/react";
+import { MotionConfig, motion, useReducedMotion } from "motion/react";
 import dynamic from "next/dynamic";
 import {
   Component,
   useCallback,
   useEffect,
+  useId,
   useRef,
   useState,
   type CSSProperties,
   type ReactNode,
 } from "react";
+import AgentPrompt from "@/components/AgentPrompt";
 import CopyCommand from "@/components/CopyCommand";
 import { ackFor } from "@/content/bench";
 import { HEADLINE, HONEST, SUB, TRUST } from "@/content/hero";
-import { HOVER, PRESS, SPRING, TAP } from "@/lib/motion";
+import { HOVER, PRESS, SPRING, SWAP, SWAP_RISE, TAP } from "@/lib/motion";
 import { WAITLIST_URL } from "@/lib/site";
 import AckChip, { formatAck } from "./AckChip";
 import { PlugResult, PowerChip } from "./PlugDemo";
@@ -41,10 +43,12 @@ type OptionProps = {
   label: string;
   checked: boolean;
   onPick: () => void;
+  // The id of the panel this option shows.
+  controls?: string;
 };
 
 // One radio in a chip. The selected one carries the highlight, which slides between options.
-function Option({ name, value, label, checked, onPick }: OptionProps) {
+function Option({ name, value, label, checked, onPick, controls }: OptionProps) {
   return (
     <motion.label
       className={styles.option}
@@ -52,7 +56,14 @@ function Option({ name, value, label, checked, onPick }: OptionProps) {
       whileTap={TAP}
       transition={PRESS}
     >
-      <input type="radio" name={name} value={value} checked={checked} onChange={onPick} />
+      <input
+        type="radio"
+        name={name}
+        value={value}
+        checked={checked}
+        onChange={onPick}
+        aria-controls={controls}
+      />
       {checked && (
         <motion.span
           layoutId={`${name}-highlight`}
@@ -63,6 +74,75 @@ function Option({ name, value, label, checked, onPick }: OptionProps) {
       )}
       <span className={styles.optionText}>{label}</span>
     </motion.label>
+  );
+}
+
+type Method = "agent" | "terminal";
+const METHODS: { value: Method; label: string }[] = [
+  { value: "agent", label: "Ask your agent" },
+  { value: "terminal", label: "Terminal" },
+];
+
+/*
+ * The install switch: paste one line into your agent, or run the command yourself.
+ * Both panels share one grid cell, so a switch never moves the page. CSS shows the panel of the
+ * checked radio, so the switch works without JS too. With JS, the new panel rises in.
+ */
+function InstallSwitch() {
+  const [method, setMethod] = useState<Method>("agent");
+  const [moved, setMoved] = useState(false);
+  const still = useReducedMotion();
+  const id = useId();
+  const enter = moved && !still ? { opacity: 0, y: SWAP_RISE } : false;
+
+  return (
+    <>
+      <fieldset className={styles.method} data-ui="install-method">
+        <legend className="visually-hidden">Install with</legend>
+        <span className={styles.options}>
+          {METHODS.map((m) => (
+            <Option
+              key={m.value}
+              name="hero-install"
+              value={m.value}
+              label={m.label}
+              checked={method === m.value}
+              controls={`${id}-${m.value}`}
+              onPick={() => {
+                setMethod(m.value);
+                setMoved(true);
+              }}
+            />
+          ))}
+        </span>
+      </fieldset>
+      <div className={styles.panels}>
+        {METHODS.map((m) => {
+          const active = method === m.value;
+          return (
+            <div
+              key={m.value}
+              id={`${id}-${m.value}`}
+              className={styles.panel}
+              data-method={m.value}
+              data-active={active}
+              role="group"
+              aria-label={m.label}
+            >
+              {/* A new key on each switch replays the entrance for the panel that comes in. */}
+              <motion.div
+                key={String(active)}
+                initial={active ? enter : false}
+                animate={{ opacity: 1, y: 0 }}
+                transition={SWAP}
+              >
+                {m.value === "agent" ? <AgentPrompt /> : <CopyCommand label="Install AtticDB" />}
+              </motion.div>
+            </div>
+          );
+        })}
+      </div>
+    </>
   );
 }
 
@@ -178,7 +258,7 @@ function HeroBody({ afterHonest }: HeroProps) {
       </div>
 
       <div className={styles.actions}>
-        <CopyCommand label="Install AtticDB" />
+        <InstallSwitch />
         <motion.a
           className={styles.waitlist}
           href={WAITLIST_URL}

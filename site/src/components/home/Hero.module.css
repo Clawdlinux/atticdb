@@ -387,7 +387,8 @@
   align-items: center;
   justify-content: center;
   gap: 0.75rem 1.25rem;
-  margin-top: clamp(2rem, 6svh, 3.5rem);
+  /* Tight: the demo above already ends in its own padding. */
+  margin-top: clamp(0.75rem, 1.5svh, 1.25rem);
 }
 
 .trust {
@@ -407,13 +408,63 @@
   margin-left: 0;
 }
 
+/* The switch, its two panels in one cell, and the waitlist link beside the panels. */
 .actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: center;
-  gap: 1rem 1.75rem;
-  margin-top: 1.25rem;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  justify-items: stretch;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.method {
+  justify-self: start;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.panels {
+  display: grid;
+  min-width: 0;
+}
+
+.panel {
+  grid-area: 1 / 1;
+  min-width: 0;
+}
+
+/* The checked radio picks the panel. Plain CSS, so it works before and without JS. */
+.actions:has(input[value="agent"]:checked) .panel[data-method="terminal"],
+.actions:has(input[value="terminal"]:checked) .panel[data-method="agent"] {
+  visibility: hidden;
+}
+
+.actions .waitlist {
+  justify-self: center;
+}
+
+@media (min-width: 48rem) {
+  .actions {
+    grid-template-columns: auto auto;
+    justify-content: center;
+    align-items: start;
+    column-gap: 1.75rem;
+  }
+
+  .method {
+    grid-column: 1;
+  }
+
+  .panels {
+    grid-column: 1;
+  }
+
+  .actions .waitlist {
+    grid-column: 2;
+    grid-row: 2;
+    justify-self: start;
+  }
 }
 
 .waitlist {
@@ -510,7 +561,7 @@
   }
 
   .actions {
-    margin-top: 1rem;
+    margin-top: 0.75rem;
   }
 }
 

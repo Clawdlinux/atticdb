@@ -3,8 +3,8 @@
   display: grid;
   gap: 2rem;
   align-items: start;
+  /* No margin: the padding alone parts it from the hero's honest line, which gave its room to the install switch. */
   padding-block: calc(var(--space-section) * 0.5);
-  margin-top: clamp(1.5rem, 4svh, 2.5rem);
   background: var(--bg);
   color: var(--ink);
   text-align: left;

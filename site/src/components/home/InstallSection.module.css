@@ -14,12 +14,14 @@
   --installer-gap: 1rem;
   --installer-step-gap: 0.5rem;
   --installer-panel-padding: 1.25rem;
+  --prompt-note: var(--installer-legend);
+  --prompt-link: var(--field-1-ink);
 }
 
 .head {
   display: grid;
   gap: 1rem;
-  margin-bottom: 1.5rem;
+  margin-bottom: 1.25rem;
 }
 
 /* Same treatment as the other bone headings: --step-head in the soft ink. */
@@ -27,16 +29,35 @@
   color: color-mix(in srgb, var(--field-1-ink) 62%, var(--field-1));
 }
 
-.lead {
+/* The prompt sits on a tile like the installer's choices, with an oxide Copy button. */
+.agent {
+  --copy-box: var(--installer-tile);
+  --copy-ink: var(--field-1-ink);
+  display: grid;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.lead,
+.or {
   max-width: 54ch;
   font-size: var(--step-lead);
   line-height: 1.3;
+}
+
+.or {
+  margin-bottom: 0.75rem;
 }
 
 @media (min-width: 64rem) {
   .head {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     gap: 2rem;
-    align-items: center;
+    align-items: end;
   }
+}
+
+/* The bone button's own focus ring would vanish on the bone field. */
+.agent :focus-visible {
+  outline-color: var(--field-1-ink);
 }

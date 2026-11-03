@@ -1,4 +1,4 @@
-Pick your system and your apps. The installer below shows exactly what to run.
+Paste the line below into your coding agent. It installs AtticDB and connects it for you.
 
 ## What the installer does
 
