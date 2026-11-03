@@ -1,4 +1,5 @@
-//! HTTP routes. Writes: `POST /v1/append`, `POST /v1/facts/put` and `POST /v1/facts/delete`.
+//! HTTP routes. Writes: `POST /v1/append`, `POST /v1/facts/put`, `POST /v1/facts/delete` and
+//! `POST /v1/forget`.
 //! Reads: `GET /v1/window`, `GET /v1/facts/get`, `GET /v1/facts/history`, `GET /v1/facts/list`,
 //! `GET /v1/search`, `GET /v1/sessions` and `GET /v1/records`. `GET /healthz` needs no token.
 //! `GET /v1/stats` and `GET /metrics` answer on the Unix socket only, with no token. Fact keys
@@ -7,9 +8,9 @@
 use crate::auth::{self, Auth};
 use crate::http::{Budget, Head, Response};
 use atticdb_core::{
-    Appended, Engine, EngineError, ErrorKind, FactQuery, FactWritten, Health, Hit, NewFact,
-    NewTurn, Record, RecordKind, RecordQuery, Revision, Role, Scope, SearchQuery, SessionQuery,
-    StoredFact, Turn, WindowQuery,
+    forget::Selector, Appended, Engine, EngineError, ErrorKind, FactQuery, FactWritten, Forgotten,
+    Health, Hit, NewFact, NewTurn, Record, RecordKind, RecordQuery, Revision, Role, Scope,
+    SearchQuery, SessionQuery, StoredFact, Turn, WindowQuery,
 };
 use atticdb_tape::{Error, Outcome};
 use serde_json::{json, Map, Value};
@@ -66,9 +67,11 @@ pub enum Route {
     Sessions,
     /// `GET /v1/records`.
     Records,
+    /// `POST /v1/forget`.
+    Forget,
 }
 
-const ROUTES: [(&str, &str, Route); 11] = [
+const ROUTES: [(&str, &str, Route); 12] = [
     ("GET", "/healthz", Route::Health),
     ("POST", "/v1/append", Route::Append),
     ("GET", "/v1/window", Route::Window),
@@ -80,6 +83,7 @@ const ROUTES: [(&str, &str, Route); 11] = [
     ("GET", "/v1/search", Route::Search),
     ("GET", "/v1/sessions", Route::Sessions),
     ("GET", "/v1/records", Route::Records),
+    ("POST", "/v1/forget", Route::Forget),
 ];
 
 /// Checks a head before its body is read: `Host` on TCP, then the token. Returns the
@@ -313,6 +317,9 @@ pub fn stats_fields(engine: &Engine) -> Option<Value> {
     fields["hot_cache_hits"] = json!(m.hot_cache_hits);
     fields["hot_cache_misses"] = json!(m.hot_cache_misses);
     fields["hot_cache_dropped"] = json!(m.hot_cache_dropped);
+    fields["forgotten_sessions"] = json!(m.forgotten_sessions);
+    fields["forgotten_fact_keys"] = json!(m.forgotten_fact_keys);
+    fields["forgotten_lsns"] = json!(m.forgotten_lsns);
     Some(fields)
 }
 
@@ -424,6 +431,52 @@ pub fn fact_write(engine: &Engine, tenant: &str, body: Vec<u8>, delete: bool) ->
     write_response(result.map(receipt), FACT_LIMITS)
 }
 
+/// `POST /v1/forget`: hides a session, a fact key or listed LSNs of the token's tenant. The
+/// record is durable before the reply. The raw body is dropped once parsed.
+pub fn forget(engine: &Engine, tenant: &str, body: Vec<u8>) -> Response {
+    let Some(slot) = PARSERS.take(1, Duration::MAX) else { return busy() };
+    let value = serde_json::from_slice(&body).map_err(|_| "body must be JSON".to_owned());
+    let parsed = value.and_then(parse_forget);
+    drop((slot, body));
+    let (selector, idem, up_to_lsn) = match parsed {
+        Ok(parsed) => parsed,
+        Err(message) => return invalid(message),
+    };
+    let result = engine.forget(tenant, selector, Some(&idem), up_to_lsn);
+    let receipt = |forgotten: Forgotten| {
+        let Forgotten { txn, lsn, cutoff, deduplicated } = forgotten;
+        json!({"deduplicated": deduplicated, "txn": txn, "lsn": lsn, "cutoff": cutoff})
+    };
+    write_response(result.map(receipt), FORGET_LIMITS)
+}
+
+const SELECTOR: &str = "pass exactly 1 of session {agent, session}, key or lsns";
+
+/// Exactly 1 selector: `session`, `key` or `lsns`. LSNs and `up_to_lsn` start at 1.
+fn parse_forget(value: Value) -> Result<(Selector, String, Option<u64>), String> {
+    let Value::Object(mut fields) = value else {
+        return Err("body must be a JSON object".into());
+    };
+    let idem = idem_key(&mut fields)?;
+    let lsn = |value: &Value| value.as_u64().filter(|lsn| *lsn > 0);
+    let up_to_lsn = fields.remove("up_to_lsn").map(|value| lsn(&value));
+    let up_to_lsn = up_to_lsn.map(|lsn| lsn.ok_or("up_to_lsn must be a whole number from 1"));
+    let up_to_lsn = up_to_lsn.transpose()?;
+    let selector = match ["session", "key", "lsns"].map(|name| fields.remove(name)) {
+        [Some(Value::Object(mut session)), None, None] => Selector::Session {
+            agent: string(&mut session, "agent")?,
+            session: string(&mut session, "session")?,
+        },
+        [None, Some(Value::String(key)), None] if !key.is_empty() => Selector::FactKey(key),
+        [None, None, Some(Value::Array(items))] if !items.is_empty() => {
+            let lsns = items.iter().map(lsn).collect::<Option<Vec<u64>>>();
+            Selector::Lsns(lsns.ok_or("lsns must be whole numbers from 1")?)
+        }
+        _ => return Err(SELECTOR.into()),
+    };
+    Ok((selector, idem, up_to_lsn))
+}
+
 fn invalid(message: String) -> Response {
     Response::json(
         400,
@@ -523,6 +576,9 @@ const LIMITS: &str = "turns must not be empty; content is at most 4 MiB, meta at
                       agent and session at most 255 bytes each";
 const FACT_LIMITS: &str = "key is 1 to 1024 bytes; content is at most 4 MiB, meta at most 64 KiB, \
                            agent at most 255 bytes";
+const FORGET_LIMITS: &str =
+    "agent and session are at most 255 bytes each, key at most 1024 bytes; \
+                             lsns holds 1 to 1024 LSNs from 1; up_to_lsn is at least 1";
 
 fn classify(kind: &ErrorKind) -> (u16, &'static str) {
     match kind {
@@ -549,7 +605,7 @@ pub fn window(engine: &Engine, tenant: &str, target: &str) -> Response {
     };
     send(engine.window_budget(&scope, query, max_bytes), |window| {
         let turns: Vec<_> = window.turns.into_iter().map(turn_json).collect();
-        json!({"truncated": window.truncated, "turns": turns})
+        json!({"truncated": window.truncated, "as_of_lsn": window.as_of_lsn, "turns": turns})
     })
 }
 
@@ -682,12 +738,15 @@ pub fn sessions(engine: &Engine, tenant: &str, target: &str) -> Response {
             let sessions: Vec<_> = page
                 .sessions
                 .into_iter()
-                .map(|s| json!({"agent": s.agent, "session": s.session, "turns": s.turns}))
+                .map(|s| {
+                    json!({"agent": s.agent, "session": s.session, "turns": s.turns,
+                           "forgotten_up_to": s.forgotten_up_to})
+                })
                 .collect();
             let next =
                 page.next.map(|(agent, session)| json!({"agent": agent, "session": session}));
             let total = json!({"sessions": page.total_sessions, "turns": page.total_turns});
-            json!({"sessions": sessions, "next": next, "total": total})
+            json!({"sessions": sessions, "next": next, "total": total, "as_of_lsn": page.as_of_lsn})
         }),
         Err(message) => Response::json(400, &json!({"error": "invalid_input", "message": message})),
     }
@@ -828,7 +887,11 @@ fn blobs(mut out: Value, content: Vec<u8>, meta: Vec<u8>) -> Value {
     out
 }
 
+/// A forgotten turn is a placeholder: `{seq, lsn, redacted: true}`.
 fn turn_json(turn: Turn) -> Value {
+    if turn.redacted {
+        return json!({"seq": turn.seq, "lsn": turn.lsn, "redacted": true});
+    }
     let role = ROLES.iter().find(|(role, _)| *role == turn.role).map_or("", |(_, name)| *name);
     let (seq, lsn, commit_time_ns) = (turn.seq, turn.lsn, turn.commit_time_ns);
     let head = json!({"seq": seq, "lsn": lsn, "commit_time_ns": commit_time_ns, "role": role});
@@ -844,9 +907,12 @@ fn fact_json(fact: StoredFact) -> Value {
     )
 }
 
+/// A forgotten revision is a placeholder: `{lsn, redacted: true}`.
 fn revision_json(revision: Revision) -> Value {
-    // No route writes a forget yet, so no revision here is redacted.
-    let Revision { lsn, commit_time_ns, agent, deleted, content, meta, redacted: _ } = revision;
+    let Revision { lsn, commit_time_ns, agent, deleted, content, meta, redacted } = revision;
+    if redacted {
+        return json!({"lsn": lsn, "redacted": true});
+    }
     let head =
         json!({"lsn": lsn, "commit_time_ns": commit_time_ns, "agent": agent, "deleted": deleted});
     blobs(head, content, meta)

@@ -18,7 +18,8 @@ fn slow_server(home: &Path) {
 
 /// The block lists rules, then this repo's facts, both in key order, then the newest 5
 /// turns of the repo's session from both Copilot agents, Claude Code, Codex and the shell
-/// verbs, oldest first. Its JSON shape follows `--harness`. A worktree gets its main repo's
+/// verbs, oldest first. Forgotten rules and notes never show. Its JSON shape follows
+/// `--harness`. A worktree gets its main repo's
 /// block, and a table of layouts names its repos. Stdin stays open. A shell write's secrets
 /// are stored as placeholders, and its line counts them.
 #[test]
@@ -47,6 +48,7 @@ fn session_start_prints_the_memory_block() {
         ("user/style", "short sentences"),
         ("repo/app/build", "cargo build"),
         ("repo/other/x", "not shown"),
+        ("user/forgotten", "not shown"),
     ];
     for (key, content) in facts {
         seed(&home, &["fact", "set", "--key", key, "--content", content]);
@@ -85,6 +87,14 @@ fn session_start_prints_the_memory_block() {
         let (code, _, err) = atticdb(&home, &cwd, &args, &[], b"", 0);
         assert_eq!(code, Some(0), "{args:?}: {err}");
     }
+    // A forgotten rule and Copilot's newest note, forgotten, never show. The note's
+    // placeholder takes no place among the 5 newest.
+    let args = ["append", "--agent", "copilot", "--session", "app", "--content", "not shown"];
+    let (code, out, err) = atticdb(&home, &home, &args, &[], b"", 0);
+    assert_eq!(code, Some(0), "{err}");
+    let lsn = serde_json::from_str::<Value>(&out).unwrap()["lsn"].to_string();
+    seed(&home, &["forget", "lsns", "--lsns", &lsn]);
+    seed(&home, &["forget", "key", "--key", "user/forgotten"]);
     // A symlinked cwd names the repo it points into, as the adapter's `current_dir` does.
     std::os::unix::fs::symlink(home.join("app/src"), home.join("link")).unwrap();
     let block = format!(

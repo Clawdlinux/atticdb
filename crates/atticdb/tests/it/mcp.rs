@@ -327,8 +327,11 @@ fn tool_calls_over_stdio() {
     assert!(text(&rejected).starts_with(expect), "{rejected}");
     let missing = mcp.call("memory_append", json!({"role": "user"}));
     assert_eq!((missing["isError"].clone(), text(&missing)), (json!(true), "content is required"));
-    let reply = mcp.request("tools/call", json!({"name": "memory_delete", "arguments": {}}));
-    assert_eq!(reply["error"]["code"], -32602, "unknown tool");
+    // No tool forgets (Q1): the user runs `atticdb forget` or uses studio.
+    for name in ["memory_delete", "memory_forget"] {
+        let reply = mcp.request("tools/call", json!({"name": name, "arguments": {}}));
+        assert_eq!(reply["error"]["code"], -32602, "unknown tool {name}");
+    }
 
     // Tokens in the content and in nested meta are stored as placeholders, and counted.
     // They are built here, as a token-shaped literal would trip push protection.
@@ -447,6 +450,64 @@ fn tool_calls_over_stdio() {
         assert_eq!(printed.pointer(pointer), Some(&expected), "{verb:?}: {out}");
         assert!(!err.contains("No hits."), "{verb:?}: {err}");
     }
+    // `atticdb forget` prints 3 lines: the receipt, what a forget hides, and what stays visible.
+    // Only `forget session` takes --agent and --session, so these get the store flags alone.
+    let forget = |verb: &[&str]| {
+        let mut process =
+            support::Process::spawn(&dir.0, &[&["forget"], verb, &args[..4]].concat());
+        let (status, out) = process.wait();
+        assert_eq!(status.code(), Some(0), "{verb:?}: {out}");
+        process.stdout()
+    };
+    let recent = serde_json::from_str::<Value>(&cli(&["recent", "--session", "sh"], 0).0).unwrap();
+    let hi = recent["turns"][0]["lsn"].as_u64().unwrap();
+    let (gone, hi_text) = (std::fs::canonicalize(&dir.0).unwrap().join("gone.png"), hi.to_string());
+    let hides =
+        "Content is hidden from normal AtticDB reads. It stays on disk until purge ships (#159).";
+    let visible = "Names, keys, LSNs, counts and sizes stay visible. See \"What a forget leaves \
+                   visible\" in the README.";
+    let mut previous = 0;
+    // (verb and its flags, how line 1 names the selector, up_to_lsn)
+    for (verb, named, up_to) in [
+        (&["lsns", "--lsns", &format!("{hi},{hi}")][..], "1 lsn".to_owned(), None),
+        (
+            &["session", "--agent", "ag", "--session", "sh", "--up-to-lsn", &hi_text],
+            "session ag/sh".into(),
+            Some(hi),
+        ),
+        (&["key", "--key", "sh/k"], "key sh/k".into(), None),
+        // The ref of a file that is gone is still forgotten by its path.
+        (&["file", "--path", gone.to_str().unwrap()], format!("file {}", gone.display()), None),
+    ] {
+        let out = forget(verb);
+        let lines: Vec<&str> = out.lines().collect();
+        let numbers: Vec<u64> =
+            lines[0].split(|c: char| !c.is_ascii_digit()).filter_map(|n| n.parse().ok()).collect();
+        let [cutoff, txn, lsn] = numbers[numbers.len() - 3..] else { panic!("{verb:?}: {out}") };
+        assert_eq!(
+            lines[0],
+            format!("forgot {named} up to lsn {cutoff} (txn {txn}, lsn {lsn})"),
+            "{verb:?}"
+        );
+        assert_eq!(
+            cutoff,
+            up_to.unwrap_or(lsn),
+            "{verb:?}: the cutoff is up_to_lsn, else the forget"
+        );
+        assert!(lsn > previous, "{verb:?}: 1 durable record each");
+        previous = lsn;
+        assert_eq!(lines[1..], [hides, visible], "{verb:?}");
+    }
+    // A forgotten turn reads as its seq and `(forgotten)`, with no content.
+    let mut reader = Mcp::start(&dir.0, &[&args[..], &["--session", "sh"]].concat(), None);
+    reader.handshake();
+    let window = reader.call("memory_recent", json!({}));
+    assert_eq!(text(&window), "#1 (forgotten)", "{window}");
+    assert_eq!(
+        window["structuredContent"]["turns"],
+        json!([{"seq": 1, "lsn": hi, "redacted": true}])
+    );
+    assert_eq!(reader.close().0.code(), Some(0));
     // A search that finds nothing prints the same JSON, and a hint on stderr.
     let (out, err) = cli(&["search", "--query", "hi there"], 0);
     assert_eq!(serde_json::from_str::<Value>(&out).unwrap(), json!({"hits": [], "next": null}));
@@ -458,6 +519,9 @@ fn tool_calls_over_stdio() {
         (&["recent", "--n", "x"], 2, ""),
         (&["fact", "drop", "--key", "k"], 2, ""),
         (&["recent", "--key", "k"], 2, ""),
+        // `cli` passes --agent but no --session.
+        (&["forget", "session"], 2, "forget session needs --session"),
+        (&["forget", "key", "--key", "k"], 2, "atticdb forget key <connect>"),
     ] {
         let (out, err) = cli(verb, code);
         assert!(out.is_empty() && err.contains(reason), "{verb:?}: {out} {err}");
@@ -613,6 +677,34 @@ fn file_refs_keep_versions() {
         );
         assert_eq!(content["versions"].as_array().unwrap().len(), 2, "{case}");
     }
+
+    // `forget file` finds a deleted file's ref by its path. Then no read shows the ref, and its
+    // history holds placeholders only. A new save starts a fresh ref with 1 version.
+    let verb = [&["forget", "file", "--path", path][..], &args[..4]].concat();
+    let (status, out) = support::Process::spawn(&dir.0, &verb).wait();
+    assert_eq!(status.code(), Some(0), "{out}");
+    let gone = mcp.call("file_get", json!({"path": path, "versions": true}));
+    assert_eq!(gone["structuredContent"], json!({"ref": null}), "{gone}");
+    let folder = mcp.call("file_get", json!({"path": shots.to_str().unwrap()}));
+    assert_eq!(folder["structuredContent"]["refs"], json!([]), "{folder}");
+    assert_eq!(text(&mcp.call("memory_search", json!({"query": "light"}))), "no matches");
+    let byte = |b: u8| match b.is_ascii_alphanumeric() || b == b'/' {
+        true => char::from(b).to_string(),
+        false => format!("%{b:02X}"),
+    };
+    let target = format!("/v1/facts/history?key={}", key.bytes().map(byte).collect::<String>());
+    let history = running.vias[1].a("GET", &target, None).1;
+    let hidden = [second_lsn, first_lsn].map(|lsn| json!({"lsn": lsn, "redacted": true}));
+    assert_eq!(history["revisions"], json!(hidden), "{history}");
+    std::fs::write(&file, b"first image").unwrap();
+    let saved = mcp.call("file_ref", json!({"path": path, "about": "login page, dark mode"}));
+    assert_eq!(saved["structuredContent"]["unchanged"], false, "a fresh ref: {saved}");
+    let fresh = saved["structuredContent"]["lsn"].clone();
+    let versions = mcp.call("file_get", json!({"path": path, "versions": true}));
+    let content = &versions["structuredContent"];
+    let list = content["versions"].as_array().unwrap();
+    let lsns: Vec<&Value> = list.iter().map(|version| &version["lsn"]).collect();
+    assert_eq!((lsns, &content["on_disk"]), (vec![&fresh], &fresh), "{versions}");
 
     // The stored about is redacted, so the same save again still writes nothing.
     let notes = dir.0.join("notes.txt");

@@ -181,6 +181,7 @@ impl Shared {
                 Route::Search => api::search(&self.engine, &tenant, &request.head.target),
                 Route::Sessions => api::sessions(&self.engine, &tenant, &request.head.target),
                 Route::Records => api::records(&self.engine, &tenant, &request.head.target),
+                Route::Forget => api::forget(&self.engine, &tenant, request.body),
             };
             let _ = conn.respond(&response);
             self.log(&method, &path, &response, &tenant, started);

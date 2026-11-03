@@ -225,10 +225,11 @@ Send `Authorization: Bearer <token>`. The token picks the tenant. On TCP the `Ho
 | Route | Request | 200 response |
 |---|---|---|
 | `POST /v1/append` | `{"agent", "session", "idem_key", "turns": [{"role", "content", "meta"?}]}` | `{"outcome": "committed", "deduplicated", "txn", "first_lsn", "last_lsn", "seqs"}` |
-| `GET /v1/window` | `?agent=&session=` plus `last=N`, or `since_seq=S` with an optional `limit=N`. Optional `max_bytes=B` | `{"turns": [{"seq", "lsn", "commit_time_ns", "role", "content", "meta"}], "truncated"}` |
+| `GET /v1/window` | `?agent=&session=` plus `last=N`, or `since_seq=S` with an optional `limit=N`. Optional `max_bytes=B` | `{"turns": [{"seq", "lsn", "commit_time_ns", "role", "content", "meta"}], "truncated", "as_of_lsn"}` |
 | `GET /v1/search` | `?q=` words, plus optional `limit=N` (default 10, cap 100), `before=LSN` and `max_bytes=B` | `{"hits": [{"kind": "turn", "agent", "session", "seq", "lsn", "commit_time_ns", "role", "content", "meta"} or {"kind": "fact", "key", "lsn", "commit_time_ns", "agent", "content", "meta"}], "next"}` |
-| `GET /v1/sessions` | Optional `limit=N` (default 100, cap 1,000), and `after_agent=` with `after_session=` | `{"sessions": [{"agent", "session", "turns"}], "next": {"agent", "session"} or null, "total": {"sessions", "turns"}}` |
+| `GET /v1/sessions` | Optional `limit=N` (default 100, cap 1,000), and `after_agent=` with `after_session=` | `{"sessions": [{"agent", "session", "turns", "forgotten_up_to"}], "next": {"agent", "session"} or null, "total": {"sessions", "turns"}, "as_of_lsn"}` |
 | `GET /v1/records` | Optional `before=LSN`, `limit=N` (default 50, cap 1,000), `kind=turn` or `kind=fact`, and `max_bytes=B` | `{"records": [{"kind": "turn", "lsn", "commit_time_ns", "agent", "session", "seq", "role", "content", "meta"} or {"kind": "fact", "lsn", "commit_time_ns", "key", "agent", "deleted", "content", "meta"}], "next"}` |
+| `POST /v1/forget` | `{"idem_key"}` plus exactly 1 of `"session": {"agent", "session"}`, `"key"` or `"lsns": [n, ...]` (1 to 1,024). Optional `up_to_lsn` | `{"outcome": "committed", "deduplicated", "txn", "lsn", "cutoff"}` |
 | `GET /healthz` | No token | `{"status": "ok" or "read_only", "instance"}`. 503 with `"poisoned"` |
 | `GET /v1/stats` | Unix socket only, no token | One flat object: `instance`, `health`, `durable_lsn`, tenant and fact counts, writer groups, checkpoint and lock timings, tape-index memory. Counters cover this open |
 | `GET /metrics` | Unix socket only, no token | The same numbers in Prometheus text format 0.0.4: counters as `atticdb_<name>_total`, gauges as `atticdb_<name>`, `_ns` maxima as `_seconds`, `atticdb_read_only`, the `atticdb_append_ack_seconds` histogram of committed appends (50 µs to 1 s), and the `atticdb_turn_content_bytes` histogram of new turns (64 B to 4 MiB). `turn_repeats` counts new turns whose content matches one of about 4,096 recent hashes, a lower bound on exact repeats |
@@ -244,6 +245,12 @@ Send `Authorization: Bearer <token>`. The token picks the tenant. On TCP the `Ho
 - Each sessions call scans every tenant's sessions under the engine's state lock, and appends wait for it. A first page over 100,000 sessions takes about 1 to 4 ms at limit 100 to 1,000. A page after a cursor costs about 1.5x that. At the default cap of 1,000,000 sessions, a first page takes about 25 to 30 ms. Figures are from an Apple M4.
 - Records walks the tenant's turns and fact revisions newest first, each as written. Superseded values and deletes show too: it is the log, not the current state. A delete has `"deleted": true` and empty content. `max_bytes` counts agent, session, key, content and meta bytes. The first record always comes back, even over `max_bytes`.
 - Records and search share 1 walk. Every LSN it passes counts toward the 1,000,000 visits, including other tenants' records and records it skips. So a page can be empty while `next` is set. Go on until `next` is null. The walk reads only the header of a record it skips, with no CRC check. No separate CRC covers a header. So a flipped bit in a record's tenant or kind can drop it from records and search with no error. `window`, the fact reads and `atticdb verify` read whole records and still report it.
+- Forget hides the tenant's records at or below `cutoff`: `up_to_lsn` when given and lower, else the forget's own LSN. So later writes still show. It is durable before the reply, and a retry with the same `idem_key` returns the same receipt.
+- Content is hidden from normal AtticDB reads. It stays on disk until purge ships (#159).
+- Windows, history and records show a forgotten record as a placeholder: `{"seq", "lsn", "redacted": true}` for a turn, `{"lsn", "redacted": true}` for a revision. Records add `kind` and the names. Get, list and search skip it. A forgotten newest revision leaves the key with no current value.
+- Names, LSNs, `turns`, `total` and the `/v1/stats` counts still include forgotten records. See [What a forget leaves visible](../../README.md#what-a-forget-leaves-visible).
+- `forgotten_up_to` is a session forget's cutoff, or null. `as_of_lsn` is the durable LSN the read saw. Pass a window's as `up_to_lsn` to forget only what it showed.
+- `/v1/stats` and `/metrics` add the gauges `forgotten_sessions`, `forgotten_fact_keys` and `forgotten_lsns`.
 - Read routes that need a token answer 400 `invalid_input` to an unknown query parameter.
 - Content that is not UTF-8, only possible from direct Rust API writes, comes back with U+FFFD and `"lossy": true`.
 - `Transfer-Encoding` gets 501. `Expect: 100-continue` works. A bad `Host`, a bad token or an oversized body gets its error before the body is read, and the connection closes.
@@ -278,7 +285,7 @@ Branch on `outcome`, never on the status alone. One call is one `idem_key`, reus
 
 ## `atticdb mcp`
 
-`atticdb mcp` gives the model `memory_append`, `memory_recent`, `fact_set`, `fact_get`, `fact_list`, `memory_search`, `file_ref` and `file_get`. Search finds turns and current facts by words, across every session, newest first. It starts the server if none is running.
+`atticdb mcp` gives the model `memory_append`, `memory_recent`, `fact_set`, `fact_get`, `fact_list`, `memory_search`, `file_ref` and `file_get`. It has no forget tool. The instructions say the user runs `atticdb forget` or uses studio. Search finds turns and current facts by words, across every session, newest first. It starts the server if none is running.
 The model can read and write any session in the tenant. Don't give it to a model you don't trust with the whole tenant.
 The server's instructions tell the model when to read memory and what to save. Claude Code and Codex read them.
 
@@ -371,6 +378,26 @@ atticdb search $Z --query "retry rule"                # {"hits":[...],"next":nul
 atticdb file save $Z --path shots/login.png --about "login page, dark mode"
 atticdb file get $Z --path shots/login.png --versions # {"ref":{...,"status":"ok"},"versions":[...],"on_disk":7}
 ```
+
+`atticdb forget` hides memory. No MCP tool does.
+
+```sh
+atticdb forget session $S --agent planner --session run-1 [--up-to-lsn 40]
+atticdb forget key $S --key repo/payments/retry-rule
+atticdb forget file $S --path shots/login.png   # the file may be gone
+atticdb forget lsns $S --lsns 12,15
+```
+
+`$S` holds the store flags only. `forget session` needs `--agent` and `--session`, with no default. It prints 3 lines:
+
+```
+forgot session planner/run-1 up to lsn 40 (txn 9, lsn 40)
+Content is hidden from normal AtticDB reads. It stays on disk until purge ships (#159).
+Names, keys, LSNs, counts and sizes stay visible. See "What a forget leaves visible" in the README.
+```
+
+A retry that found the forget already done adds ` (already done)` to line 1. See [What a forget leaves visible](../../README.md#what-a-forget-leaves-visible).
+`recent` shows a forgotten turn as `#<seq> (forgotten)`. `file get` lists no forgotten version.
 
 Each write picks 1 random `idem_key` and retries with it until `--retry-deadline` (default 30 s). Exit 0 means done. Exit 1 means nothing was written, or a read failed. Exit 2 is a usage error.
 Exit 3 means the write may have landed. Running the command again uses a new key, so it can write a duplicate.
@@ -611,6 +638,7 @@ It lists facts under `user/` and under `repo/<repo>/`, 50 each, in key order.
 It reads the last 5 turns of session `<repo>` for agents `vscode-copilot`, `copilot`, `claude-code`, `codex` and `mcp`, then keeps the newest 5.
 `mcp` is the agent of the shell verbs, so a note from `atticdb append` shows too.
 A window cut short by its 8 MiB cap hides older turns, so then it may show fewer than 5.
+Forgotten notes and rules never show. A forgotten note takes no place among the 5, but its window may then show fewer.
 It prints 1 line, `{"additionalContext": "<block>"}`. With nothing to show, or on any error, it prints `{}`.
 With `--harness claude-code` or `--harness codex`, the line is `{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "<block>"}}`.
 `--harness vscode` or `--harness copilot` gives the first shape. Any other name, or `--harness` with no name, prints `{}` and says why on stderr. It still exits 0.

@@ -37,6 +37,10 @@ const USAGE: &str = "usage:
   atticdb fact list <connect> --prefix <prefix> [--after <key>] [--limit <n>] [--max-bytes <n>]
   atticdb file save <connect> --path <file> --about <text>
   atticdb file get <connect> --path <file or folder> [--versions]
+  atticdb forget session <connect> --agent <a> --session <s> [--up-to-lsn <n>]
+  atticdb forget key <connect> --key <key> [--up-to-lsn <n>]
+  atticdb forget file <connect> --path <file> [--up-to-lsn <n>]
+  atticdb forget lsns <connect> --lsns <n,n,...> [--up-to-lsn <n>]
   <connect>: [--url unix:///path|http://127.0.0.1:<port>] [--data-dir <dir>] [--config <path>]
              [--tenant <name>] [--token-file <path>] [--agent <name>] [--session <name>]
              [--retry-deadline <n>s|<n>ms]
@@ -47,6 +51,10 @@ const USAGE: &str = "usage:
   after the folder holding .git. A worktree takes its main repo's name.
   append, recent, search, fact and file print one JSON line. They exit 1 when nothing was written,
   3 when a write may or may not be saved.
+  forget hides records up to --up-to-lsn, or up to the forget itself. It exits like append.
+  Content is hidden from normal AtticDB reads. It stays on disk until purge ships (#159).
+  What stays visible: https://github.com/Clawdlinux/atticdb#what-a-forget-leaves-visible
+  forget session needs --agent and --session. The other forget verbs take neither.
   studio serves a read-only page on 127.0.0.1 and opens it. It runs until Ctrl-C.
   setup finds VS Code, Copilot CLI, Claude Code and Codex, asks which to connect, shows the
   plan, then connects them and checks each. See atticdb setup --help.
@@ -54,8 +62,10 @@ const USAGE: &str = "usage:
 
 /// Commands that use the home. A relative `ATTICDB_HOME` fails them with exit 2, so none falls
 /// back to the default home. The hook prints `{}` for it, as for any error.
-const HOME_COMMANDS: [&str; 10] =
-    ["mcp", "connect", "setup", "doctor", "studio", "append", "recent", "search", "fact", "file"];
+const HOME_COMMANDS: [&str; 11] = [
+    "mcp", "connect", "setup", "doctor", "studio", "append", "recent", "search", "fact", "file",
+    "forget",
+];
 
 /// Flags of every command that talks to a server as a tenant. The first 5 pick the store.
 const CONNECT: [&str; 8] = [
@@ -152,6 +162,7 @@ fn main() -> ExitCode {
                 Some(("get", rest)) => tool(rest, "file_get", &["--path"], &["--versions"]),
                 _ => None,
             },
+            "forget" => forget(rest),
             _ => None,
         },
         None => None,
@@ -205,6 +216,21 @@ fn flags(args: &[String], valued: &[&str], switches: &[&str]) -> Option<HashMap<
 fn tool(args: &[String], name: &str, valued: &[&str], switches: &[&str]) -> Option<u8> {
     flags(args, &[&CONNECT[..], valued].concat(), switches)
         .map(|flags| atticdb::client::command(name, flags))
+}
+
+/// `atticdb forget <session|key|file|lsns>`. Only `session` takes `--agent` and `--session`,
+/// and they name what it forgets.
+fn forget(args: &[String]) -> Option<u8> {
+    let (verb, rest) = args.split_first()?;
+    let own: &[&str] = match verb.as_str() {
+        "session" => &["--agent", "--session"],
+        "key" => &["--key"],
+        "file" => &["--path"],
+        "lsns" => &["--lsns"],
+        _ => return None,
+    };
+    let valued = [&CONNECT[..5], &["--retry-deadline", "--up-to-lsn"], own].concat();
+    flags(rest, &valued, &[]).map(|flags| atticdb::client::forget_command(verb, flags))
 }
 
 /// `atticdb connect`. `--no-hook` and `--notes` are for Claude Code and Codex only. Codex

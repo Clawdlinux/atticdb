@@ -164,19 +164,21 @@ fn block_in(repo: &str, deadline: Instant, lookup: &Lookup) -> Result<Option<Str
     Ok((!lines.is_empty()).then(|| cap([header].into_iter().chain(lines))))
 }
 
-/// The newest [`TURNS`] turns across `windows`, oldest first. A truncated window left out
-/// only turns older than its oldest, which may be newer than another window's turns. So
-/// nothing older than that is kept: there may be fewer than 5, but never the wrong ones.
+/// The newest [`TURNS`] turns across `windows`, oldest first. A truncated or full window may
+/// have left out turns older than its oldest, which may be newer than another window's turns.
+/// So nothing older than that is kept: there may be fewer than 5, but never the wrong ones.
+/// A forgotten turn is a placeholder. It counts for that floor but never shows. LSN order is
+/// commit order, as the tape keeps commit times rising, and placeholders keep only the LSN.
 fn newest(windows: &[Value]) -> Vec<&Value> {
-    let key = |turn: &Value| (turn["commit_time_ns"].as_u64(), turn["lsn"].as_u64());
+    let lsn = |turn: &Value| turn["lsn"].as_u64();
     fn turns(window: &Value) -> &[Value] {
         window["turns"].as_array().map(Vec::as_slice).unwrap_or_default()
     }
-    let truncated = windows.iter().filter(|window| window["truncated"] == true);
-    let floor = truncated.filter_map(|window| turns(window).iter().map(key).min()).max();
+    let cut = windows.iter().filter(|w| w["truncated"] == true || turns(w).len() >= TURNS);
+    let floor = cut.filter_map(|window| turns(window).iter().map(lsn).min()).max();
     let mut kept: Vec<&Value> = windows.iter().flat_map(turns).collect();
-    kept.retain(|turn| floor.is_none_or(|floor| key(turn) >= floor));
-    kept.sort_by_key(|turn| key(turn));
+    kept.retain(|turn| turn["redacted"] != true && floor.is_none_or(|floor| lsn(turn) >= floor));
+    kept.sort_by_key(|turn| lsn(turn));
     kept.split_off(kept.len().saturating_sub(TURNS))
 }
 
@@ -226,22 +228,31 @@ mod tests {
     #![allow(clippy::unwrap_used)]
     use serde_json::{json, Value};
 
-    /// A window of turns at these commit times.
-    fn window(times: &[u64], truncated: bool) -> Value {
-        let turns: Vec<Value> =
-            times.iter().map(|t| json!({"commit_time_ns": t, "lsn": t, "content": t})).collect();
+    /// A window of turns at these commit times. Those in `forgotten` are placeholders.
+    fn window(times: &[u64], truncated: bool, forgotten: &[u64]) -> Value {
+        let turn = |t: &u64| match forgotten.contains(t) {
+            true => json!({"seq": t, "lsn": t, "redacted": true}),
+            false => json!({"commit_time_ns": t, "lsn": t, "content": t}),
+        };
+        let turns: Vec<Value> = times.iter().map(turn).collect();
         json!({"turns": turns, "truncated": truncated})
     }
 
     #[test]
     fn newest_never_shows_turns_older_than_a_truncated_window_left_out() {
-        let rows: [(&str, bool, &[u64]); 2] = [
+        type Row<'a> = (&'a str, &'a [u64], bool, &'a [u64], &'a [u64]);
+        let rows: [Row; 4] = [
             // Copilot's 3 older big notes didn't fit: VS Code's notes 1 to 3 may be older.
-            ("truncated", true, &[10, 11, 12]),
-            ("complete", false, &[2, 3, 10, 11, 12]),
+            ("truncated", &[10, 11], true, &[], &[10, 11, 12]),
+            ("complete", &[10, 11], false, &[], &[2, 3, 10, 11, 12]),
+            // Copilot's 2 newest are forgotten, so its window is full with 3 notes. Its notes
+            // before 8 may be newer than VS Code's 1 to 3.
+            ("full with placeholders", &[8, 9, 10, 11, 13], false, &[11, 13], &[8, 9, 10, 12]),
+            ("short with placeholders", &[10, 11], false, &[11], &[1, 2, 3, 10, 12]),
         ];
-        for (case, truncated, expected) in rows {
-            let windows = [window(&[10, 11], truncated), window(&[1, 2, 3, 12], false)];
+        for (case, copilot, truncated, forgotten, expected) in rows {
+            let windows =
+                [window(copilot, truncated, forgotten), window(&[1, 2, 3, 12], false, &[])];
             let shown: Vec<u64> = super::newest(&windows)
                 .iter()
                 .map(|turn| turn["content"].as_u64().unwrap())

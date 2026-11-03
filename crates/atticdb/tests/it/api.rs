@@ -58,6 +58,7 @@ fn writes_reads_and_retries_over_both_listeners() {
         assert!(turn["commit_time_ns"].as_u64().unwrap() > 0, "{name}");
         assert!(turn.get("lossy").is_none(), "{name}");
         assert_eq!(window["truncated"], false, "{name}");
+        assert_eq!(window["as_of_lsn"], first["last_lsn"], "{name}: read at the last ack");
 
         let (status, retry) = via.a("POST", "/v1/append", Some(&first_body));
         assert_eq!(status, 200, "{name}");
@@ -219,17 +220,26 @@ fn writes_reads_and_retries_over_both_listeners() {
 
     // Sessions and records answer alike on both listeners. Tenant B wrote nothing.
     let (lo, total) = (Some("127.0.0.1"), json!({"sessions": 2, "turns": 8}));
+    let acked = running.vias[1].call(None, None, "GET", "/v1/stats", None).1["durable_lsn"].clone();
     for via in &running.vias {
         let name = via.name();
         let get = |target: &str| via.a("GET", target, None);
         let first = json!({"agent": "a", "session": "s-tcp"});
         let (status, page) = get("/v1/sessions?limit=1");
         assert_eq!(status, 200, "{name}: {page}");
-        let listed = json!([{"agent": "a", "session": "s-tcp", "turns": 4}]);
-        assert_eq!(page, json!({"sessions": listed, "next": first, "total": total}), "{name}");
+        let session = |name: &str| {
+            let mut listed = json!({"agent": "a", "session": name, "turns": 4});
+            listed["forgotten_up_to"] = Value::Null;
+            json!([listed])
+        };
+        let page_of = |listed: Value, next: Value| {
+            let mut page = json!({"sessions": listed, "next": next, "total": total});
+            page["as_of_lsn"] = acked.clone();
+            page
+        };
+        assert_eq!(page, page_of(session("s-tcp"), first), "{name}");
         let page = get("/v1/sessions?after_agent=a&after_session=s-tcp").1;
-        let listed = json!([{"agent": "a", "session": "s-unix", "turns": 4}]);
-        assert_eq!(page, json!({"sessions": listed, "next": null, "total": total}), "{name}");
+        assert_eq!(page, page_of(session("s-unix"), Value::Null), "{name}");
 
         // The 3 newest records are the unix list facts. The delete comes right under them.
         let (status, page) = get("/v1/records?limit=3");
@@ -273,8 +283,12 @@ fn writes_reads_and_retries_over_both_listeners() {
             assert_eq!((got, &body["error"]), (status, &json!(error)), "{name} {case}: {body}");
         }
         let zero = json!({"sessions": 0, "turns": 0});
+        let as_of = &acked;
         for (target, nothing) in [
-            ("/v1/sessions", json!({"sessions": [], "next": null, "total": zero})),
+            (
+                "/v1/sessions",
+                json!({"sessions": [], "next": null, "total": zero, "as_of_lsn": as_of}),
+            ),
             ("/v1/records", json!({"records": [], "next": null})),
         ] {
             let got = via.call(lo, Some(TOKEN_B), "GET", target, None);
@@ -298,6 +312,120 @@ fn writes_reads_and_retries_over_both_listeners() {
         json!({"outcome": "not_committed", "error": "resource_exhausted", "resource": "facts"});
     let new = fact_body("new", "v", "new");
     assert_eq!(running.vias[0].a("POST", "/v1/facts/put", Some(&new)), (429, full), "8 keys held");
+
+    // Forgets: each selector over both listeners. Names, LSNs and counts stay (visible metadata).
+    let unix = &running.vias[1];
+    let stats = || unix.call(None, None, "GET", "/v1/stats", None).1;
+    let counts =
+        |stats: Value| stats_counts(&stats, ["facts", "fact_revisions", "compressed_turns"]);
+    let listed = |page: Value| {
+        let sessions = page["sessions"].as_array().unwrap().iter();
+        let names = sessions.map(|s| [&s["agent"], &s["session"], &s["turns"]].map(Value::clone));
+        (names.collect::<Vec<_>>(), page["total"].clone())
+    };
+    let sessions_before = listed(unix.a("GET", "/v1/sessions", None).1);
+    let counts_before = counts(stats());
+    let mut last = 0;
+    for via in &running.vias {
+        let name = via.name();
+        let get = |target: &str| via.a("GET", target, None).1;
+        let forget = |body: &Value| via.a("POST", "/v1/forget", Some(body));
+        let window_target = format!("/v1/window?agent=a&session=s-{name}&last=10");
+        let turns = get(&window_target)["turns"].clone();
+        let lsn_of = |seq: usize| turns[seq - 1]["lsn"].as_u64().unwrap();
+        let committed = |(status, body): (u16, Value), case: &str| {
+            assert_eq!((status, &body["outcome"]), (200, &json!("committed")), "{name} {case}");
+            body
+        };
+
+        // A session up to its seq 2. The cutoff is up_to_lsn, below the forget's own LSN.
+        let up_to = lsn_of(2);
+        let session = json!({"agent": "a", "session": format!("s-{name}")});
+        let body =
+            json!({"idem_key": format!("f1-{name}"), "session": session, "up_to_lsn": up_to});
+        let forgot = committed(forget(&body), "session");
+        assert_eq!((&forgot["deduplicated"], &forgot["cutoff"]), (&json!(false), &json!(up_to)));
+        assert!(forgot["lsn"].as_u64().unwrap() > up_to && forgot["txn"].is_u64(), "{forgot}");
+        let retry = committed(forget(&body), "retry");
+        assert_eq!(retry["deduplicated"], true, "{name}: a retry writes nothing");
+        assert_eq!(receipt(&retry), receipt(&forgot), "{name}: a retry keeps the receipt");
+        assert_eq!(retry["cutoff"], forgot["cutoff"], "{name}");
+        firsts.push(("/v1/forget", name, body, forgot));
+
+        // A fact key, up to the forget itself: no current value, no list entry, no content.
+        let key = format!("{name}/list/1");
+        let body = json!({"idem_key": format!("f2-{name}"), "key": key});
+        let forgot = committed(forget(&body), "key");
+        assert_eq!(forgot["cutoff"], forgot["lsn"], "{name}: no up_to_lsn hides up to the forget");
+        let target = format!("/v1/facts/get?key={key}");
+        assert_eq!(get(&target), json!({"fact": null}), "{name}: a forgotten key has no value");
+        let list = get(&format!("/v1/facts/list?prefix={name}/list/"));
+        assert_eq!(keys(&list), [format!("{name}/list/2"), format!("{name}/list/3")]);
+        let history = get(&format!("/v1/facts/history?key={key}"));
+        let revision = &history["revisions"][0];
+        assert_eq!(history["revisions"], json!([{"lsn": revision["lsn"], "redacted": true}]));
+
+        // Listed LSNs: turn seq 3, and the oldest revision of the deleted key.
+        let dir_key = format!("{name}/dir/a b+\u{e9}");
+        let dir_history = format!("/v1/facts/history?key={}", query_value(&dir_key));
+        let oldest = get(&dir_history)["revisions"][2]["lsn"].as_u64().unwrap();
+        let body = json!({"idem_key": format!("f3-{name}"), "lsns": [lsn_of(3), oldest]});
+        let forgot = committed(forget(&body), "lsns");
+        last = forgot["lsn"].as_u64().unwrap();
+
+        // Placeholders keep seq, LSN and, in records, kind and names. Seq 4 still shows.
+        let window = get(&window_target);
+        let hidden = (1..=3).map(|seq| json!({"seq": seq, "lsn": lsn_of(seq), "redacted": true}));
+        let shown: Vec<_> = hidden.chain([turns[3].clone()]).collect();
+        assert_eq!(window["turns"], json!(shown), "{name}: window");
+        assert_eq!(window["as_of_lsn"], last, "{name}: read at the last ack");
+        let history = get(&dir_history);
+        let revisions = history["revisions"].as_array().unwrap();
+        assert_eq!(revisions[1]["content"], "v2", "{name}: newer revisions still show");
+        assert_eq!(revisions[2], json!({"lsn": oldest, "redacted": true}), "{name}: history");
+        let records = |kind: &str, before: u64| {
+            get(&format!("/v1/records?kind={kind}&limit=1&before={before}"))["records"][0].clone()
+        };
+        let turn = json!({"kind": "turn", "agent": "a", "session": format!("s-{name}"), "seq": 3,
+                          "lsn": lsn_of(3), "redacted": true});
+        assert_eq!(records("turn", lsn_of(3) + 1), turn, "{name}: turn record");
+        let fact = json!({"kind": "fact", "key": dir_key, "lsn": oldest, "redacted": true});
+        assert_eq!(records("fact", oldest + 1), fact, "{name}: fact record");
+        let page = get("/v1/sessions");
+        let cutoffs: Vec<_> = page["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| (s["session"].as_str().unwrap(), s["forgotten_up_to"].as_u64()))
+            .collect();
+        assert!(cutoffs.contains(&(&format!("s-{name}"), Some(up_to))), "{name}: {page}");
+    }
+    // Names, turns, totals and the record counts are visible metadata: no forget changes them.
+    let page = unix.a("GET", "/v1/sessions", None).1;
+    assert_eq!(listed(page.clone()), sessions_before, "sessions and totals unchanged");
+    assert_eq!(page["as_of_lsn"], last, "sessions read at the last ack");
+    let after = stats();
+    assert_eq!(counts(after.clone()), counts_before, "record counts unchanged");
+    let gauges = ["forgotten_sessions", "forgotten_fact_keys", "forgotten_lsns"];
+    assert_eq!(stats_counts(&after, gauges), [2, 2, 4], "{after}");
+    let wire = unix.raw(b"GET /metrics HTTP/1.1\r\nConnection: close\r\n\r\n");
+    for (gauge, value) in gauges.iter().zip(["2", "2", "4"]) {
+        let line = format!("atticdb_{gauge} {value}");
+        assert!(wire.lines().any(|got| got == line), "{line}: {wire}");
+        assert!(wire.contains(&format!("# TYPE atticdb_{gauge} gauge\n")), "{gauge}: {wire}");
+    }
+    // Later writes show: the cutoff never covers them.
+    for via in &running.vias {
+        let name = via.name();
+        let body = append_body(&format!("s-{name}"), "later", "later");
+        assert_eq!(via.a("POST", "/v1/append", Some(&body)).0, 200, "{name}");
+        let window = via.a("GET", &format!("/v1/window?agent=a&session=s-{name}&last=1"), None).1;
+        assert_eq!(window["turns"][0]["content"], "later", "{name}: a later turn shows");
+        let key = format!("{name}/list/1");
+        assert_eq!(via.a("POST", "/v1/facts/put", Some(&fact_body(&key, "again", "again"))).0, 200);
+        let fact = via.a("GET", &format!("/v1/facts/get?key={key}"), None).1;
+        assert_eq!(fact["fact"]["content"], "again", "{name}: a later revision shows");
+    }
 
     running.server.shutdown();
     assert_eq!(Arc::strong_count(&engine), 1, "shutdown releases the engine");
@@ -327,6 +455,11 @@ fn query_value(text: &str) -> String {
 
 fn fact_body(key: &str, content: &str, idem_key: &str) -> Value {
     json!({"key": key, "content": content, "idem_key": idem_key})
+}
+
+/// The named `/v1/stats` numbers.
+fn stats_counts<const N: usize>(stats: &Value, names: [&str; N]) -> [u64; N] {
+    names.map(|name| stats[name].as_u64().unwrap_or_else(|| panic!("{name}: {stats}")))
 }
 
 fn keys(page: &Value) -> Vec<&str> {
@@ -365,6 +498,7 @@ fn auth_and_host_rules() {
         ("stats on tcp", tcp, lo, a, stats, 404, Err("not_found")),
         ("stats on tcp without token", tcp, lo, None, stats, 401, Err("unauthorized")),
         ("health with foreign host", tcp, evil, None, health, 403, Err("forbidden_host")),
+        ("forget is POST only", tcp, lo, a, "/v1/forget", 405, Err("method_not_allowed")),
     ];
     for (case, via, host, token, target, status, expect) in rows {
         let (got, body) = via.call(host, token, "GET", target, None);
@@ -398,6 +532,59 @@ fn auth_and_host_rules() {
         assert_eq!(got, (200, nothing), "tenant B sees nothing of A's facts: {target}");
     }
     assert_eq!(tcp.a("GET", "/v1/facts/get?key=secret/rule", None).1["fact"]["content"], "a-rule");
+
+    // I11: tenant B's forgets name A's session, key and LSN, and hide only B's own records.
+    let a_turn = tcp.a("GET", window, None).1["turns"][0].clone();
+    let session = json!({"agent": "a", "session": "secret"});
+    for (case, selector) in [
+        ("session", json!({"session": session})),
+        ("key", json!({"key": "secret/rule"})),
+        ("lsns", json!({"lsns": [a_turn["lsn"]]})),
+    ] {
+        let mut body = selector;
+        body["idem_key"] = json!(case);
+        let (status, forgot) = tcp.call(lo, b, "POST", "/v1/forget", Some(&body));
+        assert_eq!((status, &forgot["outcome"]), (200, &json!("committed")), "B forgets {case}");
+    }
+    assert_eq!(tcp.a("GET", window, None).1["turns"], json!([a_turn]), "A's turn still shows");
+    assert_eq!(tcp.a("GET", "/v1/facts/get?key=secret/rule", None).1["fact"]["content"], "a-rule");
+    let (_, b_window) = tcp.call(lo, b, "GET", window, None);
+    assert_eq!(b_window["turns"][0]["redacted"], true, "B's own turn is hidden: {b_window}");
+    // Exactly 1 selector. LSNs and up_to_lsn start at 1. The retry key is required.
+    let one = "pass exactly 1 of session {agent, session}, key or lsns";
+    for (case, body, message) in [
+        ("2 selectors", json!({"idem_key": "x", "key": "k", "lsns": [1]}), one),
+        ("no selector", json!({"idem_key": "x"}), one),
+        ("empty list", json!({"idem_key": "x", "lsns": []}), one),
+        ("empty key", json!({"idem_key": "x", "key": ""}), one),
+        (
+            "session without agent",
+            json!({"idem_key": "x", "session": {"session": "s"}}),
+            "agent must be a string",
+        ),
+        ("lsn 0", json!({"idem_key": "x", "lsns": [3, 0]}), "lsns must be whole numbers from 1"),
+        (
+            "up_to_lsn 0",
+            json!({"idem_key": "x", "key": "k", "up_to_lsn": 0}),
+            "up_to_lsn must be a whole number from 1",
+        ),
+        ("no idem_key", json!({"key": "k"}), "idem_key must be a string"),
+        (
+            "1025 lsns",
+            json!({"idem_key": "x", "lsns": (1..=1025).collect::<Vec<u64>>()}),
+            "lsns holds 1 to 1024",
+        ),
+    ] {
+        let (status, rejected) = tcp.a("POST", "/v1/forget", Some(&body));
+        let expected = json!({"outcome": "not_committed", "error": "invalid_input"});
+        assert_eq!(
+            (status, &rejected["outcome"], &rejected["error"]),
+            (400, &expected["outcome"], &expected["error"]),
+            "{case}"
+        );
+        let said = rejected["message"].as_str().unwrap_or_default();
+        assert!(said.contains(message), "{case}: {rejected}");
+    }
 
     // Auth runs before the body is read: a bad token declaring 8 MiB gets 401 and a
     // closed connection without sending a byte of body.
