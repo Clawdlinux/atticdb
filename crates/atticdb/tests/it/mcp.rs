@@ -442,10 +442,15 @@ fn tool_calls_over_stdio() {
         (&["fact", "get", "--key", "sh/k"], "", json!({"fact": null})),
         (&["search", "--query", "HI", "--limit", "1"], "/hits/0/session", json!("sh")),
     ] {
-        let (out, _) = cli(verb, 0);
+        let (out, err) = cli(verb, 0);
         let printed: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(printed.pointer(pointer), Some(&expected), "{verb:?}: {out}");
+        assert!(!err.contains("No hits."), "{verb:?}: {err}");
     }
+    // A search that finds nothing prints the same JSON, and a hint on stderr.
+    let (out, err) = cli(&["search", "--query", "hi there"], 0);
+    assert_eq!(serde_json::from_str::<Value>(&out).unwrap(), json!({"hits": [], "next": null}));
+    assert!(err.contains("No hits. Search matches every word. Try 1 or 2 words.\n"), "{err}");
     // (command, exit code, what stderr says)
     for (verb, code, reason) in [
         (&["fact", "set", "--key", "k", "--content", "x", "--delete"][..], 1, "pass exactly one"),

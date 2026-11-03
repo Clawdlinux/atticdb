@@ -24,6 +24,8 @@ const MAX_BACKOFF: Duration = Duration::from_secs(2);
 /// Time kept for the request itself: no attempt connects or sends with less than this
 /// left before the deadline.
 const MIN_ATTEMPT: Duration = Duration::from_secs(2);
+/// What `atticdb search` prints on stderr when it finds nothing.
+const NO_HITS: &str = "No hits. Search matches every word. Try 1 or 2 words.";
 
 /// A store connection as 1 agent, with a default session.
 pub(crate) struct Client {
@@ -36,8 +38,9 @@ pub(crate) struct Client {
 }
 
 /// Runs one tool from a shell, with arguments from `--<name>` flags. Prints the tool's
-/// `structuredContent` as one JSON line. Exits 0, 1 when nothing was written or a read
-/// failed, 2 for a bad flag, or 3 when a write's outcome is unknown.
+/// `structuredContent` as one JSON line. A search with no hits and no next page also prints
+/// a hint on stderr. Exits 0, 1 when nothing was written or a read failed, 2 for a bad flag,
+/// or 3 when a write's outcome is unknown.
 pub fn command(tool: &str, mut flags: HashMap<String, String>) -> u8 {
     let mut args = json!({});
     for name in ["content", "role", "key", "prefix", "after", "query", "path", "about"] {
@@ -68,7 +71,13 @@ pub fn command(tool: &str, mut flags: HashMap<String, String>) -> u8 {
         Err(message) => tool_error(message),
     };
     if result["isError"] != true {
-        println!("{}", result["structuredContent"]);
+        let output = &result["structuredContent"];
+        println!("{output}");
+        // Search ANDs its words, so a question finds nothing. Only the shell verb says so.
+        let none = output["hits"].as_array().is_some_and(Vec::is_empty);
+        if tool == "memory_search" && none && output["next"].is_null() {
+            eprintln!("{NO_HITS}");
+        }
         return 0;
     }
     let text = result["content"][0]["text"].as_str().unwrap_or_default();

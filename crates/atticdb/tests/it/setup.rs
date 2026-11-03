@@ -68,6 +68,17 @@ fn atticdb(
     (status.code(), process.stdout(), process.stderr())
 }
 
+/// The "Try it" lines a setup that applied with no failure prints last, for the repo the
+/// session-start hook reads in `cwd`.
+fn try_it(cwd: &Path) -> String {
+    let repo = atticdb::home::repo(cwd).unwrap();
+    format!(
+        "Try it: atticdb fact set --key repo/{repo}/rule --content \"Use pnpm, not npm\"\n\
+         Then open a new chat and ask: what are this repo's rules?\n\
+         See what your agent gets at chat start: atticdb studio\n"
+    )
+}
+
 fn read(path: &Path) -> Value {
     serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
 }
@@ -128,10 +139,13 @@ fn setup_plans_then_connects_every_app_it_finds() {
     for app in ["Copilot CLI", "VS Code", "Claude Code", "Codex"] {
         assert!(applying.contains(&format!("\n  {app}: ok\n")), "{app}: {out}");
     }
-    let next = "Next:\n  Open Codex once and approve the atticdb hook; Codex runs a new hook only \
-                after that.\n  Start new chat sessions to load memory.\n  VS Code: reload the \
-                window to load atticdb.\n";
-    assert!(out.ends_with(next), "{out}");
+    let next = format!(
+        "Next:\n  Open Codex once and approve the atticdb hook; Codex runs a new hook only after \
+         that.\n  Start new chat sessions to load memory.\n  VS Code: reload the window to load \
+         atticdb.\n{}",
+        try_it(&dir.0)
+    );
+    assert!(out.ends_with(&next), "{out}");
     assert_eq!(read(&vscode)["servers"]["atticdb"]["command"], json!(exe));
     assert_eq!(
         read(&copilot.join("mcp-config.json"))["mcpServers"]["atticdb"]["command"],
@@ -166,7 +180,7 @@ fn setup_plans_then_connects_every_app_it_finds() {
         assert!(!changed.iter().any(|word| line.contains(word)), "{line}");
     }
     assert!(out.contains("\n4 connected, 0 with skipped parts.\n"), "{out}");
-    assert!(out.ends_with(next), "the hook is in place, so Codex still needs approving: {out}");
+    assert!(out.ends_with(&next), "the hook is in place, so Codex still needs approving: {out}");
     assert_eq!((files.map(|file| std::fs::read(file).unwrap()), tree(&copilot)), before);
     assert_eq!(calls(&claude_log).len(), 1, "claude ran only for the first add");
 
@@ -307,6 +321,14 @@ fn setup_asks_and_stops_without_answers() {
             assert_eq!(std::fs::read_to_string(&agents).unwrap(), agents_kept, "{case}");
             continue;
         }
+        // Only an apply that fully worked offers "Try it".
+        assert_eq!(out.contains("Try it:"), wanted == 0 && out.contains("Applying:\n"), "{case}");
+        if case == "no apps" {
+            let shell = "Install one, or name it with --harness.\nYou can still try memory from \
+                         the shell: atticdb fact set --key repo/demo/rule --content \"Use pnpm\" \
+                         and atticdb search --query pnpm\n";
+            assert!(out.ends_with(shell), "{case}: {out}");
+        }
         if case.starts_with("Codex hook") {
             let (_, next) = out.split_once("\nNext:\n").unwrap();
             assert!(!next.contains("approve"), "{case}: {out}");
@@ -335,6 +357,16 @@ fn setup_asks_and_stops_without_answers() {
             assert!(out.starts_with("Plan:\nVS Code:\n"), "{case}: {out}");
             assert!(!out.contains("Copilot CLI"), "{case}: {out}");
             assert!(!home.join(".copilot/mcp-config.json").exists(), "{case}");
+            // "Try it" names the repo the hook reads: the folder holding .git, quoted when
+            // it has a space.
+            let sub = dir.0.join("my repo/sub");
+            std::fs::create_dir_all(&sub).unwrap();
+            std::fs::create_dir(dir.0.join("my repo/.git")).unwrap();
+            let (code, out, err) = setup(&home, &sub, path, env, args, stdin);
+            assert_eq!(code, Some(0), "{case}: in a repo: {out}{err}");
+            let key = "Try it: atticdb fact set --key \"repo/my repo/rule\" --content \"Use \
+                       pnpm, not npm\"\n";
+            assert!(out.contains(key), "{case}: {out}");
             continue;
         }
         if case == "help" {
@@ -372,9 +404,12 @@ fn setup_asks_and_stops_without_answers() {
         assert!(out.contains("Apply? [y/N] Applying:\n"), "{case}: {out}");
         assert!(out.contains("\n2 connected, 0 with skipped parts.\n"), "{case}: {out}");
         assert!(out.contains("\n  Claude Code: ok\n  Codex: ok\n"), "{case}: {out}");
-        let next = "Next:\n  Open Codex once and approve the atticdb hook; Codex runs a new hook \
-                    only after that.\n  Start new chat sessions to load memory.\n";
-        assert!(out.ends_with(next), "{case}: {out}");
+        let next = format!(
+            "Next:\n  Open Codex once and approve the atticdb hook; Codex runs a new hook only \
+             after that.\n  Start new chat sessions to load memory.\n{}",
+            try_it(&dir.0)
+        );
+        assert!(out.ends_with(&next), "{case}: {out}");
         let settings = read(&home.join(".claude/settings.json"));
         let allow = settings["permissions"]["allow"].as_array().unwrap().clone();
         assert_eq!(allow.len(), 4, "{case}: reads only, notes ask: {allow:?}");
@@ -432,7 +467,8 @@ fn setup_store_check_waits_for_a_starting_server() {
 /// An AtticDB binary that doesn't exist.
 const OLD: &str = "/old/atticdb";
 /// What doctor says about a home that isn't set up.
-const NOT_SET_UP: &str = "not set up yet, run atticdb setup\n";
+const NOT_SET_UP: &str =
+    "not set up yet. Run atticdb setup, or try memory from the shell with atticdb fact set\n";
 /// Codex's line when `codex mcp get atticdb --json` shows this AtticDB.
 const GET_OK: &str = "  codex mcp get atticdb: ok\n";
 
@@ -492,8 +528,7 @@ fn doctor_checks_an_install_and_writes_nothing() {
     let fix = |name: &str| format!("run atticdb setup --harness {name}, or atticdb connect {name}");
     let (shared_hook, version) = (home.join(".copilot/hooks/atticdb.json"), atticdb::VERSION);
     let sandbox = "Sandboxes:\n  Agents in a sandbox need read and write access to";
-    let unset =
-        format!("Home:\n  {n} (ATTICDB_HOME is not set): not set up yet, run atticdb setup\n");
+    let unset = format!("Home:\n  {n} (ATTICDB_HOME is not set): {NOT_SET_UP}");
     let unset = format!("{unset}{sandbox} {n}.\n");
     let healthy = format!("atticdb:\n  version {version}, {}: ok\nHome:\n  {z} (", exe.display());
     let healthy = format!("{healthy}ATTICDB_HOME is not set): ok\n");

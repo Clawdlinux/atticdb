@@ -19,7 +19,8 @@ and each app. The store check may start the home's server.
 Exit 0 when every check is ok or only warns, 1 when a check failed, 2 for a usage error.";
 
 /// What doctor says about a home that is missing, or lacks its config or data dir.
-const NOT_SET_UP: &str = "not set up yet, run atticdb setup";
+const NOT_SET_UP: &str =
+    "not set up yet. Run atticdb setup, or try memory from the shell with atticdb fact set";
 
 /// The options a Claude Code or Codex install may have been connected with, the defaults
 /// first. Parts are in place when any of them plans no change.
