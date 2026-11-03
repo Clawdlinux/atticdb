@@ -72,6 +72,11 @@
       ],
       "destination": "https://atticdb.com/:path*",
       "permanent": true
+    },
+    {
+      "source": "/blog/we-raced-sqlite-and-redis/medium",
+      "destination": "/blog/we-raced-sqlite-and-redis",
+      "permanent": true
     }
   ],
   "rewrites": [],
