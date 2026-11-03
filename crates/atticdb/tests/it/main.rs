@@ -11,6 +11,8 @@ mod connect;
 #[cfg(unix)]
 mod durability;
 #[cfg(unix)]
+mod export;
+#[cfg(unix)]
 mod hook;
 #[cfg(unix)]
 mod listen;

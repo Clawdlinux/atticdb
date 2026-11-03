@@ -41,6 +41,8 @@ const USAGE: &str = "usage:
   atticdb forget key <connect> --key <key> [--up-to-lsn <n>]
   atticdb forget file <connect> --path <file> [--up-to-lsn <n>]
   atticdb forget lsns <connect> --lsns <n,n,...> [--up-to-lsn <n>]
+  atticdb export <dir> [--url <url>] [--data-dir <dir>] [--config <path>] [--tenant <name>]
+                 [--token-file <path>] [--max-bytes <n>]
   <connect>: [--url unix:///path|http://127.0.0.1:<port>] [--data-dir <dir>] [--config <path>]
              [--tenant <name>] [--token-file <path>] [--agent <name>] [--session <name>]
              [--retry-deadline <n>s|<n>ms]
@@ -55,6 +57,8 @@ const USAGE: &str = "usage:
   Content is hidden from normal AtticDB reads. It stays on disk until purge ships (#159).
   What stays visible: https://github.com/Clawdlinux/atticdb#what-a-forget-leaves-visible
   forget session needs --agent and --session. The other forget verbs take neither.
+  export writes facts.md and sessions/<agent>/<session>.md at 1 LSN into <dir>, which must
+  not exist. Forgotten turns show as placeholders. Forgotten facts are left out.
   studio serves a read-only page on 127.0.0.1 and opens it. With --allow-forget it can also forget
   sessions and fact keys. It runs until Ctrl-C.
   setup finds VS Code, Copilot CLI, Claude Code and Codex, asks which to connect, shows the
@@ -63,9 +67,9 @@ const USAGE: &str = "usage:
 
 /// Commands that use the home. A relative `ATTICDB_HOME` fails them with exit 2, so none falls
 /// back to the default home. The hook prints `{}` for it, as for any error.
-const HOME_COMMANDS: [&str; 11] = [
+const HOME_COMMANDS: [&str; 12] = [
     "mcp", "connect", "setup", "doctor", "studio", "append", "recent", "search", "fact", "file",
-    "forget",
+    "forget", "export",
 ];
 
 /// Flags of every command that talks to a server as a tenant. The first 5 pick the store.
@@ -165,6 +169,11 @@ fn main() -> ExitCode {
                 _ => None,
             },
             "forget" => forget(rest),
+            "export" => rest.split_first().and_then(|(dir, rest)| {
+                let valued = [&CONNECT[..5], &["--max-bytes"]].concat();
+                let flags = flags(rest, &valued, &[])?;
+                (!dir.starts_with("--")).then(|| atticdb::export::command(dir, flags))
+            }),
             _ => None,
         },
         None => None,

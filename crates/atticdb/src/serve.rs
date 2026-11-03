@@ -182,6 +182,7 @@ impl Shared {
                 Route::Sessions => api::sessions(&self.engine, &tenant, &request.head.target),
                 Route::Records => api::records(&self.engine, &tenant, &request.head.target),
                 Route::Forget => api::forget(&self.engine, &tenant, request.body),
+                Route::Export => api::export(&self.engine, &tenant, &request.head.target),
             };
             let _ = conn.respond(&response);
             self.log(&method, &path, &response, &tenant, started);
