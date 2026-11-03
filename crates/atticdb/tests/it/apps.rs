@@ -272,17 +272,17 @@ fn wire_and_load(moved: Option<&str>) {
         assert!(out.contains(ok), "{ok}: {out}{err}");
     }
 
-    // VS Code's entry names the copy, and the others name the same path.
+    // VS Code reads Copilot CLI's entry, so it gets none of its own. The entry names the copy,
+    // and the others name the same path.
     let home_env = home.as_ref().map(|home| json!({"ATTICDB_HOME": home}));
-    let vscode = read_json(&profile.vscode_file());
-    let entry = &vscode["servers"]["atticdb"];
-    let exe = entry["command"].as_str().unwrap().to_owned();
-    assert!(exe.contains("bin dir it's & $x"), "{vscode}");
-    assert_eq!(std::fs::canonicalize(&exe).unwrap(), std::fs::canonicalize(&profile.exe).unwrap());
-    assert_eq!(entry["args"], json!(["mcp", "--agent", "vscode-copilot"]), "{vscode}");
-    assert_eq!(entry.get("env"), home_env.as_ref(), "{vscode}");
+    assert!(!profile.vscode_file().exists(), "VS Code reads Copilot CLI's entry");
     let copilot = read_json(&profile.root.join(".copilot").join("mcp-config.json"));
-    assert_eq!(copilot["mcpServers"]["atticdb"]["command"], exe.as_str(), "{copilot}");
+    let entry = &copilot["mcpServers"]["atticdb"];
+    let exe = entry["command"].as_str().unwrap().to_owned();
+    assert!(exe.contains("bin dir it's & $x"), "{copilot}");
+    assert_eq!(std::fs::canonicalize(&exe).unwrap(), std::fs::canonicalize(&profile.exe).unwrap());
+    assert_eq!(entry["args"], json!(["mcp", "--agent", "copilot"]), "{copilot}");
+    assert_eq!(entry.get("env"), home_env.as_ref(), "{copilot}");
 
     let hook_file = read_json(&profile.root.join(".copilot").join("hooks").join("atticdb.json"));
     let hook = &hook_file["hooks"]["sessionStart"][0];

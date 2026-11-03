@@ -155,6 +155,7 @@ impl Report {
 }
 
 use crate::home::{user_home, HOME_ENV};
+use crate::jsonedit;
 #[cfg(not(unix))]
 use crate::platform::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use atticdb_tape::{Io, StdIo};
@@ -324,6 +325,11 @@ pub fn detect(harness: Harness) -> bool {
 /// unless `force`. The flags are checked first, so `force` is never advised past a check
 /// that was not shown. `hook` and `notes` don't apply.
 ///
+/// VS Code 1.144 and later also read Copilot CLI's config, so an entry in both files lists 2
+/// servers. So while Copilot CLI has an entry, VS Code's `mcp.json` gets none, and an old one
+/// there is removed by [`drop_vscode_entry`]. Connecting either one does that, so the end
+/// state doesn't depend on the order. VS Code still gets the hook and instructions.
+///
 /// Claude Code: adds its MCP entry, and unless `hook` is false its SessionStart hook, and
 /// its allow rules for `notes`. An entry that differs is replaced only with `force`.
 ///
@@ -339,19 +345,27 @@ pub fn connect(harness: Harness, options: Options, mode: Mode) -> Report {
     match harness {
         Harness::ClaudeCode => claude::connect(force, hook, notes, mode),
         Harness::Codex => codex::connect(hook, notes, mode),
-        Harness::Vscode | Harness::Copilot => connect_shared(harness, force, mode),
+        Harness::Vscode | Harness::Copilot => connect_shared(harness, force, mode, false),
     }
 }
 
-/// [`connect`] for VS Code and Copilot CLI.
-fn connect_shared(harness: Harness, force: bool, mode: Mode) -> Report {
+/// [`connect`] for VS Code in a run that connects Copilot CLI just before, as setup does.
+/// VS Code then reads AtticDB from Copilot CLI's config. So its plan, too, adds no entry to
+/// `mcp.json`, though Copilot CLI's entry isn't written yet.
+pub(crate) fn connect_vscode_after_copilot(options: Options, mode: Mode) -> Report {
+    connect_shared(Harness::Vscode, options.force, mode, true)
+}
+
+/// [`connect`] for VS Code and Copilot CLI. With `copilot`, VS Code is connected as though
+/// Copilot CLI had its entry.
+fn connect_shared(harness: Harness, force: bool, mode: Mode, copilot: bool) -> Report {
     let (mut lines, mut hook_state) = (Vec::new(), None);
     let result = (|| {
         let moved = moved_home(harness)?;
         if !force {
             check_flags(harness, &crate::home::dir()?.join("data"))?;
         }
-        let split = split_home(harness, moved.as_deref(), force)?;
+        let mut split = split_home(harness, moved.as_deref(), force)?;
         // Plan mode must not create the home, so it names the data dir without making it.
         let data = match mode {
             Mode::Apply => crate::home::ensure()?.data_dir,
@@ -363,7 +377,20 @@ fn connect_shared(harness: Harness, force: bool, mode: Mode) -> Report {
         let exe = binary()?;
         let guard = (!force).then_some(data.as_path());
         let entry = harness.entry(&exe, moved.as_deref());
-        lines.push(edit(harness, Some(entry), guard, mode)?);
+        if harness == Harness::Vscode && (copilot || copilot_entry()) {
+            // Any flags on VS Code's entry were refused above, unless `force`.
+            lines.push(drop_vscode_entry(None, mode)?);
+        } else {
+            lines.push(edit(harness, Some(entry), guard, mode)?);
+        }
+        if harness == Harness::Copilot && connected(Harness::Vscode) == Ok(true) {
+            let dropped = drop_vscode_entry(guard, mode)?;
+            // VS Code's entry on another home is gone, so VS Code now uses Copilot CLI's.
+            if dropped.state == State::Removed {
+                split = None;
+            }
+            lines.push(dropped);
+        }
         let hook = set_hook(&exe, moved.as_deref(), mode)?;
         hook_state = Some(hook.state);
         lines.push(hook);
@@ -510,8 +537,9 @@ fn moved_home(harness: Harness) -> Result<Option<String>, String> {
 
 /// Removes AtticDB's entry from `harness`'s config, and the instructions file and the hook
 /// once neither VS Code nor Copilot CLI has one. Both removals are tried, and every error is
-/// reported. Claude Code's and Codex's parts go by [`claude`]'s and [`codex`]'s rules.
-/// Returns the exit code.
+/// reported. VS Code also reads Copilot CLI's entry, so while that is left, disconnecting VS
+/// Code says so and keeps both shared files. Claude Code's and Codex's parts go by
+/// [`claude`]'s and [`codex`]'s rules. Returns the exit code.
 pub fn disconnect(harness: Harness) -> u8 {
     if harness == Harness::ClaudeCode {
         return claude::disconnect();
@@ -520,7 +548,19 @@ pub fn disconnect(harness: Harness) -> u8 {
         return codex::disconnect();
     }
     finish(edit(harness, None, None, Mode::Apply).and_then(|line| {
-        println!("{}", line.text);
+        if harness == Harness::Vscode && copilot_entry() {
+            let copilot = Harness::Copilot.file()?;
+            if line.state != State::Unchanged {
+                println!("{}", line.text);
+            }
+            println!(
+                "VS Code still reads atticdb from {}. To remove it there, run atticdb \
+                 disconnect copilot",
+                copilot.display()
+            );
+        } else {
+            println!("{}", line.text);
+        }
         let mut errors = Vec::new();
         for removed in [remove_guide(), remove_hook()] {
             match removed {
@@ -623,10 +663,9 @@ fn edit(
 /// Flags that point an entry at a store other than the home.
 const CONNECTION: [&str; 5] = ["--url", "--data-dir", "--config", "--token-file", "--tenant"];
 
-/// Fails when `current`, `harness`'s entry in `file`, passes connection flags, because its
-/// memory would not follow a switch to the home, whose data directory is `data`.
-fn refuse_flags(harness: Harness, file: &Path, current: &Value, data: &Path) -> Result<(), String> {
-    let args = current["args"].as_array().map(Vec::as_slice).unwrap_or_default();
+/// The connection flags `entry` passes, with their values, joined by `, `. Empty when none.
+fn connection_flags(entry: &Value) -> String {
+    let args = entry["args"].as_array().map(Vec::as_slice).unwrap_or_default();
     let args: Vec<&str> = args.iter().filter_map(Value::as_str).collect();
     let mut used = Vec::new();
     for flag in CONNECTION {
@@ -635,10 +674,17 @@ fn refuse_flags(harness: Harness, file: &Path, current: &Value, data: &Path) -> 
             used.push(args.get(at + 1).map_or(flag.to_owned(), |value| format!("{flag} {value}")));
         }
     }
+    used.join(", ")
+}
+
+/// Fails when `current`, `harness`'s entry in `file`, passes connection flags, because its
+/// memory would not follow a switch to the home, whose data directory is `data`.
+fn refuse_flags(harness: Harness, file: &Path, current: &Value, data: &Path) -> Result<(), String> {
+    let used = connection_flags(current);
     if used.is_empty() {
         return Ok(());
     }
-    let (used, file, data) = (used.join(", "), file.display(), data.display());
+    let (file, data) = (file.display(), data.display());
     let name = harness.name();
     let apps =
         if harness == Harness::ClaudeCode { "Claude Code" } else { "VS Code and Copilot CLI" };
@@ -834,10 +880,89 @@ fn entry_exe(entry: &Value) -> Option<String> {
 /// one with comments, counts when it holds `"atticdb"`.
 fn connected(harness: Harness) -> Result<bool, String> {
     let Some((bytes, _)) = read(&harness.file()?)? else { return Ok(false) };
-    Ok(match serde_json::from_slice::<Value>(&bytes) {
+    Ok(has_entry(harness, &bytes))
+}
+
+/// Whether `bytes`, `harness`'s config, have an AtticDB entry, as [`connected`] reads them.
+fn has_entry(harness: Harness, bytes: &[u8]) -> bool {
+    match serde_json::from_slice::<Value>(bytes) {
         Ok(root) => root.get(harness.section()).is_some_and(|s| s.get("atticdb").is_some()),
-        Err(_) => bytes.windows(8).any(|window| window == b"\"atticdb\""),
-    })
+        Err(_) => find(bytes, b"\"atticdb\""),
+    }
+}
+
+/// Whether Copilot CLI's config has an AtticDB entry, which VS Code 1.144 and later read too.
+/// A config that can't be read counts as none, so VS Code keeps its own entry.
+fn copilot_entry() -> bool {
+    connected(Harness::Copilot).unwrap_or(false)
+}
+
+/// Removes AtticDB's entry from VS Code's `mcp.json`, as VS Code also reads Copilot CLI's
+/// config, and 2 entries list 2 servers. [`jsonedit`] makes the edit, so only the entry's
+/// bytes change. With `guard`, an entry with connection flags is kept, as it uses another
+/// store. A file that isn't strict JSON is skipped, with what to do by hand. Returns the line
+/// to print, [`State::Unchanged`] when there is no entry. `Err` only when VS Code's config
+/// can't be located. In Plan mode, it writes nothing.
+fn drop_vscode_entry(guard: Option<&Path>, mode: Mode) -> Result<Line, String> {
+    let path = Harness::Vscode.file()?;
+    let shown = path.display();
+    let copilot = Harness::Copilot.file();
+    let copilot =
+        copilot.map_or_else(|_| "Copilot CLI's config".into(), |c| c.display().to_string());
+    let skipped = |why: &str| {
+        Line::new(
+            State::Skipped,
+            format!(
+                "{shown}: {why}. Nothing changed. Remove \"atticdb\" from \"servers\" by hand, \
+                 as VS Code reads it from {copilot}"
+            ),
+        )
+    };
+    let none = || {
+        let text = format!("{shown}: no atticdb entry needed. VS Code reads it from {copilot}");
+        Line::new(State::Unchanged, text)
+    };
+    let old = match read(&path) {
+        Ok(Some(old)) if has_entry(Harness::Vscode, &old.0) => old,
+        Ok(_) => return Ok(none()),
+        Err(why) => return Ok(skipped(&why)),
+    };
+    let Ok(text) = std::str::from_utf8(&old.0) else { return Ok(skipped("not UTF-8")) };
+    let (edited, had) = match jsonedit::remove_key(text, &["servers"], "atticdb") {
+        Ok(done) => done,
+        Err(error) => return Ok(skipped(&error.to_string())),
+    };
+    if !had {
+        return Ok(none());
+    }
+    if guard.is_some() {
+        let root: Value = serde_json::from_str(text).unwrap_or_default();
+        let used = connection_flags(&root["servers"]["atticdb"]);
+        if !used.is_empty() {
+            return Ok(Line::new(
+                State::Kept,
+                format!(
+                    "{shown}: kept the atticdb entry, as it uses {used}. VS Code may list \
+                     atticdb twice. To remove it, run atticdb connect vscode --force"
+                ),
+            ));
+        }
+    }
+    if mode == Mode::Plan {
+        let text = format!("{shown}: remove the MCP entry. VS Code reads atticdb from {copilot}");
+        return Ok(Line::new(State::Removed, text));
+    }
+    let backup = match write(&path, Some(&old), edited.as_bytes()) {
+        Ok(backup) => backup.map(|backup| format!(" (backup: {})", backup.display())),
+        Err(why) => return Ok(Line::new(State::Failed, why)),
+    };
+    Ok(Line::new(
+        State::Removed,
+        format!(
+            "removed the duplicate atticdb entry from {shown}{}. VS Code reads it from {copilot}",
+            backup.unwrap_or_default()
+        ),
+    ))
 }
 
 /// Why a shared Copilot file stays: VS Code or Copilot CLI still has an AtticDB entry, or its

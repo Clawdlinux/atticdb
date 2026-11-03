@@ -390,6 +390,14 @@ It also writes the session-start hook file, described below.
 `atticdb disconnect <vscode|copilot>` removes that entry. Every other key and server stays.
 Claude Code and Codex have their own parts. See [Claude Code](#claude-code) and [Codex](#codex) below.
 
+VS Code 1.144 and later also read Copilot CLI's `mcp-config.json`. An entry in both files lists 2 atticdb servers, and notes split between them.
+So while Copilot CLI has an entry, `connect vscode` adds none to `mcp.json`, and removes an old one there.
+`connect copilot` removes it too, so the order doesn't matter. The edit changes only the entry's bytes and keeps a backup.
+An entry with connection flags stays, unless `--force`. A `mcp.json` that isn't strict JSON is left alone, and `connect` says to remove the entry by hand.
+Without a Copilot CLI entry, `connect vscode` writes `mcp.json`, for VS Code builds that don't read Copilot CLI's file.
+`doctor` counts VS Code as connected through either file.
+`disconnect vscode` keeps the hook and instructions while Copilot CLI has its entry, and says that VS Code still reads it.
+
 | Name | File | Entry |
 |---|---|---|
 | `vscode` | macOS: `~/Library/Application Support/Code/User/mcp.json`. Linux: `$XDG_CONFIG_HOME/Code/User/mcp.json` when set and absolute, else `~/.config/Code/User/mcp.json`. Windows: `%APPDATA%\Code\User\mcp.json` | `servers.atticdb`: `atticdb mcp --agent vscode-copilot` |
@@ -713,7 +721,7 @@ The apps: VS Code, Copilot CLI and Claude Code get every part. Codex gets only i
 
 | App | Windows files | What differs |
 |---|---|---|
-| VS Code | `%APPDATA%\Code\User\mcp.json` | Nothing else. It reads the Copilot hook and instructions below |
+| VS Code | `%APPDATA%\Code\User\mcp.json`, only while Copilot CLI has no entry | Nothing else. It reads the Copilot hook and instructions below |
 | Copilot CLI | `mcp-config.json`, `hooks\atticdb.json` and `instructions\atticdb.instructions.md` in `%USERPROFILE%\.copilot`, or `%COPILOT_HOME%` | The hook's key is `powershell`: `& '<binary>' hook session-start` |
 | Claude Code | `%USERPROFILE%\.claude.json` and `%USERPROFILE%\.claude\settings.json` | The hook runs in exec form, below. `claude` may be `claude.exe` or npm's `claude.cmd` |
 | Codex | `%USERPROFILE%\.codex\config.toml` | Only the MCP entry. No hook and no `AGENTS.md` guide |

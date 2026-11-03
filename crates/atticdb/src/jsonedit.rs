@@ -20,7 +20,7 @@
 //!   becomes `{"a":["x"]}`. Otherwise it opens up: `[`, the new item on its own line, `]`.
 //! - A new object member goes last. Values on their own lines are pretty-printed, with keys
 //!   in sorted order, as [`Value`] keeps them.
-//! - Removing every element of an array leaves `[]`.
+//! - Removing every element of an array leaves `[]`, and every member of an object `{}`.
 //! - CRLF files stay CRLF. Bytes after the root value, such as a final newline, never change.
 
 use serde_json::{Map, Value};
@@ -142,9 +142,41 @@ pub fn remove(
     }
     let kept = std::mem::take(values).into_iter().zip(&hits).filter(|(_, hit)| !**hit);
     *values = kept.map(|(value, _)| value).collect();
-    let edited = cut(text, node, items, &hits);
+    let edited = cut(text, node, &node.spans(), &hits);
     check(&edited, &want, path)?;
     Ok((edited, removed))
+}
+
+/// Removes the member `key` from the object at `path`, with the comma and whitespace it owns.
+/// Returns the text and whether the member was there. A missing path removes nothing.
+pub fn remove_key(text: &str, path: &[&str], key: &str) -> Result<(String, bool), Error> {
+    let root = parse(text)?;
+    let mut want = original(text, path)?;
+    let (node, found) = walk(&root, path)?;
+    if found < path.len() {
+        return Ok((text.to_owned(), false));
+    }
+    let Kind::Object(members) = &node.kind else {
+        return Err(wrong_type(path, "an object", node));
+    };
+    let hits: Vec<bool> = members.iter().map(|member| member.key == key).collect();
+    if !hits.contains(&true) {
+        return Ok((text.to_owned(), false));
+    }
+    let mut at = &mut want;
+    for step in path {
+        at = at.get_mut(*step).ok_or_else(|| refused(path, "the path differs in serde_json"))?;
+    }
+    let removed = match at {
+        Value::Object(map) => map.remove(key).is_some(),
+        _ => false,
+    };
+    if !removed {
+        return Err(refused(path, "the object differs in serde_json"));
+    }
+    let edited = cut(text, node, &node.spans(), &hits);
+    check(&edited, &want, path)?;
+    Ok((edited, true))
 }
 
 /// The original text as serde_json reads it.
@@ -256,10 +288,10 @@ fn insert(text: &str, container: &Node, key: Option<&str>, value: &Value) -> Str
     format!("{}{new}{}", &text[..from], &text[to..])
 }
 
-/// `text` without the elements of `array` marked in `hits`, with the commas and whitespace
-/// they own. A run of removed elements takes the gap after it, or the gap before it when it
-/// ends the array, so removing what [`insert`] added restores the bytes.
-fn cut(text: &str, array: &Node, items: &[Node], hits: &[bool]) -> String {
+/// `text` without the items of `container`, at `items`' spans, marked in `hits`, with the
+/// commas and whitespace they own. A run of removed items takes the gap after it, or the gap
+/// before it when it ends the container, so removing what [`insert`] added restores the bytes.
+fn cut(text: &str, container: &Node, items: &[(usize, usize)], hits: &[bool]) -> String {
     let mut spans = Vec::new();
     let mut i = 0;
     while i < items.len() {
@@ -272,9 +304,9 @@ fn cut(text: &str, array: &Node, items: &[Node], hits: &[bool]) -> String {
             j += 1;
         }
         spans.push(match (items.get(j + 1), i.checked_sub(1)) {
-            (Some(next), _) => (items[i].start, next.start),
-            (None, Some(prev)) => (items[prev].end, items[j].end),
-            (None, None) => (array.start + 1, array.end - 1),
+            (Some(next), _) => (items[i].0, next.0),
+            (None, Some(prev)) => (items[prev].1, items[j].1),
+            (None, None) => (container.start + 1, container.end - 1),
         });
         i = j + 1;
     }
@@ -648,7 +680,7 @@ impl Parser<'_> {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
-    use super::{append, remove};
+    use super::{append, remove, remove_key};
     use serde_json::{json, Value};
 
     /// An edit and its arguments, with values written as JSON.
@@ -656,8 +688,10 @@ mod tests {
         Append(&'static [&'static str], &'static str),
         /// The path, the elements to drop, and how many of them the array holds.
         Remove(&'static [&'static str], &'static [&'static str], usize),
+        /// The path, the key to drop, and whether the object holds it.
+        RemoveKey(&'static [&'static str], &'static str, bool),
     }
-    use Edit::{Append, Remove};
+    use Edit::{Append, Remove, RemoveKey};
 
     /// Name, input, edit, and the exact output text or error message.
     type Case = (&'static str, &'static str, Edit, Result<&'static str, &'static str>);
@@ -856,6 +890,60 @@ mod tests {
             Ok("{\"hooks\": {}}"),
         ),
         (
+            "remove the first member, its value multi-line",
+            "{\n  \"servers\": {\n    \"atticdb\": {\n      \"command\": \"a\"\n    },\n    \"other\": {}\n  },\n  \"inputs\": []\n}\n",
+            RemoveKey(&["servers"], "atticdb", true),
+            Ok("{\n  \"servers\": {\n    \"other\": {}\n  },\n  \"inputs\": []\n}\n"),
+        ),
+        (
+            "remove the last member",
+            "{\n  \"servers\": {\n    \"other\": {},\n    \"atticdb\": {\"command\": \"a\"}\n  }\n}\n",
+            RemoveKey(&["servers"], "atticdb", true),
+            Ok("{\n  \"servers\": {\n    \"other\": {}\n  }\n}\n"),
+        ),
+        (
+            "remove the only member, CRLF",
+            "{\r\n  \"servers\": {\r\n    \"atticdb\": {}\r\n  },\r\n  \"x\": 1\r\n}\r\n",
+            RemoveKey(&["servers"], "atticdb", true),
+            Ok("{\r\n  \"servers\": {},\r\n  \"x\": 1\r\n}\r\n"),
+        ),
+        (
+            "remove an inline member by its decoded key",
+            r#"{"servers": {"a": 1, "attic\u0064b": 2, "b": 3}}"#,
+            RemoveKey(&["servers"], "atticdb", true),
+            Ok(r#"{"servers": {"a": 1, "b": 3}}"#),
+        ),
+        (
+            "remove a root member",
+            "{\"a\": 1, \"b\": 2}",
+            RemoveKey(&[], "a", true),
+            Ok("{\"b\": 2}"),
+        ),
+        (
+            "missing key removes nothing",
+            "{\"servers\": {\"other\": {}}}",
+            RemoveKey(&["servers"], "atticdb", false),
+            Ok("{\"servers\": {\"other\": {}}}"),
+        ),
+        (
+            "missing object removes nothing",
+            "{\"inputs\": []}",
+            RemoveKey(&["servers"], "atticdb", false),
+            Ok("{\"inputs\": []}"),
+        ),
+        (
+            "remove a key from an array",
+            "{\"servers\": []}",
+            RemoveKey(&["servers"], "atticdb", false),
+            Err("[\"servers\"] should be an object but is an array"),
+        ),
+        (
+            "remove a key from a file with comments",
+            "{\n  // mine\n  \"servers\": {\"atticdb\": {}}\n}",
+            RemoveKey(&["servers"], "atticdb", false),
+            Err("invalid JSON at byte 4: comments are not JSON"),
+        ),
+        (
             "BOM",
             "\u{feff}{\"allow\": []}",
             Append(&["allow"], r#""a""#),
@@ -972,12 +1060,18 @@ mod tests {
                         drop.iter().map(|value| serde_json::from_str(value).unwrap()).collect();
                     remove(text, path, |value| drop.contains(value))
                 }
+                RemoveKey(path, key, _) => {
+                    remove_key(text, path, key).map(|(out, had)| (out, usize::from(had)))
+                }
             };
             match (got, want) {
                 (Ok((out, count)), Ok(want)) => {
                     assert_eq!(out, *want, "{name}: output text");
                     if let Remove(_, _, removed) = edit {
                         assert_eq!(count, *removed, "{name}: removed count");
+                    }
+                    if let RemoveKey(_, _, had) = edit {
+                        assert_eq!(count, usize::from(*had), "{name}: whether it was there");
                     }
                 }
                 (Err(err), Err(want)) => assert_eq!(err.to_string(), *want, "{name}: error"),

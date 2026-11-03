@@ -296,7 +296,16 @@ fn show_plan(harnesses: &[Harness], options: Options) -> u8 {
     println!("Plan:");
     let (mut shown, mut reports) = (Vec::new(), Vec::new());
     for &harness in harnesses {
-        let report = connect::connect(harness, options, Mode::Plan);
+        // Copilot CLI goes first, by `ORDER`. Once its plan adds its entry, VS Code reads that.
+        let copilot = harnesses.iter().zip(&reports).any(|(other, report): (_, &Report)| {
+            *other == Harness::Copilot && report.stopped.is_none()
+        });
+        let report = match harness {
+            Harness::Vscode if copilot => {
+                connect::connect_vscode_after_copilot(options, Mode::Plan)
+            }
+            _ => connect::connect(harness, options, Mode::Plan),
+        };
         show(harness, &report, &mut shown, "stopped");
         reports.push(report);
         if harness == Harness::Vscode {
