@@ -1,5 +1,7 @@
-/* "Controls beside a terminal": the choices on bone, the commands in an oxide panel. */
+/* The agent prompt and the folded commands beside the first-visit questions, on bone. */
 .install {
+  display: grid;
+  gap: 2rem;
   padding-block: calc(var(--space-section) * 0.5);
   background: var(--field-1);
   color: var(--field-1-ink);
@@ -18,10 +20,11 @@
   --prompt-link: var(--field-1-ink);
 }
 
-.head {
+.agent {
   display: grid;
-  gap: 1rem;
-  margin-bottom: 1.25rem;
+  gap: 1.25rem;
+  align-content: start;
+  min-width: 0;
 }
 
 /* Same treatment as the other bone headings: --step-head in the soft ink. */
@@ -30,7 +33,7 @@
 }
 
 /* The prompt sits on a tile like the installer's choices, with an oxide Copy button. */
-.agent {
+.prompt {
   --copy-box: var(--installer-tile);
   --copy-ink: var(--field-1-ink);
   display: grid;
@@ -38,26 +41,153 @@
   min-width: 0;
 }
 
-.lead,
-.or {
+.lead {
   max-width: 54ch;
   font-size: var(--step-lead);
   line-height: 1.3;
 }
 
-.or {
-  margin-bottom: 0.75rem;
+.commands {
+  min-width: 0;
 }
 
-@media (min-width: 64rem) {
-  .head {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    gap: 2rem;
-    align-items: end;
-  }
+/* A plain text link with a small chevron. No box. */
+.summary {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 0.625rem;
+  font-size: var(--step-lead);
+  line-height: 1.3;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.2em;
+  cursor: pointer;
+  list-style: none;
+}
+
+.summary::-webkit-details-marker {
+  display: none;
+}
+
+.summary::after {
+  content: "";
+  width: 0.45em;
+  height: 0.45em;
+  margin-top: -0.2em;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(45deg);
+  transition: transform 160ms ease-out;
+}
+
+.summary:hover {
+  text-decoration-thickness: 2px;
+}
+
+.commands[open] > .summary {
+  margin-bottom: 1rem;
+}
+
+.commands[open] > .summary::after {
+  margin-top: 0.25em;
+  transform: rotate(-135deg);
+}
+
+.questions {
+  display: grid;
+  gap: 1.5rem;
+  align-content: start;
+  min-width: 0;
+}
+
+.pair {
+  display: grid;
+  gap: 0.375rem;
+  align-content: start;
+}
+
+.question {
+  font-family: var(--font-text), Georgia, serif;
+  font-size: var(--step-lead);
+  font-weight: 500;
+  line-height: 1.15;
+  text-transform: none;
+}
+
+.answer {
+  max-width: 46ch;
+  line-height: 1.45;
 }
 
 /* The bone button's own focus ring would vanish on the bone field. */
-.agent :focus-visible {
+.install :focus-visible {
   outline-color: var(--field-1-ink);
+}
+
+@media (min-width: 48rem) {
+  .questions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: 2rem;
+  }
+}
+
+@media (min-width: 64rem) {
+  .install {
+    grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+    column-gap: 4rem;
+    row-gap: 1.25rem;
+    padding-block: 3rem;
+  }
+
+  .agent {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .questions {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  /* The opened installer needs the full width for its own two columns. */
+  .commands {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+
+  /*
+   * Where :has works, the closed summary sits right under the prompt, beside the questions.
+   * Opening it moves the questions below, so the summary stays put and the installer gets the full width.
+   */
+  @supports selector(:has(*)) {
+    .install {
+      grid-template-rows: auto 1fr;
+    }
+
+    .questions {
+      grid-row: 1 / 3;
+    }
+
+    .commands {
+      grid-column: 1;
+      align-self: start;
+    }
+
+    .install:has(.commands[open]) .questions {
+      grid-column: 1 / -1;
+      grid-row: 3;
+      margin-top: 2rem;
+    }
+
+    .install:has(.commands[open]) .commands {
+      grid-column: 1 / -1;
+    }
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .summary::after {
+    transition: none;
+  }
 }

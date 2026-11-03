@@ -1,6 +1,5 @@
 import JsonLd from "@/components/JsonLd";
 import Demo from "@/components/home/Demo";
-import Faq from "@/components/home/Faq";
 import Hero from "@/components/home/Hero";
 import InstallSection from "@/components/home/InstallSection";
 import Numbers from "@/components/home/Numbers";
@@ -14,11 +13,11 @@ export default function Home() {
   return (
     <>
       <JsonLd data={softwareAppJsonLd()} />
+      {/* The home questions render inside the install section. */}
       <JsonLd data={faqJsonLd(HOME_FAQ)} />
       <Hero afterHonest={<Demo />} />
       <InstallSection />
       <Numbers />
-      <Faq items={HOME_FAQ} id="home-faq-title" />
       <PricingTeaser />
     </>
   );

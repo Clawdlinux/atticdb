@@ -48,28 +48,28 @@
   text-decoration-thickness: 2px;
 }
 
+/* Desktop: the headline on the left, the line and the actions beside it. */
 @media (min-width: 64rem) {
-  .foot {
-    grid-template-columns: repeat(12, minmax(0, 1fr));
-    column-gap: 2rem;
+  .pricing {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    column-gap: 4rem;
     align-items: end;
-    margin-top: 1.5rem;
+    padding-block: 3rem;
   }
 
-  .support {
-    grid-column: 1 / 7;
+  .foot {
+    margin-top: 0;
   }
 
   .actions {
-    grid-column: 10 / 13;
-    align-items: flex-end;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    column-gap: 1.5rem;
   }
 
   .action {
     min-width: 12rem;
-  }
-
-  .second {
-    justify-content: flex-end;
   }
 }

@@ -33,9 +33,9 @@ describe("home page", () => {
   it("gives every section after the hero an h2", () => {
     const { container } = render(<Home />);
     const sections = [...container.querySelectorAll("section")];
-    expect(sections).toHaveLength(6);
+    expect(sections).toHaveLength(5);
     expect(sections.map((section) => section.querySelector("h1,h2")?.id)).toEqual([
-      "hero-title", "demo-heading", "install-title", "numbers-title", "home-faq-title", "pricing-title",
+      "hero-title", "demo-heading", "install-title", "numbers-title", "pricing-title",
     ]);
     for (const section of sections) {
       if (section.querySelector("h1")) continue;
@@ -73,15 +73,45 @@ describe("home page", () => {
     expect(section.textContent).toContain("Claude Code, Codex, GitHub Copilot CLI and VS Code");
   });
 
-  it("leads the install section with the agent prompt, then the installer", () => {
+  it("leads the install section with the agent prompt, then the folded installer, then the questions", () => {
     const { container } = render(<Home />);
     const section = container.querySelector("#install") as HTMLElement;
+    expect(section.querySelectorAll("h2")).toHaveLength(1);
     const ask = within(section).getByText("Paste this into your coding agent.");
     const prompt = within(section).getByText(AGENT_PROMPT);
-    const or = within(section).getByText("Or pick the commands yourself.");
-    const installer = [...section.querySelectorAll("code")].find((c) => c.textContent === INSTALL_CMD)!;
-    for (const [a, b] of [[ask, prompt], [prompt, or], [or, installer]] as const) {
+    const details = section.querySelector("details") as HTMLDetailsElement;
+    const question = within(section).getByRole("heading", { level: 3, name: HOME_FAQ[0].q });
+    for (const [a, b] of [[ask, prompt], [prompt, details], [details, question]] as const) {
       expect(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    }
+    // The prompt is outside the details, so it shows without opening anything.
+    expect(prompt.closest("details")).toBeNull();
+    expect(ask.closest("details")).toBeNull();
+  });
+
+  it("folds the installer behind a closed native details", () => {
+    const { container } = render(<Home />);
+    const section = container.querySelector("#install") as HTMLElement;
+    const all = section.querySelectorAll("details");
+    expect(all).toHaveLength(1);
+    const details = all[0] as HTMLDetailsElement;
+    expect(details.open).toBe(false);
+    expect(details).not.toHaveAttribute("open");
+    expect(details.id).toBe("commands");
+    const summary = details.querySelector(":scope > summary")!;
+    expect(summary.textContent).toBe("Or pick the commands yourself");
+    const installer = [...section.querySelectorAll("code")].find((c) => c.textContent === INSTALL_CMD)!;
+    expect(installer.closest("details")).toBe(details);
+    expect(within(details).getByRole("button", { name: "Copy all", hidden: true })).toBeInTheDocument();
+  });
+
+  it("opens the commands for a #commands link", () => {
+    window.history.replaceState(null, "", "#commands");
+    try {
+      const { container } = render(<Home />);
+      expect((container.querySelector("#install details") as HTMLDetailsElement).open).toBe(true);
+    } finally {
+      window.history.replaceState(null, "", window.location.pathname);
     }
   });
 });
@@ -190,13 +220,19 @@ describe("home first screen", () => {
 });
 
 describe("home FAQ", () => {
-  it("answers what changes, where the data is, how to uninstall and whether it's free", () => {
+  it("answers what changes, where the data is, how to uninstall and whether it's free, inside #install", () => {
     const { container } = render(<Home />);
-    const faq = container.querySelector('[aria-labelledby="home-faq-title"]') as HTMLElement;
-    for (const q of ["What changes in my agent?", "Where is my data?", "How do I uninstall it?", "Is it free?"]) {
-      expect(within(faq).getByRole("heading", { level: 3, name: q })).toBeInTheDocument();
+    expect(container.querySelector('[aria-labelledby="home-faq-title"]')).toBeNull();
+    const install = container.querySelector("#install") as HTMLElement;
+    const questions = within(install).getAllByRole("heading", { level: 3 });
+    expect(questions.map((h) => h.textContent)).toEqual([
+      "What changes in my agent?", "Where is my data?", "How do I uninstall it?", "Is it free?",
+    ]);
+    for (const { a } of HOME_FAQ) {
+      const answer = within(install).getByText(a);
+      expect(answer.closest("details")).toBeNull();
     }
-    for (const { a } of HOME_FAQ) expect(within(faq).getByText(a)).toBeInTheDocument();
+    expect(install.querySelector("details h3")).toBeNull();
   });
 
   it("uses no jargon from the onboarding audit", () => {
