@@ -4,7 +4,7 @@
 use atticdb_core::{
     forget::Selector, turn::decode, Appended, CompressionMode, Engine, EngineError, EngineOptions,
     ErrorKind, FactQuery, FactWritten, Forgotten, Health, Hit, NewFact, NewTurn, Outcome, Record,
-    RecordQuery, Revision, Role, Scope, SearchQuery, SimFact, Turn, WindowQuery,
+    RecordQuery, Revision, Role, Scope, SearchQuery, SessionQuery, SimFact, Turn, WindowQuery,
 };
 use atticdb_tape::sim::{CapacityError, CapacityPlan, PublishPause, SimClock, StorageFullFault};
 use atticdb_tape::{Clock, Error, HookIo, Io, Kind, Op, SimDisk, Tape, TapeOptions};
@@ -1735,6 +1735,46 @@ fn inline_group_publishes_once_and_replies_with_original_sequences() {
     assert!(retried.deduplicated && (retried.txn, retried.lsn) == (c1.txn, c1.lsn));
     assert_eq!(engine.fact_get("t", "c").unwrap().unwrap().lsn, c1.lsn);
     assert_eq!(engine.fact_get("t", "k").unwrap().unwrap().lsn, k3.lsn);
+}
+
+/// Studio pins a session forget to the `as_of_lsn` of the view the user saw. A turn published
+/// but not yet durable must not be under that pin, or the forget would hide a turn no view
+/// showed.
+#[test]
+fn window_as_of_lsn_never_covers_an_unseen_turn() {
+    let pause = Arc::new(PublishPause::default());
+    let tape = TapeOptions {
+        inline_sim: true,
+        publish_pause: Some(pause.clone()),
+        ..TapeOptions::default()
+    };
+    let opts = EngineOptions { tape, ..EngineOptions::default() };
+    let engine = open(Arc::new(HookIo::sim(41)), Arc::new(SimClock::default()), &opts);
+    let scope = one_scope();
+    let turn = |value| NewTurn { role: Role::User, content: vec![value], meta: vec![] };
+    engine.append(&scope, vec![turn(1), turn(2)], None).unwrap();
+    let third = engine.enqueue_sim(&scope, vec![turn(3)], None).unwrap();
+    let pin = std::thread::scope(|threads| {
+        let (arrived, release) = pause.arm();
+        let stepping = threads.spawn(|| engine.step_sim().unwrap());
+        arrived.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        // Parked after publish, before the durable watermark moves.
+        let durable = engine.metrics().unwrap().durable_lsn;
+        let window = engine.window_budget(&scope, WindowQuery::Last(50), usize::MAX).unwrap();
+        let page = engine.sessions("t", SessionQuery { after: None, limit: 10 }).unwrap();
+        assert_eq!((window.as_of_lsn, page.as_of_lsn), (durable, durable));
+        assert_eq!(window.turns.iter().map(|t| t.seq).collect::<Vec<_>>(), [1, 2]);
+        release.send(()).unwrap();
+        stepping.join().unwrap();
+        window.as_of_lsn
+    });
+    let third = third.finish().unwrap();
+    assert!(third.first_lsn > pin, "the pin never reaches the unseen turn");
+    let session = Selector::Session { agent: "a".into(), session: "s".into() };
+    engine.forget("t", session, Some("studio"), Some(pin)).unwrap();
+    let window = engine.window(&scope, WindowQuery::Last(50)).unwrap();
+    let seen: Vec<_> = window.iter().map(|t| (t.seq, t.redacted, t.content.clone())).collect();
+    assert_eq!(seen, [(1, true, vec![]), (2, true, vec![]), (3, false, vec![3])]);
 }
 
 fn inline_opts() -> EngineOptions {

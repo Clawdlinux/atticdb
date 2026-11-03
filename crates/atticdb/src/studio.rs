@@ -5,6 +5,9 @@
 //! secret from the URL fragment, which browsers never send, and returns it in the
 //! `X-Atticdb-Studio` header. A page on another origin cannot send that header without a CORS
 //! answer, and there is none. The exact `Host` check blocks DNS rebinding.
+//!
+//! With `--allow-forget`, 1 write route is added: `POST /api/forget`. It forwards each item as
+//! `POST /v1/forget`. Nothing else writes, and without the flag studio is read-only.
 
 use crate::api;
 use crate::client::{Store, StoreFlags, StoreKind};
@@ -68,6 +71,13 @@ const READS: [&str; 9] = [
     "/api/metrics",
 ];
 
+/// The only write route, registered only with `--allow-forget`.
+const FORGET: &str = "/api/forget";
+/// Most body bytes of a forget. Every other request has no body.
+const FORGET_BODY_BYTES: u64 = 64 << 10;
+/// Most sessions in 1 forget. A fact key goes alone.
+const MAX_FORGET_SESSIONS: usize = 100;
+
 /// Where a request that passed the checks goes.
 enum Route {
     /// A page file: its content type and text.
@@ -78,6 +88,8 @@ enum Route {
     Block,
     /// `/api/info`.
     Info,
+    /// `POST /api/forget`, only with `--allow-forget`.
+    Forget,
 }
 
 struct Studio {
@@ -92,17 +104,20 @@ struct Studio {
     host: String,
     /// `http://127.0.0.1:<port>`, the only `Origin` accepted.
     origin: String,
+    /// `--allow-forget`: registers `POST /api/forget`.
+    forget: bool,
 }
 
 /// Runs `atticdb studio` until it is killed. Returns exit code 1 when it cannot start.
 pub fn start(mut flags: HashMap<String, String>) -> u8 {
     let open = flags.remove("--no-open").is_none();
-    let Err(message) = run(flags, open);
+    let forget = flags.remove("--allow-forget").is_some();
+    let Err(message) = run(flags, open, forget);
     let _ = writeln!(io::stderr(), "atticdb: {message}");
     1
 }
 
-fn run(mut flags: HashMap<String, String>, open: bool) -> Result<Infallible, String> {
+fn run(mut flags: HashMap<String, String>, open: bool, forget: bool) -> Result<Infallible, String> {
     let Store { launch, token, kind, tenant, home } = StoreFlags::take(&mut flags)?.open(true)?;
     let launch = Mutex::new(launch);
     probe(&launch)?;
@@ -114,7 +129,8 @@ fn run(mut flags: HashMap<String, String>, open: bool) -> Result<Infallible, Str
     let url = format!("http://127.0.0.1:{port}/#k={secret}");
     // 1 write, so a reader never sees half of a line.
     let mut stdout = io::stdout();
-    let lines = format!("atticdb studio: {url}\nPress Ctrl-C to stop.\n");
+    let on = if forget { "atticdb studio: forget is on (--allow-forget).\n" } else { "" };
+    let lines = format!("atticdb studio: {url}\n{on}Press Ctrl-C to stop.\n");
     let _ = stdout.write_all(lines.as_bytes()).and_then(|()| stdout.flush());
     if open {
         if let Err(error) = open_page(&url) {
@@ -122,7 +138,8 @@ fn run(mut flags: HashMap<String, String>, open: bool) -> Result<Infallible, Str
         }
     }
     let (host, origin) = (format!("127.0.0.1:{port}"), format!("http://127.0.0.1:{port}"));
-    serve(listener, Arc::new(Studio { launch, token, kind, tenant, home, secret, host, origin }))
+    let studio = Studio { launch, token, kind, tenant, home, secret, host, origin, forget };
+    serve(listener, Arc::new(studio))
 }
 
 /// `GET /healthz` once, without the token. Fails unless the store answers 200.
@@ -153,6 +170,37 @@ fn get(
     let mut headers = vec![("Host", host.as_str())];
     headers.extend(auth.as_deref().map(|auth| ("Authorization", auth)));
     http::exchange(&mut *stream, "GET", target, &headers, &[], deadline, api::MAX_RESPONSE_BYTES)
+}
+
+/// Why a [`post`] got no answer.
+enum Lost {
+    /// Connect failed, so nothing was sent.
+    NotSent(io::Error),
+    /// The request may have been sent.
+    Unknown(io::Error),
+}
+
+/// Sends 1 `POST` of a JSON `body` to the store with the token, by `deadline`.
+fn post(
+    launch: &Mutex<Launch>,
+    target: &str,
+    token: &Token,
+    body: &[u8],
+    deadline: Instant,
+) -> Result<ClientResponse, Lost> {
+    let (mut stream, host) = {
+        let mut launch = launch.lock().unwrap_or_else(PoisonError::into_inner);
+        launch.connect(deadline).map_err(Lost::NotSent)?
+    };
+    let auth = format!("Bearer {}", token.expose());
+    let headers = [
+        ("Host", host.as_str()),
+        ("Authorization", auth.as_str()),
+        ("Content-Type", "application/json"),
+    ];
+    let max = api::MAX_RESPONSE_BYTES;
+    http::exchange(&mut *stream, "POST", target, &headers, body, deadline, max)
+        .map_err(Lost::Unknown)
 }
 
 /// Writes a 0600 redirect page to `url` in the home directory and opens it in the browser.
@@ -290,7 +338,7 @@ impl Studio {
     fn connection(&self, stream: TcpStream) {
         let limits = Limits {
             head_timeout: HEAD_TIMEOUT,
-            body_bytes: 0,
+            body_bytes: if self.forget { FORGET_BODY_BYTES } else { 0 },
             max_requests: 1,
             headers: HEADERS,
             ..Limits::default()
@@ -303,6 +351,7 @@ impl Studio {
             Route::Info => json(200, &self.info()),
             Route::Block => self.block(&request.head.target),
             Route::Read(path) => self.read(path, &request.head.target),
+            Route::Forget => self.forget(request.body),
         };
         let _ = conn.respond(&response);
         // Only allowlisted paths get here, so the line holds no query and no secret.
@@ -313,17 +362,29 @@ impl Studio {
         }
     }
 
-    /// In order: `Host`, `Origin`, the method, then the secret for `/api/`. Returns the route,
-    /// or the error to answer.
+    /// In order: `Host`, `Origin`, the method, `Sec-Fetch-Site` for a write, then the secret for
+    /// `/api/` and `Content-Type` for a write. Returns the route, or the error to answer.
     fn check(&self, head: &Head) -> Result<Route, Response> {
-        let origin = head.headers("origin").all(|origin| origin == self.origin.as_bytes());
+        let path = head.path();
+        // Only with --allow-forget. Without it, `/api/forget` is a path like any other.
+        let write = self.forget && path == FORGET;
+        let own = self.origin.as_bytes();
+        let mut origins = head.headers("origin");
+        let origin = if write && head.method == "POST" {
+            // A write needs exactly 1 `Origin`, the studio's own.
+            matches!((origins.next(), origins.next()), (Some(origin), None) if origin == own)
+        } else {
+            origins.all(|origin| origin == own)
+        };
         if head.header("host") != Some(self.host.as_bytes()) || !origin {
             return Err(error(403, "forbidden"));
         }
-        if head.method != "GET" {
+        if head.method != if write { "POST" } else { "GET" } {
             return Err(error(405, "method_not_allowed"));
         }
-        let path = head.path();
+        if write && !head.headers("sec-fetch-site").all(|site| site == b"same-origin") {
+            return Err(error(403, "forbidden"));
+        }
         if let Some(&(_, content_type, text)) = PAGES.iter().find(|(page, ..)| *page == path) {
             return Ok(Route::Page(content_type, text));
         }
@@ -332,6 +393,16 @@ impl Studio {
         }
         if !self.authorized(head) {
             return Err(error(401, "unauthorized"));
+        }
+        if write {
+            // A type a form can't send, so a browser must ask first, and the studio never answers.
+            let mut types = head.headers("content-type");
+            let json = matches!((types.next(), types.next()), (Some(b"application/json"), None));
+            return if json {
+                Ok(Route::Forget)
+            } else {
+                Err(error(415, "unsupported_media_type"))
+            };
         }
         match path {
             "/api/info" => Ok(Route::Info),
@@ -365,7 +436,55 @@ impl Studio {
         };
         let home = self.home.as_ref().map(|home| home.to_string_lossy());
         let version = crate::VERSION;
-        json!({"version": version, "tenant": self.tenant, "store": store, "home": home})
+        let (tenant, forget) = (&self.tenant, self.forget);
+        json!({"version": version, "tenant": tenant, "store": store, "home": home,
+               "forget": forget})
+    }
+
+    /// `POST /api/forget`: sends each item, in order, as `POST /v1/forget` with the token. It
+    /// stops at the first item not committed and marks the rest `not_sent`. 1 stderr line,
+    /// with counts only.
+    fn forget(&self, body: Vec<u8>) -> Response {
+        let items = match forgets(&body) {
+            Ok(items) => items,
+            Err(message) => {
+                let _ = writeln!(io::stderr(), "atticdb studio: forget refused (400)");
+                return json(400, &json!({"error": "invalid_input", "message": message}));
+            }
+        };
+        drop(body);
+        let mut results = Vec::with_capacity(items.len());
+        let mut stopped = false;
+        for item in &items {
+            if stopped {
+                results.push(json!({"outcome": "not_sent"}));
+                continue;
+            }
+            let body = item.to_string().into_bytes();
+            let reply =
+                post(&self.launch, "/v1/forget", &self.token, &body, Instant::now() + DEADLINE);
+            let result = forget_result(reply);
+            stopped = result["outcome"] != "committed";
+            results.push(result);
+        }
+        let mut counts = [0; 4];
+        for result in &results {
+            let names = ["committed", "not_committed", "unknown", "not_sent"];
+            let at = names.iter().position(|name| result["outcome"] == *name);
+            counts[at.unwrap_or(2)] += 1;
+        }
+        let what = match (items[0].get("key").is_some(), items.len()) {
+            (true, _) => "1 fact key".to_owned(),
+            (false, 1) => "1 session".to_owned(),
+            (false, many) => format!("{many} sessions"),
+        };
+        let [committed, not, unknown, unsent] = counts;
+        let _ = writeln!(
+            io::stderr(),
+            "atticdb studio: forget {what}: {committed} committed, {not} not committed, \
+             {unknown} unknown, {unsent} not sent"
+        );
+        json(200, &json!({"results": results}))
     }
 
     /// Forwards `GET <target without /api>` with the token. The store's status and body come
@@ -416,6 +535,90 @@ impl Studio {
                 json(200, &json!({"repo": repo, "block": block, "chars": chars, "max": max}))
             }
             Err(message) => json(502, &json!({"error": "store_unreachable", "message": message})),
+        }
+    }
+}
+
+/// Parses a forget: `"confirm": "hide"` and 1 to 100 session items, or 1 fact-key item alone.
+/// Each item has a 32-hex `idem_key` and an `up_to_lsn` from 1. Returns the store's bodies.
+fn forgets(body: &[u8]) -> Result<Vec<Value>, String> {
+    let Ok(Value::Object(mut fields)) = serde_json::from_slice(body) else {
+        return Err("body must be a JSON object".into());
+    };
+    if fields.remove("confirm") != Some(json!("hide")) {
+        return Err("confirm must be \"hide\"".into());
+    }
+    let Some(Value::Array(items)) = fields.remove("forgets") else {
+        return Err("forgets must be an array".into());
+    };
+    if !fields.is_empty() {
+        return Err("pass only confirm and forgets".into());
+    }
+    if !(1..=MAX_FORGET_SESSIONS).contains(&items.len()) {
+        return Err("forgets holds 1 to 100 items".into());
+    }
+    let items = items.into_iter().map(forget_item).collect::<Result<Vec<_>, _>>()?;
+    if items.len() > 1 && items.iter().any(|item| item.get("key").is_some()) {
+        return Err("forget 1 to 100 sessions, or 1 fact key alone".into());
+    }
+    Ok(items)
+}
+
+/// 1 item as the store's `POST /v1/forget` body.
+fn forget_item(item: Value) -> Result<Value, String> {
+    let Value::Object(mut fields) = item else { return Err("each item must be an object".into()) };
+    let idem = fields.remove("idem_key");
+    let hex =
+        |key: &&str| key.len() == 32 && key.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    let Some(idem) = idem.as_ref().and_then(Value::as_str).filter(hex) else {
+        return Err("idem_key must be 32 lowercase hex characters".into());
+    };
+    let up_to_lsn = fields.remove("up_to_lsn").and_then(|lsn| lsn.as_u64()).filter(|lsn| *lsn > 0);
+    let Some(up_to_lsn) = up_to_lsn else {
+        return Err("up_to_lsn must be a whole number from 1".into());
+    };
+    let (session, key) = (fields.remove("session"), fields.remove("key"));
+    let mut body = match (session, key, fields.is_empty()) {
+        (Some(Value::Object(session)), None, true) => {
+            let names = (session.get("agent"), session.get("session"), session.len());
+            let (Some(Value::String(agent)), Some(Value::String(name)), 2) = names else {
+                return Err("session must be {agent, session}, 2 strings".into());
+            };
+            json!({"session": {"agent": agent, "session": name}})
+        }
+        (None, Some(Value::String(key)), true) if !key.is_empty() => json!({"key": key}),
+        _ => return Err("each item needs idem_key, up_to_lsn, and session or key".into()),
+    };
+    body["idem_key"] = json!(idem);
+    body["up_to_lsn"] = json!(up_to_lsn);
+    Ok(body)
+}
+
+/// What the page gets for 1 forwarded item: the store's body when it names an outcome.
+/// Nothing sent is `not_sent`, and an answer that may have been lost is `unknown`.
+fn forget_result(reply: Result<ClientResponse, Lost>) -> Value {
+    match reply {
+        Ok(reply) if reply.status == 401 => {
+            let message = "the store refused the studio's token";
+            json!({"outcome": "not_committed", "error": "store_unauthorized", "message": message})
+        }
+        Ok(reply) => match serde_json::from_slice::<Value>(&reply.body) {
+            Ok(body) if body["outcome"].as_str().and_then(crate::outcome::parse).is_some() => body,
+            _ => {
+                let message = format!("the store answered {} with no outcome", reply.status);
+                json!({"outcome": "unknown", "error": "bad_reply", "message": message})
+            }
+        },
+        Err(Lost::NotSent(failure)) => {
+            let message = failure.to_string();
+            json!({"outcome": "not_sent", "error": "store_unreachable", "message": message})
+        }
+        Err(Lost::Unknown(failure)) if failure.kind() == io::ErrorKind::TimedOut => {
+            json!({"outcome": "unknown", "error": "store_timeout"})
+        }
+        Err(Lost::Unknown(failure)) => {
+            let message = failure.to_string();
+            json!({"outcome": "unknown", "error": "store_unreachable", "message": message})
         }
     }
 }

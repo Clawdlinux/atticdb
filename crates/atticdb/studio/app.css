@@ -140,6 +140,8 @@ h1:focus { outline: none; }
 .card-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 14px var(--pad) 18px; border-top: 1px solid var(--rule); }
 .card-foot > :first-child { margin-right: auto; }
 .pill { display: inline-flex; flex: none; align-items: center; height: 20px; padding: 0 8px; border-radius: 999px; background: var(--pill-bg); color: var(--pill-ink); font-size: var(--fs-small); font-weight: 500; white-space: nowrap; vertical-align: 1px; }
+/* a forgotten record: muted, outlined, never filled, so it reads as a gap and not as a label */
+.pill.forgotten { background: none; border: 1px solid var(--control); color: var(--muted); }
 .dot { display: inline-block; width: 8px; height: 8px; margin-right: 8px; border-radius: 50%; background: var(--positive); vertical-align: 1px; }
 .dot.bad { background: var(--negative); }
 
@@ -196,6 +198,23 @@ th:last-child, td:last-child { padding-right: 0; }
 th.n, td.n { text-align: right; }
 td.n { font: var(--fs-fig)/20px var(--fig); font-variant-numeric: tabular-nums; white-space: nowrap; }
 tfoot td { border-top: 1px solid var(--border); font-weight: 500; }
+
+/* forget, only with --allow-forget: a box per row above the row's link, and the confirm step */
+th.pick, td.pick { width: 28px; padding-right: 0; }
+td.pick input { position: relative; z-index: 1; }
+.pick input { width: 16px; height: 16px; margin: 0; vertical-align: -3px; accent-color: var(--primary); cursor: pointer; }
+.btn.danger { border-color: var(--negative); color: var(--negative); }
+.btn.danger:hover { background: #fdf2f2; border-color: var(--negative); }
+.btn.danger[aria-disabled="true"] { border-color: var(--control); color: var(--muted); background: var(--surface); }
+.forget-status { flex-basis: 100%; color: var(--muted); }
+.forget-status:empty { display: none; }
+.is-forgotten .turn-head .fig, .is-forgotten .rec-meta { color: var(--muted); }
+.confirm { width: min(520px, calc(100vw - 32px)); margin: auto; padding: 24px; border: 1px solid var(--border); border-radius: var(--radius-card); background: var(--surface); color: var(--text); }
+.confirm::backdrop { background: rgba(10, 10, 10, 0.4); }
+.confirm h2 { font-size: var(--fs-section); line-height: 24px; font-weight: 500; }
+.confirm p, .confirm ul { margin-top: 10px; }
+.confirm-items { padding-left: 20px; list-style: disc; overflow-wrap: anywhere; }
+.confirm-actions { display: flex; justify-content: flex-end; gap: 12px; margin-top: 20px; }
 
 /* ---------- a session's turns, read in full ---------- */
 .turn { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "head when" "body when" "meta meta"; gap: 6px 20px; padding: 16px 12px; margin: 0 -12px; border-top: 1px solid var(--rule); }
