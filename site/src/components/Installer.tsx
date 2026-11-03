@@ -17,6 +17,7 @@ import {
   hookApplies,
   methodsFor,
   normalize,
+  splitInstallSteps,
   type App,
   type InstallOptions,
   type InstallStep,
@@ -179,6 +180,39 @@ function stepText(step: InstallStep): ReactNode {
   );
 }
 
+type StepProps = { step: InstallStep; index: number; cascade: boolean; t: Timing };
+
+function Step({ step, index, cascade, t }: StepProps) {
+  return (
+    <motion.li
+      className={styles.step}
+      layout="position"
+      initial={{ opacity: 0, y: t.rise }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, transition: t.exit }}
+      transition={{
+        ...t.standard,
+        // 40 ms a step on a rebuild, capped so the whole cascade stays under 200 ms.
+        delay: cascade ? Math.min(index * t.stagger, INSTALL.staggerMax) : 0,
+        layout: t.standard,
+      }}
+    >
+      <p className={styles.say}>{stepText(step)}</p>
+      {step.commands.length > 0 && (
+        <div className={styles.commands}>
+          {step.commands.map((command, j) => (
+            <div key={j} className={styles.cell}>
+              <AnimatePresence initial={false}>
+                <Line key={command} command={command} t={t} />
+              </AnimatePresence>
+            </div>
+          ))}
+        </div>
+      )}
+    </motion.li>
+  );
+}
+
 function InstallerBody({ initial }: InstallerProps) {
   const uid = useId();
   const reduced = useReducedMotion();
@@ -193,8 +227,9 @@ function InstallerBody({ initial }: InstallerProps) {
 
   const os: Os = picked.choice.os ?? initial?.os ?? detected ?? DEFAULT_OPTIONS.os;
   const options = normalize({ ...DEFAULT_OPTIONS, ...initial, ...picked.choice, os });
-  const steps = buildInstallSteps(options);
-  const commands = steps.flatMap((s) => s.commands);
+  const { install, setup } = splitInstallSteps(buildInstallSteps(options));
+  // Copy all stops before setup. Setup asks questions, so it gets pasted on its own.
+  const commands = install.flatMap((s) => s.commands);
   const hookShown = hookApplies(options);
   const notes =
     options.os === "windows"
@@ -290,36 +325,10 @@ function InstallerBody({ initial }: InstallerProps) {
       </div>
 
       <div className={styles.panel} data-ui="steps">
-        <ol key={flow} className={styles.steps}>
+        <ol key={flow} className={styles.steps} data-ui="install-steps">
           <AnimatePresence initial={picked.cascade}>
-            {steps.map((step, i) => (
-              <motion.li
-                key={step.id}
-                className={styles.step}
-                layout="position"
-                initial={{ opacity: 0, y: t.rise }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, transition: t.exit }}
-                transition={{
-                  ...t.standard,
-                  // 40 ms a step on a rebuild, capped so the whole cascade stays under 200 ms.
-                  delay: picked.cascade ? Math.min(i * t.stagger, INSTALL.staggerMax) : 0,
-                  layout: t.standard,
-                }}
-              >
-                <p className={styles.say}>{stepText(step)}</p>
-                {step.commands.length > 0 && (
-                  <div className={styles.commands}>
-                    {step.commands.map((command, j) => (
-                      <div key={j} className={styles.cell}>
-                        <AnimatePresence initial={false}>
-                          <Line key={command} command={command} t={t} />
-                        </AnimatePresence>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </motion.li>
+            {install.map((step, i) => (
+              <Step key={step.id} step={step} index={i} cascade={picked.cascade} t={t} />
             ))}
           </AnimatePresence>
         </ol>
@@ -337,19 +346,29 @@ function InstallerBody({ initial }: InstallerProps) {
           </button>
           <span className="visually-hidden" role="status">
             {copy === "copied"
-              ? "Every command copied, one per line."
+              ? "Install commands copied, one per line. Run setup on its own after."
               : copy === "failed"
                 ? "Copy failed. Use each command's own button."
                 : ""}
           </span>
-          {notes.length > 0 && (
-            <ul className={styles.notes}>
-              {notes.map((n) => (
-                <li key={n.app}>{n.text}</li>
-              ))}
-            </ul>
-          )}
         </div>
+
+        <p className={styles.then}>Then run each of these on its own. Setup asks you questions.</p>
+        <ol key={`${flow}-setup`} className={styles.steps} data-ui="setup-steps">
+          <AnimatePresence initial={picked.cascade}>
+            {setup.map((step, i) => (
+              <Step key={step.id} step={step} index={install.length + i} cascade={picked.cascade} t={t} />
+            ))}
+          </AnimatePresence>
+        </ol>
+
+        {notes.length > 0 && (
+          <ul className={styles.notes}>
+            {notes.map((n) => (
+              <li key={n.app}>{n.text}</li>
+            ))}
+          </ul>
+        )}
       </div>
     </div>
   );

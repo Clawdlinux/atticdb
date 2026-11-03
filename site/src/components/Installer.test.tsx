@@ -154,19 +154,48 @@ describe("Installer", () => {
     expect(screen.getByRole("checkbox", { name: "Preview first" })).not.toBeChecked();
   });
 
-  it("copies every command, one per line", async () => {
+  it("copies only the install lines, one per line, never setup", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
     render(<Installer />);
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Copy all" }));
     });
-    expect(writeText).toHaveBeenCalledWith(
-      buildInstallSteps(DEFAULT_OPTIONS)
-        .flatMap((s) => s.commands)
-        .join("\n"),
-    );
+    expect(writeText).toHaveBeenCalledWith(`${INSTALL_CMD}\n${PATH_CMD}`);
+    const copied = writeText.mock.calls[0][0] as string;
+    expect(copied).not.toMatch(/atticdb (setup|doctor)/);
     expect(screen.getByRole("button", { name: "Copied" })).toBeInTheDocument();
+    expect(
+      screen.getByText("Install commands copied, one per line. Run setup on its own after."),
+    ).toHaveAttribute("role", "status");
+  });
+
+  it("copies only the build line from source, and no setup line", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    render(<Installer initial={{ method: "source" }} />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Copy all" }));
+    });
+    const copied = writeText.mock.calls[0][0] as string;
+    expect(copied).toMatch(/^cargo install /);
+    expect(copied.split("\n")).toHaveLength(1);
+  });
+
+  it("puts setup, its preview and the doctor after Copy all, each with its own copy button", () => {
+    const { container } = render(<Installer />);
+    const button = screen.getByRole("button", { name: "Copy all" });
+    const setupList = container.querySelector('[data-ui="setup-steps"]') as HTMLElement;
+    expect(button.compareDocumentPosition(setupList) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const rows = [...setupList.querySelectorAll('[data-ui="command"] code')].map((c) => c.textContent);
+    expect(rows).toEqual([`${SETUP} --dry-run`, SETUP, "atticdb doctor"]);
+    for (const row of setupList.querySelectorAll('[data-ui="command"]')) {
+      expect(within(row as HTMLElement).getByRole("button")).toBeInTheDocument();
+    }
+    const installList = container.querySelector('[data-ui="install-steps"]') as HTMLElement;
+    const installRows = [...installList.querySelectorAll('[data-ui="command"] code')].map((c) => c.textContent);
+    expect(installRows).toEqual([INSTALL_CMD, PATH_CMD]);
+    expect(screen.getByText("Then run each of these on its own. Setup asks you questions.")).toBeInTheDocument();
   });
 
   it("renders the macOS steps on the server", () => {

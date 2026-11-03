@@ -120,6 +120,17 @@ export function hookApplies(o: InstallOptions): boolean {
   return o.apps.length === 0 || o.apps.some((app) => HOOK_APPS.includes(app));
 }
 
+// These steps run after the install, one at a time. Setup asks questions in the terminal.
+// Pasted with the install lines, a shell without bracketed paste reads the later lines as answers.
+export const SETUP_STEP_IDS = ["preview", "setup", "doctor"];
+
+export function splitInstallSteps(steps: InstallStep[]): { install: InstallStep[]; setup: InstallStep[] } {
+  return {
+    install: steps.filter((s) => !SETUP_STEP_IDS.includes(s.id)),
+    setup: steps.filter((s) => SETUP_STEP_IDS.includes(s.id)),
+  };
+}
+
 export function buildInstallSteps(options: InstallOptions): InstallStep[] {
   const o = normalize(options);
   const steps = installSteps(o.method);

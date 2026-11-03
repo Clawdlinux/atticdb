@@ -229,10 +229,20 @@
   display: block;
 }
 
+/* Setup asks questions, so its steps sit below Copy all and are copied one at a time. */
+.then {
+  max-width: 60ch;
+  margin-top: var(--installer-gap, 1.75rem);
+  margin-bottom: var(--installer-step-gap, 0.625rem);
+  padding-top: var(--installer-gap, 1.75rem);
+  border-top: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+  font-weight: 600;
+}
+
 .notes {
   display: grid;
   gap: 0.25rem;
-  margin: 0;
+  margin: var(--installer-gap, 1.75rem) 0 0;
   padding: 0;
   color: var(--muted);
   font-size: var(--step-small);

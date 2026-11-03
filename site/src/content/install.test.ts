@@ -11,6 +11,7 @@ import {
   hookApplies,
   methodsFor,
   normalize,
+  splitInstallSteps,
   type InstallOptions,
 } from "./install";
 
@@ -105,6 +106,23 @@ describe("buildInstallSteps", () => {
     expect(steps[0].id).toBe("install");
     expect(steps[0].commands[0].startsWith("cargo install --git")).toBe(true);
     expect(steps.map((s) => s.id)).not.toContain("path");
+  });
+});
+
+describe("splitInstallSteps", () => {
+  it("keeps setup, which asks questions, out of the install lines", () => {
+    const { install, setup } = splitInstallSteps(buildInstallSteps(DEFAULT_OPTIONS));
+    expect(install.flatMap((s) => s.commands)).toEqual([INSTALL_CMD, PATH_CMD]);
+    expect(setup.map((s) => s.id)).toEqual(["preview", "setup", "doctor"]);
+  });
+
+  it("splits the zip and source flows the same way", () => {
+    for (const method of ["zip", "source"] as const) {
+      const os = method === "zip" ? "windows" : "linux";
+      const { install, setup } = splitInstallSteps(buildInstallSteps({ ...DEFAULT_OPTIONS, os, method }));
+      expect(install.flatMap((s) => s.commands).join("\n")).not.toMatch(/atticdb (setup|doctor)/);
+      expect(setup.map((s) => s.id)).toEqual(["preview", "setup", "doctor"]);
+    }
   });
 });
 
