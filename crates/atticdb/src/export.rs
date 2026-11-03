@@ -127,6 +127,10 @@ fn parse(target: &str) -> Result<(Option<Cursor>, usize), String> {
     let at = number(at, "at")?.unwrap_or_default();
     let skip = number(skip, "skip")?.unwrap_or_default();
     let offset = number(offset, "offset")?.unwrap_or_default();
+    // Far below u64::MAX, so adding a page's bytes to it can't overflow.
+    if offset > i64::MAX as u64 {
+        return Err(format!("offset must be at most {}", i64::MAX));
+    }
     // A cursor's offset counts the skipped bytes of its entry too.
     let skip = usize::try_from(skip).ok().filter(|skip| *skip as u64 <= offset);
     let skip = skip.ok_or("skip must be at most offset")?;
@@ -149,6 +153,17 @@ fn build(
     };
     let page = engine.export(tenant, query).map_err(failed)?;
     let at = page.at;
+    // A cursor inside an entry needs that entry first, and visible. A forget may have hidden
+    // it, and an empty page has no entry to check in the loop below.
+    if let Some(cursor) = cursor.filter(|cursor| cursor.skip > 0) {
+        let shown = page.entries.first().is_some_and(|entry| {
+            let hidden = matches!(entry, ExportEntry::Turn { turn, .. } if turn.redacted);
+            entry.pos() == cursor.pos && !hidden
+        });
+        if !shown {
+            return Err(conflict());
+        }
+    }
     // The file the next entry continues, and its bytes before that entry.
     let (mut file, mut written) = match cursor {
         Some(cursor) => (path_of(&cursor.pos), cursor.offset - cursor.skip as u64),
@@ -165,8 +180,7 @@ fn build(
         let mut start = 0;
         // The cursor's entry, re-rendered. Checked before any slice, so no cursor can panic.
         if let Some(cursor) = cursor.filter(|cursor| i == 0 && cursor.skip > 0) {
-            let hidden = matches!(entry, ExportEntry::Turn { turn, .. } if turn.redacted);
-            if pos != cursor.pos || hidden || cursor.skip > markdown.len() {
+            if cursor.skip > markdown.len() {
                 return Err(conflict());
             }
             if !markdown.is_char_boundary(cursor.skip) {

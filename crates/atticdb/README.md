@@ -661,6 +661,19 @@ Past 6,000 characters the block stops at a whole line and ends with `(more in at
 The block depends only on the repo and memory, so the prompt prefix stays the same until memory changes.
 It is a snapshot. The model can call `memory_search` or `fact_list` for more.
 
+## `atticdb export`
+
+```sh
+atticdb export <dir> [--url <url>] [--data-dir <dir>] [--config <path>] [--tenant <name>] \
+  [--token-file <path>] [--max-bytes <n>]
+```
+
+It writes `facts.md` and `sessions/<agent>/<session>.md` at 1 durable LSN. It reads pages of `GET /v1/export?format=markdown`.
+Forgotten turns show as placeholders. Forgotten facts are left out.
+`<dir>` must not exist. The export is written into `<dir>.partial-<hex>` and renamed to `<dir>` at the end.
+A crash leaves only the partial folder, and a failure prints its path.
+An empty directory created at `<dir>` during the final rename can be replaced on Unix.
+
 ## `atticdb studio`
 
 ```sh

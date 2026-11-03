@@ -1,4 +1,4 @@
-use crate::support::{private_file, serve, sim_engine, Dir, Process, Via, TOKEN_A};
+use crate::support::{private_file, serve, sim_engine, Dir, Process, Via, TOKEN_A, TOKEN_B};
 use atticdb_core::{forget::Selector, Engine, NewFact, NewTurn, Role, Scope};
 use atticdb_tape::SimDisk;
 use serde_json::{json, Value};
@@ -267,6 +267,12 @@ fn export_writes_one_file_per_session_and_facts_at_one_lsn() {
         ),
         ("non-numeric skip", vec![("skip", "1x")], 400, "invalid_input"),
         ("skip past offset", vec![("offset", "0")], 400, "invalid_input"),
+        (
+            "offset past i64",
+            vec![("skip", "0"), ("offset", "18446744073709551615")],
+            400,
+            "invalid_input",
+        ),
         ("a traversal name is only a name", vec![("after_agent", "..%2Fx")], 409, "conflict"),
         (
             "a traversal name at an entry's start",
@@ -397,5 +403,18 @@ fn export_restarts_when_a_forget_cuts_an_entry() {
 
     let (status, body) = via.a("GET", &target(&next, &[]), None);
     let expected = json!({"error": "conflict", "message": "the export fell behind; start again"});
-    assert_eq!((status, body), (409, expected), "a forget mid-entry stops the old cursor");
+    assert_eq!((status, body), (409, expected.clone()), "a forget mid-entry stops the old cursor");
+
+    // Tenant b's only entry is a big fact. Forgotten mid-entry, it leaves an empty page.
+    let b = |target: &str| via.call(Some("127.0.0.1"), Some(TOKEN_B), "GET", target, None);
+    let content = "x".repeat(200_000);
+    let big =
+        NewFact { key: "k".into(), content: content.into(), meta: Vec::new(), agent: "ag".into() };
+    engine.fact_put("b", big, None, None).unwrap();
+    let (status, first) = b(&format!("/v1/export?format=markdown&max_bytes={PAGE}"));
+    let next = first["next"].clone();
+    assert!(status == 200 && next["key"] == "k" && next["skip"].as_u64().unwrap() > 0, "{next}");
+    engine.forget("b", Selector::FactKey("k".into()), None, None).unwrap();
+    let (status, body) = b(&target(&next, &[]));
+    assert_eq!((status, body), (409, expected), "the last entry, hidden mid-entry");
 }
