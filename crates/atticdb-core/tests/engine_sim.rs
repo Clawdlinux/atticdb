@@ -3,8 +3,8 @@
 
 use atticdb_core::{
     forget::Selector, turn::decode, Appended, CompressionMode, Engine, EngineError, EngineOptions,
-    ErrorKind, FactQuery, FactWritten, Health, Hit, NewFact, NewTurn, Outcome, Record, RecordQuery,
-    Role, Scope, SearchQuery, SimFact, Turn, WindowQuery,
+    ErrorKind, FactQuery, FactWritten, Forgotten, Health, Hit, NewFact, NewTurn, Outcome, Record,
+    RecordQuery, Revision, Role, Scope, SearchQuery, SimFact, Turn, WindowQuery,
 };
 use atticdb_tape::sim::{CapacityError, CapacityPlan, PublishPause, SimClock, StorageFullFault};
 use atticdb_tape::{Clock, Error, HookIo, Io, Kind, Op, SimDisk, Tape, TapeOptions};
@@ -108,6 +108,13 @@ struct Batch {
     receipt: Option<Appended>,
     time: u64,
     fact: Option<FactOp>,
+    forget: Option<ForgetOp>,
+}
+/// A forget in the scope's tenant. It covers records at or below `up_to_lsn` and its own LSN.
+#[derive(Clone)]
+struct ForgetOp {
+    selector: Selector,
+    up_to_lsn: Option<u64>,
 }
 /// A fact write in the scope's tenant. `content` None deletes. The agent names the batch.
 #[derive(Clone)]
@@ -121,6 +128,13 @@ const FACT_KEYS: [&str; 8] = ["a", "a/1", "a/2", "a/b/1", "a/b/2", "ab", "b/1", 
 type FactKey = (String, String);
 /// Per (tenant, key), every acknowledged revision in LSN order. None is a tombstone.
 type Revisions = Vec<(u64, Option<Vec<u8>>)>;
+/// Per tenant, every acknowledged forget in LSN order as (LSN, selector, cutoff).
+type Forgets = BTreeMap<String, Vec<(u64, Selector, u64)>>;
+/// A record a forget can cover: a turn of a scope, or a fact revision of a key.
+enum Target<'a> {
+    Turn(&'a Scope),
+    Fact(&'a FactKey),
+}
 #[derive(Clone)]
 struct Oracle {
     scopes: Vec<Scope>,
@@ -128,8 +142,9 @@ struct Oracle {
     batches: Vec<Batch>,
     tenants: BTreeMap<String, u32>,
     facts: BTreeMap<FactKey, Revisions>,
+    forgets: Forgets,
     fact_history: usize,
-    /// Commit time of the newest fact. Facts advance the tape's commit clock too.
+    /// Commit time of the newest fact or forget. They advance the tape's commit clock too.
     fact_time: u64,
 }
 impl Oracle {
@@ -147,9 +162,165 @@ impl Oracle {
             batches: Vec::new(),
             tenants: BTreeMap::new(),
             facts: BTreeMap::new(),
+            forgets: BTreeMap::new(),
             fact_history: EngineOptions::default().fact_history,
             fact_time: 0,
         }
+    }
+    /// I10: a record is hidden exactly when an acknowledged forget of its own tenant covers it.
+    fn hidden(&self, target: Target, lsn: u64) -> bool {
+        let tenant = match target {
+            Target::Turn(scope) => &scope.tenant,
+            Target::Fact((tenant, _)) => tenant,
+        };
+        let forgets = self.forgets.get(tenant).map_or(&[][..], Vec::as_slice);
+        forgets.iter().any(|(_, selector, cutoff)| {
+            lsn <= *cutoff
+                && match (selector, &target) {
+                    (Selector::Session { agent, session }, Target::Turn(scope)) => {
+                        *agent == scope.agent && *session == scope.session
+                    }
+                    (Selector::FactKey(key), Target::Fact((_, fact_key))) => key == fact_key,
+                    (Selector::Lsns(lsns), _) => lsns.contains(&lsn),
+                    _ => false,
+                }
+        })
+    }
+    /// The scope's turns as readers must return them: a forgotten turn is a placeholder.
+    fn window(&self, scope: usize) -> Vec<Turn> {
+        let hide = |turn: &Turn| self.hidden(Target::Turn(&self.scopes[scope]), turn.lsn);
+        let placeholder = |turn: &Turn| Turn {
+            lsn: turn.lsn,
+            seq: turn.seq,
+            commit_time_ns: 0,
+            role: Role::System,
+            content: vec![],
+            meta: vec![],
+            redacted: true,
+        };
+        let turns = self.history[scope].iter();
+        turns.map(|turn| if hide(turn) { placeholder(turn) } else { turn.clone() }).collect()
+    }
+    /// A full window equals the oracle's and costs 1 read per turn that is not a placeholder.
+    /// Returns the expected window.
+    fn check_window(&self, engine: &Engine, scope: usize, case: &str) -> Vec<Turn> {
+        let expected = self.window(scope);
+        let before = engine.metrics().unwrap().window_reads;
+        let got = engine.window(&self.scopes[scope], WindowQuery::Last(usize::MAX)).unwrap();
+        assert_eq!(got, expected, "I10: {case} scope={scope}");
+        let reads = expected.iter().filter(|turn| !turn.redacted).count() as u64;
+        let read = engine.metrics().unwrap().window_reads - before;
+        assert_eq!(read, reads, "window reads: {case} scope={scope}");
+        expected
+    }
+    /// A revision as readers must return it: a forgotten one is a placeholder.
+    fn revision(&self, key: &FactKey, lsn: u64, content: &Option<Vec<u8>>) -> Revision {
+        if self.hidden(Target::Fact(key), lsn) {
+            let (agent, content, meta) = (String::new(), vec![], vec![]);
+            return Revision {
+                lsn,
+                commit_time_ns: 0,
+                agent,
+                deleted: false,
+                content,
+                meta,
+                redacted: true,
+            };
+        }
+        let index = self.fact_batch(lsn);
+        Revision {
+            lsn,
+            commit_time_ns: self.batches[index].time,
+            agent: index.to_string(),
+            deleted: content.is_none(),
+            content: content.clone().unwrap_or_default(),
+            meta: vec![],
+            redacted: false,
+        }
+    }
+    /// The acknowledged fact batch that wrote the revision at `lsn`.
+    fn fact_batch(&self, lsn: u64) -> usize {
+        self.batches
+            .iter()
+            .position(|b| b.fact.is_some() && b.receipt.as_ref().is_some_and(|r| r.last_lsn == lsn))
+            .unwrap()
+    }
+    /// The key's current value: the newest revision unless it is a tombstone or forgotten (I9).
+    fn current_value(&self, key: &FactKey) -> Option<(u64, Vec<u8>)> {
+        let (lsn, content) = self.facts.get(key)?.last()?;
+        if self.hidden(Target::Fact(key), *lsn) {
+            return None;
+        }
+        Some((*lsn, content.clone()?))
+    }
+    /// The scopes and fact keys a forget batch names, in every tenant for LSNs.
+    fn touched(&self, index: usize) -> (Vec<usize>, Vec<FactKey>) {
+        let tenant = &self.scopes[self.batches[index].scope].tenant;
+        match &self.batches[index].forget.as_ref().unwrap().selector {
+            Selector::Session { agent, session } => {
+                let scopes = (0..self.scopes.len()).filter(|&s| {
+                    let scope = &self.scopes[s];
+                    scope.tenant == *tenant && scope.agent == *agent && scope.session == *session
+                });
+                (scopes.collect(), vec![])
+            }
+            Selector::FactKey(key) => (vec![], vec![(tenant.clone(), key.clone())]),
+            Selector::Lsns(lsns) => {
+                let scopes = (0..self.scopes.len())
+                    .filter(|&s| self.history[s].iter().any(|turn| lsns.contains(&turn.lsn)));
+                let keys = self
+                    .facts
+                    .iter()
+                    .filter(|(_, revs)| revs.iter().any(|(lsn, _)| lsns.contains(lsn)));
+                (scopes.collect(), keys.map(|(key, _)| key.clone()).collect())
+            }
+        }
+    }
+    /// Reads every window and fact a forget batch names. Before the forget this fills the hot
+    /// cache with turns it will hide. After the ack it proves they are hidden at once.
+    fn check_touched(&self, engine: &Engine, index: usize) {
+        let (scopes, keys) = self.touched(index);
+        for scope in scopes {
+            self.check_window(engine, scope, &format!("batch={index}"));
+        }
+        for key in keys {
+            self.check_fact(engine, &key);
+        }
+    }
+    /// The forget entries the engine holds and counts: sessions and keys that had a record
+    /// when the forget committed, and (tenant, LSN) pairs at or below the cutoff.
+    fn held_forgets(&self) -> [usize; 3] {
+        let (mut sessions, mut keys, mut lsns) =
+            (BTreeSet::new(), BTreeSet::new(), BTreeSet::new());
+        for (tenant, forgets) in &self.forgets {
+            for (forget, selector, cutoff) in forgets {
+                match selector {
+                    Selector::Session { agent, session } => {
+                        let written =
+                            self.scopes.iter().zip(&self.history).any(|(scope, turns)| {
+                                (&scope.tenant, &scope.agent, &scope.session)
+                                    == (tenant, agent, session)
+                                    && turns.first().is_some_and(|turn| turn.lsn < *forget)
+                            });
+                        if written {
+                            sessions.insert((tenant, agent, session));
+                        }
+                    }
+                    Selector::FactKey(key) => {
+                        let revs = self.facts.get(&(tenant.clone(), key.clone()));
+                        if revs.and_then(|revs| revs.first()).is_some_and(|(lsn, _)| lsn < forget) {
+                            keys.insert((tenant, key));
+                        }
+                    }
+                    Selector::Lsns(list) => {
+                        lsns.extend(
+                            list.iter().filter(|&lsn| lsn <= cutoff).map(|lsn| (tenant, *lsn)),
+                        );
+                    }
+                }
+            }
+        }
+        [sessions.len(), keys.len(), lsns.len()]
     }
     fn fact_key(&self, index: usize) -> Option<FactKey> {
         let batch = &self.batches[index];
@@ -157,34 +328,49 @@ impl Oracle {
     }
     /// The LSN of the key's current value, or 0 when it has none.
     fn current(&self, key: &FactKey) -> u64 {
-        let newest = self.facts.get(key).and_then(|revs| revs.last());
-        newest.filter(|(_, content)| content.is_some()).map_or(0, |(lsn, _)| *lsn)
+        self.current_value(key).map_or(0, |(lsn, _)| lsn)
     }
     /// A conditional write conflicts only on a stale `if_lsn`, or behind an unresolved
-    /// earlier write to the same key in its group.
+    /// earlier write or forget to the same key in its group.
     fn assert_conflict(&self, index: usize, unresolved: &[usize]) {
         let key = self.fact_key(index).unwrap();
         let if_lsn = self.batches[index].fact.as_ref().unwrap().if_lsn;
+        let forgets = |i: usize| {
+            let batch = &self.batches[i];
+            self.scopes[batch.scope].tenant == key.0
+                && batch.forget.as_ref().is_some_and(|op| match &op.selector {
+                    Selector::FactKey(name) => *name == key.1,
+                    Selector::Lsns(_) => true,
+                    Selector::Session { .. } => false,
+                })
+        };
         assert!(
             if_lsn.is_some_and(|lsn| lsn != self.current(&key))
-                || unresolved.iter().any(|&i| self.fact_key(i).as_ref() == Some(&key)),
+                || unresolved
+                    .iter()
+                    .any(|&i| self.fact_key(i).as_ref() == Some(&key) || forgets(i)),
             "Conflict on a matching if_lsn: batch={index}"
         );
     }
-    /// I9: the current value is the newest revision unless it is a tombstone. History shows the
-    /// newest `fact_history` revisions. Reads cost one tape read per returned entry.
+    /// I9 and I10: the current value is the newest revision unless it is a tombstone or
+    /// forgotten. History shows the newest `fact_history` revisions, forgotten ones as
+    /// placeholders. Reads cost one tape read per returned entry that is not a placeholder.
     fn check_fact(&self, engine: &Engine, key: &FactKey) {
         let revs = self.facts.get(key).map_or(&[][..], Vec::as_slice);
         let before = engine.metrics().unwrap().fact_reads;
-        let current = revs.last().and_then(|(lsn, content)| Some((*lsn, content.clone()?)));
-        let reads = u64::from(current.is_some()) + revs.len().min(self.fact_history) as u64;
+        let current = self.current_value(key);
+        let newest: Vec<_> = revs
+            .iter()
+            .rev()
+            .take(self.fact_history)
+            .map(|(lsn, content)| self.revision(key, *lsn, content))
+            .collect();
+        let shown = newest.iter().filter(|rev| !rev.redacted).count();
+        let reads = u64::from(current.is_some()) + shown as u64;
         let got = engine.fact_get(&key.0, &key.1).unwrap();
         assert_eq!(got.map(|fact| (fact.lsn, fact.content)), current, "I9: {key:?}");
         let history = engine.fact_history(&key.0, &key.1, usize::MAX).unwrap();
-        let shown =
-            history.revisions.into_iter().map(|r| (r.lsn, (!r.deleted).then_some(r.content)));
-        let newest = revs.iter().rev().take(self.fact_history).cloned();
-        assert!(shown.eq(newest), "history: {key:?}");
+        assert_eq!(history.revisions, newest, "history: {key:?}");
         assert_eq!(history.truncated, revs.len() > self.fact_history, "truncated: {key:?}");
         assert_eq!(engine.metrics().unwrap().fact_reads - before, reads, "fact reads: {key:?}");
     }
@@ -192,8 +378,19 @@ impl Oracle {
         assert!(!receipt.deduplicated, "an unacknowledged batch must be a fresh commit");
         let previous = self.history.iter().flatten().map(|turn| turn.commit_time_ns).max();
         let previous = previous.unwrap_or(0).max(self.fact_time);
+        if let Some(op) = self.batches[index].forget.clone() {
+            self.fact_time = self.batches[index].time.max(previous + 1);
+            self.batches[index].time = self.fact_time;
+            let tenant = self.scopes[self.batches[index].scope].tenant.clone();
+            let lsn = receipt.last_lsn;
+            let cutoff = op.up_to_lsn.map_or(lsn, |up_to| up_to.min(lsn));
+            self.forgets.entry(tenant).or_default().push((lsn, op.selector, cutoff));
+            self.batches[index].receipt = Some(receipt);
+            return;
+        }
         if let Some(key) = self.fact_key(index) {
             self.fact_time = self.batches[index].time.max(previous + 1);
+            self.batches[index].time = self.fact_time;
             let fact = self.batches[index].fact.clone().unwrap();
             if let Some(if_lsn) = fact.if_lsn {
                 assert_eq!(self.current(&key), if_lsn, "committed on another LSN: batch={index}");
@@ -225,10 +422,8 @@ impl Oracle {
         b.receipt = Some(receipt);
     }
     fn verify(&self, engine: &Engine, rng: &mut Rng) {
-        for (scope, expected) in self.scopes.iter().zip(&self.history) {
-            let before = engine.metrics().unwrap().window_reads;
-            assert_eq!(engine.window(scope, WindowQuery::Last(usize::MAX)).unwrap(), *expected);
-            assert_eq!(engine.metrics().unwrap().window_reads - before, expected.len() as u64);
+        for (index, scope) in self.scopes.iter().enumerate() {
+            let expected = &self.check_window(engine, index, "verify");
             let n = rng.below(expected.len() + 5);
             assert_eq!(
                 engine.window(scope, WindowQuery::Last(n)).unwrap(),
@@ -242,6 +437,10 @@ impl Oracle {
             assert_eq!(engine.window(scope, WindowQuery::Since { seq, limit }).unwrap(), wanted);
         }
         assert_eq!(engine.metrics().unwrap().tenants, self.tenants.len());
+        let metrics = engine.metrics().unwrap();
+        let held =
+            [metrics.forgotten_sessions, metrics.forgotten_fact_keys, metrics.forgotten_lsns];
+        assert_eq!(held, self.held_forgets(), "forgotten sessions, fact keys and LSNs");
         for key in self.facts.keys() {
             self.check_fact(engine, key);
         }
@@ -250,14 +449,11 @@ impl Oracle {
         for tenant in self.facts.keys().map(|(tenant, _)| tenant).collect::<BTreeSet<_>>() {
             let live: Vec<_> = self
                 .facts
-                .iter()
-                .filter(|((owner, _), _)| owner == tenant)
-                .filter_map(|((_, key), revs)| {
-                    let (lsn, content) = revs.last()?;
-                    let agent = self.batches.iter().position(|b| {
-                        b.fact.is_some() && b.receipt.as_ref().is_some_and(|r| r.last_lsn == *lsn)
-                    });
-                    Some((key, agent?.to_string(), content.as_ref()?))
+                .keys()
+                .filter(|(owner, _)| owner == tenant)
+                .filter_map(|fact_key| {
+                    let (lsn, content) = self.current_value(fact_key)?;
+                    Some((&fact_key.1, self.fact_batch(lsn).to_string(), content))
                 })
                 .collect();
             for prefix in &prefixes {
@@ -284,7 +480,7 @@ impl Oracle {
                         page.facts.iter().map(|f| (&f.key, &f.agent, &f.content)).collect();
                     let expected: Vec<_> = expected
                         .iter()
-                        .map(|(key, agent, content)| (*key, agent, *content))
+                        .map(|(key, agent, content)| (*key, agent, content))
                         .collect();
                     let case = format!(
                         "tenant={tenant} prefix={prefix:?} limit={limit} max_bytes={max_bytes}"
@@ -303,9 +499,48 @@ impl Oracle {
                 }
             }
         }
+        self.check_records(engine, rng);
         // Half the time keeps the nightly 20,000-seed run affordable.
         if rng.below(2) == 0 {
             self.check_search(engine, rng);
+        }
+    }
+
+    /// A full `records` walk of every tenant returns each turn and fact revision as written,
+    /// newest first, and a forgotten one as a placeholder with its identifiers (I10).
+    fn check_records(&self, engine: &Engine, rng: &mut Rng) {
+        let tenants: BTreeSet<&String> = self.scopes.iter().map(|s| &s.tenant).collect();
+        for tenant in tenants {
+            let mut expected: Vec<(u64, Record)> = Vec::new();
+            for (index, scope) in self.scopes.iter().enumerate() {
+                if scope.tenant == *tenant {
+                    expected.extend(self.window(index).into_iter().map(|turn| {
+                        let (agent, session) = (scope.agent.clone(), scope.session.clone());
+                        (turn.lsn, Record::Turn { agent, session, turn })
+                    }));
+                }
+            }
+            for (key, revs) in self.facts.iter().filter(|((owner, _), _)| owner == tenant) {
+                expected.extend(revs.iter().map(|(lsn, content)| {
+                    let revision = self.revision(key, *lsn, content);
+                    (*lsn, Record::Fact { key: key.1.clone(), revision })
+                }));
+            }
+            expected.sort_by_key(|(lsn, _)| std::cmp::Reverse(*lsn));
+            let expected: Vec<Record> = expected.into_iter().map(|(_, record)| record).collect();
+            let (limit, visits) = (1 + rng.below(64), [64, usize::MAX][rng.below(2)]);
+            let (mut got, mut before) = (Vec::new(), None);
+            loop {
+                let query =
+                    RecordQuery { before, limit, kind: None, max_bytes: usize::MAX, visits };
+                let page = engine.records(tenant, query).unwrap();
+                got.extend(page.records);
+                match page.next {
+                    Some(next) => before = Some(next),
+                    None => break,
+                }
+            }
+            assert_eq!(got, expected, "records: tenant={tenant} limit={limit} visits={visits}");
         }
     }
 
@@ -321,22 +556,21 @@ impl Oracle {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
-        // 1 tenant per check keeps the nightly run short. Seeds cover the others.
-        for tenant in [tenants[rng.below(tenants.len())]] {
-            let word = ["abab", "bba", "aaaa"][rng.below(3)];
-            let mut expected: Vec<(u64, Vec<u8>)> = self
-                .scopes
-                .iter()
-                .zip(&self.history)
-                .filter(|(scope, _)| scope.tenant == tenant)
-                .flat_map(|(_, turns)| turns.iter())
-                .filter(|turn| has(&turn.content, word))
-                .map(|turn| (turn.lsn, turn.content.clone()))
+        // 1 tenant per check keeps the nightly run short. Seeds cover the others. Every word
+        // the content generator writes is searched, so hidden turns and facts are candidates.
+        let tenant = tenants[rng.below(tenants.len())];
+        for word in ["abab", "bba", "aaaa"] {
+            let mut expected: Vec<(u64, Vec<u8>)> = (0..self.scopes.len())
+                .filter(|&scope| self.scopes[scope].tenant == tenant)
+                .flat_map(|scope| self.window(scope))
+                .filter(|turn| !turn.redacted && has(&turn.content, word))
+                .map(|turn| (turn.lsn, turn.content))
                 .collect();
-            for ((owner, key), revs) in &self.facts {
-                if let Some((lsn, Some(content))) = revs.last() {
-                    if owner == tenant && (has(key.as_bytes(), word) || has(content, word)) {
-                        expected.push((*lsn, content.clone()));
+            for fact_key in self.facts.keys() {
+                let (owner, key) = fact_key;
+                if let Some((lsn, content)) = self.current_value(fact_key) {
+                    if owner == tenant && (has(key.as_bytes(), word) || has(&content, word)) {
+                        expected.push((lsn, content));
                     }
                 }
             }
@@ -376,6 +610,8 @@ impl Oracle {
         let mut transactions: BTreeMap<u64, Vec<(u64, u64)>> = BTreeMap::new();
         let mut tenant_names = BTreeMap::new();
         let mut facts: BTreeMap<FactKey, Revisions> = BTreeMap::new();
+        let mut forgets = Forgets::new();
+        let mut claimed = BTreeSet::new();
         let mut records = 0;
         for record in tape.scan(0) {
             let record = record.unwrap();
@@ -387,6 +623,32 @@ impl Oracle {
                 }
                 assert!(tenant_names.insert(record.tenant_id, name.clone()).is_none());
                 self.tenants.insert(name, record.tenant_id);
+                continue;
+            }
+            if record.kind == Kind::Forget {
+                let forget = atticdb_core::forget::decode(&record.payload).unwrap();
+                let tenant = tenant_names[&record.tenant_id].clone();
+                // A keyless forget has no batch number, so it matches its payload. Identical
+                // pending copies are told apart by claiming each once.
+                let index = (0..self.batches.len())
+                    .find(|&i| {
+                        let batch = &self.batches[i];
+                        batch.forget.as_ref().is_some_and(|op| {
+                            (&op.selector, op.up_to_lsn) == (&forget.selector, forget.up_to_lsn)
+                        }) && self.scopes[batch.scope].tenant == tenant
+                            && batch.key == forget.idem_key
+                            && match &batch.receipt {
+                                Some(receipt) => receipt.last_lsn == record.lsn,
+                                None => pending.contains(&i) && !claimed.contains(&i),
+                            }
+                    })
+                    .unwrap_or_else(|| {
+                        panic!("NotCommitted or unwritten forget recovered: lsn={}", record.lsn)
+                    });
+                claimed.insert(index);
+                transactions.entry(record.txn).or_default().push((index as u64, record.lsn));
+                let cutoff = forget.up_to_lsn.map_or(record.lsn, |lsn| lsn.min(record.lsn));
+                forgets.entry(tenant).or_default().push((record.lsn, forget.selector, cutoff));
                 continue;
             }
             if record.kind == Kind::Fact {
@@ -463,6 +725,10 @@ impl Oracle {
         }
         assert_eq!(actual, self.history, "acknowledged data lost or unexpected turns recovered");
         assert_eq!(facts, self.facts, "acknowledged facts lost or unexpected facts recovered");
+        assert_eq!(
+            forgets, self.forgets,
+            "acknowledged forgets lost or unexpected forgets recovered"
+        );
         records
     }
 }
@@ -500,10 +766,14 @@ fn retry(engine: &Engine, oracle: &mut Oracle, index: usize) {
         oracle.check_fact(engine, &key);
         return;
     }
+    if oracle.batches[index].forget.is_some() {
+        oracle.check_touched(engine, index);
+        return;
+    }
     let scope = oracle.batches[index].scope;
     assert_eq!(
         engine.window(&oracle.scopes[scope], WindowQuery::Last(usize::MAX)).unwrap(),
-        oracle.history[scope],
+        oracle.window(scope),
         "an acknowledged retry must be immediately readable"
     );
 }
@@ -520,7 +790,22 @@ fn fact_receipt(written: FactWritten) -> Appended {
     Appended { txn, first_lsn: lsn, last_lsn: lsn, seqs: vec![], deduplicated }
 }
 
-/// Runs a batch as a turn append or a fact write.
+/// A forget receipt's cutoff is `up_to_lsn` when lower than its LSN, on retries too.
+#[track_caller]
+fn forget_receipt(forgotten: Forgotten, up_to_lsn: Option<u64>) -> Appended {
+    let Forgotten { txn, lsn, cutoff, deduplicated } = forgotten;
+    assert_eq!(cutoff, up_to_lsn.map_or(lsn, |up_to| up_to.min(lsn)), "cutoff of {lsn}");
+    Appended { txn, first_lsn: lsn, last_lsn: lsn, seqs: vec![], deduplicated }
+}
+
+/// The forget a batch names. `changed` alters the cutoff but keeps the retry key.
+fn forget_args(op: &ForgetOp, changed: bool) -> (Selector, Option<u64>) {
+    let up_to_lsn =
+        if changed { Some(op.up_to_lsn.map_or(1, |lsn| lsn + 1)) } else { op.up_to_lsn };
+    (op.selector.clone(), up_to_lsn)
+}
+
+/// Runs a batch as a turn append, a fact write or a forget.
 fn write(
     engine: &Engine,
     oracle: &Oracle,
@@ -529,6 +814,11 @@ fn write(
 ) -> std::result::Result<Appended, EngineError> {
     let batch = &oracle.batches[index];
     let (scope, key) = (&oracle.scopes[batch.scope], batch.key.as_deref());
+    if let Some(op) = &batch.forget {
+        let (selector, up_to_lsn) = forget_args(op, changed);
+        let forgotten = engine.forget(&scope.tenant, selector, key, up_to_lsn);
+        return forgotten.map(|forgotten| forget_receipt(forgotten, up_to_lsn));
+    }
     let Some(op) = &batch.fact else {
         let mut turns = batch.turns.clone();
         if changed {
@@ -550,6 +840,11 @@ type Queued<'a> = Box<dyn FnOnce() -> std::result::Result<Appended, EngineError>
 fn enqueue<'a>(engine: &'a Engine, oracle: &Oracle, index: usize, changed: bool) -> Queued<'a> {
     let batch = &oracle.batches[index];
     let (scope, key) = (&oracle.scopes[batch.scope], batch.key.as_deref());
+    if let Some(op) = &batch.forget {
+        let (selector, up_to_lsn) = forget_args(op, changed);
+        let reply = engine.enqueue_forget_sim(&scope.tenant, selector, key, up_to_lsn).unwrap();
+        return Box::new(move || reply.finish().map(|f| forget_receipt(f, up_to_lsn)));
+    }
     let Some(op) = &batch.fact else {
         let mut turns = batch.turns.clone();
         if changed {
@@ -565,23 +860,31 @@ fn enqueue<'a>(engine: &'a Engine, oracle: &Oracle, index: usize, changed: bool)
 }
 
 /// A turn batch, or with `facts` a fact put, delete or conditional put one time in three.
+/// With `forgets` too, about 1 batch in 10 is a forget.
 fn random_batch(
     rng: &mut Rng,
     index: usize,
     scope: usize,
     time: u64,
     facts: Option<&Oracle>,
+    forgets: bool,
 ) -> Batch {
     let key = if rng.below(3) == 0 { None } else { Some(format!("key-{index}")) };
+    if let Some(oracle) = facts.filter(|_| forgets && rng.below(10) == 0) {
+        let (scope, forget) = random_forget(rng, oracle, scope);
+        let forget = Some(forget);
+        return Batch { scope, turns: vec![], key, receipt: None, time, fact: None, forget };
+    }
     if let Some(oracle) = facts.filter(|_| rng.below(3) == 0) {
         let fact_key = FACT_KEYS[rng.below(FACT_KEYS.len())].to_owned();
         let current = oracle.current(&(oracle.scopes[scope].tenant.clone(), fact_key.clone()));
         let size = [0, 1, 31, 256, 1024][rng.below(5)];
-        let content = (rng.below(4) > 0).then(|| rng.bytes(size));
+        // Text half the time, so search finds facts too.
+        let content = (rng.below(4) > 0).then(|| rng.content(size));
         let stale = Some(rng.below(current as usize + 2) as u64);
         let if_lsn = [None, Some(current), stale][rng.below(3)];
         let fact = Some(FactOp { key: fact_key, content, if_lsn });
-        return Batch { scope, turns: vec![], key, receipt: None, time, fact };
+        return Batch { scope, turns: vec![], key, receipt: None, time, fact, forget: None };
     }
     let turns = (0..1 + rng.below(4))
         .map(|_| {
@@ -596,7 +899,59 @@ fn random_batch(
             }
         })
         .collect();
-    Batch { scope, turns, key, receipt: None, time, fact: None }
+    Batch { scope, turns, key, receipt: None, time, fact: None, forget: None }
+}
+
+/// A forget of a session, a fact key, or 1 to 8 acknowledged LSNs, sometimes with
+/// `up_to_lsn`. Half of the session and key forgets name the newest such write, which may be
+/// queued earlier in the same group. 1 forget in 4 crosses tenants: it runs in `scope`'s
+/// tenant, with LSNs of every tenant, or a session or key named after any tenant's write.
+/// Names repeat across tenants, so only the forget's own tenant may lose records.
+/// Returns the scope whose tenant runs the forget.
+fn random_forget(rng: &mut Rng, oracle: &Oracle, scope: usize) -> (usize, ForgetOp) {
+    let newest = |fact: bool| {
+        let mut writes = oracle.batches.iter().rev().filter(|b| b.forget.is_none());
+        writes.find(|b| b.fact.is_some() == fact)
+    };
+    let tenant = &oracle.scopes[scope].tenant;
+    let other = rng.below(4) == 0;
+    let turns = oracle
+        .scopes
+        .iter()
+        .zip(&oracle.history)
+        .flat_map(|(scope, turns)| turns.iter().map(move |turn| (&scope.tenant, turn.lsn)));
+    let facts =
+        oracle.facts.iter().flat_map(|((owner, _), revs)| revs.iter().map(move |r| (owner, r.0)));
+    let pool: Vec<u64> = turns
+        .chain(facts)
+        .filter(|(owner, _)| other || *owner == tenant)
+        .map(|(_, lsn)| lsn)
+        .collect();
+    let (target, selector) = match rng.below(3) {
+        0 if !pool.is_empty() => {
+            let lsns = (0..1 + rng.below(8)).map(|_| pool[rng.below(pool.len())]).collect();
+            (scope, Selector::Lsns(lsns))
+        }
+        1 => match newest(true).filter(|_| rng.below(2) == 0) {
+            Some(batch) => {
+                (batch.scope, Selector::FactKey(batch.fact.as_ref().unwrap().key.clone()))
+            }
+            None => (scope, Selector::FactKey(FACT_KEYS[rng.below(FACT_KEYS.len())].into())),
+        },
+        _ => {
+            let target = match newest(false).filter(|_| rng.below(2) == 0) {
+                Some(batch) => batch.scope,
+                None => rng.below(oracle.scopes.len()),
+            };
+            let Scope { agent, session, .. } = oracle.scopes[target].clone();
+            (target, Selector::Session { agent, session })
+        }
+    };
+    let target = if other { scope } else { target };
+    let newest_lsn = oracle.batches.iter().filter_map(|b| b.receipt.as_ref()).map(|r| r.last_lsn);
+    let max = newest_lsn.max().unwrap_or(0) as usize;
+    let up_to_lsn = (rng.below(3) == 0).then(|| 1 + rng.below(max + 2) as u64);
+    (target, ForgetOp { selector, up_to_lsn })
 }
 
 fn corrupt_page_checksum(disk: &SimDisk, rng: &mut Rng) {
@@ -613,7 +968,7 @@ fn corrupt_page_checksum(disk: &SimDisk, rng: &mut Rng) {
             let mut header = [0; 9];
             assert_eq!(disk.read_at(file, offset, &mut header).unwrap(), header.len());
             let len = u32::from_le_bytes(header[4..8].try_into().unwrap());
-            if matches!(header[8], 2 | 4 | 5) {
+            if matches!(header[8], 2 | 4..=9) {
                 pages.push((path.clone(), offset));
             }
             offset += u64::from(len);
@@ -682,9 +1037,13 @@ fn run_seed_with_capacity(seed: u64, plan: &CapacityPlan) -> Vec<Vec<Turn>> {
             }
             let scope = if rng.below(3) == 0 { 0 } else { rng.below(oracle.scopes.len()) };
             let index = oracle.batches.len();
-            let batch = random_batch(&mut rng, index, scope, clock.now_ns(), Some(&oracle));
+            let batch = random_batch(&mut rng, index, scope, clock.now_ns(), Some(&oracle), true);
             oracle.batches.push(batch);
-            // Every seed covers failed sync before and after persistence, plus live reopen.
+            let forget = oracle.batches[index].forget.is_some();
+            if forget {
+                // Fills the hot cache with turns the forget will hide.
+                oracle.check_touched(&engine, index);
+            }
             let fault = step == 12 || step == 28;
             let failing = fault.then(|| fail_sync(&io, step == 28));
             let cut = step == 39;
@@ -705,7 +1064,12 @@ fn run_seed_with_capacity(seed: u64, plan: &CapacityPlan) -> Vec<Vec<Turn>> {
                 }
             } else {
                 match result {
-                    Ok(receipt) => oracle.apply(index, receipt),
+                    Ok(receipt) => {
+                        oracle.apply(index, receipt);
+                        if forget {
+                            oracle.check_touched(&engine, index);
+                        }
+                    }
                     Err(error) if error.outcome == Outcome::Unknown => pending.push(index),
                     Err(error) if matches!(error.kind, ErrorKind::Conflict) => {
                         assert_eq!(error.outcome, Outcome::NotCommitted);
@@ -752,7 +1116,7 @@ fn run_seed_with_capacity(seed: u64, plan: &CapacityPlan) -> Vec<Vec<Turn>> {
             }
             if rng.below(8) == 0 {
                 // Discover newly acknowledged tenant IDs through the independent tape scan at reopen.
-                let expected = &oracle.history[scope];
+                let expected = oracle.window(scope);
                 assert_eq!(
                     engine.window(&oracle.scopes[scope], WindowQuery::Last(7)).unwrap(),
                     expected[expected.len().saturating_sub(7)..]
@@ -793,7 +1157,8 @@ fn run_seed_with_capacity(seed: u64, plan: &CapacityPlan) -> Vec<Vec<Turn>> {
     history
 }
 
-/// One keyed turn or unconditional fact put, 512 to 2559 content bytes.
+/// One keyed turn, unconditional fact put or forget. Turns and facts carry 512 to 2559 content
+/// bytes.
 fn enqueue_keyed_batch<'a>(
     engine: &'a Engine,
     oracle: &mut Oracle,
@@ -802,11 +1167,12 @@ fn enqueue_keyed_batch<'a>(
 ) -> (usize, Queued<'a>) {
     let index = oracle.batches.len();
     let scope = rng.below(4);
-    let mut batch = random_batch(rng, index, scope, clock.now_ns(), Some(oracle));
+    let mut batch = random_batch(rng, index, scope, clock.now_ns(), Some(oracle), true);
     let len = 512 + rng.below(2048);
     let content = rng.bytes(len);
     match &mut batch.fact {
         Some(fact) => (fact.content, fact.if_lsn) = (Some(content), None),
+        None if batch.forget.is_some() => {}
         None => batch.turns = vec![NewTurn { content, ..batch.turns[0].clone() }],
     }
     batch.key = Some(format!("key-{index}"));
@@ -858,11 +1224,11 @@ fn capacity_faults(
         assert_eq!(error.outcome, Outcome::NotCommitted);
     }
     assert_eq!(engine.health(), Health::ReadOnly, "a clean floor hit must not poison");
-    let (scope, oldest) = oracle
-        .history
-        .iter()
-        .enumerate()
-        .filter_map(|(scope, turns)| turns.first().map(|turn| (scope, turn)))
+    // The oldest turn a forget does not hide, so the read reaches the tape.
+    let (scope, oldest) = (0..oracle.scopes.len())
+        .filter_map(|scope| {
+            oracle.window(scope).into_iter().find(|t| !t.redacted).map(|t| (scope, t))
+        })
         .min_by_key(|(_, turn)| turn.lsn)
         .unwrap();
     let capacity = io.inner.total_bytes(Path::new("db")).unwrap();
@@ -873,7 +1239,7 @@ fn capacity_faults(
         engine
             .window(&oracle.scopes[scope], WindowQuery::Since { seq: oldest.seq, limit: 1 })
             .unwrap_or_else(|error| panic!("read-only cold read must not allocate: {error:?}")),
-        vec![oldest.clone()],
+        vec![oldest],
         "acknowledged turn must remain readable with no free space"
     );
     if opts.tape.lsn_index_bytes == 4224 {
@@ -1001,7 +1367,7 @@ fn grouped_seed(seed: u64, plan: &CapacityPlan) -> Vec<Vec<Turn>> {
     let mut oracle = Oracle::new();
     for scope in 0..4 {
         let index = oracle.batches.len();
-        let mut batch = random_batch(&mut rng, index, scope, clock.now_ns(), None);
+        let mut batch = random_batch(&mut rng, index, scope, clock.now_ns(), None, false);
         batch.turns.truncate(1);
         let receipt = engine
             .append(&oracle.scopes[scope], batch.turns.clone(), batch.key.as_deref())
@@ -1091,7 +1457,7 @@ fn grouped_seed(seed: u64, plan: &CapacityPlan) -> Vec<Vec<Turn>> {
                 let scope = rng.below(oracle.scopes.len());
                 // Position 0 stays a turn batch: its duplicate and changed copies follow it.
                 let facts = (position > 0).then_some(&oracle);
-                let mut batch = random_batch(&mut rng, index, scope, clock.now_ns(), facts);
+                let mut batch = random_batch(&mut rng, index, scope, clock.now_ns(), facts, true);
                 if position == 0 {
                     batch.key = Some(format!("key-{index}"));
                 }
@@ -1102,6 +1468,13 @@ fn grouped_seed(seed: u64, plan: &CapacityPlan) -> Vec<Vec<Turn>> {
                     queued.push((index, true, enqueue(&engine, &oracle, index, true)));
                 }
             }
+            // Fills the hot cache with turns the queued forgets will hide.
+            let forgets: Vec<usize> = queued
+                .iter()
+                .map(|(index, ..)| *index)
+                .filter(|&index| oracle.batches[index].forget.is_some())
+                .collect();
+            forgets.iter().for_each(|&index| oracle.check_touched(&engine, index));
             let fault = group == 6;
             let cut = group == 7;
             let checkpoint_fired = Arc::new(AtomicBool::new(false));
@@ -1204,6 +1577,10 @@ fn grouped_seed(seed: u64, plan: &CapacityPlan) -> Vec<Vec<Turn>> {
             }
             pending.sort_unstable();
             pending.dedup();
+            // Acknowledged forgets hide at once, cached turns included.
+            for &index in forgets.iter().filter(|&&i| oracle.batches[i].receipt.is_some()) {
+                oracle.check_touched(&engine, index);
+            }
             if fault || cut {
                 let next = image.unwrap_or_else(|| {
                     if cut {
