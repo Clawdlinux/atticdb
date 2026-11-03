@@ -253,41 +253,58 @@ fn connect_writes_the_session_start_hook() {
         let now = || std::fs::read_to_string(&vscode).ok();
         assert_eq!(now().as_deref(), Some("{\n  \"servers\": {}\n}\n"), "{var:?}");
         // While Copilot CLI has its entry, connecting VS Code adds none to mcp.json, and
-        // removes an old one, leaving the other bytes as they were. The hook and
-        // instructions stay. (case, mcp.json before, after, what connect says first)
-        let reads = format!(". VS Code reads it from {}\n", copilot_file.display());
+        // removes an old one, leaving the other bytes as they were. --force writes it anyway,
+        // for VS Code builds older than 1.144. The hook and instructions stay.
+        // (case, args, mcp.json before, after, what connect says first)
+        let reads = format!(
+            ". VS Code 1.144 and later read it from {}. Older VS Code: update it, or run atticdb \
+             connect vscode --force\n",
+            copilot_file.display()
+        );
         let old = "{\n    \"inputs\": [],\n    \"servers\": {\n        \"other\": {\"command\": \"x\"},\n        \
                    \"atticdb\": {\"command\": \"/old/atticdb\", \"args\": [\"mcp\"]}\n    }\n}\n";
         let others =
             "{\n    \"inputs\": [],\n    \"servers\": {\n        \"other\": {\"command\": \"x\"}\n    }\n}\n";
+        let mut forced: Value = serde_json::from_str(others).unwrap();
+        forced["servers"]["atticdb"] = json!({"type": "stdio", "command": exe,
+            "args": ["mcp", "--agent", "vscode-copilot"]});
+        if moved {
+            forced["servers"]["atticdb"]["env"] = env.clone();
+        }
+        let forced = serde_json::to_string_pretty(&forced).unwrap() + "\n";
+        let (plain, force) = (&["connect", "vscode"][..], &["connect", "vscode", "--force"][..]);
         let rows = [
-            ("old entry", Some(old), Some(others), "removed the duplicate atticdb entry from "),
-            ("no entry", Some(others), Some(others), ": no atticdb entry needed"),
-            ("no file", None, None, ": no atticdb entry needed"),
+            ("old entry", plain, Some(old), Some(others), "removed the duplicate atticdb entry"),
+            ("no entry", plain, Some(others), Some(others), ": no atticdb entry needed"),
+            ("no file", plain, None, None, ": no atticdb entry needed"),
+            ("--force", force, Some(others), Some(forced.as_str()), "connected atticdb to vscode"),
         ];
-        for (case, before, after, said) in rows {
+        for (case, args, before, after, said) in rows {
             match before {
                 Some(before) => std::fs::write(&vscode, before).unwrap(),
                 None => std::fs::remove_file(&vscode).unwrap(),
             }
             let shared = (files(&hooks), files(&instructions));
-            let out = run(&["connect", "vscode"]);
+            let out = run(args);
             let first = out.lines().next().unwrap_or_default();
-            assert!(first.contains(said) && out.contains(&reads), "{var:?} {case}: {out}");
+            assert!(first.contains(said), "{var:?} {case}: {out}");
+            assert_eq!(out.contains(&reads), args == plain, "{var:?} {case}: {out}");
             assert_eq!(now().as_deref(), after, "{var:?} {case}: mcp.json");
             assert_eq!((files(&hooks), files(&instructions)), shared, "{var:?} {case}: kept");
         }
         let names = files(vscode_dir).into_keys();
         let backups = names.filter(|name| name.contains(".atticdb-backup-")).count();
-        assert_eq!((backups, files(vscode_dir).len()), (2, 2), "{var:?}: 2 backups, no temp file");
+        assert_eq!((backups, files(vscode_dir).len()), (3, 4), "{var:?}: 3 backups, no temp file");
 
         // VS Code still reads Copilot CLI's entry, so disconnecting VS Code says so. The hook
         // and instructions stay.
         std::fs::write(&vscode, old).unwrap();
         let out = run(&["disconnect", "vscode"]);
         assert!(out.starts_with("disconnected atticdb from vscode: "), "{var:?}: {out}");
-        let still =
-            format!("\nVS Code still reads atticdb from {}. To remove", copilot_file.display());
+        let still = format!(
+            "\nVS Code 1.144 and later still read atticdb from {}. To remove",
+            copilot_file.display()
+        );
         assert!(out.contains(&still), "{var:?}: {out}");
         let servers: Value = serde_json::from_slice(&std::fs::read(&vscode).unwrap()).unwrap();
         assert_eq!(servers["servers"], json!({"other": {"command": "x"}}), "{var:?}");
@@ -433,18 +450,24 @@ fn connect_writes_the_session_start_hook() {
     assert_eq!(code, Some(0), "unset --force: {out}");
     assert!(out.contains(&said), "unset --force: {out}");
     assert_eq!(hook_env(), Value::Null, "unset --force");
-    // Matching homes connect cleanly, and VS Code still gets no entry of its own.
+    // --force writes VS Code's own entry, for builds older than 1.144.
+    let config: Value = serde_json::from_slice(&std::fs::read(&vscode).unwrap()).unwrap();
+    assert!(config["servers"]["atticdb"].is_object(), "unset --force: {config}");
+    // Matching homes connect cleanly. Without --force, VS Code's own entry goes again.
     let (code, out) = connect(&["connect", "vscode"], true);
     assert_eq!(code, Some(0), "matching: {out}");
+    assert!(out.starts_with("removed the duplicate atticdb entry from "), "matching: {out}");
     assert!(!out.contains("still uses"), "matching: {out}");
     assert_eq!((env_of(&vscode, "servers"), hook_env()), (Value::Null, env), "matching");
     // A hand-made VS Code entry in a file with comments passes no ATTICDB_HOME, and an empty
     // one counts as unset. Both are on the default home, as Copilot is about to be. The empty
-    // one is removed. The file with comments isn't strict JSON, so it stays, and connect says
-    // to remove the entry by hand and exits 1.
-    let by_hand = "Nothing changed. Remove \"atticdb\" from \"servers\" by hand, as VS Code reads";
+    // one is removed. A file with comments isn't strict JSON, so only its text was searched,
+    // and an entry there may be commented out. It stays, connect says it may hold an entry to
+    // remove by hand, and exits 1.
+    let by_hand = "may hold an atticdb entry, but it isn't strict JSON: invalid JSON at byte ";
     let rows = [
         ("empty", "{\"servers\": {\"atticdb\": {\"command\": \"atticdb\", \"env\": {\"ATTICDB_HOME\": \"\"}}}}", 0, "{\"servers\": {}}"),
+        ("commented out", "{\n  // \"atticdb\": {\"command\": \"atticdb\"},\n  \"servers\": {}\n}\n", 1, ""),
         ("comments", "// mine\n{\"servers\": {\"atticdb\": {\"command\": \"atticdb\"}}}\n", 1, ""),
     ];
     for (case, text, wanted, left) in rows {

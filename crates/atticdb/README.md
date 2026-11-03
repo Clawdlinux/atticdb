@@ -393,10 +393,13 @@ Claude Code and Codex have their own parts. See [Claude Code](#claude-code) and 
 VS Code 1.144 and later also read Copilot CLI's `mcp-config.json`. An entry in both files lists 2 atticdb servers, and notes split between them.
 So while Copilot CLI has an entry, `connect vscode` adds none to `mcp.json`, and removes an old one there.
 `connect copilot` removes it too, so the order doesn't matter. The edit changes only the entry's bytes and keeps a backup.
-An entry with connection flags stays, unless `--force`. A `mcp.json` that isn't strict JSON is left alone, and `connect` says to remove the entry by hand.
+An entry with connection flags stays, unless `--force`.
+A `mcp.json` that isn't strict JSON is left alone. Only its raw text was searched, so `connect` says it may hold an entry to remove by hand.
 Without a Copilot CLI entry, `connect vscode` writes `mcp.json`, for VS Code builds that don't read Copilot CLI's file.
+Older VS Code builds lose AtticDB once Copilot CLI is connected. Update VS Code, or run `atticdb connect vscode --force`, which writes `mcp.json` anyway.
+A later `connect copilot` or `setup` removes that entry again.
 `doctor` counts VS Code as connected through either file.
-`disconnect vscode` keeps the hook and instructions while Copilot CLI has its entry, and says that VS Code still reads it.
+`disconnect vscode` keeps the hook and instructions while Copilot CLI has its entry, and says that VS Code 1.144 and later still read it.
 
 | Name | File | Entry |
 |---|---|---|

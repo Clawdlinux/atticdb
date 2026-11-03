@@ -132,7 +132,8 @@ fn setup_plans_then_connects_every_app_it_finds() {
         "Plan:\nCopilot CLI:\n  {c}/mcp-config.json: add the MCP entry\n  \
          {c}/hooks/atticdb.json: add the sessionStart hook\n  \
          {c}/instructions/atticdb.instructions.md: add the atticdb instructions\n\
-         VS Code:\n  {v}: no atticdb entry needed. VS Code reads it from {c}/mcp-config.json\n  \
+         VS Code:\n  {v}: no atticdb entry needed. VS Code 1.144 and later read it from \
+         {c}/mcp-config.json. Older VS Code: update it, or run atticdb connect vscode --force\n  \
          VS Code's Copilot chat reads the Copilot hook and \
          instructions in {c}, so VS Code gets those too.\n\
          Claude Code:\n  {h}/.claude.json: add the MCP entry\n  \
@@ -651,8 +652,8 @@ fn doctor_checks_an_install_and_writes_nothing() {
     // VS Code is connected through Copilot CLI's entry, or its own in mcp.json. Both list 2.
     let vscode_ok = "\nVS Code:\n  parts: ok\n  binary: ok\n  hook: ok\n".to_owned();
     let both_files = format!(
-        "\nVS Code:\n  parts: 1 would change, {}\n    {v}: remove the MCP entry. VS Code reads \
-         atticdb from {}\n  binary: ok\n  hook: ok\n",
+        "\nVS Code:\n  parts: 1 would change, {}\n    {v}: remove the MCP entry. VS Code 1.144 \
+         and later read it from {}\n  binary: ok\n  hook: ok\n",
         fix("vscode"),
         entry.display()
     );

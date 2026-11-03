@@ -328,7 +328,9 @@ pub fn detect(harness: Harness) -> bool {
 /// VS Code 1.144 and later also read Copilot CLI's config, so an entry in both files lists 2
 /// servers. So while Copilot CLI has an entry, VS Code's `mcp.json` gets none, and an old one
 /// there is removed by [`drop_vscode_entry`]. Connecting either one does that, so the end
-/// state doesn't depend on the order. VS Code still gets the hook and instructions.
+/// state doesn't depend on the order. VS Code still gets the hook and instructions. Older
+/// builds don't read Copilot CLI's config, so `connect vscode --force` writes `mcp.json`
+/// anyway.
 ///
 /// Claude Code: adds its MCP entry, and unless `hook` is false its SessionStart hook, and
 /// its allow rules for `notes`. An entry that differs is replaced only with `force`.
@@ -377,8 +379,9 @@ fn connect_shared(harness: Harness, force: bool, mode: Mode, copilot: bool) -> R
         let exe = binary()?;
         let guard = (!force).then_some(data.as_path());
         let entry = harness.entry(&exe, moved.as_deref());
-        if harness == Harness::Vscode && (copilot || copilot_entry()) {
-            // Any flags on VS Code's entry were refused above, unless `force`.
+        // `force` writes VS Code's own entry anyway, for builds older than 1.144.
+        if harness == Harness::Vscode && !force && (copilot || copilot_entry()) {
+            // Any flags on VS Code's entry were refused above.
             lines.push(drop_vscode_entry(None, mode)?);
         } else {
             lines.push(edit(harness, Some(entry), guard, mode)?);
@@ -554,8 +557,8 @@ pub fn disconnect(harness: Harness) -> u8 {
                 println!("{}", line.text);
             }
             println!(
-                "VS Code still reads atticdb from {}. To remove it there, run atticdb \
-                 disconnect copilot",
+                "VS Code 1.144 and later still read atticdb from {}. To remove it there, run \
+                 atticdb disconnect copilot",
                 copilot.display()
             );
         } else {
@@ -897,29 +900,34 @@ fn copilot_entry() -> bool {
     connected(Harness::Copilot).unwrap_or(false)
 }
 
-/// Removes AtticDB's entry from VS Code's `mcp.json`, as VS Code also reads Copilot CLI's
-/// config, and 2 entries list 2 servers. [`jsonedit`] makes the edit, so only the entry's
-/// bytes change. With `guard`, an entry with connection flags is kept, as it uses another
-/// store. A file that isn't strict JSON is skipped, with what to do by hand. Returns the line
-/// to print, [`State::Unchanged`] when there is no entry. `Err` only when VS Code's config
-/// can't be located. In Plan mode, it writes nothing.
+/// What VS Code builds that don't read Copilot CLI's config do to get AtticDB.
+const OLDER_VSCODE: &str = "Older VS Code: update it, or run atticdb connect vscode --force";
+
+/// Removes AtticDB's entry from VS Code's `mcp.json`, as VS Code 1.144 and later also read
+/// Copilot CLI's config, and 2 entries list 2 servers. [`jsonedit`] makes the edit, so only
+/// the entry's bytes change. With `guard`, an entry with connection flags is kept, as it uses
+/// another store. A file that isn't strict JSON is skipped, with what to do by hand. As only
+/// its raw text was searched, its line says it may hold an entry. Returns the line to print,
+/// [`State::Unchanged`] when there is no entry. `Err` only when VS Code's config can't be
+/// located. In Plan mode, it writes nothing.
 fn drop_vscode_entry(guard: Option<&Path>, mode: Mode) -> Result<Line, String> {
     let path = Harness::Vscode.file()?;
     let shown = path.display();
     let copilot = Harness::Copilot.file();
     let copilot =
         copilot.map_or_else(|_| "Copilot CLI's config".into(), |c| c.display().to_string());
+    let reads = format!("VS Code 1.144 and later read it from {copilot}");
     let skipped = |why: &str| {
         Line::new(
             State::Skipped,
             format!(
-                "{shown}: {why}. Nothing changed. Remove \"atticdb\" from \"servers\" by hand, \
-                 as VS Code reads it from {copilot}"
+                "{shown}: {why}. Nothing changed. Remove \"atticdb\" from \"servers\" by hand. \
+                 {reads}"
             ),
         )
     };
     let none = || {
-        let text = format!("{shown}: no atticdb entry needed. VS Code reads it from {copilot}");
+        let text = format!("{shown}: no atticdb entry needed. {reads}. {OLDER_VSCODE}");
         Line::new(State::Unchanged, text)
     };
     let old = match read(&path) {
@@ -930,6 +938,17 @@ fn drop_vscode_entry(guard: Option<&Path>, mode: Mode) -> Result<Line, String> {
     let Ok(text) = std::str::from_utf8(&old.0) else { return Ok(skipped("not UTF-8")) };
     let (edited, had) = match jsonedit::remove_key(text, &["servers"], "atticdb") {
         Ok(done) => done,
+        // serde_json can't read it, so only its raw text mentions atticdb, maybe in a comment.
+        Err(error) if serde_json::from_str::<Value>(text).is_err() => {
+            return Ok(Line::new(
+                State::Skipped,
+                format!(
+                    "{shown} may hold an atticdb entry, but it isn't strict JSON: {error}. \
+                     Nothing changed. If it holds one, remove it from \"servers\" by hand. \
+                     {reads}"
+                ),
+            ));
+        }
         Err(error) => return Ok(skipped(&error.to_string())),
     };
     if !had {
@@ -942,14 +961,15 @@ fn drop_vscode_entry(guard: Option<&Path>, mode: Mode) -> Result<Line, String> {
             return Ok(Line::new(
                 State::Kept,
                 format!(
-                    "{shown}: kept the atticdb entry, as it uses {used}. VS Code may list \
-                     atticdb twice. To remove it, run atticdb connect vscode --force"
+                    "{shown}: kept the atticdb entry, as it uses {used}. VS Code 1.144 and \
+                     later may list atticdb twice. To remove it, run atticdb connect copilot \
+                     --force"
                 ),
             ));
         }
     }
     if mode == Mode::Plan {
-        let text = format!("{shown}: remove the MCP entry. VS Code reads atticdb from {copilot}");
+        let text = format!("{shown}: remove the MCP entry. {reads}");
         return Ok(Line::new(State::Removed, text));
     }
     let backup = match write(&path, Some(&old), edited.as_bytes()) {
@@ -959,7 +979,7 @@ fn drop_vscode_entry(guard: Option<&Path>, mode: Mode) -> Result<Line, String> {
     Ok(Line::new(
         State::Removed,
         format!(
-            "removed the duplicate atticdb entry from {shown}{}. VS Code reads it from {copilot}",
+            "removed the duplicate atticdb entry from {shown}{}. {reads}. {OLDER_VSCODE}",
             backup.unwrap_or_default()
         ),
     ))
