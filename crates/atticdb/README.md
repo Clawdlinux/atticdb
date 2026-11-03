@@ -682,7 +682,7 @@ Files are mode 0600 and folders 0700. They hold your content in plain text.
 A later forget doesn't touch them, so delete an export you no longer need.
 `<dir>` must not exist. The export is written into `<dir>.partial-<hex>` and renamed to `<dir>` at the end.
 A crash leaves only the partial folder, and a failure prints its path.
-A forget that lands mid-file between pages gets a 409. The export then starts again, at most 3 times.
+A forget that hides the turn or fact a page cut in half gets a 409. The export then starts again, at most 3 times.
 An empty directory created at `<dir>` during the final rename can be replaced on Unix.
 Exit 0 on success, 1 when the export failed, 2 on a bad flag.
 

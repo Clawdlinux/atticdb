@@ -57,8 +57,9 @@ const USAGE: &str = "usage:
   Content is hidden from normal AtticDB reads. It stays on disk until purge ships (#159).
   What stays visible: https://github.com/Clawdlinux/atticdb#what-a-forget-leaves-visible
   forget session needs --agent and --session. The other forget verbs take neither.
-  export writes facts.md and sessions/<agent>/<session>.md at 1 LSN into <dir>, which must
-  not exist. Forgotten turns show as placeholders. Forgotten facts are left out.
+  export writes sessions/<agent>/<session>.md at 1 LSN into <dir>, which must not exist.
+  It writes facts.md only when at least 1 fact is left. Forgotten turns show as placeholders.
+  Forgotten facts are left out.
   studio serves a read-only page on 127.0.0.1 and opens it. With --allow-forget it can also forget
   sessions and fact keys. It runs until Ctrl-C.
   setup finds VS Code, Copilot CLI, Claude Code and Codex, asks which to connect, shows the
