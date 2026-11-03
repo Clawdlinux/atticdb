@@ -19,6 +19,9 @@ const CSP: &str = concat!(
     "frame-ancestors 'none'"
 );
 
+/// A turn written after the page loaded, so a forget pinned to the page leaves it.
+const LATE: &str = "written after the page loaded";
+
 /// On every reply, errors included.
 const HEADERS: [(&str, &str); 6] = [
     ("Connection", "close"),
@@ -103,6 +106,18 @@ impl Studio {
         let key = if secret { format!("X-Atticdb-Studio: {}\r\n", self.secret) } else { "".into() };
         let host = format!("Host: 127.0.0.1:{}\r\n", self.port);
         self.send(target, &format!("GET {target} HTTP/1.1\r\n{host}{key}\r\n"))
+    }
+
+    /// `POST /api/forget` with `body`, and the headers the page sends.
+    fn forget(&self, case: &str, body: &Value) -> Reply {
+        let (port, secret, body) = (self.port, &self.secret, body.to_string());
+        let head = format!(
+            "POST /api/forget HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-Atticdb-Studio: {secret}\r\n\
+             Origin: http://127.0.0.1:{port}\r\nSec-Fetch-Site: same-origin\r\n\
+             Content-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        self.send(case, &(head + &body))
     }
 }
 
@@ -357,6 +372,9 @@ fn studio_forwards_reads_and_refuses_the_rest() {
         ("a body", get(&format!("{ok}Content-Length: 2\r\n\r\n{{}}")), 400, "bad_request"),
         ("append", request("GET", "/api/v1/append", &ok), 404, "not_found"),
         ("facts/put", request("GET", "/api/v1/facts/put", &ok), 404, "not_found"),
+        // Without --allow-forget, the forget route is a path like any other.
+        ("GET forget", request("GET", "/api/forget", &ok), 404, "not_found"),
+        ("POST forget", request("POST", "/api/forget", &ok), 405, "method_not_allowed"),
         ("not /api/", request("GET", "/v1/sessions", &ok), 404, "not_found"),
         ("block without repo", request("GET", "/api/block", &ok), 400, "invalid_input"),
     ];
@@ -378,16 +396,28 @@ fn studio_forwards_reads_and_refuses_the_rest() {
     let expected = json!({"repo": "app", "block": block, "chars": chars, "max": 6000});
     assert_eq!((reply.status, reply.json()), (200, expected));
     let version = atticdb::VERSION;
-    let info = json!({"version": version, "tenant": "me", "store": "home", "home": data.parent()});
+    let info = json!({"version": version, "tenant": "me", "store": "home", "home": data.parent(),
+                      "forget": false});
     assert_eq!(studio.get("/api/info", true).json(), info);
 
     // On the home's data directory: the same store, but no block, as the hook reads the home.
+    // It can forget too. That runs below.
     let (config, data_flag) = (config.to_str().unwrap(), data.to_str().unwrap());
-    let flags = ["--no-open", "--config", config, "--tenant", "me", "--data-dir", data_flag];
+    let flags = [
+        "--no-open",
+        "--config",
+        config,
+        "--tenant",
+        "me",
+        "--data-dir",
+        data_flag,
+        "--allow-forget",
+    ];
     let by_dir = Studio::start(&home, &flags, &[]);
     let reply = by_dir.get("/api/block?repo=app", true);
     assert_eq!((reply.status, reply.json()), (404, json!({"error": "not_home"})));
-    let info = json!({"version": version, "tenant": "me", "store": "data_dir", "home": null});
+    let info = json!({"version": version, "tenant": "me", "store": "data_dir", "home": null,
+                      "forget": true});
     assert_eq!(by_dir.get("/api/info", true).json(), info);
     assert_eq!(by_dir.get("/api/v1/sessions", true).json(), sessions);
 
@@ -402,7 +432,8 @@ fn studio_forwards_reads_and_refuses_the_rest() {
     let message = "the store refused the studio's token";
     let unauthorized = json!({"error": "store_unauthorized", "message": message});
     assert_eq!((reply.status, reply.json()), (502, unauthorized));
-    let info = json!({"version": version, "tenant": null, "store": "data_dir", "home": null});
+    let info = json!({"version": version, "tenant": null, "store": "data_dir", "home": null,
+                      "forget": false});
     let reply = bad.get("/api/info", true);
     assert_eq!((reply.status, reply.json()), (200, info));
 
@@ -430,7 +461,8 @@ fn studio_forwards_reads_and_refuses_the_rest() {
     let url = format!("unix://{}", link.display());
     let token_file = private_file(&dir, "token", &token);
     let env = [("PATH", path.as_os_str()), ("ATTICDB_TOKEN", OsStr::new(&token))];
-    let by_url = Studio::start(&other, &["--url", &url, "--token-file", &token_file], &env);
+    let flags = ["--url", &url, "--token-file", &token_file, "--allow-forget"];
+    let by_url = Studio::start(&other, &flags, &env);
     wait_for("the opener", || args.exists());
     wait_for("the note", || by_url.process.stderr().contains("cannot open a browser"));
     let page = data_dir(&other).parent().unwrap().join("studio.html");
@@ -446,7 +478,8 @@ fn studio_forwards_reads_and_refuses_the_rest() {
     assert_eq!((mode(&page), mode(page.parent().unwrap())), (0o600, 0o700));
     let names: Vec<String> = files(page.parent().unwrap()).into_keys().collect();
     assert_eq!(names, ["studio.html"], "no config and no temp file");
-    let info = json!({"version": version, "tenant": null, "store": "url", "home": null});
+    let info =
+        json!({"version": version, "tenant": null, "store": "url", "home": null, "forget": true});
     assert_eq!(by_url.get("/api/info", true).json(), info);
     assert_eq!(by_url.get("/api/v1/sessions", true).json(), sessions);
     // Once the store's path is gone, reads answer 502, logged without the query.
@@ -457,6 +490,20 @@ fn studio_forwards_reads_and_refuses_the_rest() {
     assert!(body["message"].as_str().is_some_and(|text| !text.is_empty()), "{body}");
     let logged = "atticdb studio: GET /api/v1/sessions 502 ";
     wait_for("the 502 line", || by_url.process.stderr().contains(logged));
+    // A forget then sends nothing. Every item is not_sent, so the page keeps it for a retry.
+    let item = |n: usize| {
+        let session = json!({"agent": "copilot", "session": "app"});
+        json!({"idem_key": format!("{n:032x}"), "session": session, "up_to_lsn": 1})
+    };
+    let reply =
+        by_url.forget("no store", &json!({"confirm": "hide", "forgets": [item(1), item(2)]}));
+    let results = reply.json()["results"].clone();
+    let outcomes: Vec<_> = results.as_array().unwrap().iter().map(|r| &r["outcome"]).collect();
+    assert_eq!((reply.status, outcomes), (200, vec![&json!("not_sent"); 2]), "{results}");
+    assert_eq!(results[0]["error"], "store_unreachable", "{results}");
+    let logged =
+        "atticdb studio: forget 2 sessions: 0 committed, 0 not committed, 0 unknown, 2 not sent";
+    wait_for("the not-sent line", || by_url.process.stderr().contains(logged));
     // With no store at start, it exits 1 and prints no link.
     let missing = format!("unix://{}", dir.0.join("missing.sock").display());
     let flags = ["--no-open", "--url", &missing, "--token-file", &token_file];
@@ -465,6 +512,154 @@ fn studio_forwards_reads_and_refuses_the_rest() {
     assert_eq!(status.code(), Some(1), "{output}");
     let refused = process.stderr().starts_with("atticdb: cannot reach the store: ");
     assert!(process.stdout().is_empty() && refused, "{output}");
+
+    // With --allow-forget, 1 write route. Checks run in order: Host, Origin, method,
+    // Sec-Fetch-Site, the secret, then Content-Type. Then the body.
+    let forgetful = Studio::start(&home, &["--no-open", "--allow-forget"], &[]);
+    let info = json!({"version": version, "tenant": "me", "store": "home", "home": data.parent(),
+                      "forget": true});
+    assert_eq!(forgetful.get("/api/info", true).json(), info);
+    let port = forgetful.port;
+    let (host, key) = (
+        format!("Host: 127.0.0.1:{port}\r\n"),
+        format!("X-Atticdb-Studio: {}\r\n", forgetful.secret),
+    );
+    let (own, typed) =
+        (format!("Origin: http://127.0.0.1:{port}\r\n"), "Content-Type: application/json\r\n");
+    let all = format!("{host}{key}{own}Sec-Fetch-Site: same-origin\r\n{typed}");
+    let post = |headers: &str, body: &Value| {
+        let body = body.to_string();
+        format!(
+            "POST /api/forget HTTP/1.1\r\n{headers}Content-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    };
+    let hex = |n: usize| format!("{n:032x}");
+    let item = |n: usize, agent: &str, lsn: Value| {
+        let session = json!({"agent": agent, "session": "app"});
+        json!({"idem_key": hex(n), "session": session, "up_to_lsn": lsn})
+    };
+    let hide = |items: Value| json!({"confirm": "hide", "forgets": items});
+    let good = hide(json!([item(1, "copilot", json!(1))]));
+    let no_lsn = json!({"idem_key": hex(1), "session": {"agent": "copilot", "session": "app"}});
+    let many: Vec<Value> = (0..101).map(|n| item(n, "copilot", json!(1))).collect();
+    let mixed =
+        json!([item(1, "copilot", json!(1)), {"idem_key": hex(2), "key": "k", "up_to_lsn": 1}]);
+    let (invalid, unsupported) = ("invalid_input", "unsupported_media_type");
+    let (foreign, cross) = ("Origin: http://evil.example\r\n", "Sec-Fetch-Site: cross-site\r\n");
+    let (plain, form) =
+        ("Content-Type: text/plain\r\n", "Content-Type: application/x-www-form-urlencoded\r\n");
+    let (no_confirm, mixed) = (json!({"forgets": [item(1, "copilot", json!(1))]}), hide(mixed));
+    let big = format!("POST /api/forget HTTP/1.1\r\n{all}Content-Length: 65537\r\n\r\n");
+    let (not_allowed, sessions_post) =
+        ("method_not_allowed", format!("POST /api/v1/sessions HTTP/1.1\r\n{host}{key}\r\n"));
+    // (case, request, status, error)
+    let rows = [
+        ("no Origin", post(&format!("{host}{key}{typed}"), &good), 403, forbidden),
+        ("a foreign Origin", post(&format!("{host}{key}{foreign}{typed}"), &good), 403, forbidden),
+        ("Origin twice", post(&format!("{all}{own}"), &good), 403, forbidden),
+        ("cross-site", post(&format!("{host}{key}{own}{cross}{typed}"), &good), 403, forbidden),
+        ("no secret", post(&format!("{host}{own}{typed}"), &good), 401, "unauthorized"),
+        ("text/plain", post(&format!("{host}{key}{own}{plain}"), &good), 415, unsupported),
+        ("form-encoded", post(&format!("{host}{key}{own}{form}"), &good), 415, unsupported),
+        ("no confirm", post(&all, &no_confirm), 400, invalid),
+        ("no up_to_lsn", post(&all, &hide(json!([no_lsn]))), 400, invalid),
+        ("up_to_lsn 0", post(&all, &hide(json!([item(1, "copilot", json!(0))]))), 400, invalid),
+        ("101 items", post(&all, &hide(json!(many))), 400, invalid),
+        ("mixed selectors", post(&all, &mixed), 400, invalid),
+        ("over 64 KiB", big, 413, "too_large"),
+        ("OPTIONS", format!("OPTIONS /api/forget HTTP/1.1\r\n{all}\r\n"), 405, not_allowed),
+        ("GET forget", format!("GET /api/forget HTTP/1.1\r\n{host}{key}\r\n"), 405, not_allowed),
+        ("POST a read", sessions_post, 405, not_allowed),
+    ];
+    for (case, request, status, error) in rows {
+        let reply = forgetful.send(case, &request);
+        let body = reply.json();
+        let found = (reply.status, body["error"].as_str().unwrap_or_default());
+        assert_eq!(found, (status, error), "{case}: {body}");
+        assert!(
+            !reply.head.to_ascii_lowercase().contains("access-control-"),
+            "{case}: no CORS answer"
+        );
+    }
+
+    // The page pins each forget to the as_of_lsn it loaded at. A turn written after it stays.
+    let page = forgetful.get("/api/v1/sessions?limit=1000", true).json();
+    let pin = page["as_of_lsn"].as_u64().unwrap();
+    let late = json!({"agent": "copilot", "session": "app", "idem_key": "late",
+                      "turns": [{"role": "assistant", "content": LATE}]});
+    let (status, appended) =
+        store.call(Some("localhost"), Some(&token), "POST", "/v1/append", Some(&late));
+    assert!(status == 200 && appended["first_lsn"].as_u64().unwrap() > pin, "{appended}");
+    let both = hide(json!([item(7, "copilot", json!(pin)), item(8, "vscode-copilot", json!(pin))]));
+    let mut receipts = Vec::new();
+    for (case, retried) in [("bulk forget", false), ("its retry", true)] {
+        let reply = forgetful.forget(case, &both);
+        assert_eq!(reply.status, 200, "{case}: {}", reply.body);
+        let results = reply.json()["results"].as_array().unwrap().clone();
+        assert_eq!(results.len(), 2, "{case}: {results:?}");
+        for result in &results {
+            let found = (&result["outcome"], &result["deduplicated"], &result["cutoff"]);
+            assert_eq!(found, (&json!("committed"), &json!(retried), &json!(pin)), "{case}");
+        }
+        receipts
+            .push(results.iter().map(|r| (r["txn"].clone(), r["lsn"].clone())).collect::<Vec<_>>());
+    }
+    assert_eq!(receipts[0], receipts[1], "the same keys give the same forgets");
+    let logged =
+        "atticdb studio: forget 2 sessions: 2 committed, 0 not committed, 0 unknown, 0 not sent\n";
+    wait_for("the forget lines", || forgetful.process.stderr().matches(logged).count() == 2);
+    // Re-fetched as the page does: the window, the sessions, the records and the block.
+    let window = "/api/v1/window?agent=copilot&session=app&last=50&max_bytes=8388608";
+    let turns = forgetful.get(window, true).json()["turns"].clone();
+    let lsn = turns[0]["lsn"].clone();
+    assert!(lsn.as_u64().unwrap() <= pin, "{turns}");
+    assert_eq!(turns[0], json!({"seq": 1, "lsn": lsn, "redacted": true}));
+    let shown = (&turns[1]["seq"], &turns[1]["content"], turns.as_array().unwrap().len());
+    assert_eq!(shown, (&json!(2), &json!(LATE), 2), "{turns}");
+    let page = forgetful.get("/api/v1/sessions?limit=1000", true).json();
+    for session in page["sessions"].as_array().unwrap() {
+        let forgotten = if session["session"] == "app" { json!(pin) } else { Value::Null };
+        assert_eq!(session["forgotten_up_to"], forgotten, "{session}");
+    }
+    let records = forgetful.get("/api/v1/records?limit=50&max_bytes=8388608", true).json();
+    let in_app = records["records"].as_array().unwrap().iter().filter(|r| r["session"] == "app");
+    let (mut hidden, mut later) = (0, 0);
+    for record in in_app {
+        if record["lsn"].as_u64().unwrap() > pin {
+            assert_eq!(record["content"], LATE);
+            later += 1;
+            continue;
+        }
+        let names = ["kind", "agent", "session", "seq", "lsn", "redacted"];
+        let placeholder: serde_json::Map<String, Value> =
+            names.iter().map(|name| (name.to_string(), record[name].clone())).collect();
+        assert_eq!((record, &record["redacted"]), (&Value::Object(placeholder), &json!(true)));
+        hidden += 1;
+    }
+    assert_eq!((hidden, later), (2, 1), "{records}");
+    let (out, _) = hook(&home, &cwd(&home.join("app")), 0, &[]);
+    let block = serde_json::from_str::<Value>(&out).unwrap()["additionalContext"].clone();
+    let text = block.as_str().unwrap();
+    assert!(text.contains(LATE) && !text.contains("saw <b>html</b>"), "{text}");
+    assert_eq!(forgetful.get("/api/block?repo=app", true).json()["block"], block);
+    // A fact key, from the data-dir studio, pinned to the newest revision shown.
+    let history = "/api/v1/facts/history?key=repo%2Fweb%2Fdeploy&max_bytes=8388608";
+    let newest = by_dir.get(history, true).json()["revisions"][0]["lsn"].clone();
+    let one = json!([{"idem_key": hex(9), "key": "repo/web/deploy", "up_to_lsn": newest}]);
+    let reply = by_dir.forget("a fact key", &hide(one));
+    let result = reply.json()["results"][0].clone();
+    assert_eq!(
+        (reply.status, &result["outcome"], &result["cutoff"]),
+        (200, &json!("committed"), &newest)
+    );
+    let current = by_dir.get("/api/v1/facts/get?key=repo%2Fweb%2Fdeploy", true).json();
+    assert_eq!(current, json!({"fact": null}));
+    let revisions = by_dir.get(history, true).json()["revisions"].clone();
+    assert_eq!(revisions, json!([{"lsn": newest, "redacted": true}]));
+    let logged =
+        "atticdb studio: forget 1 fact key: 1 committed, 0 not committed, 0 unknown, 0 not sent\n";
+    wait_for("the key line", || by_dir.process.stderr().contains(logged));
 
     // 16 idle connections fill the cap, so the next is refused on accept. It sends nothing:
     // closing over unread bytes makes Linux reset it before the answer is read.
@@ -487,19 +682,22 @@ fn studio_forwards_reads_and_refuses_the_rest() {
     drop(idle);
 
     // The token stays in the studio. The secret is only in the link on stdout.
-    for studio in [&studio, &by_dir, &bad, &by_url] {
+    for (studio, forget) in
+        [(&studio, false), (&by_dir, true), (&bad, false), (&by_url, true), (&forgetful, true)]
+    {
         for wire in studio.wires.lock().unwrap().iter() {
             assert!(!wire.contains(&token), "the token reached the page: {wire}");
         }
         let (port, secret) = (studio.port, &studio.secret);
-        let out =
-            format!("atticdb studio: http://127.0.0.1:{port}/#k={secret}\nPress Ctrl-C to stop.\n");
-        assert_eq!(studio.process.stdout(), out);
-        let err = studio.process.stderr();
-        assert!(
-            !err.contains(secret) && !err.contains(&token) && !err.contains("limit=1"),
-            "{err}"
+        let on = if forget { "atticdb studio: forget is on (--allow-forget).\n" } else { "" };
+        let out = format!(
+            "atticdb studio: http://127.0.0.1:{port}/#k={secret}\n{on}Press Ctrl-C to stop.\n"
         );
+        assert_eq!(studio.process.stdout(), out);
+        // Forget lines hold counts, never a name.
+        let err = studio.process.stderr();
+        let named = ["limit=1", "copilot", "deploy"].iter().any(|text| err.contains(text));
+        assert!(!err.contains(secret) && !err.contains(&token) && !named, "{err}");
     }
     assert!(!data.parent().unwrap().join("studio.html").exists(), "--no-open writes no page");
 }

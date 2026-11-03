@@ -1,5 +1,6 @@
 'use strict';
-// AtticDB studio: a read-only page over the studio bridge on 127.0.0.1.
+// AtticDB studio: a read-only page over the studio bridge on 127.0.0.1. Started with --allow-forget, it can also
+// forget sessions and fact keys, after a confirm step.
 // Every store value (content, keys, agent and session names) is untrusted text. It reaches the page only
 // through text nodes and attribute values: never as markup, never in a class, tag or attribute name, and
 // in a URL only as a query parameter built with URLSearchParams.
@@ -29,15 +30,26 @@ class ApiError extends Error {
 async function api(route, params) {
   const query = new URLSearchParams();
   for (const [k, v] of Object.entries(params || {})) if (v !== undefined && v !== null) query.set(k, String(v));
+  const qs = query.toString();
+  return call(route, qs ? '?' + qs : '', null);
+}
+// POST /api/<route> with a JSON body. The JSON type makes a browser ask first for any other origin, and the studio
+// never answers that, so only this page can send it.
+const post = (route, body) => call(route, '', JSON.stringify(body));
+async function call(route, qs, body) {
   const headers = {};
   let secret = null;
   try { secret = sessionStorage.getItem(SECRET_KEY); } catch (e) { secret = null; }
   if (secret) headers['X-Atticdb-Studio'] = secret;
-  const qs = query.toString();
+  const init = { headers, cache: 'no-store', credentials: 'omit', redirect: 'error', referrerPolicy: 'no-referrer' };
+  if (body !== null) {
+    headers['Content-Type'] = 'application/json';
+    Object.assign(init, { method: 'POST', body });
+  }
   let res;
   let text;
   try {
-    res = await fetch('/api/' + route + (qs ? '?' + qs : ''), { headers, cache: 'no-store', credentials: 'omit', redirect: 'error', referrerPolicy: 'no-referrer' });
+    res = await fetch('/api/' + route + qs, init);
     // a body cut off in transfer fails here too
     text = await res.text();
   } catch (e) {
@@ -207,6 +219,8 @@ function storeHint(kind) {
   });
   return hint;
 }
+// Whether the store holds a forget. Its counts then include forgotten records.
+const anyForgotten = (s) => (s.forgotten_sessions || 0) + (s.forgotten_fact_keys || 0) + (s.forgotten_lsns || 0) > 0;
 const statsRefused = (err) => err instanceof ApiError && (err.status === 403 || err.status === 404);
 const STATS_REFUSED = 'This store does not share its stats over its URL. A home or data dir studio shows them.';
 function errorShort(err) {
@@ -232,7 +246,7 @@ const infoReady = api('info').then((info) => {
   byId('scope-store').textContent = Object.hasOwn(STORE_NAME, info.store) ? STORE_NAME[info.store] : info.store;
   // a line may break before any slash of the path
   if (info.home) put(byId('scope-path'), info.home.split('/').map((part, i) => (i ? [h('wbr'), '/' + part] : part)));
-  byId('version').textContent = `atticdb ${info.version}. Read only.`;
+  byId('version').textContent = `atticdb ${info.version}. ${info.forget === true ? 'Forget is on.' : 'Read only.'}`;
   return info;
 }, () => null);
 
@@ -279,6 +293,129 @@ function card(title, aside, cls) {
   return { el: h('section', { class: cls ? 'card ' + cls : 'card' }, head, body), head, heading, body };
 }
 
+// ---------- forget: only when the studio was started with --allow-forget ----------
+// Placeholders come from the store either way, so every studio draws the pill. Only the controls need the flag.
+const forgottenPill = () => h('span', { class: 'pill forgotten' }, 'Forgotten');
+const HIDDEN = 'Content is hidden from normal AtticDB reads. It stays on disk until purge ships (#159).';
+const VISIBLE_URL = 'https://github.com/Clawdlinux/atticdb#what-a-forget-leaves-visible';
+const canForget = (info) => Boolean(info && info.forget === true);
+const outcomeOf = (r) => (r && typeof r.outcome === 'string' ? r.outcome : 'unknown');
+// An item that may or may not have been forgotten, or never reached the store, keeps its retry key and its pin. A
+// retry then resends the same request, and the store answers it as done once.
+const retryable = (r) => outcomeOf(r) === 'unknown' || outcomeOf(r) === 'not_sent';
+const pendingForgets = new Map();
+function retryKey() {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+// Sends items of { id, selector, upTo }, where selector is { session: { agent, session } } or { key }. Returns 1
+// result per item, in order.
+async function sendForget(items) {
+  const forgets = items.map((item) => {
+    if (!pendingForgets.has(item.id)) pendingForgets.set(item.id, { idem_key: retryKey(), up_to_lsn: item.upTo });
+    const { idem_key, up_to_lsn } = pendingForgets.get(item.id);
+    return { idem_key, ...item.selector, up_to_lsn };
+  });
+  let results;
+  try {
+    const reply = await post('forget', { confirm: 'hide', forgets });
+    results = items.map((_, i) => (Array.isArray(reply.results) ? reply.results[i] : null) || { outcome: 'unknown' });
+  } catch (err) {
+    if (!(err instanceof ApiError)) throw err;
+    // the studio refused it before sending, unless its answer was lost on the way back
+    const outcome = err.code === 'offline' ? 'unknown' : 'not_sent';
+    results = items.map(() => ({ outcome, error: err.code, status: err.status, message: err.detail }));
+  }
+  items.forEach((item, i) => { if (!retryable(results[i])) pendingForgets.delete(item.id); });
+  return results;
+}
+function forgetError(r) {
+  if (outcomeOf(r) === 'unknown') return "The answer was lost, so it may be done.";
+  if (r.status === 401) return 'This link is out of date. Open the link atticdb studio printed.';
+  if (r.error === 'store_unreachable') return "Couldn't reach the store.";
+  if (r.error === 'resource_exhausted') return 'The store holds as many forgets as it can.';
+  return `The store answered ${r.error || 'with an error'}${r.message ? ': ' + r.message : ''}.`;
+}
+// 1 status line for the results of 1 forget.
+function forgetMessage(results, noun) {
+  const done = results.filter((r) => outcomeOf(r) === 'committed').length;
+  const kept = results.filter(retryable).length;
+  const failed = results.find((r) => outcomeOf(r) !== 'committed');
+  if (!failed) return `Forgot ${count(done, noun)}.`;
+  const parts = [results.length === 1 ? `Couldn't forget this ${noun}.` : `Forgot ${n(done)} of ${count(results.length, noun)}.`, forgetError(failed)];
+  if (kept && results.length === 1) parts.push('Try again to send the same request.');
+  else if (kept) parts.push(`${count(kept, noun)} ${kept === 1 ? 'stays' : 'stay'} selected. Try again to send ${kept === 1 ? 'it' : 'them'}.`);
+  return parts.join(' ');
+}
+// Asks first, in a modal dialog. Cancel has the focus, and Escape cancels. Focus goes back to the opener on close.
+// Resolves true only for the forget button.
+function confirmForget({ title, names, later, opener }) {
+  const cancel = h('button', { class: 'btn', type: 'button', autofocus: true }, 'Cancel');
+  const hide = h('button', { class: 'btn danger', type: 'button' }, 'Forget');
+  const shown = names.slice(0, 10);
+  const dialog = h('dialog', { class: 'confirm', 'aria-labelledby': 'confirm-title', 'aria-describedby': 'confirm-hidden' },
+    h('h2', { id: 'confirm-title' }, title),
+    h('ul', { class: 'confirm-items' }, shown.map((name) => h('li', null, name))),
+    names.length > shown.length ? h('p', { class: 'muted' }, `and ${n(names.length - shown.length)} more`) : null,
+    h('p', { id: 'confirm-hidden' }, HIDDEN),
+    h('p', null, 'Names, keys, LSNs, counts and sizes stay visible. ',
+      h('a', { class: 'link', href: VISIBLE_URL, target: '_blank', rel: 'noopener noreferrer' }, 'What a forget leaves visible')),
+    h('p', null, later),
+    h('p', null, "AtticDB can't undo this."),
+    h('div', { class: 'confirm-actions' }, cancel, hide));
+  document.body.append(dialog);
+  return new Promise((resolve) => {
+    cancel.addEventListener('click', () => dialog.close('cancel'));
+    hide.addEventListener('click', () => dialog.close('hide'));
+    dialog.addEventListener('close', () => {
+      dialog.remove();
+      if (opener.isConnected) opener.focus();
+      resolve(dialog.returnValue === 'hide');
+    });
+    dialog.showModal();
+    cancel.focus();
+  });
+}
+// Set right before the redraw a forget asks for. The screen it names shows the message, keeps the items to retry
+// selected and puts the focus back on its forget button.
+let afterForget = null;
+function takeAfterForget(screen) {
+  const after = afterForget && afterForget.screen === screen ? afterForget : null;
+  afterForget = null;
+  return after;
+}
+// A forget button and its status line, enabled once the view has loaded. `items` gives what to send: each of
+// { id, name, selector, upTo }. Call placed() once both are on the page.
+function forgetControls({ label, noun, screen, title, later, items }) {
+  const button = h('button', { class: 'btn danger', type: 'button', 'aria-disabled': 'true' }, label);
+  const status = h('p', { class: 'forget-status', role: 'status' });
+  const id = renderId;
+  button.addEventListener('click', async () => {
+    if (button.getAttribute('aria-disabled') === 'true') return;
+    const picked = items();
+    if (!picked || !picked.length) return;
+    const yes = await confirmForget({ title: title(picked), names: picked.map((item) => item.name), later, opener: button });
+    if (!yes || id !== renderId) return;
+    button.setAttribute('aria-disabled', 'true');
+    status.textContent = 'Forgetting...';
+    const results = await sendForget(picked);
+    if (id !== renderId) return;
+    afterForget = { screen, message: forgetMessage(results, noun), keep: picked.filter((_, i) => retryable(results[i])).map((item) => item.id) };
+    render(false);
+  });
+  const after = takeAfterForget(screen);
+  return {
+    button, status, keep: new Set(after ? after.keep : []),
+    enable(on) { if (on) button.removeAttribute('aria-disabled'); else button.setAttribute('aria-disabled', 'true'); },
+    placed() {
+      if (!after) return;
+      status.textContent = after.message;
+      button.focus({ preventScroll: true });
+    },
+  };
+}
+
 // ---------- records: a turn or a fact revision as one row ----------
 // The store's plural rule, Harman's S-stemmer (singular in atticdb-core's engine.rs): keys gives key,
 // policies gives policy, and status, class, does and goes stay as they are. Lengths count UTF-8 bytes.
@@ -319,7 +456,22 @@ function highlight(text, words) {
   return out;
 }
 
+// A forgotten record keeps its names and position: kind, key or agent and session, seq and LSN. No content, no time.
+function forgottenRow(rec) {
+  const isFact = rec.kind === 'fact';
+  const where = isFact
+    ? ['Fact ', h('a', { href: href('fact', { key: rec.key }) }, code(rec.key))]
+    : ['Turn ', fig(String(rec.seq)), ' in ', h('a', { href: href('session', { agent: rec.agent, session: rec.session, seq: rec.seq }) }, nameOf(rec.session)),
+        h('span', { class: 'also' }, ' by ', h('span', { class: 'who' }, nameOf(rec.agent)))];
+  return h('li', { class: 'rec is-forgotten' },
+    h('span', { class: 'rec-lsn' }, String(rec.lsn)),
+    h('p', { class: 'rec-text' }, forgottenPill()),
+    h('p', { class: 'rec-meta' }, where),
+    h('span', { class: 'rec-agent' }, isFact ? h('span', { class: 'muted' }, '-') : nameOf(rec.agent)),
+    h('span', { class: 'rec-when' }, h('span', { class: 'lsn' }, 'LSN ' + rec.lsn)));
+}
 function recordRow(rec, words) {
+  if (rec.redacted === true) return forgottenRow(rec);
   const isFact = rec.kind === 'fact';
   const mark = (t) => (words ? highlight(t, words) : t);
   const text = isFact && rec.deleted === true
@@ -462,7 +614,8 @@ async function allSessions(after) {
   let total = { sessions: 0, turns: 0 };
   for (let i = 0; i < BATCH && id === renderId; i++) {
     const page = await api('v1/sessions', after ? { limit: 1000, after_agent: after.agent, after_session: after.session } : { limit: 1000 });
-    rows.push(...page.sessions);
+    // a forget of a row hides only what its page saw: turns at or below the page's as_of_lsn
+    rows.push(...page.sessions.map((s) => ({ ...s, asOf: page.as_of_lsn })));
     total = page.total;
     if (page.next === null) return { rows, total, next: null };
     after = page.next;
@@ -568,6 +721,13 @@ async function showBlock(body, repo, copyInto, more) {
 }
 
 // ---------- screens ----------
+function newestWrite(finding, r) {
+  const what = r.kind === 'fact'
+    ? [nameOf(r.agent), r.deleted ? ' deleted ' : ' set ', h('a', { href: href('fact', { key: r.key }) }, code(r.key))]
+    : [nameOf(r.agent), ' saved turn ', String(r.seq), ' in ', h('a', { href: href('session', { agent: r.agent, session: r.session, seq: r.seq }) }, nameOf(r.session))];
+  if (daysAgo(dateOf(r.commit_time_ns)) === 0) say(finding, `Newest write ${ago(r.commit_time_ns)}, at ${TIME.format(dateOf(r.commit_time_ns))}: `, what, '.');
+  else say(finding, 'Nothing saved today. The newest write was ', whenWords(r.commit_time_ns), ': ', what, '.');
+}
 // 1. Overview: what did my agents save lately?
 async function overview(main) {
   const finding = titleRow(main, 'Overview');
@@ -608,12 +768,9 @@ async function overview(main) {
     return;
   }
   put(done(list), ...records.map((r) => recordRow(r)));
-  const r = records[0];
-  const what = r.kind === 'fact'
-    ? [nameOf(r.agent), r.deleted ? ' deleted ' : ' set ', h('a', { href: href('fact', { key: r.key }) }, code(r.key))]
-    : [nameOf(r.agent), ' saved turn ', String(r.seq), ' in ', h('a', { href: href('session', { agent: r.agent, session: r.session, seq: r.seq }) }, nameOf(r.session))];
-  if (daysAgo(dateOf(r.commit_time_ns)) === 0) say(finding, `Newest write ${ago(r.commit_time_ns)}, at ${TIME.format(dateOf(r.commit_time_ns))}: `, what, '.');
-  else say(finding, 'Nothing saved today. The newest write was ', whenWords(r.commit_time_ns), ': ', what, '.');
+  // a forgotten record has no time, so the finding names the newest one shown in full
+  const r = records.find((x) => x.redacted !== true);
+  if (r) newestWrite(finding, r); else say(finding, 'The newest records are forgotten.');
 
   const repo = newestRepo(records);
   if (!repo) { empty(chat.body, ['The newest records name no repo. Pick one on ', h('a', { class: 'link', href: href('chat-start') }, 'Chat start'), '.']); return; }
@@ -633,10 +790,11 @@ async function storeLine(line) {
   try {
     const [s, ses] = await Promise.all([api('v1/stats'), api('v1/sessions', { limit: 1 })]);
     if (id !== renderId) return;
+    const turns = anyForgotten(s) ? 'Turns, forgotten included' : 'Turns';
     const item = (label, v) => h('span', { class: 'item' }, label, h('b', { class: v === 0 ? 'zero' : null }, n(v)));
     put(line, head,
       h('span', { class: 'item' }, h('span', { class: s.health === 'ok' ? 'dot' : 'dot bad' }), s.health === 'ok' ? 'Healthy' : `Health: ${s.health}`),
-      item('Durable LSN', s.durable_lsn), item('Fact keys', s.facts), item('Sessions', ses.total.sessions), item('Turns', ses.total.turns),
+      item('Durable LSN', s.durable_lsn), item('Fact keys', s.facts), item('Sessions', ses.total.sessions), item(turns, ses.total.turns),
       h('a', { class: 'link', href: href('health') }, 'Open health'));
   } catch (err) {
     if (!(err instanceof ApiError)) throw err;
@@ -681,7 +839,8 @@ async function logScreen(main, p) {
     const all = [ses.total.turns + s.fact_revisions, ses.total.turns, s.fact_revisions];
     all.forEach((v, i) => { counts[i].textContent = n(v); });
     pages.setTotal(all[kind === 'turn' ? 1 : kind === 'fact' ? 2 : 0]);
-    if (all[0]) say(finding, `${count(all[0], 'record')}: ${count(all[1], 'turn')} and ${count(all[2], 'fact revision')}, newest first by LSN. Superseded revisions and deletes stay in the log.`);
+    const forgot = anyForgotten(s) ? ' Counts include forgotten records.' : '';
+    if (all[0]) say(finding, `${count(all[0], 'record')}: ${count(all[1], 'turn')} and ${count(all[2], 'fact revision')}, newest first by LSN. Superseded revisions and deletes stay in the log.${forgot}`);
   } catch (err) { if (!(err instanceof ApiError)) throw err; }
 }
 
@@ -722,6 +881,7 @@ async function searchScreen(main, p) {
 }
 
 // 3. Sessions: which sessions hold turns, by agent and by name
+const sessionId = (s) => JSON.stringify(['session', s.agent, s.session]);
 async function sessionsScreen(main) {
   const id = renderId;
   const finding = titleRow(main, 'Sessions');
@@ -730,18 +890,39 @@ async function sessionsScreen(main) {
   const tbody = h('tbody');
   const matchNote = h('span', { class: 'card-note' });
   const list = card('Every session', matchNote);
-  const table = h('table', null, h('thead', null, h('tr', null, h('th', null, 'Session'), h('th', null, 'Agent'), h('th', { class: 'n' }, 'Turns'))), tbody);
-  main.append(strip, h('div', { class: 'toolbar' }, filter), list.el);
+  const toolbar = h('div', { class: 'toolbar' }, filter);
+  main.append(strip, toolbar, list.el);
   busy(strip, 1);
   busy(list.body, 6);
+  const info = await infoReady;
+  if (id !== renderId) return;
+  // Picked sessions by id. A pick hidden by the filter or the agent strip stays picked, and the button counts it.
+  const picked = new Map();
+  const forget = canForget(info) ? forgetControls({
+    label: 'Forget selected (0)', noun: 'session', screen: 'sessions',
+    title: (items) => `Forget ${count(items.length, 'session')}?`,
+    later: 'Turns written after this page loaded stay visible.',
+    items: () => [...picked.values()].map((s) => ({ id: sessionId(s), name: [nameOf(s.session), ' by ', nameOf(s.agent)], selector: { session: { agent: s.agent, session: s.session } }, upTo: s.asOf })),
+  }) : null;
+  const pickAll = forget ? h('input', { type: 'checkbox', 'aria-label': 'Select every shown session' }) : null;
+  const cap = h('span', { class: 'muted' });
+  if (forget) {
+    toolbar.append(forget.button, cap, forget.status);
+    forget.placed();
+  }
+  const head = [forget ? h('th', { class: 'pick' }, pickAll) : null, h('th', null, 'Session'), h('th', null, 'Agent'), h('th', { class: 'n' }, 'Turns')];
+  const table = h('table', null, h('thead', null, h('tr', null, head)), tbody);
   let data;
   try { data = await allSessions(); } catch (err) { if (id !== renderId) return; failed(list.body, err); strip.remove(); say(finding, errorShort(err)); return; }
   if (id !== renderId) return;
   const rows = data.rows;
   let { total, next } = data;
-  if (!rows.length && next === null) { empty(list.body, nothingSaved()); strip.remove(); note(finding, 'No sessions yet.'); return; }
+  if (!rows.length && next === null) { empty(list.body, nothingSaved()); strip.remove(); if (forget) forget.button.remove(); note(finding, 'No sessions yet.'); return; }
+  // after a forget, the sessions to retry stay picked
+  if (forget) for (const s of rows) if (forget.keep.has(sessionId(s))) picked.set(sessionId(s), s);
   let agent = null;
   let more = null;
+  let shown = [];
   // Until the list is complete, the agent strip and the filter cover only the sessions loaded, and the foot says so.
   const build = () => {
     const byAgent = new Map();
@@ -749,8 +930,9 @@ async function sessionsScreen(main) {
       const a = byAgent.get(s.agent) || { sessions: 0, turns: 0 };
       a.sessions++; a.turns += s.turns; byAgent.set(s.agent, a);
     }
-    if (next === null) say(finding, `${count(total.sessions, 'session')} hold ${count(total.turns, 'turn')}, from ${count(byAgent.size, 'agent')}.`);
-    else say(finding, `${count(total.sessions, 'session')} hold ${count(total.turns, 'turn')}. The first ${n(rows.length)} are loaded.`);
+    const forgot = rows.some((s) => s.forgotten_up_to !== null && s.forgotten_up_to !== undefined) ? ' Counts include forgotten turns.' : '';
+    if (next === null) say(finding, `${count(total.sessions, 'session')} hold ${count(total.turns, 'turn')}, from ${count(byAgent.size, 'agent')}.${forgot}`);
+    else say(finding, `${count(total.sessions, 'session')} hold ${count(total.turns, 'turn')}. The first ${n(rows.length)} are loaded.${forgot}`);
     const cells = [[null, 'All agents', total.sessions, total.turns], ...[...byAgent].map(([a, v]) => [a, a, v.sessions, v.turns])];
     const buttons = cells.map(([key, label, ses, turns]) => {
       const b = h('button', { class: 'agent', type: 'button', 'aria-pressed': String(key === agent) },
@@ -782,16 +964,47 @@ async function sessionsScreen(main) {
     }
     more.show(next === null ? `Showing all ${count(total.sessions, 'session')}.` : `Showing ${n(rows.length)} of ${count(total.sessions, 'session')}. The rest are not loaded, so counts by agent cover these.`, next !== null);
   };
+  // The button, the header box and the cap note follow the picks.
+  const sync = () => {
+    if (!forget) return;
+    const size = picked.size;
+    forget.button.textContent = `Forget selected (${n(size)})`;
+    forget.enable(size > 0 && size <= 100);
+    cap.textContent = size > 100 ? 'Select at most 100 sessions at a time.' : '';
+    const on = shown.filter((s) => picked.has(sessionId(s))).length;
+    pickAll.checked = shown.length > 0 && on === shown.length;
+    pickAll.indeterminate = on > 0 && on < shown.length;
+  };
+  if (forget) {
+    pickAll.addEventListener('change', () => {
+      for (const s of shown) if (pickAll.checked) picked.set(sessionId(s), s); else picked.delete(sessionId(s));
+      paint();
+    });
+  }
   put(done(list.body), table);
   const paint = () => {
     const f = filter.value.trim().toLowerCase();
-    const hit = rows.filter((s) => (agent === null || s.agent === agent) && (!f || s.session.toLowerCase().includes(f)));
+    shown = rows.filter((s) => (agent === null || s.agent === agent) && (!f || s.session.toLowerCase().includes(f)));
     put(list.heading, agent === null ? 'Every session' : ['Sessions of ', nameOf(agent)]);
-    put(matchNote, f ? `${n(hit.length)} match` : '');
-    if (!hit.length) { put(tbody, h('tr', null, h('td', { colspan: '3', class: 'muted' }, 'No session name holds that text.'))); return; }
-    put(tbody, hit.map((s) => h('tr', { class: 'linked' },
-      h('td', null, h('a', { class: 'row-link', href: href('session', { agent: s.agent, session: s.session }) }, nameOf(s.session))),
-      h('td', null, nameOf(s.agent)), h('td', { class: 'n' }, n(s.turns)))));
+    put(matchNote, f ? `${n(shown.length)} match` : '');
+    sync();
+    if (!shown.length) { put(tbody, h('tr', null, h('td', { colspan: forget ? '4' : '3', class: 'muted' }, 'No session name holds that text.'))); return; }
+    put(tbody, shown.map((s) => {
+      const forgotten = s.forgotten_up_to !== null && s.forgotten_up_to !== undefined;
+      let box = null;
+      if (forget) {
+        const label = `Select session ${s.session === '' ? '(empty)' : s.session} by ${s.agent === '' ? '(empty)' : s.agent}`;
+        box = h('input', { type: 'checkbox', 'aria-label': label, checked: picked.has(sessionId(s)) });
+        box.addEventListener('change', () => {
+          if (box.checked) picked.set(sessionId(s), s); else picked.delete(sessionId(s));
+          sync();
+        });
+      }
+      return h('tr', { class: 'linked' },
+        forget ? h('td', { class: 'pick' }, box) : null,
+        h('td', null, h('a', { class: 'row-link', href: href('session', { agent: s.agent, session: s.session }) }, nameOf(s.session)), forgotten ? [' ', forgottenPill()] : null),
+        h('td', null, nameOf(s.agent)), h('td', { class: 'n' }, n(s.turns)));
+    }));
   };
   build();
   filter.addEventListener('input', paint);
@@ -800,6 +1013,12 @@ async function sessionsScreen(main) {
 
 // 3b. Session: one session's turns, newest first, older pages by since_seq
 function turnItem(t, want) {
+  // a forgotten turn keeps its seq and LSN, and nothing else
+  if (t.redacted === true) {
+    return h('li', { class: 'turn is-forgotten', 'aria-current': t.seq === want ? 'true' : null },
+      h('p', { class: 'turn-head' }, 'Turn ', fig(String(t.seq)), forgottenPill()),
+      h('p', { class: 'rec-when' }, h('span', { class: 'lsn' }, 'LSN ' + t.lsn)));
+  }
   return h('li', { class: 'turn', 'aria-current': t.seq === want ? 'true' : null },
     h('p', { class: 'turn-head' }, 'Turn ', fig(String(t.seq)), t.role === 'assistant' ? h('span', null, 'assistant') : h('span', { class: 'pill' }, t.role)),
     h('p', { class: 'rec-when' }, timeCell(t.commit_time_ns), h('span', { class: 'lsn' }, 'LSN ' + t.lsn)),
@@ -822,6 +1041,20 @@ async function sessionScreen(main, p) {
   main.append(c.el);
   busy(list, 4);
   const id = renderId;
+  const info = await infoReady;
+  if (id !== renderId) return;
+  // The first window's as_of_lsn. A forget hides turns up to it, so a turn written after it stays visible.
+  let pin = null;
+  const forget = canForget(info) ? forgetControls({
+    label: 'Forget this session', noun: 'session', screen: 'session',
+    title: () => 'Forget this session?',
+    later: 'Turns written after this page loaded stay visible.',
+    items: () => (pin === null ? null : [{ id: sessionId({ agent, session: name }), name: [nameOf(name), ' by ', nameOf(agent)], selector: { session: { agent, session: name } }, upTo: pin }]),
+  }) : null;
+  if (forget) {
+    c.el.before(h('div', { class: 'toolbar' }, forget.button, forget.status));
+    forget.placed();
+  }
   // the turns shown are low to high, of the session's total
   let low = 0;
   let high = 0;
@@ -873,8 +1106,12 @@ async function sessionScreen(main, p) {
     const w = await api('v1/window', { agent, session: name, last: 50, max_bytes: EIGHT_MIB });
     if (id !== renderId) return;
     if (!w.turns.length) { empty(list, ['No turns in this session.']); foot.remove(); note(finding, 'No turns from ', nameOf(agent), ' in this session.'); return; }
-    const newest = w.turns[w.turns.length - 1];
-    total = newest.seq;
+    pin = w.as_of_lsn;
+    if (forget && Number.isInteger(pin) && pin > 0) forget.enable(true);
+    total = w.turns[w.turns.length - 1].seq;
+    // a forgotten turn has no time, so the finding names the newest turn shown in full
+    const newest = w.turns.slice().reverse().find((t) => t.redacted !== true);
+    const hidden = w.turns.filter((t) => t.redacted === true).length;
     let shown = w.turns;
     // a link to a turn older than these reads a window around it, however far back it is
     if (want !== null && want < shown[0].seq) {
@@ -886,9 +1123,14 @@ async function sessionScreen(main, p) {
     put(done(list), ...shown.slice().reverse().map((t) => turnItem(t, want)));
     low = shown[0].seq;
     high = shown[shown.length - 1].seq;
-    say(finding, h('span', { class: 'who' }, nameOf(agent)), total === 1
-      ? ` saved 1 turn here, ${whenWords(newest.commit_time_ns)}.`
-      : ` saved ${count(total, 'turn')} here. The newest came ${whenWords(newest.commit_time_ns)}, ${ago(newest.commit_time_ns)}.`);
+    const who = h('span', { class: 'who' }, nameOf(agent));
+    if (!newest) say(finding, who, total === 1 ? ' saved 1 turn here. It is forgotten.' : ` saved ${count(total, 'turn')} here. ${hidden === total ? 'All' : `The newest ${n(hidden)}`} are forgotten.`);
+    else if (total === 1) say(finding, who, ` saved 1 turn here, ${whenWords(newest.commit_time_ns)}.`);
+    else {
+      const which = newest.seq === total ? 'The newest' : 'The newest shown';
+      const forgot = hidden ? ' The count includes forgotten turns.' : '';
+      say(finding, who, ` saved ${count(total, 'turn')} here. ${which} came ${whenWords(newest.commit_time_ns)}, ${ago(newest.commit_time_ns)}.${forgot}`);
+    }
     paint();
     list.querySelector('[aria-current="true"]')?.scrollIntoView({ block: 'center' });
   } catch (err) { if (id !== renderId) return; failed(list, err); foot.remove(); say(finding, errorShort(err)); }
@@ -973,7 +1215,9 @@ async function factsScreen(main) {
       if (id !== renderId || !info || info.store !== 'home') return;
       const s = await api('v1/stats');
       if (id !== renderId) return;
-      if (s.tenants <= 1 && s.facts > facts.length) finding.append(` ${count(s.facts - facts.length, 'more key')} ${s.facts - facts.length === 1 ? 'was' : 'were'} deleted.`);
+      // stats count forgotten keys too, and the list skips them
+      const gone = anyForgotten(s) ? 'deleted or forgotten' : 'deleted';
+      if (s.tenants <= 1 && s.facts > facts.length) finding.append(` ${count(s.facts - facts.length, 'more key')} ${s.facts - facts.length === 1 ? 'was' : 'were'} ${gone}.`);
     } catch (err) { if (!(err instanceof ApiError)) throw err; }
   };
   paint();
@@ -993,6 +1237,20 @@ async function factScreen(main, p) {
   busy(now.body, 1);
   busy(revs.body, 3);
   const id = renderId;
+  const info = await infoReady;
+  if (id !== renderId) return;
+  // The LSN of the newest revision shown. A forget hides revisions up to it, so a later one stays visible.
+  let pin = null;
+  const forget = canForget(info) ? forgetControls({
+    label: 'Forget this key', noun: 'fact key', screen: 'fact',
+    title: () => 'Forget this key?',
+    later: 'Revisions written after this page loaded stay visible.',
+    items: () => (pin === null ? null : [{ id: JSON.stringify(['key', key]), name: code(key), selector: { key }, upTo: pin }]),
+  }) : null;
+  if (forget) {
+    now.el.before(h('div', { class: 'toolbar' }, forget.button, forget.status));
+    forget.placed();
+  }
   // 1 read, so the current value, a delete and the revisions all come from the same snapshot of the store
   let hist;
   try { hist = await api('v1/facts/history', { key, max_bytes: EIGHT_MIB }); } catch (err) {
@@ -1002,10 +1260,12 @@ async function factScreen(main, p) {
   }
   if (id !== renderId) return;
   const list = hist.revisions;
-  if (!list.length) { empty(now.body, ['No fact has the key ', code(key), '.']); revs.el.remove(); note(finding, 'No such fact.'); return; }
-  // the newest revision is the current value, unless it is a delete
+  if (!list.length) { empty(now.body, ['No fact has the key ', code(key), '.']); revs.el.remove(); note(finding, 'No such fact.'); if (forget) forget.button.remove(); return; }
+  // the newest revision is the current value, unless it is a delete or forgotten
   const last = list[0];
-  const cur = last.deleted ? null : last;
+  const cur = last.deleted || last.redacted === true ? null : last;
+  pin = last.lsn;
+  if (forget) forget.enable(last.redacted !== true);
   // truncated: the store lists only its newest revisions, at most 16 and 8 MiB of them. The log keeps every one.
   const shown = `${count(list.length, 'revision')}${hist.truncated ? ' shown' : ''}`;
   const line = (label, ...v) => h('span', null, label, ' ', h('b', null, v));
@@ -1014,18 +1274,24 @@ async function factScreen(main, p) {
       h('p', { class: 'facts-line' }, line('Key', code(key)), line('Set by', nameOf(cur.agent)), line('At', timeCell(cur.commit_time_ns)), line('LSN', fig(String(cur.lsn)))),
       cur.meta === null || cur.meta === undefined ? null : h('p', { class: 'meta-json' }, breakable('meta ' + JSON.stringify(cur.meta))));
     say(finding, `${shown}. Last set by `, h('span', { class: 'who' }, nameOf(cur.agent)), ` ${whenWords(cur.commit_time_ns)}.`);
+  } else if (last.redacted === true) {
+    empty(now.body, ['No current value. This key was forgotten.']);
+    say(finding, `${shown}. This key was forgotten.`);
   } else {
     empty(now.body, ['No current value. ', h('b', null, nameOf(last.agent)), ` deleted this key ${whenWords(last.commit_time_ns)}, at LSN ${last.lsn}.`]);
     say(finding, `${shown}. Deleted ${whenWords(last.commit_time_ns)}.`);
   }
-  put(done(revs.body), h('ol', { class: 'rows' }, list.map((r) => h('li', { class: 'rev' },
+  put(done(revs.body), h('ol', { class: 'rows' }, list.map((r) => (r.redacted === true ? h('li', { class: 'rev is-forgotten' },
+    h('span', { class: 'rec-lsn' }, String(r.lsn)),
+    h('p', { class: 'rec-text' }, forgottenPill()),
+    h('span', { class: 'rec-when' }, h('span', { class: 'lsn' }, 'LSN ' + r.lsn))) : h('li', { class: 'rev' },
     h('span', { class: 'rec-lsn' }, String(r.lsn)),
     r.deleted
       ? h('p', { class: 'rec-text is-deleted' }, h('span', { class: 'pill' }, 'Deleted'), 'The key held no value after this.')
       : h('p', { class: 'rec-text' }, r === cur ? h('span', { class: 'pill' }, 'Current') : null, breakable(r.content)),
     h('span', { class: 'rec-agent' }, nameOf(r.agent)),
     h('p', { class: 'rec-meta' }, 'by ', h('span', { class: 'who' }, nameOf(r.agent))),
-    h('span', { class: 'rec-when' }, timeCell(r.commit_time_ns), h('span', { class: 'lsn' }, 'LSN ' + r.lsn))))),
+    h('span', { class: 'rec-when' }, timeCell(r.commit_time_ns), h('span', { class: 'lsn' }, 'LSN ' + r.lsn)))))),
     hist.truncated ? h('p', { class: 'chart-note' }, 'Older revisions are not listed here. ', h('a', { class: 'link', href: href('log', { kind: 'fact' }) }, 'The log'), ' keeps every one.') : null);
 }
 

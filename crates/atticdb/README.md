@@ -16,7 +16,7 @@ atticdb mcp                                       # no flags: the per-user home
 atticdb connect vscode                            # adds AtticDB to VS Code's MCP config
 atticdb connect claude-code                       # adds AtticDB to Claude Code, with its hook
 atticdb connect codex                             # adds AtticDB to Codex, with its hook
-atticdb studio                                    # a read-only page about the store
+atticdb studio                                    # a read-only page, unless --allow-forget
 atticdb doctor                                    # checks the install and writes nothing
 atticdb verify --data-dir ./data                  # checks a stopped data dir on a copy
 atticdb recover --truncate-at <lsn> --data-dir ./data
@@ -664,11 +664,13 @@ It is a snapshot. The model can call `memory_search` or `fact_list` for more.
 ## `atticdb studio`
 
 ```sh
-atticdb studio             # the home, opens your browser
-atticdb studio --no-open   # only prints the link
+atticdb studio                  # the home, opens your browser
+atticdb studio --no-open        # only prints the link
+atticdb studio --allow-forget   # can also forget sessions and fact keys
 ```
 
-`atticdb studio [<flags>] [--no-open]` serves a read-only web page about the store, on loopback.
+`atticdb studio [<flags>] [--no-open] [--allow-forget]` serves a web page about the store, on loopback.
+It is read-only unless started with `--allow-forget`.
 It takes `--url`, `--data-dir`, `--config`, `--tenant` and `--token-file`, as `atticdb mcp` does.
 With none, it uses the home and starts its server if needed.
 It sends `GET /healthz` once, without the token. Unless the store answers 200, it exits 1 with the error.
@@ -678,6 +680,8 @@ Then it listens on `127.0.0.1` on a random port, makes a secret of 32 hex charac
 atticdb studio: http://127.0.0.1:<port>/#k=<secret>
 Press Ctrl-C to stop.
 ```
+
+With `--allow-forget`, the line `atticdb studio: forget is on (--allow-forget).` comes after the link.
 
 Unless `--no-open`, it writes a redirect page with that link to `studio.html` in the home directory, at mode 0600.
 It creates that directory if missing, with no config. Then it runs `open` on macOS or `xdg-open` on Linux on that file.
@@ -696,15 +700,39 @@ Every request goes through these checks, in order:
 - Routes under `/api/` need the secret, else 401 `unauthorized`. It is compared in constant time.
   A page on another origin cannot send that header, because the studio gives no CORS answer.
 
+With `--allow-forget`, `POST /api/forget` is the 1 exception to `GET` only. It gets more checks, in this order:
+
+- `Host` as above. Then exactly 1 `Origin`, equal to `http://127.0.0.1:<port>`, else 403 `forbidden`.
+- `POST` only on this path, else 405. `OPTIONS` gets 405 too, and no `Access-Control-*` header is ever sent.
+- `Sec-Fetch-Site`, when sent, must be `same-origin`, else 403 `forbidden`.
+- The secret, else 401 `unauthorized`.
+- `Content-Type` must be exactly `application/json`, else 415 `unsupported_media_type`. A browser must ask before
+  it sends that type to another origin, and the studio never answers.
+- The body is at most 64 KiB, else 413 `too_large`.
+
 | Route | Answer |
 |---|---|
 | `GET /`, `/app.js`, `/app.css` | The page. No secret needed. It holds no data |
 | `GET /api/v1/sessions`, `records`, `window`, `search`, `facts/list`, `facts/get`, `facts/history` | The store's `GET /v1/...` with the same query, sent with the token. Its status and body come back unchanged |
 | `GET /api/v1/stats`, `GET /api/metrics` | The store's `/v1/stats` and `/metrics`. A TCP store refuses them, and that answer comes back |
 | `GET /api/block?repo=<name>` | `{"repo", "block": <text> or null, "chars", "max": 6000}`: the session-start hook's block for that repo, built by the hook's code. Only on the home, else 404 `not_home`. `repo` is 1 to 255 bytes and the only parameter, else 400 `invalid_input`. A failed read is 502 `store_unreachable` |
-| `GET /api/info` | `{"version", "tenant", "store": "home", "data_dir" or "url", "home": <path> or null}`. `tenant` is null when the token came from a token file or `ATTICDB_TOKEN` |
+| `GET /api/info` | `{"version", "tenant", "store": "home", "data_dir" or "url", "home": <path> or null, "forget": true or false}`. `tenant` is null when the token came from a token file or `ATTICDB_TOKEN`. `forget` is true only with `--allow-forget` |
+| `POST /api/forget` | Only with `--allow-forget`. See below |
 
-Anything else is 404 `not_found`. No route writes to the store.
+Anything else is 404 `not_found`. Without `--allow-forget`, no route writes to the store, and `/api/forget` is a path like any other.
+
+`POST /api/forget` takes `{"confirm": "hide", "forgets": [<item>, ...]}`.
+It holds 1 to 100 session items, or 1 fact-key item alone.
+A session item is `{"idem_key": "<32 hex>", "session": {"agent": "a", "session": "s"}, "up_to_lsn": 812}`.
+A fact-key item has `"key": "<key>"` in place of `session`.
+Every item needs `up_to_lsn`, a whole number from 1. Anything else is 400 `invalid_input`.
+The studio sends each item in order as `POST /v1/forget`, with its token.
+It stops at the first item not committed, and marks the rest `{"outcome": "not_sent"}`.
+The answer is `{"results": [...]}`, 1 per item. Each is the store's answer, or `not_sent` when nothing reached the store.
+A lost answer is `unknown`. The page resends `unknown` and `not_sent` items with the same keys.
+Each forget logs 1 stderr line with counts only, never a name.
+Content is hidden from normal AtticDB reads. It stays on disk until purge ships (#159).
+See [What a forget leaves visible](https://github.com/Clawdlinux/atticdb#what-a-forget-leaves-visible).
 A store read has 10 s, connect included. Past that it answers 504 `store_timeout`.
 A store it cannot reach answers 502 `store_unreachable`, with a `message`.
 A store 401 is the exception to unchanged answers: it becomes 502 `store_unauthorized`, so a 401 always means a wrong secret.
@@ -716,6 +744,11 @@ A 5xx answer logs 1 stderr line with the method, path, status and time. Never a 
 Exit code 1 when it cannot start, 2 for a bad flag.
 
 The page has 7 screens: Overview, Log, Sessions, Facts, Search, Chat start and Health, each at a hash route.
+Forgotten turns and revisions show as a muted "Forgotten" pill, with their names and LSNs only.
+With `--allow-forget`, the Sessions table gets a box per row and "Forget selected (N)".
+A session gets "Forget this session", and a fact "Forget this key". Each asks first, in a dialog.
+A forget hides only what the page saw. A session forget sends the `as_of_lsn` the view loaded at as `up_to_lsn`.
+A key forget sends the LSN of the newest revision shown. Then the page loads the view again.
 `studio/seed.sh <empty dir>` seeds a throwaway home with realistic memory and hostile values. Set `ATTICDB_BIN` for a build not on `PATH`, then run `HOME=<dir> XDG_DATA_HOME= ATTICDB_HOME= atticdb studio`.
 
 ## Windows

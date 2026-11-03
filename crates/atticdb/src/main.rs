@@ -28,7 +28,7 @@ const USAGE: &str = "usage:
   atticdb disconnect <vscode|copilot|claude-code|codex>
   atticdb hook session-start [--harness <name>] [--home <dir>]
   atticdb studio [--url unix:///path|http://127.0.0.1:<port>] [--data-dir <dir>] [--config <path>]
-                [--tenant <name>] [--token-file <path>] [--no-open]
+                [--tenant <name>] [--token-file <path>] [--no-open] [--allow-forget]
   atticdb append <connect> --content <text> [--role user|assistant|tool]
   atticdb recent <connect> [--n <n>] [--max-bytes <n>]
   atticdb search <connect> --query <words> [--limit <n>] [--before <lsn>] [--max-bytes <n>]
@@ -55,7 +55,8 @@ const USAGE: &str = "usage:
   Content is hidden from normal AtticDB reads. It stays on disk until purge ships (#159).
   What stays visible: https://github.com/Clawdlinux/atticdb#what-a-forget-leaves-visible
   forget session needs --agent and --session. The other forget verbs take neither.
-  studio serves a read-only page on 127.0.0.1 and opens it. It runs until Ctrl-C.
+  studio serves a read-only page on 127.0.0.1 and opens it. With --allow-forget it can also forget
+  sessions and fact keys. It runs until Ctrl-C.
   setup finds VS Code, Copilot CLI, Claude Code and Codex, asks which to connect, shows the
   plan, then connects them and checks each. See atticdb setup --help.
   doctor checks the install and writes nothing. See atticdb doctor --help.";
@@ -140,7 +141,8 @@ fn main() -> ExitCode {
                 _ => None,
             },
             "hook" => hook(rest),
-            "studio" => flags(rest, &CONNECT[..5], &["--no-open"]).map(atticdb::studio::start),
+            "studio" => flags(rest, &CONNECT[..5], &["--no-open", "--allow-forget"])
+                .map(atticdb::studio::start),
             "append" => tool(rest, "memory_append", &["--content", "--role"], &[]),
             "recent" => tool(rest, "memory_recent", &["--n", "--max-bytes"], &[]),
             "search" => {
