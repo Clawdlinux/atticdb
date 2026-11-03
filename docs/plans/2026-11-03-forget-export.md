@@ -115,10 +115,10 @@ Every user-facing surface uses this exact sentence: "Content is hidden from norm
 A forget hides turn content, meta, role and time, and fact values. These stay observable:
 - Names: agents, sessions, fact keys and file-ref paths. `/v1/sessions`, `records` placeholders, studio's tables and list cursors show them.
 - Positions: LSNs, seqs and record kinds. Placeholders keep them. Search and list cursors may name a hidden LSN or key.
-- Counts: each session's `turns`, session totals, and the `/v1/stats` and `/metrics` fields `facts`, `fact_revisions`, `compressed_turns` and `search_index_terms`. They include forgotten records.
+- Counts: each session's `turns`, session totals, and the `/v1/stats` and `/metrics` fields `facts`, `fact_revisions` and `compressed_turns`. They include forgotten records. `search_index_terms` includes them until the next restart.
 - Sizes and times: `atticdb dump` prints every record's payload length and commit time.
 - Retry oracles: a retry with a guessed payload and a known retry key confirms the guess. `turn_repeats` counts repeated content.
-- RAM: the word index keeps tokens of hidden text. A restart rebuilds it from the log, hidden text included. Hot cache entries stay until purged or evicted. Reads never serve either.
+- RAM: in-memory index tokens stay until the next restart. Hot cache entries stay until purged or evicted. Reads never serve either.
 - Bytes: segment files, unsalted retry digests in checkpoints, filesystem and SSD remanence, copies, backups and exports already taken.
 - `recover --truncate-at` below a forget's LSN drops the forget, and the content shows again.
 - A retry that arrives after its key left the dedup window writes the content again.

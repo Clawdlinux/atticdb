@@ -605,12 +605,15 @@ impl Engine {
         let worker = Worker::start(io.clone(), dir.clone(), state.clone(), &opts)?;
         lock(&state)?.notify = worker.sender.clone();
         let failed = lock(&state)?.failed.clone();
+        // Recovery has loaded every durable forget into `state`, so the rebuild skips hidden
+        // records and forgotten text never reaches the word index after a restart.
         #[cfg(feature = "sim")]
         let inline = opts.tape.inline_sim;
         #[cfg(not(feature = "sim"))]
         let inline = false;
         let indexer = crate::search_index::Indexer::start(
             tape.durable_reads(),
+            state.clone(),
             opts.search_index_bytes,
             inline,
         )
