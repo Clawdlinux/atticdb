@@ -108,7 +108,8 @@ fn read(path: &Path) -> Value {
 /// `codex mcp get` only, then checks each: parts in place, the hook answers, the store
 /// answers. Codex's guide goes in its AGENTS.md. A rerun changes nothing and says so, the
 /// guide included. A Claude part that can't be applied is
-/// skipped, and the exit code is 1.
+/// skipped, and the exit code is 1. VS Code reads Copilot CLI's entry, so it lists 1 atticdb
+/// server whichever app is connected first.
 #[test]
 fn setup_plans_then_connects_every_app_it_finds() {
     let dir = Dir::new();
@@ -131,7 +132,9 @@ fn setup_plans_then_connects_every_app_it_finds() {
         "Plan:\nCopilot CLI:\n  {c}/mcp-config.json: add the MCP entry\n  \
          {c}/hooks/atticdb.json: add the sessionStart hook\n  \
          {c}/instructions/atticdb.instructions.md: add the atticdb instructions\n\
-         VS Code:\n  {v}: add the MCP entry\n  VS Code's Copilot chat reads the Copilot hook and \
+         VS Code:\n  {v}: no atticdb entry needed. VS Code 1.144 and later read it from \
+         {c}/mcp-config.json. Older VS Code: update it, or run atticdb connect vscode --force\n  \
+         VS Code's Copilot chat reads the Copilot hook and \
          instructions in {c}, so VS Code gets those too.\n\
          Claude Code:\n  {h}/.claude.json: add the MCP entry\n  \
          {h}/.claude/settings.json: add the SessionStart hook\n  \
@@ -166,7 +169,7 @@ fn setup_plans_then_connects_every_app_it_finds() {
         try_it(&dir.0, &typed_exe())
     );
     assert!(out.ends_with(&next), "{out}");
-    assert_eq!(read(&vscode)["servers"]["atticdb"]["command"], json!(exe));
+    assert!(!vscode.exists(), "VS Code reads Copilot CLI's entry, so it gets none of its own");
     assert_eq!(
         read(&copilot.join("mcp-config.json"))["mcpServers"]["atticdb"]["command"],
         json!(exe)
@@ -188,12 +191,12 @@ fn setup_plans_then_connects_every_app_it_finds() {
     let get = ["mcp", "get", "atticdb", "--json"].map(String::from).to_vec();
     assert_eq!(calls(&codex_log), [get.clone(), get.clone()]);
 
-    let files = [&vscode, &state, &settings, &config, &hooks, &agents];
+    let files = [&state, &settings, &config, &hooks, &agents];
     let before = (files.map(|file| std::fs::read(file).unwrap()), tree(&copilot));
     let (code, out, err) = run(&["--yes"]);
     assert_eq!(code, Some(0), "{out}{err}");
     let plan = out.split("Applying:\n").next().unwrap();
-    assert_eq!(plan.lines().filter(|line| line.ends_with(" unchanged")).count(), 10, "{out}");
+    assert_eq!(plan.lines().filter(|line| line.ends_with(" unchanged")).count(), 9, "{out}");
     for line in out.lines() {
         let changed = [": add the ", ": update the ", "added", "updated", "connected atticdb to"];
         let changed = [&changed[..], &["removed", "skipped,", "backup"]].concat();
@@ -215,6 +218,30 @@ fn setup_plans_then_connects_every_app_it_finds() {
     assert!(out.contains(failed), "{out}");
     assert!(out.contains("\n    not in place: allow rules: skipped, "), "{out}");
     assert_eq!(std::fs::read_to_string(&settings).unwrap(), commented);
+
+    // VS Code reads Copilot CLI's entry too. So it lists exactly 1 atticdb server, whichever
+    // app is connected first, in 1 run or 2. The plan says what the run does to mcp.json.
+    // (case, each run's apps and what its output says of mcp.json, "" for nothing)
+    let rows: [(&str, &[(&str, &str)]); 3] = [
+        ("1 run, vscode named first", &[("vscode,copilot", "no atticdb entry needed")]),
+        ("vscode, then copilot", &[("vscode", "add the MCP entry"), ("copilot", "remove the MCP")]),
+        ("copilot, then vscode", &[("copilot", ""), ("vscode", "no atticdb entry needed")]),
+    ];
+    let mcp_config = copilot.join("mcp-config.json");
+    for (case, runs) in rows {
+        std::fs::remove_dir_all(&copilot).unwrap();
+        let _ = std::fs::remove_file(&vscode);
+        for (apps, said) in runs {
+            let (code, out, err) = run(&["--yes", "--harness", apps]);
+            assert_eq!(code, Some(0), "{case} {apps}: {out}{err}");
+            // With "", no line names mcp.json.
+            let line = format!("\n  {v}: {said}");
+            assert_eq!(out.contains(&line), !said.is_empty(), "{case} {apps}: {out}");
+        }
+        let found = [(&vscode, "servers"), (&mcp_config, "mcpServers")]
+            .map(|(file, section)| file.exists() && read(file)[section].get("atticdb").is_some());
+        assert_eq!(found, [false, true], "{case}: 1 entry, Copilot CLI's");
+    }
 }
 
 /// A case, the args, the env, `PATH`, stdin, the exit code, and text stdout or stderr shows.
@@ -516,7 +543,7 @@ type DoctorRow<'a> =
 /// `atticdb doctor` on a home that setup connected to all 4 fake apps, then with 1 thing
 /// wrong per row. A failed check, or a home that isn't set up, exits 1. A warning, or an app
 /// not found, exits 0. It runs only `codex mcp get`, and writes nothing in `HOME` or the home
-/// but the server's own files in `data/`.
+/// but the server's own files in `data/`. VS Code counts as connected through either file.
 #[test]
 fn doctor_checks_an_install_and_writes_nothing() {
     let dir = Dir::new();
@@ -622,7 +649,16 @@ fn doctor_checks_an_install_and_writes_nothing() {
     };
     let config_odd = odd(&config_link, "atticdb.json", "regular file");
     let data_odd = odd(&data_link, "data", "directory");
-    let rows: [DoctorRow<'_>; 17] = [
+    // VS Code is connected through Copilot CLI's entry, or its own in mcp.json. Both list 2.
+    let vscode_ok = "\nVS Code:\n  parts: ok\n  binary: ok\n  hook: ok\n".to_owned();
+    let both_files = format!(
+        "\nVS Code:\n  parts: 1 would change, {}\n    {v}: remove the MCP entry. VS Code 1.144 \
+         and later read it from {}\n  binary: ok\n  hook: ok\n",
+        fix("vscode"),
+        entry.display()
+    );
+    let vscode_only = ["--harness", "vscode"];
+    let rows: [DoctorRow<'_>; 20] = [
         ("not set up", &bare, None, &no_apps, &[], 1, unset(&typed_exe())),
         ("not set up, atticdb on PATH", &bare, None, &found, &[], 1, unset("atticdb")),
         (
@@ -648,18 +684,34 @@ fn doctor_checks_an_install_and_writes_nothing() {
         ("codex not on PATH", &home, None, &no_codex, &codex, 0, not_verified.into()),
         ("codex hooks off", &home, None, &path, &codex, 0, off),
         ("symlinked binary", &home, None, &path, &copilot, 1, linked),
+        ("vscode via copilot's entry", &home, None, &path, &vscode_only, 0, vscode_ok.clone()),
+        ("vscode via mcp.json", &home, None, &path, &vscode_only, 0, vscode_ok),
+        ("vscode in both files", &home, None, &path, &vscode_only, 1, both_files),
     ];
+    // VS Code's own entry, as connect writes it when Copilot CLI has none.
+    let vscode_entry = |command: &str| {
+        let entry = json!({"type": "stdio", "command": command,
+            "args": ["mcp", "--agent", "vscode-copilot"]});
+        json!({"servers": {"atticdb": entry}}).to_string()
+    };
+    let drop_copilot = || {
+        let mut config = read(&entry);
+        config["mcpServers"].as_object_mut().unwrap().remove("atticdb");
+        std::fs::write(&entry, config.to_string()).unwrap();
+    };
     let shared = &shared_hook;
+    // Setup wrote no mcp.json, as VS Code reads Copilot CLI's entry. Rows may write one.
+    std::fs::create_dir_all(vscode.parent().unwrap()).unwrap();
     for (case, row_home, moved, path, args, wanted, said) in rows {
         let files = [&agents, &vscode, shared, &settings, &toml, &entry];
-        let saved = files.map(|file| std::fs::read(file).unwrap());
+        let saved = files.map(|file| std::fs::read(file).ok());
         match case {
             "part would change" => std::fs::remove_file(&agents).unwrap(),
             // A binary that is gone, and one that exists but isn't this one.
+            // VS Code's own entry counts only without Copilot CLI's.
             "stale binary" => {
-                let mut config = read(&vscode);
-                config["servers"]["atticdb"]["command"] = json!(OLD);
-                std::fs::write(&vscode, config.to_string()).unwrap();
+                std::fs::write(&vscode, vscode_entry(OLD)).unwrap();
+                drop_copilot();
                 let exe = exe.to_str().unwrap();
                 for (file, other) in [(shared, "/bin/sh"), (&settings, OLD), (&toml, OLD)] {
                     let text = std::fs::read_to_string(file).unwrap();
@@ -668,11 +720,12 @@ fn doctor_checks_an_install_and_writes_nothing() {
             }
             // Valid for AtticDB's scanner, but not TOML, so only codex finds it.
             "codex bad toml" => {
-                std::fs::write(&toml, [b"model = ???\n", &saved[4][..]].concat()).unwrap()
+                let saved = saved[4].as_deref().unwrap();
+                std::fs::write(&toml, [b"model = ???\n", saved].concat()).unwrap()
             }
             "codex hooks off" => {
-                std::fs::write(&toml, [b"[features]\nhooks = false\n\n", &saved[4][..]].concat())
-                    .unwrap()
+                let saved = saved[4].as_deref().unwrap();
+                std::fs::write(&toml, [b"[features]\nhooks = false\n\n", saved].concat()).unwrap()
             }
             "symlinked binary" => {
                 let mut config = read(&entry);
@@ -680,6 +733,13 @@ fn doctor_checks_an_install_and_writes_nothing() {
                 std::fs::write(&entry, config.to_string()).unwrap();
             }
             "home 0755" => support::chmod(&atticdb_home, 0o755),
+            "vscode via mcp.json" => {
+                std::fs::write(&vscode, vscode_entry(exe.to_str().unwrap())).unwrap();
+                drop_copilot();
+            }
+            "vscode in both files" => {
+                std::fs::write(&vscode, vscode_entry(exe.to_str().unwrap())).unwrap()
+            }
             _ => {}
         }
         // HOME and the home it names, or ATTICDB_HOME, each without the server's `data/`.
@@ -751,7 +811,12 @@ fn doctor_checks_an_install_and_writes_nothing() {
             _ => {}
         }
         for (file, bytes) in files.into_iter().zip(saved) {
-            std::fs::write(file, bytes).unwrap();
+            match bytes {
+                Some(bytes) => std::fs::write(file, bytes).unwrap(),
+                None => {
+                    let _ = std::fs::remove_file(file);
+                }
+            }
         }
     }
     assert_eq!(calls(&claude_log), claude_calls, "claude never ran");
