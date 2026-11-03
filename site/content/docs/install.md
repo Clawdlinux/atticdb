@@ -66,6 +66,28 @@ Without a terminal on stdin, it needs `--yes` or `--dry-run`. Else it exits 2. `
 | 1 | A part was skipped or failed, a check failed, or no app was found |
 | 2 | A usage error, no terminal without `--yes`, or no answer. Also an app that stopped with exit 2 |
 
+## Try it in 1 minute
+
+Save 1 rule for a repo. Use the name of the folder that holds its `.git`:
+
+```sh
+atticdb fact set --key repo/<your-repo>/rule --content "Use pnpm, not npm."
+```
+
+It prints `{"committed":true,...}` once the rule is on disk. The first command also starts a small server in the background. It keeps running after the command ends.
+
+Now open a new chat in that repo, in any app you connected. Ask: "what are this repo's rules?" The agent answers from memory.
+
+To see exactly what the agent got, run:
+
+```sh
+atticdb studio
+```
+
+It opens a page in your browser. Click **Chat start** and pick your repo. That block is what each new chat in that repo starts with.
+
+No app connected yet? `atticdb search --query pnpm` finds the rule from the shell.
+
 ## Check the install
 
 ```sh
@@ -93,5 +115,36 @@ Copilot CLI's sandbox needs the home in its read and write paths. Else AtticDB c
 | 0 | Every check is ok or warns. Apps that aren't found don't count |
 | 1 | A check failed, a part would change, or the home isn't set up |
 | 2 | A usage error, such as an unknown app name |
+
+## Uninstall
+
+First disconnect each app you connected. The names are `copilot`, `vscode`, `claude-code` and `codex`. Each one removes only what setup added:
+
+```sh
+atticdb disconnect claude-code   # repeat for each connected app
+```
+
+Then stop the background server. There's no stop command yet. Find its pid and stop it:
+
+```sh
+pgrep -f "atticdb serve"   # prints the pid
+kill <pid>
+```
+
+Remove the binary:
+
+```sh
+rm ~/.local/bin/atticdb    # from the install script, or your ATTICDB_INSTALL_DIR
+cargo uninstall atticdb    # if you built it from source instead
+```
+
+Last, delete the data folder. This deletes your memory for good:
+
+```sh
+rm -rf ~/Library/Application\ Support/atticdb   # macOS
+rm -rf ~/.local/share/atticdb                   # Linux
+```
+
+On Linux with `XDG_DATA_HOME` set, the folder is `$XDG_DATA_HOME/atticdb`. If you set `ATTICDB_HOME`, delete that folder instead. On Windows, it's `%LOCALAPPDATA%\atticdb`.
 
 Source: [README.md](https://github.com/Clawdlinux/atticdb/blob/main/README.md) and [crates/atticdb/README.md](https://github.com/Clawdlinux/atticdb/blob/main/crates/atticdb/README.md)

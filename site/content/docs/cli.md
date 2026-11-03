@@ -1,19 +1,23 @@
-The same 6 tools run from a shell, with `atticdb mcp`'s connection flags. Each prints 1 JSON line.
+The same 6 tools run from a shell. Each prints 1 JSON line. You don't need a token, a URL or any setup.
 
 ## Shell verbs
 
 ```sh
-export ATTICDB_TOKEN=$TOKEN
-Z="--url unix://$PWD/data/atticdb.sock --agent planner --session run-1"
-atticdb append $Z --content "hi" --role user          # {"committed":true,"deduplicated":false,"lsn":3,"seq":2}
-atticdb recent $Z --n 10                              # {"truncated":false,"turns":[...]}
-atticdb fact set $Z --key repo/payments/retry-rule --content "Retry 3 times, then fail."
-atticdb fact get $Z --key repo/payments/retry-rule    # {"fact":{"agent":"planner","content":...}}
-atticdb fact list $Z --prefix repo/ --limit 50        # {"facts":[...],"next":null}
-atticdb search $Z --query "retry rule"                # {"hits":[...],"next":null}
+atticdb fact set --key repo/payments/retry-rule --content "Retry 3 times, then fail."   # {"committed":true,"deduplicated":false,"lsn":2}
+atticdb fact get --key repo/payments/retry-rule      # {"fact":{"agent":"mcp","content":...}}
+atticdb fact list --prefix repo/ --limit 50          # {"facts":[...],"next":null}
+atticdb search --query retry                         # {"hits":[...],"next":null}
+atticdb append --content "Kept retries at 3. PR #12 merged." --role user   # {"committed":true,"deduplicated":false,"lsn":3,"seq":1}
+atticdb recent --n 10                                # {"truncated":false,"turns":[...]}
 ```
 
-`fact set --delete` deletes. With no connection flags, the shell verbs use the same per-user home as [`atticdb mcp`](docs:mcp#the-home).
+With no connection flags, the shell verbs use the same per-user home as [`atticdb mcp`](docs:mcp#the-home). The first one starts the home's server in the background if it isn't running. It prints `atticdb: started server pid <pid>`. The server keeps running after the command ends.
+
+`append` and `recent` use a session named after the repo you're in: the folder that holds `.git`. Writes are saved as agent `mcp`.
+
+Search matches every word you give it. It's word search, not semantic. If a question finds nothing, try 1 or 2 words.
+
+`fact set --delete` deletes.
 
 Each write picks 1 random `idem_key`. It retries with it until `--retry-deadline`, 30 s by default.
 
@@ -72,5 +76,22 @@ Every request goes through these checks, in order:
 Anything else is 404 `not_found`. No route writes to the store. A store read has 10 s, connect included. Past that it answers 504 `store_timeout`. At most 16 connections are open. Past that, a new one gets 503 `busy`.
 
 Exit code 1 when it cannot start, 2 for a bad flag.
+
+## Advanced: talk to another server
+
+Connection flags point a verb at a server other than your home. They are `--url`, `--data-dir`, `--config`, `--tenant` and `--token-file`. `--agent` and `--session` name who writes and where. `--retry-deadline` sets how long a write retries.
+
+```sh
+export ATTICDB_TOKEN=$TOKEN
+Z="--url unix://$PWD/data/atticdb.sock --agent planner --session run-1"
+atticdb append $Z --content "hi" --role user          # {"committed":true,"deduplicated":false,"lsn":3,"seq":2}
+atticdb recent $Z --n 10                              # {"truncated":false,"turns":[...]}
+atticdb fact set $Z --key repo/payments/retry-rule --content "Retry 3 times, then fail."
+atticdb fact get $Z --key repo/payments/retry-rule    # {"fact":{"agent":"planner","content":...}}
+atticdb fact list $Z --prefix repo/ --limit 50        # {"facts":[...],"next":null}
+atticdb search $Z --query "retry rule"                # {"hits":[...],"next":null}
+```
+
+The token comes from `--token-file`, `ATTICDB_TOKEN`, or the config entry for `--tenant`. With none of the 5 connection flags, the home is used and `ATTICDB_TOKEN` is ignored.
 
 Source: [README.md](https://github.com/Clawdlinux/atticdb/blob/main/README.md) and [crates/atticdb/README.md](https://github.com/Clawdlinux/atticdb/blob/main/crates/atticdb/README.md)
