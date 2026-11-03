@@ -15,8 +15,7 @@ export default function Home() {
     <>
       <JsonLd data={softwareAppJsonLd()} />
       <JsonLd data={faqJsonLd(HOME_FAQ)} />
-      <Hero />
-      <Demo />
+      <Hero afterHonest={<Demo />} />
       <InstallSection />
       <Numbers />
       <Faq items={HOME_FAQ} id="home-faq-title" />

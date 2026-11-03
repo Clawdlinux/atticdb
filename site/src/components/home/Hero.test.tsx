@@ -5,10 +5,9 @@ import { INSTALL_CMD, WAITLIST_URL } from "@/lib/site";
 import Hero from "./Hero";
 import { LAY_MS, RESTART_MS, runToCut, stillFrame, tapeParams } from "./tape-sim";
 
-// The chip's text as it reads at rest: a leaving value may still be fading out beside it.
-function ackText(container: HTMLElement) {
-  const value = container.querySelector('[data-ui="ack"] [data-present="true"]')?.textContent;
-  return `acked ${value}`;
+// The proof's own live line. The copy button has a status of its own.
+function status() {
+  return document.querySelector('[data-ui="proof"] [role="status"]')!.textContent;
 }
 
 function highlightIn(container: HTMLElement, name: string) {
@@ -71,25 +70,27 @@ describe("Hero", () => {
     expect(screen.getByText(TRUST)).toBeInTheDocument();
   });
 
-  it("shows the NVMe 1-writer ack and updates it from the chips", () => {
+  it("says saved to disk on the chip, with no unit, and puts the numbers in the status line", () => {
     const { container } = render(<Hero />);
-    expect(ackText(container)).toBe("acked 94 µs");
+    const chip = container.querySelector('[data-ui="ack"]')!;
+    expect(chip).toHaveTextContent(/^saved to disk$/);
+    expect(chip).toHaveAttribute("aria-hidden", "true");
+    expect(status()).toBe("Local NVMe, 1 writer: AtticDB acked in 94 µs at p50, 9,799 acks/s.");
     fireEvent.click(screen.getByRole("radio", { name: "Premium SSD v2" }));
-    expect(ackText(container)).toBe("acked 817 µs");
+    expect(status()).toContain("817 µs");
     fireEvent.click(screen.getByRole("radio", { name: "16" }));
-    expect(ackText(container)).toBe("acked 1.6 ms");
+    expect(status()).toContain("1.6 ms");
+    expect(chip).toHaveTextContent(/^saved to disk$/);
   });
 
-  it("swaps the ack value: the new one arrives, the old one leaves out of the accessible tree", () => {
-    const { container } = render(<Hero />);
-    fireEvent.click(screen.getByRole("radio", { name: "Premium SSD v2" }));
-    const values = [...container.querySelectorAll('[data-ui="ack"] [data-present]')];
-    const leaving = values.find((v) => v.getAttribute("data-present") === "false");
-    const current = values.find((v) => v.getAttribute("data-present") === "true");
-    expect(current).toHaveTextContent("817 µs");
-    if (leaving) {
-      expect(leaving).toHaveTextContent("94 µs");
-      expect(leaving).toHaveAttribute("aria-hidden", "true");
+  it("puts the slot after the honest line, so the chip and the plug band come after it", () => {
+    const { container } = render(<Hero afterHonest={<section data-testid="slot">demo</section>} />);
+    const honest = screen.getByText(HONEST);
+    const slot = screen.getByTestId("slot");
+    const chip = container.querySelector('[data-ui="ack"]')!;
+    const band = container.querySelector('[data-ui="band"]')!;
+    for (const [a, b] of [[honest, slot], [slot, chip], [chip, band]] as const) {
+      expect(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     }
   });
 

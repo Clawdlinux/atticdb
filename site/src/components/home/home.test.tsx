@@ -75,10 +75,11 @@ describe("home page", () => {
 });
 
 describe("home demo", () => {
-  it("shows the animated demo right under the hero, with alt text and a still frame for reduced motion", () => {
+  it("shows the animated demo right after the honest line, with alt text and a still frame for reduced motion", () => {
     const { container } = render(<Home />);
     const hero = container.querySelector("section")!;
-    const demo = hero.nextElementSibling as HTMLElement;
+    const demo = hero.querySelector('[aria-labelledby="demo-heading"]') as HTMLElement;
+    expect(demo.previousElementSibling).toHaveAttribute("data-ui", "honest");
     expect(demo.querySelector("h2")?.id).toBe("demo-heading");
     const img = within(demo).getByRole("img", { name: DEMO_ALT });
     expect(img).toHaveAttribute("src", "/demo/remember.svg");
@@ -107,6 +108,23 @@ describe("home demo", () => {
     expect(svg).toContain('{"committed":true,"deduplicated":false,"lsn":2}');
     expect(svg).toContain("AtticDB memory for repo shop, a snapshot from chat start:");
     expect(svg).toContain("This repo (shop):");
+  });
+});
+
+describe("home first screen", () => {
+  it("has no benchmark jargon before the demo: the chip and the plug band come after it", () => {
+    const { container } = render(<Home />);
+    const hero = container.querySelector("section")!;
+    const demo = hero.querySelector('[aria-labelledby="demo-heading"]')!;
+    const range = document.createRange();
+    range.setStartBefore(hero.firstChild!);
+    range.setEndBefore(demo);
+    const before = range.cloneContents().textContent!;
+    expect(before).toContain("Your coding agent forgets everything between chats.");
+    expect(before).toMatch(/Early\. Word search, not semantic\./);
+    for (const word of [/\backed\b/i, /\backs\b/i, /µs/, /p50/i, /fdatasync/i, /Pull the plug/i, /Writers/, /Disk/]) {
+      expect(before).not.toMatch(word);
+    }
   });
 });
 

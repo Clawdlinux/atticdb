@@ -118,33 +118,22 @@ Copilot CLI's sandbox needs the home in its read and write paths. Else AtticDB c
 
 ## Uninstall
 
-First disconnect each app you connected. The names are `copilot`, `vscode`, `claude-code` and `codex`. Each one removes only what setup added:
+1. Run `atticdb disconnect <app>` for each app you connected: `copilot`, `vscode`, `claude-code` or `codex`. It removes only what setup added.
+2. Stop the background server. Its pid is in the `LOCK` file in the data folder. The data folder is `~/Library/Application Support/atticdb` on macOS and `~/.local/share/atticdb` on Linux.
 
-```sh
-atticdb disconnect claude-code   # repeat for each connected app
-```
+   ```sh
+   cat ~/Library/Application\ Support/atticdb/data/LOCK   # macOS. Linux: ~/.local/share/atticdb/data/LOCK
+   kill <pid>                                             # the number after pid=
+   ```
 
-Then stop the background server. There's no stop command yet. Find its pid and stop it:
+3. Remove the binary and the data folder. The data folder holds all your memory, so this deletes it for good.
 
-```sh
-pgrep -f "atticdb serve"   # prints the pid
-kill <pid>
-```
+   ```sh
+   rm ~/.local/bin/atticdb                         # or: cargo uninstall atticdb
+   rm -rf ~/Library/Application\ Support/atticdb   # macOS
+   rm -rf ~/.local/share/atticdb                   # Linux
+   ```
 
-Remove the binary:
-
-```sh
-rm ~/.local/bin/atticdb    # from the install script, or your ATTICDB_INSTALL_DIR
-cargo uninstall atticdb    # if you built it from source instead
-```
-
-Last, delete the data folder. This deletes your memory for good:
-
-```sh
-rm -rf ~/Library/Application\ Support/atticdb   # macOS
-rm -rf ~/.local/share/atticdb                   # Linux
-```
-
-On Linux with `XDG_DATA_HOME` set, the folder is `$XDG_DATA_HOME/atticdb`. If you set `ATTICDB_HOME`, delete that folder instead. On Windows, it's `%LOCALAPPDATA%\atticdb`.
+If you set `ATTICDB_HOME`, that is the data folder. On Linux with `XDG_DATA_HOME` set, it is `$XDG_DATA_HOME/atticdb`. If you set `ATTICDB_INSTALL_DIR`, the binary is there. On Windows, the data folder is `%LOCALAPPDATA%\atticdb`.
 
 Source: [README.md](https://github.com/Clawdlinux/atticdb/blob/main/README.md) and [crates/atticdb/README.md](https://github.com/Clawdlinux/atticdb/blob/main/crates/atticdb/README.md)

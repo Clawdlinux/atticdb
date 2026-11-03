@@ -116,7 +116,13 @@ function Poster() {
   });
 }
 
-function HeroBody() {
+type HeroProps = {
+  // Shown right after the honest line, so the first screen has no benchmark words.
+  // The ack chip and the plug band follow it, below the fold.
+  afterHonest?: ReactNode;
+};
+
+function HeroBody({ afterHonest }: HeroProps) {
   const [disk, setDisk] = useState<Disk>("nvme");
   const [writers, setWriters] = useState<Writers>(1);
   const [view, setView] = useState<PlugView>({ phase: "idle", outcome: null });
@@ -188,10 +194,12 @@ function HeroBody() {
         {HONEST}
       </p>
 
+      {afterHonest}
+
       <div className={styles.proof} data-ui="proof">
         <p className={styles.trust}>{TRUST}</p>
         <span className={styles.ackBox}>
-          <AckChip p50us={ack.p50us} pulse={groups} powered={powered} />
+          <AckChip pulse={groups} powered={powered} />
         </span>
         <p className="visually-hidden" role="status">
           {`${diskLabel}, ${writers} ${writers === 1 ? "writer" : "writers"}: AtticDB acked in ${formatAck(ack.p50us)} at p50, ${numbers.format(ack.acksPerSec)} acks/s.`}
@@ -268,10 +276,10 @@ function HeroBody() {
 }
 
 // Its own MotionConfig: motion stays out of the root layout, so pages without motion never load it.
-export default function Hero() {
+export default function Hero(props: HeroProps) {
   return (
     <MotionConfig reducedMotion="user">
-      <HeroBody />
+      <HeroBody {...props} />
     </MotionConfig>
   );
 }

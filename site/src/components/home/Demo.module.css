@@ -4,8 +4,10 @@
   gap: 2rem;
   align-items: center;
   padding-block: calc(var(--space-section) * 0.5);
+  margin-top: clamp(1.5rem, 4svh, 2.5rem);
   background: var(--bg);
   color: var(--ink);
+  text-align: left;
 }
 
 .head {

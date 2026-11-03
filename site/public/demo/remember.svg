@@ -7,7 +7,6 @@
     .ink { fill: #EDE6D8; }
     .muted { fill: #A89C8C; }
     .accent { fill: #C8F03C; }
-    .dark { fill: #16110E; }
     .a { animation-duration: 16s; animation-iteration-count: infinite; animation-fill-mode: both; }
     .c1 { transform: translateX(380px); animation-name: type1; }
     .c2 { transform: translateX(320px); animation-name: type2; }
@@ -42,13 +41,13 @@
     #still:target ~ * .a, #still:target ~ .a { animation: none; }
   </style>
   <defs>
-    <clipPath id="term"><rect x="0" y="0" width="640" height="166" rx="6"/></clipPath>
+    <clipPath id="term"><rect x="0" y="0" width="640" height="146" rx="6"/></clipPath>
   </defs>
   <g id="still"/>
   <rect width="640" height="580" fill="#16110E"/>
 
   <!-- Terminal -->
-  <rect x="0.5" y="0.5" width="639" height="165" rx="6" fill="#221B17" stroke="#3A302A"/>
+  <rect x="0.5" y="0.5" width="639" height="145" rx="6" fill="#221B17" stroke="#3A302A"/>
   <circle cx="18" cy="18" r="5" fill="#3A302A"/>
   <circle cx="34" cy="18" r="5" fill="#3A302A"/>
   <circle cx="50" cy="18" r="5" fill="#3A302A"/>
@@ -62,10 +61,9 @@
     <rect class="a c2" x="16" y="70" width="320" height="22" fill="#221B17"/>
   </g>
   <text class="a out mono muted" x="20" y="124" font-size="14">{"committed":true,"deduplicated":false,"lsn":2}</text>
-  <g class="a saved">
-    <rect x="436" y="108" width="72" height="24" fill="#C8F03C"/>
-    <text x="472" y="125" text-anchor="middle" font-size="13" font-weight="600" class="sans dark">Saved.</text>
-  </g>
+
+  <!-- A caption outside the terminal, not CLI output -->
+  <text class="a saved sans accent" x="320" y="172" text-anchor="middle" font-size="13">Saved. The rule is on disk.</text>
 
   <!-- A new chat, later -->
   <g class="a chat">

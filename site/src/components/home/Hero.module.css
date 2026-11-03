@@ -87,19 +87,8 @@
   white-space: nowrap;
 }
 
-.ackValue,
 .readout {
   font-variant-numeric: tabular-nums lining-nums;
-}
-
-/* The value swaps with a short rise; popLayout pins the leaving one inside this box. */
-.ackValue {
-  position: relative;
-  display: inline-block;
-}
-
-.ackSwap {
-  display: inline-block;
 }
 
 /* Controls, docked to the band's top left */
@@ -414,6 +403,7 @@
 }
 
 .ackBox .ack {
+  width: auto;
   margin-left: 0;
 }
 

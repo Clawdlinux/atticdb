@@ -1,4 +1,3 @@
-import Swap from "@/components/Swap";
 import styles from "./Hero.module.css";
 
 export function formatAck(us: number): string {
@@ -7,24 +6,19 @@ export function formatAck(us: number): string {
 }
 
 type AckChipProps = {
-  p50us: number;
   // Changes once per simulated write so the light pulses.
   pulse: number;
   powered: boolean;
 };
 
-// Visual twin of the hero's status line, so it stays out of the h1's accessible name.
-export default function AckChip({ p50us, pulse, powered }: AckChipProps) {
+// Plain words, no unit: the light pulses as each write is saved. The status line and the
+// time caption under the tape carry the numbers.
+export default function AckChip({ pulse, powered }: AckChipProps) {
   return (
     <span className={styles.ack} data-ui="ack" aria-hidden="true">
       <span className={styles.ackInner}>
         <span key={pulse} className={styles.light} data-on={powered} data-pulse={pulse > 0} />
-        <span className={styles.ackText}>
-          acked{" "}
-          <span className={styles.ackValue}>
-            <Swap value={formatAck(p50us)} className={styles.ackSwap} />
-          </span>
-        </span>
+        <span className={styles.ackText}>saved to disk</span>
       </span>
     </span>
   );
