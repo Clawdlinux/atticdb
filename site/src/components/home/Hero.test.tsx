@@ -55,7 +55,7 @@ describe("Hero", () => {
     const { container } = render(<Hero />);
     const sub = screen.getByText(SUB);
     expect(SUB).toBe(
-      "It saves your rules and decisions locally and loads them into every new chat in Claude Code, Codex, Copilot and VS Code. Free, open source, 1 small binary, no account.",
+      "It saves your rules and decisions on your machine. Every new chat in Claude Code, Codex, Copilot and VS Code starts with them. Free, open source, 1 small binary, no account.",
     );
     const install = screen.getByText(INSTALL_CMD);
     const honest = screen.getByText(HONEST);
