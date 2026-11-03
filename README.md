@@ -56,6 +56,85 @@ atticdb doctor            # checks the install; it may start the server
 
 `atticdb doctor` prints 1 line per check, with what to do when one fails. [Set up](crates/atticdb/README.md#set-up) and [`atticdb doctor`](crates/atticdb/README.md#atticdb-doctor) give the details.
 
+## Forget and export
+
+Content is hidden from normal AtticDB reads. It stays on disk until purge ships (#159).
+
+A forget hides a session, a fact, a file ref or single records. After it, your agents, search, studio and exports stop showing that content.
+It doesn't erase anything. The bytes stay in the data folder. Real erase is tracked in [#159](https://github.com/Clawdlinux/atticdb/issues/159).
+A forget covers only what was written before it. Notes written later still show.
+AtticDB can't undo a forget. No MCP tool forgets, so your agents can't forget through their memory tools.
+You forget from the shell or from studio. An agent that runs shell commands could still run `atticdb forget`.
+Setup adds no shell allow rule for it, so check the commands your agent asks to run.
+
+### Forget from the shell
+
+```sh
+atticdb forget session --agent copilot --session myrepo   # a whole session
+atticdb forget key --key repo/myrepo/deploy-rule          # 1 fact
+atticdb forget file --path shots/login.png                # 1 file ref. The file may be gone
+atticdb forget lsns --lsns 12,15                          # single records, by LSN
+```
+
+With no store flags, these use your home, the store `atticdb setup` wired up.
+Agents save notes under an agent name, such as `copilot` or `claude-code`, and a session named after the repo.
+`atticdb recent --agent copilot --session myrepo` lists that session's turns with their LSNs. Studio shows them too.
+Add `--up-to-lsn <n>` to hide only records at or below LSN `n`. Each forget prints 3 lines:
+
+```text
+forgot session copilot/myrepo up to lsn 40 (txn 9, lsn 40)
+Content is hidden from normal AtticDB reads. It stays on disk until purge ships (#159).
+Names, keys, LSNs, counts and sizes stay visible. See "What a forget leaves visible" in the README.
+```
+
+`atticdb forget` doesn't ask "are you sure?". Typing the command is the only friction.
+It isn't an approval step either. Anything that holds your token can call `POST /v1/forget`.
+`atticdb dump`, `atticdb stats` and `atticdb verify` never print content. Their counts and sizes still include forgotten records.
+
+The store holds at most 100,000 hidden LSNs, set by the engine option `max_forgotten_lsns`.
+Past that, `forget lsns` fails with `resource_exhausted`. Session and key forgets don't count toward it.
+The server config doesn't set this option. If you embed the engine and lower it below the LSNs already hidden, open fails until you raise it.
+`max_facts` works the same way.
+
+### Forget from studio
+
+Studio is read-only unless you start it with `--allow-forget`:
+
+```sh
+atticdb studio --allow-forget
+```
+
+The Sessions table then gets a box on each row and a "Forget selected (N)" button. It takes up to 100 sessions at a time.
+A session page gets "Forget this session", and a fact page gets "Forget this key".
+Each asks first, in a dialog with the sentence above and a link to the list below.
+Studio hides only what the page showed you. Turns written after the page loaded stay visible.
+Studio forgets sessions and fact keys. Use the shell for single records.
+
+### Export
+
+```sh
+atticdb export ~/atticdb-export
+```
+
+It writes your memory as markdown. Facts go in `facts.md`, and each session gets `sessions/<agent>/<session>.md`.
+It all comes from 1 point in time. Forgotten turns show as `## #<seq> forgotten`. Forgotten facts are left out.
+The folder must not exist yet. A failed run never leaves a half export there.
+The files hold your memory in plain text. A later forget doesn't touch them.
+[`atticdb export`](crates/atticdb/README.md#atticdb-export) has the details.
+
+### What a forget leaves visible
+
+A forget hides turn content, meta, role and time, and fact values. These stay observable:
+- Names: agents, sessions, fact keys and file-ref paths. `/v1/sessions`, `records` placeholders, studio's tables and list cursors show them.
+- Positions: LSNs, seqs and record kinds. Placeholders keep them. Search and list cursors may name a hidden LSN or key.
+- Counts: each session's `turns`, session totals, and the `/v1/stats` and `/metrics` fields `facts`, `fact_revisions`, `compressed_turns` and `search_index_terms`. They include forgotten records.
+- Sizes and times: `atticdb dump` prints every record's payload length and commit time.
+- Retry oracles: a retry with a guessed payload and a known retry key confirms the guess. `turn_repeats` counts repeated content.
+- RAM: the word index keeps tokens of hidden text. A restart rebuilds it from the log, hidden text included. Hot cache entries stay until purged or evicted. Reads never serve either.
+- Bytes: segment files, unsalted retry digests in checkpoints, filesystem and SSD remanence, copies, backups and exports already taken.
+- `recover --truncate-at` below a forget's LSN drops the forget, and the content shows again.
+- A retry that arrives after its key left the dedup window writes the content again.
+
 ## Uninstall
 
 1. Run `atticdb disconnect <app>` for each app you connected: `copilot`, `vscode`, `claude-code` or `codex`. It removes only what setup added.
@@ -94,10 +173,10 @@ AtticDB does a few things on purpose. We add features when people ask for them.
 
 ## Docs
 
-- [atticdb](crates/atticdb/README.md): server, HTTP API, MCP, studio, `stats`, `load`, `verify`, `dump` and `recover`. It also has these:
+- [atticdb](crates/atticdb/README.md): server, HTTP API, MCP, studio, `forget`, `export`, `stats`, `load`, `verify`, `dump` and `recover`. It also has these:
   - [Run a server by hand](crates/atticdb/README.md#run-a-server-by-hand), [Keys](crates/atticdb/README.md#keys) and [Where to keep the data directory](crates/atticdb/README.md#where-to-keep-the-data-directory).
   - [MCP](crates/atticdb/README.md#atticdb-mcp), [Secrets](crates/atticdb/README.md#secrets), [Shell verbs](crates/atticdb/README.md#shell-verbs) and [Connect](crates/atticdb/README.md#atticdb-connect-and-atticdb-disconnect).
-  - [Studio](crates/atticdb/README.md#atticdb-studio) and [Windows](crates/atticdb/README.md#windows).
+  - [Studio](crates/atticdb/README.md#atticdb-studio), [`atticdb export`](crates/atticdb/README.md#atticdb-export) and [Windows](crates/atticdb/README.md#windows).
 - [atticdb-core](crates/atticdb-core/README.md) and [atticdb-tape](crates/atticdb-tape/README.md): engine, formats, recovery and limits.
 - [Overview](docs/overview.md): how it works, benchmark numbers and the build steps.
 - [Sandboxed agents](docs/deploy/sandboxes.md): who holds memory, and how sandboxed code can reach it.

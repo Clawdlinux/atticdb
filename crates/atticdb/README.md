@@ -17,6 +17,7 @@ atticdb connect vscode                            # adds AtticDB to VS Code's MC
 atticdb connect claude-code                       # adds AtticDB to Claude Code, with its hook
 atticdb connect codex                             # adds AtticDB to Codex, with its hook
 atticdb studio                                    # a read-only page, unless --allow-forget
+atticdb export ./memory-md                        # memory as markdown, at 1 LSN
 atticdb doctor                                    # checks the install and writes nothing
 atticdb verify --data-dir ./data                  # checks a stopped data dir on a copy
 atticdb recover --truncate-at <lsn> --data-dir ./data
@@ -230,6 +231,7 @@ Send `Authorization: Bearer <token>`. The token picks the tenant. On TCP the `Ho
 | `GET /v1/sessions` | Optional `limit=N` (default 100, cap 1,000), and `after_agent=` with `after_session=` | `{"sessions": [{"agent", "session", "turns", "forgotten_up_to"}], "next": {"agent", "session"} or null, "total": {"sessions", "turns"}, "as_of_lsn"}` |
 | `GET /v1/records` | Optional `before=LSN`, `limit=N` (default 50, cap 1,000), `kind=turn` or `kind=fact`, and `max_bytes=B` | `{"records": [{"kind": "turn", "lsn", "commit_time_ns", "agent", "session", "seq", "role", "content", "meta"} or {"kind": "fact", "lsn", "commit_time_ns", "key", "agent", "deleted", "content", "meta"}], "next"}` |
 | `POST /v1/forget` | `{"idem_key"}` plus exactly 1 of `"session": {"agent", "session"}`, `"key"` or `"lsns": [n, ...]` (1 to 1,024). Optional `up_to_lsn` | `{"outcome": "committed", "deduplicated", "txn", "lsn", "cutoff"}` |
+| `GET /v1/export` | `?format=markdown`, optional `max_bytes=B` (64 KiB to 8 MiB, default 1 MiB). Later pages pass back `next` as `at`, then `after_key`, or `after_agent`, `after_session` and `after_seq`, then `skip` and `offset` | `{"format": "markdown", "at", "chunks": [{"path", "offset", "markdown"}], "next"}`. `next` is null on the last page |
 | `GET /healthz` | No token | `{"status": "ok" or "read_only", "instance"}`. 503 with `"poisoned"` |
 | `GET /v1/stats` | Unix socket only, no token | One flat object: `instance`, `health`, `durable_lsn`, tenant and fact counts, writer groups, checkpoint and lock timings, tape-index memory. Counters cover this open |
 | `GET /metrics` | Unix socket only, no token | The same numbers in Prometheus text format 0.0.4: counters as `atticdb_<name>_total`, gauges as `atticdb_<name>`, `_ns` maxima as `_seconds`, `atticdb_read_only`, the `atticdb_append_ack_seconds` histogram of committed appends (50 µs to 1 s), and the `atticdb_turn_content_bytes` histogram of new turns (64 B to 4 MiB). `turn_repeats` counts new turns whose content matches one of about 4,096 recent hashes, a lower bound on exact repeats |
@@ -251,6 +253,8 @@ Send `Authorization: Bearer <token>`. The token picks the tenant. On TCP the `Ho
 - Names, LSNs, `turns`, `total` and the `/v1/stats` counts still include forgotten records. See [What a forget leaves visible](../../README.md#what-a-forget-leaves-visible).
 - `forgotten_up_to` is a session forget's cutoff, or null. `as_of_lsn` is the durable LSN the read saw. Pass a window's as `up_to_lsn` to forget only what it showed.
 - `/v1/stats` and `/metrics` add the gauges `forgotten_sessions`, `forgotten_fact_keys` and `forgotten_lsns`.
+- Export pages read at `at`, the durable LSN of page 1. Each body is at most `max_bytes`, and a page can cut inside a file or a turn.
+  A chunk adds `markdown` to file `path` at byte `offset`. A cursor that a forget or a trimmed revision broke gets 409 `conflict`. Start again.
 - Read routes that need a token answer 400 `invalid_input` to an unknown query parameter.
 - Content that is not UTF-8, only possible from direct Rust API writes, comes back with U+FFFD and `"lossy": true`.
 - `Transfer-Encoding` gets 501. `Expect: 100-continue` works. A bad `Host`, a bad token or an oversized body gets its error before the body is read, and the connection closes.
@@ -669,10 +673,18 @@ atticdb export <dir> [--url <url>] [--data-dir <dir>] [--config <path>] [--tenan
 ```
 
 It writes `facts.md` and `sessions/<agent>/<session>.md` at 1 durable LSN. It reads pages of `GET /v1/export?format=markdown`.
-Forgotten turns show as placeholders. Forgotten facts are left out.
+`facts.md` is there only when a fact is left to export.
+With no store flags it exports the home. On success it prints `exported <n> files at lsn <lsn> to <dir>`.
+Forgotten turns show as placeholders, `## #<seq> forgotten`. Forgotten and deleted facts are left out.
+Names in paths keep `a-z`, `0-9`, `-`, `_` and inner dots. Other bytes become `%xx`, so `App` is `%41pp`.
+A name past 200 bytes is cut and ends in `~` and 16 hex chars of its hash.
+Files are mode 0600 and folders 0700. They hold your content in plain text.
+A later forget doesn't touch them, so delete an export you no longer need.
 `<dir>` must not exist. The export is written into `<dir>.partial-<hex>` and renamed to `<dir>` at the end.
 A crash leaves only the partial folder, and a failure prints its path.
+A forget that lands mid-file between pages gets a 409. The export then starts again, at most 3 times.
 An empty directory created at `<dir>` during the final rename can be replaced on Unix.
+Exit 0 on success, 1 when the export failed, 2 on a bad flag.
 
 ## `atticdb studio`
 

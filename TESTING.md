@@ -103,6 +103,8 @@ Floor rejections must issue no segment writes, including unpublished frames.
 The sims inject partial-write and sync `StorageFull` errors alongside crash cuts.
 The oracles check rejection state, read-only recovery, and acknowledged durability after reopening.
 The engine sim also checks dedup state and verifies rejected-key retries commit exactly once.
+The engine sim checks I10 both ways for forgets, across crashes and reopens.
+Every reader hides exactly what a forget of its own tenant covers. A missing hide and an extra hide both fail.
 Failures print the seed, the capacity plan and the command that reproduces the run.
 
 ## Power loss
