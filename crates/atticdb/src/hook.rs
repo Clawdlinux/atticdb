@@ -137,13 +137,16 @@ fn block_in(repo: &str, deadline: Instant, lookup: &Lookup) -> Result<Option<Str
     // memory. The shell verbs write as DEFAULT_AGENT. Each agent is read once, so no note
     // shows twice.
     let agents = Harness::ALL.map(Harness::agent).into_iter();
+    let agents: Vec<&str> = agents.filter(|a| *a != DEFAULT_AGENT).chain([DEFAULT_AGENT]).collect();
     let mut windows = Vec::new();
-    for agent in agents.filter(|agent| *agent != DEFAULT_AGENT).chain([DEFAULT_AGENT]) {
+    for agent in &agents {
         // The server's largest window, so the newest turn always fits.
         let args = json!({"n": TURNS, "max_bytes": crate::api::MAX_WINDOW_BYTES});
-        let mut window = home.read(agent, "memory_recent", &args)?;
-        reach_back(&mut home, agent, &mut window);
-        windows.push(window);
+        windows.push(home.read(agent, "memory_recent", &args)?);
+    }
+    // Only after every other read, so read-back can't spend the budget those need.
+    for (agent, window) in agents.iter().zip(&mut windows) {
+        reach_back(&mut home, agent, window);
     }
     let notes = newest(&windows).into_iter();
     let notes = notes.map(|turn| format!("- {}", line(&turn["content"], MAX_CONTENT))).collect();
@@ -166,56 +169,55 @@ fn block_in(repo: &str, deadline: Instant, lookup: &Lookup) -> Result<Option<Str
     Ok((!lines.is_empty()).then(|| cap([header].into_iter().chain(lines))))
 }
 
-/// Most turns 1 read in [`reach_back`] asks for: the server's cap.
+/// Most turns the 1 older read in [`reach_back`] asks for: the server's cap.
 const BACK: u64 = crate::api::MAX_WINDOW_TURNS as u64;
 
-/// A forget turns notes into placeholders, which cost no bytes. While `window` holds a
-/// placeholder, fewer than [`TURNS`] visible notes, and starts after seq 1, this reads the
-/// turns before it. So a forgotten agent's window sets no floor that hides other agents'
-/// notes. A window with no placeholder is left as is. A failed read marks it truncated.
+/// A forget turns notes into placeholders, which cost no bytes. A window with a placeholder,
+/// fewer than [`TURNS`] visible notes, and a start after seq 1 may sit on older visible notes.
+/// At most 2 reads settle it. If the session forget's cutoff covers its oldest turn, every
+/// older turn is hidden too, so it is `complete`. Else 1 read takes up to [`BACK`] older
+/// turns. A window still short after that, or after a failed read, is marked truncated, so
+/// [`newest`] keeps its floor. A window with no placeholder is left as is.
 fn reach_back(home: &mut HomeReader, agent: &str, window: &mut Value) {
-    loop {
+    let short = |window: &Value| {
         let turns = window["turns"].as_array().map(Vec::as_slice).unwrap_or_default();
         let visible = turns.iter().filter(|turn| turn["redacted"] != true).count();
         let first = turns.first().and_then(|turn| turn["seq"].as_u64()).unwrap_or(1);
-        if visible == turns.len() || visible >= TURNS || first <= 1 || window["truncated"] == true {
+        visible < TURNS && first > 1 && window["truncated"] != true
+    };
+    let turns = window["turns"].as_array().cloned().unwrap_or_default();
+    if turns.iter().all(|turn| turn["redacted"] != true) || !short(window) {
+        return;
+    }
+    let oldest = turns[0]["lsn"].as_u64();
+    if let Ok(Some(cutoff)) = home.forgotten_up_to(agent) {
+        if oldest.is_some_and(|lsn| lsn <= cutoff) {
+            window["complete"] = json!(true);
             return;
         }
-        match older(home, agent, first) {
-            Some(mut older) => {
-                older.extend(turns.iter().cloned());
-                window["turns"] = Value::Array(older);
-            }
-            None => {
+    }
+    let first = turns[0]["seq"].as_u64().unwrap_or(1);
+    let since = first.saturating_sub(BACK).max(1);
+    match home.window(agent, since, first - since) {
+        // A window cut by bytes drops its newest turns, which would leave a gap.
+        Ok(page) if page["truncated"] != true => {
+            let mut older = page["turns"].as_array().cloned().unwrap_or_default();
+            older.extend(turns);
+            window["turns"] = Value::Array(older);
+            if short(window) {
                 window["truncated"] = json!(true);
-                return;
             }
         }
+        _ => window["truncated"] = json!(true),
     }
-}
-
-/// `agent`'s turns before seq `first`, at most [`BACK`] of them, oldest first. A read cut by
-/// bytes still holds its oldest turn, as any turn fits 8 MiB, so the next read starts after
-/// its last. `None` when a read fails or returns nothing.
-fn older(home: &mut HomeReader, agent: &str, first: u64) -> Option<Vec<Value>> {
-    let mut since = first.saturating_sub(BACK).max(1);
-    let mut got = Vec::new();
-    while since < first {
-        let page = home.window(agent, since, first - since).ok()?;
-        let turns = page["turns"].as_array()?;
-        let last = turns.last().and_then(|turn| turn["seq"].as_u64()).filter(|s| *s >= since)?;
-        got.extend(turns.iter().cloned());
-        since = last + 1;
-    }
-    Some(got)
 }
 
 /// The newest [`TURNS`] turns across `windows`, oldest first. A window that is truncated, or
-/// full and starting after seq 1, may have left out turns older than its oldest, which may be
-/// newer than another window's turns. So nothing older than that is kept: there may be fewer
-/// than 5, but never the wrong ones. A forgotten turn is a placeholder. It counts for that
-/// floor but never shows. LSN order is commit order, as the tape keeps commit times rising,
-/// and placeholders keep only the LSN.
+/// full, starting after seq 1 and not `complete`, may have left out turns older than its
+/// oldest, which may be newer than another window's turns. So nothing older than that is
+/// kept: there may be fewer than 5, but never the wrong ones. A forgotten turn is a
+/// placeholder. It counts for that floor but never shows. LSN order is commit order, as the
+/// tape keeps commit times rising, and placeholders keep only the LSN.
 fn newest(windows: &[Value]) -> Vec<&Value> {
     let lsn = |turn: &Value| turn["lsn"].as_u64();
     fn turns(window: &Value) -> &[Value] {
@@ -223,7 +225,8 @@ fn newest(windows: &[Value]) -> Vec<&Value> {
     }
     let cut = windows.iter().filter(|w| {
         let after_first = turns(w).first().and_then(|t| t["seq"].as_u64()).is_some_and(|s| s > 1);
-        w["truncated"] == true || (turns(w).len() >= TURNS && after_first)
+        let complete = w["complete"] == true;
+        w["truncated"] == true || (turns(w).len() >= TURNS && after_first && !complete)
     });
     let floor = cut.filter_map(|window| turns(window).iter().map(lsn).min()).max();
     let mut kept: Vec<&Value> = windows.iter().flat_map(turns).collect();

@@ -210,6 +210,27 @@ impl HomeReader {
         );
         structured(self.client.read("hook", &target, "turns", turns))
     }
+
+    /// The `forgotten_up_to` of `agent`'s session of this reader's name. It reads 1 sessions
+    /// page from just below it: after the agent and the name less its last character. `None`
+    /// when the session has none, the name is empty, or the page doesn't reach it.
+    pub(crate) fn forgotten_up_to(&mut self, agent: &str) -> Result<Option<u64>, String> {
+        self.client.retry_deadline = self.deadline.saturating_duration_since(Instant::now());
+        let session = self.client.session.clone();
+        let Some((cut, _)) = session.char_indices().last() else { return Ok(None) };
+        let (after_agent, after_session) = (encode(agent), encode(&session[..cut]));
+        let target = format!(
+            "/v1/sessions?limit={}&after_agent={after_agent}&after_session={after_session}",
+            crate::api::MAX_WINDOW_TURNS
+        );
+        let page = self.client.read("hook", &target, "sessions", |reply| {
+            answer(String::new(), json!({"sessions": reply["sessions"]}))
+        });
+        let page = structured(page)?;
+        let sessions = page["sessions"].as_array().map(Vec::as_slice).unwrap_or_default();
+        let found = sessions.iter().find(|s| s["agent"] == agent && s["session"] == *session);
+        Ok(found.and_then(|found| found["forgotten_up_to"].as_u64()))
+    }
 }
 
 /// A tool result's `structuredContent`, or its error text.
