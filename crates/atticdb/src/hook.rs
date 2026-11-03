@@ -137,11 +137,16 @@ fn block_in(repo: &str, deadline: Instant, lookup: &Lookup) -> Result<Option<Str
     // memory. The shell verbs write as DEFAULT_AGENT. Each agent is read once, so no note
     // shows twice.
     let agents = Harness::ALL.map(Harness::agent).into_iter();
+    let agents: Vec<&str> = agents.filter(|a| *a != DEFAULT_AGENT).chain([DEFAULT_AGENT]).collect();
     let mut windows = Vec::new();
-    for agent in agents.filter(|agent| *agent != DEFAULT_AGENT).chain([DEFAULT_AGENT]) {
+    for agent in &agents {
         // The server's largest window, so the newest turn always fits.
         let args = json!({"n": TURNS, "max_bytes": crate::api::MAX_WINDOW_BYTES});
         windows.push(home.read(agent, "memory_recent", &args)?);
+    }
+    // Only after every other read, so read-back can't spend the budget those need.
+    for (agent, window) in agents.iter().zip(&mut windows) {
+        reach_back(&mut home, agent, window);
     }
     let notes = newest(&windows).into_iter();
     let notes = notes.map(|turn| format!("- {}", line(&turn["content"], MAX_CONTENT))).collect();
@@ -164,19 +169,69 @@ fn block_in(repo: &str, deadline: Instant, lookup: &Lookup) -> Result<Option<Str
     Ok((!lines.is_empty()).then(|| cap([header].into_iter().chain(lines))))
 }
 
-/// The newest [`TURNS`] turns across `windows`, oldest first. A truncated window left out
-/// only turns older than its oldest, which may be newer than another window's turns. So
-/// nothing older than that is kept: there may be fewer than 5, but never the wrong ones.
+/// Most turns the 1 older read in [`reach_back`] asks for: the server's cap.
+const BACK: u64 = crate::api::MAX_WINDOW_TURNS as u64;
+
+/// A forget turns notes into placeholders, which cost no bytes. A window with a placeholder,
+/// fewer than [`TURNS`] visible notes, and a start after seq 1 may sit on older visible notes.
+/// At most 2 reads settle it. If the session forget's cutoff covers its oldest turn, every
+/// older turn is hidden too, so it is `complete`. Else 1 read takes up to [`BACK`] older
+/// turns. A window still short after that, or after a failed read, is marked truncated, so
+/// [`newest`] keeps its floor. A window with no placeholder is left as is.
+fn reach_back(home: &mut HomeReader, agent: &str, window: &mut Value) {
+    let short = |window: &Value| {
+        let turns = window["turns"].as_array().map(Vec::as_slice).unwrap_or_default();
+        let visible = turns.iter().filter(|turn| turn["redacted"] != true).count();
+        let first = turns.first().and_then(|turn| turn["seq"].as_u64()).unwrap_or(1);
+        visible < TURNS && first > 1 && window["truncated"] != true
+    };
+    let turns = window["turns"].as_array().cloned().unwrap_or_default();
+    if turns.iter().all(|turn| turn["redacted"] != true) || !short(window) {
+        return;
+    }
+    let oldest = turns[0]["lsn"].as_u64();
+    if let Ok(Some(cutoff)) = home.forgotten_up_to(agent) {
+        if oldest.is_some_and(|lsn| lsn <= cutoff) {
+            window["complete"] = json!(true);
+            return;
+        }
+    }
+    let first = turns[0]["seq"].as_u64().unwrap_or(1);
+    let since = first.saturating_sub(BACK).max(1);
+    match home.window(agent, since, first - since) {
+        // A window cut by bytes drops its newest turns, which would leave a gap.
+        Ok(page) if page["truncated"] != true => {
+            let mut older = page["turns"].as_array().cloned().unwrap_or_default();
+            older.extend(turns);
+            window["turns"] = Value::Array(older);
+            if short(window) {
+                window["truncated"] = json!(true);
+            }
+        }
+        _ => window["truncated"] = json!(true),
+    }
+}
+
+/// The newest [`TURNS`] turns across `windows`, oldest first. A window that is truncated, or
+/// full, starting after seq 1 and not `complete`, may have left out turns older than its
+/// oldest, which may be newer than another window's turns. So nothing older than that is
+/// kept: there may be fewer than 5, but never the wrong ones. A forgotten turn is a
+/// placeholder. It counts for that floor but never shows. LSN order is commit order, as the
+/// tape keeps commit times rising, and placeholders keep only the LSN.
 fn newest(windows: &[Value]) -> Vec<&Value> {
-    let key = |turn: &Value| (turn["commit_time_ns"].as_u64(), turn["lsn"].as_u64());
+    let lsn = |turn: &Value| turn["lsn"].as_u64();
     fn turns(window: &Value) -> &[Value] {
         window["turns"].as_array().map(Vec::as_slice).unwrap_or_default()
     }
-    let truncated = windows.iter().filter(|window| window["truncated"] == true);
-    let floor = truncated.filter_map(|window| turns(window).iter().map(key).min()).max();
+    let cut = windows.iter().filter(|w| {
+        let after_first = turns(w).first().and_then(|t| t["seq"].as_u64()).is_some_and(|s| s > 1);
+        let complete = w["complete"] == true;
+        w["truncated"] == true || (turns(w).len() >= TURNS && after_first && !complete)
+    });
+    let floor = cut.filter_map(|window| turns(window).iter().map(lsn).min()).max();
     let mut kept: Vec<&Value> = windows.iter().flat_map(turns).collect();
-    kept.retain(|turn| floor.is_none_or(|floor| key(turn) >= floor));
-    kept.sort_by_key(|turn| key(turn));
+    kept.retain(|turn| turn["redacted"] != true && floor.is_none_or(|floor| lsn(turn) >= floor));
+    kept.sort_by_key(|turn| lsn(turn));
     kept.split_off(kept.len().saturating_sub(TURNS))
 }
 
@@ -226,22 +281,39 @@ mod tests {
     #![allow(clippy::unwrap_used)]
     use serde_json::{json, Value};
 
-    /// A window of turns at these commit times.
-    fn window(times: &[u64], truncated: bool) -> Value {
-        let turns: Vec<Value> =
-            times.iter().map(|t| json!({"commit_time_ns": t, "lsn": t, "content": t})).collect();
+    /// A window of turns at these commit times, from seq `first`. Those in `forgotten` are
+    /// placeholders.
+    fn window(times: &[u64], truncated: bool, forgotten: &[u64], first: u64) -> Value {
+        let turn = |(seq, t): (u64, &u64)| match forgotten.contains(t) {
+            true => json!({"seq": seq, "lsn": t, "redacted": true}),
+            false => json!({"seq": seq, "commit_time_ns": t, "lsn": t, "content": t}),
+        };
+        let turns: Vec<Value> = (first..).zip(times).map(turn).collect();
         json!({"turns": turns, "truncated": truncated})
     }
 
     #[test]
     fn newest_never_shows_turns_older_than_a_truncated_window_left_out() {
-        let rows: [(&str, bool, &[u64]); 2] = [
+        // (case, Copilot's turns, truncated, forgotten, Copilot's first seq, shown)
+        type Row<'a> = (&'a str, &'a [u64], bool, &'a [u64], u64, &'a [u64]);
+        let all = [20, 21, 22, 23, 24];
+        let rows: [Row; 5] = [
             // Copilot's 3 older big notes didn't fit: VS Code's notes 1 to 3 may be older.
-            ("truncated", true, &[10, 11, 12]),
-            ("complete", false, &[2, 3, 10, 11, 12]),
+            ("truncated", &[10, 11], true, &[], 4, &[10, 11, 12]),
+            ("complete", &[10, 11], false, &[], 1, &[2, 3, 10, 11, 12]),
+            // Copilot's 2 newest are forgotten, so its window is full with 3 notes. Its notes
+            // before 8 may be newer than VS Code's 1 to 3.
+            ("full with placeholders", &[8, 9, 10, 11, 13], false, &[11, 13], 4, &[8, 9, 10, 12]),
+            ("short with placeholders", &[10, 11], false, &[11], 1, &[1, 2, 3, 10, 12]),
+            // A session forget: Copilot's window reached seq 1 with 5 placeholders. It left
+            // nothing out, so VS Code's older notes show.
+            ("whole session forgotten", &all, false, &all, 1, &[1, 2, 3, 12]),
         ];
-        for (case, truncated, expected) in rows {
-            let windows = [window(&[10, 11], truncated), window(&[1, 2, 3, 12], false)];
+        for (case, copilot, truncated, forgotten, first, expected) in rows {
+            let windows = [
+                window(copilot, truncated, forgotten, first),
+                window(&[1, 2, 3, 12], false, &[], 1),
+            ];
             let shown: Vec<u64> = super::newest(&windows)
                 .iter()
                 .map(|turn| turn["content"].as_u64().unwrap())

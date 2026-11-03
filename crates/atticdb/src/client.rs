@@ -4,6 +4,7 @@
 //! Each one checks its arguments, hides secrets in writes, sends the request with retries,
 //! and shapes the result. The MCP adapter, the shell verbs and the session-start hook use it.
 //! The studio uses it only to find the store and token, then sends its own reads.
+//! `atticdb forget` uses it too, through [`forget_command`]. No tool forgets.
 
 use crate::config::{read_token_file, Config, Token};
 use crate::launch::{Launch, Url};
@@ -26,6 +27,12 @@ const MAX_BACKOFF: Duration = Duration::from_secs(2);
 const MIN_ATTEMPT: Duration = Duration::from_secs(2);
 /// What `atticdb search` prints on stderr when it finds nothing.
 const NO_HITS: &str = "No hits. Search matches every word. Try 1 or 2 words.";
+/// What `atticdb forget` prints after its receipt line. Its usage says it too.
+const FORGET_HIDES: &str =
+    "Content is hidden from normal AtticDB reads. It stays on disk until purge ships (#159).";
+/// What `atticdb forget` prints last.
+const FORGET_LEAVES: &str = "Names, keys, LSNs, counts and sizes stay visible. See \
+    \"What a forget leaves visible\" in the README.";
 
 /// A store connection as 1 agent, with a default session.
 pub(crate) struct Client {
@@ -89,6 +96,77 @@ pub fn command(tool: &str, mut flags: HashMap<String, String>) -> u8 {
     }
 }
 
+/// Runs `atticdb forget <verb>`, where `verb` is `session`, `key`, `file` or `lsns`. `flags` holds
+/// the store flags, `--retry-deadline`, `--up-to-lsn` and the verb's own flags. `session`
+/// needs `--agent` and `--session`, with no default. `file` derives the key from the path as
+/// `file save` does, so the ref of a deleted file can be forgotten too. On success it prints
+/// 3 lines on stdout: the receipt, [`FORGET_HIDES`] and where the list of what stays visible
+/// is. Exits as [`command`] does: 0, 1, 2 for a bad or missing flag, or 3.
+pub fn forget_command(verb: &str, mut flags: HashMap<String, String>) -> u8 {
+    let parsed = (|| {
+        let mut take = |name: &str| flags.remove(name).ok_or(format!("forget {verb} needs {name}"));
+        let (selector, named) = match verb {
+            "session" => {
+                let (agent, session) = (take("--agent")?, take("--session")?);
+                let named = format!("session {agent}/{session}");
+                (json!({"session": {"agent": agent, "session": session}}), named)
+            }
+            "key" => {
+                let key = take("--key")?;
+                (json!({"key": key}), format!("key {key}"))
+            }
+            "file" => {
+                let path = resolve(&take("--path")?);
+                (json!({"key": file_key(&path)?}), format!("file {}", path.display()))
+            }
+            "lsns" => {
+                let lsns = take("--lsns")?;
+                let lsns = lsns.split(',').map(|lsn| lsn.trim().parse::<u64>());
+                let lsns = lsns.collect::<Result<Vec<u64>, _>>();
+                let mut lsns = lsns.map_err(|_| "--lsns must be whole numbers, as 3,5")?;
+                lsns.sort_unstable();
+                lsns.dedup();
+                let plural = if lsns.len() == 1 { "" } else { "s" };
+                let named = format!("{} lsn{plural}", lsns.len());
+                (json!({"lsns": lsns}), named)
+            }
+            _ => return Err(format!("unknown forget verb {verb}")),
+        };
+        let up_to = flags.remove("--up-to-lsn").map(|text| text.parse::<u64>());
+        let up_to = up_to.transpose().map_err(|_| "--up-to-lsn must be a whole number")?;
+        Ok::<_, String>((selector, named, up_to))
+    })();
+    let (mut body, named, up_to) = match parsed {
+        Ok(parsed) => parsed,
+        Err(message) => {
+            eprintln!("atticdb: {message}");
+            return 2;
+        }
+    };
+    if let Some(up_to) = up_to {
+        body["up_to_lsn"] = json!(up_to);
+    }
+    let result = match Client::new(flags) {
+        Ok(mut client) => client.write("/v1/forget", body),
+        Err(message) => tool_error(message),
+    };
+    if result["isError"] == true {
+        let text = result["content"][0]["text"].as_str().unwrap_or_default();
+        eprintln!("atticdb: {text}");
+        return if text.starts_with("unknown:") { 3 } else { 1 };
+    }
+    let receipt = &result["structuredContent"];
+    let first = match (&receipt["cutoff"], &receipt["txn"], &receipt["lsn"]) {
+        (Value::Number(cutoff), Value::Number(txn), Value::Number(lsn)) => {
+            format!("forgot {named} up to lsn {cutoff} (txn {txn}, lsn {lsn})")
+        }
+        _ => format!("forgot {named}, receipt unavailable"),
+    };
+    let again = if receipt["deduplicated"] == true { " (already done)" } else { "" };
+    println!("{first}{again}\n{FORGET_HIDES}\n{FORGET_LEAVES}");
+    0
+}
+
 /// Reads from the per-user home for code in this crate, such as the session-start hook.
 pub(crate) struct HomeReader {
     client: Client,
@@ -116,10 +194,50 @@ impl HomeReader {
         // `retry` and every exchange in it end at now + `retry_deadline`.
         self.client.retry_deadline = self.deadline.saturating_duration_since(Instant::now());
         let result = self.client.call(tool, args).ok_or_else(|| format!("unknown tool {tool}"))?;
-        match result["content"][0]["text"].as_str() {
-            Some(text) if result["isError"] == true => Err(text.to_owned()),
-            _ => Ok(result["structuredContent"].clone()),
-        }
+        structured(result)
+    }
+
+    /// `agent`'s turns in this reader's session from seq `since`, at most `limit`, oldest
+    /// first, in the server's largest window. Returns `{turns, truncated}`, or the error. A
+    /// window cut by bytes drops its newest turns. The deadline is [`Self::read`]'s.
+    pub(crate) fn window(&mut self, agent: &str, since: u64, limit: u64) -> Result<Value, String> {
+        self.client.retry_deadline = self.deadline.saturating_duration_since(Instant::now());
+        let (agent, session) = (encode(agent), encode(&self.client.session));
+        let max = crate::api::MAX_WINDOW_BYTES;
+        let target = format!(
+            "/v1/window?agent={agent}&session={session}&since_seq={since}&limit={limit}\
+             &max_bytes={max}"
+        );
+        structured(self.client.read("hook", &target, "turns", turns))
+    }
+
+    /// The `forgotten_up_to` of `agent`'s session of this reader's name. It reads 1 sessions
+    /// page from just below it: after the agent and the name less its last character. `None`
+    /// when the session has none, the name is empty, or the page doesn't reach it.
+    pub(crate) fn forgotten_up_to(&mut self, agent: &str) -> Result<Option<u64>, String> {
+        self.client.retry_deadline = self.deadline.saturating_duration_since(Instant::now());
+        let session = self.client.session.clone();
+        let Some((cut, _)) = session.char_indices().last() else { return Ok(None) };
+        let (after_agent, after_session) = (encode(agent), encode(&session[..cut]));
+        let target = format!(
+            "/v1/sessions?limit={}&after_agent={after_agent}&after_session={after_session}",
+            crate::api::MAX_WINDOW_TURNS
+        );
+        let page = self.client.read("hook", &target, "sessions", |reply| {
+            answer(String::new(), json!({"sessions": reply["sessions"]}))
+        });
+        let page = structured(page)?;
+        let sessions = page["sessions"].as_array().map(Vec::as_slice).unwrap_or_default();
+        let found = sessions.iter().find(|s| s["agent"] == agent && s["session"] == *session);
+        Ok(found.and_then(|found| found["forgotten_up_to"].as_u64()))
+    }
+}
+
+/// A tool result's `structuredContent`, or its error text.
+fn structured(result: Value) -> Result<Value, String> {
+    match result["content"][0]["text"].as_str() {
+        Some(text) if result["isError"] == true => Err(text.to_owned()),
+        _ => Ok(result["structuredContent"].clone()),
     }
 }
 
@@ -459,7 +577,8 @@ impl Client {
         let versions: Vec<Value> = revisions
             .unwrap_or_default()
             .iter()
-            .filter(|revision| revision["deleted"] != true)
+            // A forgotten revision is a placeholder with no file. It is no version.
+            .filter(|revision| revision["deleted"] != true && revision["redacted"] != true)
             .map(|revision| {
                 let file = &revision["meta"]["file"];
                 json!({"lsn": revision["lsn"], "commit_time_ns": revision["commit_time_ns"],
@@ -723,8 +842,8 @@ fn reported(mut result: Value, hidden: Counts) -> Value {
     result
 }
 
-/// One `structuredContent` shape per tool, `seq` for appends only. Receipt fields are null
-/// when the server had no receipt.
+/// One `structuredContent` shape per tool, `seq` for appends only, and `txn` and `cutoff`
+/// for forgets only. Receipt fields are null when the server had no receipt.
 fn committed(reply: &Value, target: &str) -> Value {
     let append = target == "/v1/append";
     let lsn = &reply[if append { "last_lsn" } else { "lsn" }];
@@ -733,6 +852,9 @@ fn committed(reply: &Value, target: &str) -> Value {
     let (name, number) = if append { ("seq", &reply["seqs"][0]) } else { ("lsn", lsn) };
     if append {
         structured["seq"] = number.clone();
+    }
+    if target == "/v1/forget" {
+        (structured["txn"], structured["cutoff"]) = (reply["txn"].clone(), reply["cutoff"].clone());
     }
     let text = match number {
         Value::Null => "committed, receipt unavailable".into(),
@@ -810,6 +932,9 @@ fn turns(reply: &Value) -> Value {
     let mut text: Vec<String> = turns
         .iter()
         .map(|turn| {
+            if turn["redacted"] == true {
+                return format!("#{} (forgotten)", turn["seq"]);
+            }
             let content = turn["content"].as_str().unwrap_or_default();
             format!("#{} {}: {content}", turn["seq"], turn["role"].as_str().unwrap_or_default())
         })

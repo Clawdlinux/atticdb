@@ -424,9 +424,24 @@ fn startup_checks() {
                 for usage in [&["--writers", "2", "--turns", "3"][..], &huge, &slow] {
                     ctx.cli(&[&load[..], usage].concat(), 2, &[]);
                 }
-                let last = second["last_lsn"].as_u64().unwrap() + 4;
+                // Forget turn `two`: 1 more record. Fact counts stay as they were.
+                let counts = |out: String| {
+                    let names = ["facts=", "fact_revisions="];
+                    let lines = out.lines().filter(|l| names.iter().any(|n| l.starts_with(n)));
+                    lines.map(str::to_owned).collect::<Vec<_>>()
+                };
+                let counted = counts(ctx.cli(&["stats", "--url", &url], 0, &["forgotten_lsns=0"]));
+                assert_eq!(counted.len(), 2, "{case}: {counted:?}");
+                let two = second["first_lsn"].to_string();
+                let forget =
+                    ["forget", "lsns", "--url", &url, "--token-file", &token, "--lsns", &two];
+                let hides = "Content is hidden from normal AtticDB reads. It stays on disk until \
+                             purge ships (#159).";
+                ctx.cli(&forget, 0, &[hides]);
+                let last = second["last_lsn"].as_u64().unwrap() + 4 + 1;
                 let healthy = ["health=ok".to_owned(), format!("durable_lsn={last}")];
-                let healthy = healthy.each_ref().map(String::as_str);
+                let healthy = [&healthy[..], &counted, &["forgotten_lsns=1".to_owned()]].concat();
+                let healthy: Vec<&str> = healthy.iter().map(String::as_str).collect();
                 ctx.cli(&["stats", "--data-dir", data], 0, &healthy);
                 // Both refuse while the server holds the lock.
                 let recover = ["recover", "--truncate-at", &cut, "--data-dir", data];
@@ -459,6 +474,18 @@ fn startup_checks() {
                 let acked: Vec<String> = (from..=last).map(|l| format!("lsn={l}")).collect();
                 assert_eq!(lsns, acked, "{case}: acked records in LSN order: {out}");
                 assert!(!out.contains("two"), "{case}: dump shows no content: {out}");
+                // The forgotten turn keeps its line and size, the same as turn `one`'s.
+                let line = |lsn: &str| {
+                    let line = out.lines().find(|l| l.starts_with(&format!("lsn={lsn} ")));
+                    let fields = line.unwrap_or_else(|| panic!("{case}: lsn {lsn}: {out}"));
+                    let fields = fields
+                        .split(' ')
+                        .filter(|f| f.starts_with("kind=") || f.starts_with("bytes="));
+                    fields.collect::<Vec<_>>().join(" ")
+                };
+                let one = first["first_lsn"].to_string();
+                assert_eq!(line(&two), line(&one), "{case}: same kind and bytes");
+                assert!(line(&last.to_string()).starts_with("kind=Forget "), "{case}: {out}");
                 let out = ctx.cli(&[&dump[..], &["--limit", "1"]].concat(), 0, &[]);
                 assert_eq!(out.lines().count(), 1, "{case}: limit 1: {out}");
                 ctx.cli(&["stats", "--data-dir", data], 1, &[]);
