@@ -324,6 +324,74 @@ pub struct Window {
     /// above it shows. Pass it as `up_to_lsn` to forget only what this window saw.
     pub as_of_lsn: u64,
 }
+/// Where an export page starts, inclusive.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ExportPos {
+    /// A fact key. Facts come first, in byte order of key.
+    Fact {
+        /// Tenant-scoped key.
+        key: String,
+    },
+    /// A turn. Turns follow the facts, in byte order of agent, then session, each by seq.
+    Turn {
+        /// Agent identifier.
+        agent: String,
+        /// Session identifier.
+        session: String,
+        /// Sequence within the session. 0 starts at 1.
+        seq: u64,
+    },
+}
+/// One page of a tenant's export: facts, then every session's turns.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ExportQuery {
+    /// The LSN the export reads at. None pins the durable LSN, for a first page.
+    pub at: Option<u64>,
+    /// The entry this page starts at, inclusive. None starts at the first fact.
+    pub after: Option<ExportPos>,
+    /// Content and meta bytes. The page stops after the entry that passes it, so the first
+    /// entry always comes.
+    pub max_bytes: usize,
+    /// Entries per page, at least 1.
+    pub max_items: usize,
+}
+/// One export entry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ExportEntry {
+    /// A fact's value at the export's LSN. Forgotten and deleted facts are left out.
+    Fact(StoredFact),
+    /// A turn, or a forgotten turn's placeholder.
+    Turn {
+        /// Agent identifier.
+        agent: String,
+        /// Session identifier.
+        session: String,
+        /// The turn.
+        turn: Turn,
+    },
+}
+/// One page of an export.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ExportPage {
+    /// The LSN the page read at. Pass it as `at` for every later page.
+    pub at: u64,
+    /// Entries in export order.
+    pub entries: Vec<ExportEntry>,
+    /// The entry after the last one returned. Pass it as `after`. None once the export is done.
+    /// It may name an entry the next page leaves out, such as a deleted key.
+    pub next: Option<ExportPos>,
+}
+impl ExportEntry {
+    /// The entry's position, to pass as `after`.
+    pub fn pos(&self) -> ExportPos {
+        match self {
+            Self::Fact(fact) => ExportPos::Fact { key: fact.key.clone() },
+            Self::Turn { agent, session, turn } => {
+                ExportPos::Turn { agent: agent.clone(), session: session.clone(), seq: turn.seq }
+            }
+        }
+    }
+}
 /// Observable bounds and recovery counters.
 #[derive(Clone, Debug)]
 pub struct Metrics {
@@ -1050,10 +1118,23 @@ impl Engine {
         query: WindowQuery,
         max_bytes: usize,
     ) -> Result<Window> {
-        match self.window_snapshot(scope, query, max_bytes) {
+        self.window_at(scope, query, max_bytes, None)
+    }
+
+    /// [`Self::window_budget`]. With `export` set to an LSN, it reads as an export does. It
+    /// reads at that LSN and keeps the turn that passes `max_bytes`. It never inserts into the
+    /// hot cache, so an export doesn't evict agents' recent turns.
+    fn window_at(
+        &self,
+        scope: &Scope,
+        query: WindowQuery,
+        max_bytes: usize,
+        export: Option<u64>,
+    ) -> Result<Window> {
+        match self.window_snapshot(scope, query, max_bytes, export) {
             Err(EngineError { kind: ErrorKind::ResourceExhausted("hot_pages"), .. }) => {
                 self.worker.flush()?;
-                self.window_snapshot(scope, query, max_bytes)
+                self.window_snapshot(scope, query, max_bytes, export)
             }
             result => result,
         }
@@ -1063,9 +1144,10 @@ impl Engine {
         scope: &Scope,
         query: WindowQuery,
         max_bytes: usize,
+        export: Option<u64>,
     ) -> Result<Window> {
         let state = lock(&self.state)?;
-        let snapshot = self.tape.durable_lsn();
+        let snapshot = export.unwrap_or_else(|| self.tape.durable_lsn());
         let empty = Window { turns: Vec::new(), truncated: false, as_of_lsn: snapshot };
         let Some(tenant) = state.tenants.get(&scope.tenant) else {
             return Ok(empty);
@@ -1172,23 +1254,35 @@ impl Engine {
                     let commit_time_ns = frame.header.commit_time_ns;
                     let (role, content, meta) =
                         (decoded.turn.role, decoded.turn.content, decoded.turn.meta);
-                    self.hot.insert(
-                        lsn,
-                        crate::hot_cache::Cached::new(
-                            tenant,
-                            &scope.agent,
-                            &scope.session,
-                            seq,
-                            commit_time_ns,
-                            role,
-                            content.clone(),
-                            meta.clone(),
-                        ),
-                    );
+                    if export.is_none() {
+                        self.hot.insert(
+                            lsn,
+                            crate::hot_cache::Cached::new(
+                                tenant,
+                                &scope.agent,
+                                &scope.session,
+                                seq,
+                                commit_time_ns,
+                                role,
+                                content.clone(),
+                                meta.clone(),
+                            ),
+                        );
+                    }
                     Turn { lsn, seq, commit_time_ns, role, content, meta, redacted: false }
                 }
             };
             let size = turn.content.len().saturating_add(turn.meta.len());
+            if export.is_some() {
+                // An export keeps the turn that passes the budget, then stops.
+                bytes = bytes.saturating_add(size);
+                turns.push(turn);
+                if bytes > max_bytes {
+                    truncated = true;
+                    break;
+                }
+                continue;
+            }
             match bytes.checked_add(size).filter(|&total| total <= max_bytes) {
                 Some(total) => bytes = total,
                 None => {
@@ -1616,6 +1710,206 @@ impl Engine {
         Ok(page)
     }
 
+    /// Reads 1 page of a tenant's export: facts first, file refs included, keys in byte
+    /// order. Then sessions in byte order of agent, then session, each by seq.
+    ///
+    /// The first page pins `at` to the durable LSN. Later pages pass it back, so every page
+    /// reads the same state. Turns past `at` are left out. Forgets apply at the current state
+    /// (D45). A forgotten fact is left out, and a forgotten turn is a placeholder. A key
+    /// whose revision at `at` was trimmed gives `Conflict`. Reads use the hot cache but never
+    /// insert into it, so an export doesn't evict agents' recent turns.
+    pub fn export(&self, tenant: &str, query: ExportQuery) -> Result<ExportPage> {
+        let durable = self.tape.durable_lsn();
+        let at = query.at.unwrap_or(durable);
+        if query.max_items == 0 || at > durable {
+            return Err(EngineError::rejected(ErrorKind::InvalidInput));
+        }
+        let id = lock(&self.state)?.tenants.get(tenant);
+        let Some(id) = id else {
+            return Ok(ExportPage { at, ..ExportPage::default() });
+        };
+        let (max_bytes, max_items) = (query.max_bytes, query.max_items);
+        let mut fill = Fill { at, entries: Vec::new(), bytes: 0, max_bytes, max_items };
+        let start = query.after.unwrap_or(ExportPos::Fact { key: String::new() });
+        let (agent, session, seq) = match start {
+            ExportPos::Fact { key } => match self.export_facts(id, key, &mut fill)? {
+                Some(next) => return Ok(ExportPage { at, entries: fill.entries, next }),
+                None => (String::new(), String::new(), 0),
+            },
+            ExportPos::Turn { agent, session, seq } => (agent, session, seq),
+        };
+        let next = self.export_turns(tenant, id, (agent, session, seq), &mut fill)?;
+        Ok(ExportPage { at, entries: fill.entries, next })
+    }
+
+    /// Fills facts from `key` on. `Some(next)` when the page is full, None when the facts ran
+    /// out first. Holds the state lock for at most 1,024 keys at a time, as `fact_list` does.
+    fn export_facts(
+        &self,
+        id: u32,
+        key: String,
+        fill: &mut Fill,
+    ) -> Result<Option<Option<ExportPos>>> {
+        let mut from = Bound::Included((id, key));
+        loop {
+            let (picks, last) = {
+                let state = lock(&self.state)?;
+                let (mut picks, mut last) = (Vec::new(), None);
+                for (fact_key, revs) in state.facts.map.range((from, Bound::Unbounded)).take(1024) {
+                    if fact_key.0 != id {
+                        break;
+                    }
+                    last = Some(fact_key);
+                    let Some(rev) = visible(revs, fill.at).last() else {
+                        // The revision at `at` may be one the index no longer holds.
+                        if revs.dropped {
+                            return Err(EngineError::rejected(ErrorKind::Conflict));
+                        }
+                        continue;
+                    };
+                    if !rev.deleted && !state.forgets.hides_fact(fact_key, rev.lsn) {
+                        picks.push((fact_key.1.clone(), *rev));
+                    }
+                }
+                (picks, last.cloned())
+            };
+            let Some(last) = last else { return Ok(None) };
+            for (i, (key, rev)) in picks.iter().enumerate() {
+                let (mut read, _) = self.read_facts(id, [(key.as_str(), *rev)], usize::MAX)?;
+                let fact = read.pop().ok_or_else(|| EngineError::rejected(ErrorKind::CorruptIndex));
+                fill.push(ExportEntry::Fact(stored(fact?)));
+                if fill.full() {
+                    let next = match picks.get(i + 1) {
+                        Some((key, _)) => Some(ExportPos::Fact { key: key.clone() }),
+                        None => self.after_fact(id, key)?,
+                    };
+                    return Ok(Some(next));
+                }
+            }
+            from = Bound::Excluded(last);
+        }
+    }
+
+    /// The export position after fact `key`: the next key, else the first session.
+    fn after_fact(&self, id: u32, key: &str) -> Result<Option<ExportPos>> {
+        let next = {
+            let state = lock(&self.state)?;
+            let from = Bound::Excluded((id, key.to_owned()));
+            let mut keys = state.facts.map.range((from, Bound::Unbounded)).map(|(key, _)| key);
+            keys.next().filter(|(owner, _)| *owner == id).map(|(_, key)| key.clone())
+        };
+        Ok(match next {
+            Some(key) => Some(ExportPos::Fact { key }),
+            None => self.after_session(id, ("", ""), true)?,
+        })
+    }
+
+    /// The first turn of the first session at or after `from`, or after it.
+    fn after_session(
+        &self,
+        id: u32,
+        from: (&str, &str),
+        inclusive: bool,
+    ) -> Result<Option<ExportPos>> {
+        let first = self.sessions_from(id, from, inclusive, 1)?.into_iter().next();
+        Ok(first.map(|(agent, session, _)| ExportPos::Turn { agent, session, seq: 1 }))
+    }
+
+    /// Fills turns from `(agent, session, seq)` on. Returns the next position when the page is
+    /// full, None when the turns ran out first.
+    fn export_turns(
+        &self,
+        tenant: &str,
+        id: u32,
+        (agent, session, seq): (String, String, u64),
+        fill: &mut Fill,
+    ) -> Result<Option<ExportPos>> {
+        let (mut from, mut inclusive) = ((agent, session), true);
+        // 1 more than a page can fill, so the one after the last filled is known.
+        let limit = fill.max_items.saturating_add(1);
+        loop {
+            let batch = self.sessions_from(id, (&from.0, &from.1), inclusive, limit)?;
+            for (i, (agent, session, len)) in batch.iter().enumerate() {
+                let start = match inclusive && (agent, session) == (&from.0, &from.1) {
+                    true => seq.max(1),
+                    false => 1,
+                };
+                if start > *len {
+                    continue;
+                }
+                let scope = Scope {
+                    tenant: tenant.to_owned(),
+                    agent: agent.clone(),
+                    session: session.clone(),
+                };
+                let query =
+                    WindowQuery::Since { seq: start, limit: fill.max_items - fill.entries.len() };
+                let room = fill.max_bytes.saturating_sub(fill.bytes);
+                let window = self.window_at(&scope, query, room, Some(fill.at))?;
+                let mut last = 0;
+                for turn in window.turns {
+                    last = turn.seq;
+                    fill.push(ExportEntry::Turn {
+                        agent: agent.clone(),
+                        session: session.clone(),
+                        turn,
+                    });
+                }
+                if !fill.full() {
+                    continue;
+                }
+                if last < *len {
+                    let (agent, session) = (agent.clone(), session.clone());
+                    return Ok(Some(ExportPos::Turn { agent, session, seq: last + 1 }));
+                }
+                return match batch.get(i + 1) {
+                    Some((agent, session, _)) => {
+                        let (agent, session) = (agent.clone(), session.clone());
+                        Ok(Some(ExportPos::Turn { agent, session, seq: 1 }))
+                    }
+                    None => self.after_session(id, (agent, session), false),
+                };
+            }
+            if batch.len() < limit {
+                return Ok(None);
+            }
+            if let Some((agent, session, _)) = batch.into_iter().last() {
+                (from, inclusive) = ((agent, session), false);
+            }
+        }
+    }
+
+    /// The `limit` smallest sessions of tenant `id` with a published turn, with their turn
+    /// counts. They start at `from`, or after it when not `inclusive`. It makes 1 pass over
+    /// the session index under the state lock, as `sessions` does.
+    fn sessions_from(
+        &self,
+        id: u32,
+        from: (&str, &str),
+        inclusive: bool,
+        limit: usize,
+    ) -> Result<Vec<(String, String, u64)>> {
+        let state = lock(&self.state)?;
+        let mut smallest = BinaryHeap::new();
+        for (Key(owner, agent, session), entry) in &state.index.sessions {
+            let key = (agent.as_str(), session.as_str());
+            if *owner != id || entry.len == 0 || key < from || (!inclusive && key == from) {
+                continue;
+            }
+            if smallest.len() < limit {
+                smallest.push((key, entry.len));
+            } else if let Some(mut largest) = smallest.peek_mut() {
+                if key < largest.0 {
+                    *largest = (key, entry.len);
+                }
+            }
+        }
+        let sorted = smallest.into_sorted_vec().into_iter();
+        Ok(sorted
+            .map(|((agent, session), len)| (agent.to_owned(), session.to_owned(), len))
+            .collect())
+    }
+
     /// True when a forget hides this turn frame. Uses the header's tenant id (I11).
     fn hides_turn(&self, frame: &Frame, parsed: &ParsedTurn<'_>) -> Result<bool> {
         let state = lock(&self.state)?;
@@ -1836,6 +2130,30 @@ impl SimForget<'_> {
 
 /// A fact frame read for a revision, with its commit time.
 type ReadFact = (Rev, u64, Fact);
+
+/// An export page being filled, with its bounds.
+struct Fill {
+    at: u64,
+    entries: Vec<ExportEntry>,
+    /// Content and meta bytes so far.
+    bytes: usize,
+    max_bytes: usize,
+    max_items: usize,
+}
+impl Fill {
+    fn push(&mut self, entry: ExportEntry) {
+        let size = match &entry {
+            ExportEntry::Fact(fact) => fact.content.len() + fact.meta.len(),
+            ExportEntry::Turn { turn, .. } => turn.content.len() + turn.meta.len(),
+        };
+        self.bytes = self.bytes.saturating_add(size);
+        self.entries.push(entry);
+    }
+    /// True once the page holds `max_items` entries, or its bytes passed `max_bytes`.
+    fn full(&self) -> bool {
+        self.entries.len() >= self.max_items || self.bytes > self.max_bytes
+    }
+}
 
 /// The bounds of a newest-first walk, from a search or a records query.
 struct Walk {

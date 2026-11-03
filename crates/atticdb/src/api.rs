@@ -1,7 +1,8 @@
 //! HTTP routes. Writes: `POST /v1/append`, `POST /v1/facts/put`, `POST /v1/facts/delete` and
 //! `POST /v1/forget`.
 //! Reads: `GET /v1/window`, `GET /v1/facts/get`, `GET /v1/facts/history`, `GET /v1/facts/list`,
-//! `GET /v1/search`, `GET /v1/sessions` and `GET /v1/records`. `GET /healthz` needs no token.
+//! `GET /v1/search`, `GET /v1/sessions`, `GET /v1/records` and `GET /v1/export`. `GET /healthz`
+//! needs no token.
 //! `GET /v1/stats` and `GET /metrics` answer on the Unix socket only, with no token. Fact keys
 //! travel in bodies and query strings, never in paths.
 
@@ -69,9 +70,11 @@ pub enum Route {
     Records,
     /// `POST /v1/forget`.
     Forget,
+    /// `GET /v1/export`.
+    Export,
 }
 
-const ROUTES: [(&str, &str, Route); 12] = [
+const ROUTES: [(&str, &str, Route); 13] = [
     ("GET", "/healthz", Route::Health),
     ("POST", "/v1/append", Route::Append),
     ("GET", "/v1/window", Route::Window),
@@ -84,6 +87,7 @@ const ROUTES: [(&str, &str, Route); 12] = [
     ("GET", "/v1/sessions", Route::Sessions),
     ("GET", "/v1/records", Route::Records),
     ("POST", "/v1/forget", Route::Forget),
+    ("GET", "/v1/export", Route::Export),
 ];
 
 /// Checks a head before its body is read: `Host` on TCP, then the token. Returns the
@@ -580,7 +584,7 @@ const FORGET_LIMITS: &str =
     "agent and session are at most 255 bytes each, key at most 1024 bytes; \
                              lsns holds 1 to 1024 LSNs from 1; up_to_lsn is at least 1";
 
-fn classify(kind: &ErrorKind) -> (u16, &'static str) {
+pub(crate) fn classify(kind: &ErrorKind) -> (u16, &'static str) {
     match kind {
         ErrorKind::InvalidInput => (400, "invalid_input"),
         ErrorKind::IdempotencyConflict => (409, "idempotency_conflict"),
@@ -623,6 +627,19 @@ fn send<T>(result: Result<T, EngineError>, build: impl FnOnce(T) -> Value) -> Re
     let body = build(read);
     let response = Response::json(200, &body);
     drop(body);
+    match SENDING.take(response.body.len(), SEND_WAIT) {
+        Some(held) => Response { _held: Some(held), ..response },
+        None => busy(),
+    }
+}
+
+/// `GET /v1/export?format=markdown`: 1 page of the tenant's markdown export. See
+/// [`crate::export`]. The body takes the send budget, as windows do.
+pub fn export(engine: &Engine, tenant: &str, target: &str) -> Response {
+    let response = crate::export::page(engine, tenant, target);
+    if response.status != 200 {
+        return response;
+    }
     match SENDING.take(response.body.len(), SEND_WAIT) {
         Some(held) => Response { _held: Some(held), ..response },
         None => busy(),

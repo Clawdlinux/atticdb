@@ -9,6 +9,7 @@ pub mod client;
 pub mod config;
 pub mod connect;
 pub mod doctor;
+pub mod export;
 #[cfg(feature = "fault-inject")]
 pub mod fault;
 pub mod home;

@@ -1,7 +1,7 @@
 use crate::support::{new_fact, open, options, query};
 use atticdb_core::{
-    forget::Selector, Engine, EngineError, EngineOptions, ErrorKind, FactHistory, FactPage,
-    FactWritten, Outcome, StoredFact,
+    forget::Selector, Engine, EngineError, EngineOptions, ErrorKind, ExportEntry, ExportQuery,
+    FactHistory, FactPage, FactWritten, Outcome, StoredFact,
 };
 use atticdb_tape::sim::SimClock;
 use atticdb_tape::{Io, SimDisk};
@@ -128,6 +128,22 @@ fn put_supersede_delete_condition_and_reopen() {
     let shown = vec![(current, false), (newest - 1, true), (newest - 2, false)];
     assert_eq!(history(&engine, "a", "a/x"), (shown, true), "five writes, three shown");
     assert_eq!(reads(&engine) - before, 3);
+    // An export at the first write's LSN needs a revision the index trimmed.
+    for (case, at, expected) in [
+        ("trimmed", Some(first.lsn), Err("Conflict".to_owned())),
+        ("current", None, Ok(vec![("a/x".to_owned(), current)])),
+    ] {
+        let query = ExportQuery { at, after: None, max_bytes: usize::MAX, max_items: 10 };
+        let page = engine.export("a", query).map_err(|error| format!("{:?}", error.kind));
+        let facts = page.map(|page| {
+            let facts = page.entries.into_iter().map(|entry| match entry {
+                ExportEntry::Fact(fact) => (fact.key, fact.lsn),
+                ExportEntry::Turn { .. } => panic!("{case}: no turns"),
+            });
+            facts.collect::<Vec<_>>()
+        });
+        assert_eq!(facts, expected, "export {case}");
+    }
 
     let retry = engine.fact_put("a", new_fact("a/x", 1, "a"), Some("p1"), None).unwrap();
     assert_cached(&first, retry, "same key and payload");

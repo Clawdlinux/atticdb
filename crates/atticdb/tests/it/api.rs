@@ -277,6 +277,16 @@ fn writes_reads_and_retries_over_both_listeners() {
             ("unknown parameter on sessions", a, "/v1/sessions?agent=a", 400),
             ("unknown parameter on records", a, "/v1/records?session=s", 400),
             ("kind is turn or fact", a, "/v1/records?kind=forget", 400),
+            ("export without a token", None, "/v1/export?format=markdown", 401),
+            ("export format is markdown", a, "/v1/export?format=html", 400),
+            ("export max_bytes from 64 KiB", a, "/v1/export?format=markdown&max_bytes=65535", 400),
+            (
+                "export after_key with after_agent",
+                a,
+                "/v1/export?format=markdown&at=1&after_key=k&after_agent=a&after_session=s\
+                 &after_seq=1&skip=0&offset=0",
+                400,
+            ),
         ] {
             let error = if status == 401 { "unauthorized" } else { "invalid_input" };
             let (got, body) = via.call(lo, token, "GET", target, None);

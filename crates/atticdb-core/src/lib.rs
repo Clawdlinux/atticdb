@@ -22,9 +22,10 @@ pub mod turn;
 
 pub use atticdb_tape::Outcome;
 pub use engine::{
-    Appended, Engine, FactHistory, FactPage, FactQuery, FactWritten, Forgotten, Health, Hit,
-    Metrics, NewFact, Record, RecordKind, RecordPage, RecordQuery, Revision, Scope, SearchPage,
-    SearchQuery, SessionInfo, SessionPage, SessionQuery, StoredFact, Turn, Window, WindowQuery,
+    Appended, Engine, ExportEntry, ExportPage, ExportPos, ExportQuery, FactHistory, FactPage,
+    FactQuery, FactWritten, Forgotten, Health, Hit, Metrics, NewFact, Record, RecordKind,
+    RecordPage, RecordQuery, Revision, Scope, SearchPage, SearchQuery, SessionInfo, SessionPage,
+    SessionQuery, StoredFact, Turn, Window, WindowQuery,
 };
 #[cfg(feature = "sim")]
 pub use engine::{SimAppend, SimFact, SimForget};
