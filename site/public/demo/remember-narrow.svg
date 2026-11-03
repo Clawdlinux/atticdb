@@ -1,0 +1,125 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 884" width="400" height="884" role="img" aria-labelledby="demo-title demo-desc">
+  <title id="demo-title">AtticDB demo: save a rule, then a new chat uses it</title>
+  <desc id="demo-desc">In a terminal in the shop repo, someone runs atticdb fact set --key repo/shop/rule --content "Use pnpm, not npm." It prints {"committed":true,"deduplicated":false,"lsn":2}, so the rule is saved. Later, a new chat in Claude Code starts with the AtticDB memory block for repo shop. The block lists repo/shop/rule: Use pnpm, not npm. Asked to add lodash, the agent says the repo uses pnpm and runs pnpm add lodash.</desc>
+  <!-- The phone layout of remember.svg. Same story and strings, wrapped to fit 400 wide.
+       Every text is 19 units, so 16px or more when it renders 343px wide on a 375px phone. -->
+  <style>
+    .sans { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+    .ink { fill: #EDE6D8; }
+    .muted { fill: #A89C8C; }
+    .accent { fill: #C8F03C; }
+    .a { animation-duration: 16s; animation-iteration-count: infinite; animation-fill-mode: both; }
+    .c1 { transform: translateX(213px); animation-name: type1; }
+    .c2 { transform: translateX(279px); animation-name: type2; }
+    .c3 { transform: translateX(371px); animation-name: type3; }
+    .out { animation-name: out; }
+    .saved { animation-name: saved; }
+    .chat { animation-name: chat; }
+    .block { animation-name: block; }
+    .user { animation-name: user; }
+    .agent { animation-name: agent; }
+    @keyframes type1 {
+      0%, 3.75% { transform: translateX(0); animation-timing-function: steps(18, end); }
+      8.5%, 96% { transform: translateX(213px); }
+      96.5%, 100% { transform: translateX(0); }
+    }
+    @keyframes type2 {
+      0%, 9% { transform: translateX(0); animation-timing-function: steps(24, end); }
+      14.5%, 96% { transform: translateX(279px); }
+      96.5%, 100% { transform: translateX(0); }
+    }
+    @keyframes type3 {
+      0%, 15% { transform: translateX(0); animation-timing-function: steps(32, end); }
+      22.5%, 96% { transform: translateX(371px); }
+      96.5%, 100% { transform: translateX(0); }
+    }
+    @keyframes out { 0%, 25% { opacity: 0; } 26%, 96% { opacity: 1; } 97%, 100% { opacity: 0; } }
+    @keyframes saved { 0%, 27.5% { opacity: 0; } 28.5%, 96% { opacity: 1; } 97%, 100% { opacity: 0; } }
+    @keyframes chat {
+      0%, 35% { opacity: 0; transform: translateY(10px); }
+      37%, 96% { opacity: 1; transform: none; }
+      97%, 100% { opacity: 0; transform: none; }
+    }
+    @keyframes block { 0%, 40% { opacity: 0; } 41.5%, 96% { opacity: 1; } 97%, 100% { opacity: 0; } }
+    @keyframes user { 0%, 50% { opacity: 0; } 51%, 96% { opacity: 1; } 97%, 100% { opacity: 0; } }
+    @keyframes agent { 0%, 60% { opacity: 0; } 61%, 96% { opacity: 1; } 97%, 100% { opacity: 0; } }
+    /* Reduced motion, or the #still fragment: no animation, so the last frame shows. */
+    @media (prefers-reduced-motion: reduce) { .a { animation: none; } }
+    #still:target ~ * .a, #still:target ~ .a { animation: none; }
+  </style>
+  <defs>
+    <clipPath id="term"><rect x="1" y="1" width="398" height="222" rx="5.5"/></clipPath>
+  </defs>
+  <g id="still"/>
+  <rect width="400" height="884" fill="#16110E"/>
+
+  <!-- Terminal. The command wraps with backslashes, the output at its commas. -->
+  <rect x="0.5" y="0.5" width="399" height="223" rx="6" fill="#221B17" stroke="#3A302A"/>
+  <circle cx="18" cy="22" r="5" fill="#3A302A"/>
+  <circle cx="34" cy="22" r="5" fill="#3A302A"/>
+  <circle cx="50" cy="22" r="5" fill="#3A302A"/>
+  <text x="225" y="29" text-anchor="middle" font-size="19" class="sans muted">Terminal · ~/shop</text>
+  <g font-size="19" class="mono">
+    <text x="14" y="70" class="accent">$</text>
+    <text x="34" y="70" class="ink">atticdb fact set \</text>
+    <text x="14" y="96" class="muted">&gt;</text>
+    <text x="34" y="96" class="ink">--key repo/shop/rule \</text>
+    <text x="14" y="122" class="muted">&gt;</text>
+    <text x="34" y="122" class="ink">--content "Use pnpm, not npm."</text>
+  </g>
+  <g clip-path="url(#term)">
+    <rect class="a c1" x="32" y="53" width="213" height="24" fill="#221B17"/>
+    <rect class="a c2" x="8" y="79" width="279" height="24" fill="#221B17"/>
+    <rect class="a c3" x="8" y="105" width="371" height="24" fill="#221B17"/>
+  </g>
+  <g class="a out mono muted" font-size="19">
+    <text x="14" y="160">{"committed":true,</text>
+    <text x="14" y="183">"deduplicated":false,</text>
+    <text x="14" y="206">"lsn":2}</text>
+  </g>
+
+  <!-- A caption outside the terminal, not CLI output -->
+  <text class="a saved sans accent" x="200" y="256" text-anchor="middle" font-size="19">Saved. The rule is on disk.</text>
+
+  <!-- A new chat, later -->
+  <g class="a chat">
+    <text x="200" y="290" text-anchor="middle" font-size="19" class="sans muted">Later, a new chat in the same repo</text>
+    <rect x="0.5" y="306.5" width="399" height="569" rx="6" fill="#221B17" stroke="#3A302A"/>
+    <text x="14" y="336" font-size="19" class="sans muted">New chat · Claude Code · ~/shop</text>
+    <line x1="1" y1="352" x2="399" y2="352" stroke="#3A302A"/>
+
+    <g class="a block">
+      <rect x="10.5" y="366.5" width="379" height="307" fill="#16110E" stroke="#C8F03C" stroke-dasharray="4 3"/>
+      <text x="22" y="392" font-size="19" class="sans accent">What the agent sees at chat start</text>
+      <g font-size="19" class="mono muted">
+        <text x="22" y="420">AtticDB memory for repo shop,</text>
+        <text x="22" y="443">a snapshot from chat start:</text>
+        <text x="22" y="466">rules, facts under repo/shop/</text>
+        <text x="22" y="489">and only the 5 newest notes.</text>
+        <text x="22" y="512">Older notes and decisions are</text>
+        <text x="22" y="535">not shown. Before saying why</text>
+        <text x="22" y="558">or when something was decided,</text>
+        <text x="22" y="581">call memory_search.</text>
+      </g>
+      <g font-size="19" class="mono ink">
+        <text x="22" y="612">This repo (shop):</text>
+        <text x="22" y="635">- repo/shop/rule:</text>
+        <text x="45" y="658" class="accent">Use pnpm, not npm.</text>
+      </g>
+    </g>
+
+    <g class="a user">
+      <rect x="140" y="690" width="250" height="40" rx="4" fill="#3A302A"/>
+      <text x="378" y="716" text-anchor="end" font-size="19" class="sans ink">Add lodash to this repo.</text>
+    </g>
+
+    <g class="a agent">
+      <text x="14" y="760" font-size="19" class="sans muted">Agent</text>
+      <text x="14" y="788" font-size="19" class="sans ink">This repo uses pnpm, not npm.</text>
+      <text x="14" y="812" font-size="19" class="sans ink">So I'll run:</text>
+      <rect x="14" y="826" width="204" height="36" fill="#16110E"/>
+      <text x="26" y="850" font-size="19" class="mono accent">pnpm add lodash</text>
+    </g>
+  </g>
+</svg>

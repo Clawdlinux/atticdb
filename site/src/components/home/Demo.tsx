@@ -5,6 +5,10 @@ import styles from "./Demo.module.css";
 export const DEMO_SRC = "/demo/remember.svg";
 // The SVG's #still fragment turns its animation off, so it shows the last frame.
 export const DEMO_STILL = `${DEMO_SRC}#still`;
+// Phones get a taller, narrower layout of the same story, so its text stays 16px or more at 375px.
+export const DEMO_NARROW_SRC = "/demo/remember-narrow.svg";
+export const DEMO_NARROW_STILL = `${DEMO_NARROW_SRC}#still`;
+export const DEMO_NARROW_MEDIA = "(max-width: 40rem)";
 export const DEMO_ALT =
   'A terminal in the shop repo runs atticdb fact set --key repo/shop/rule --content "Use pnpm, not npm." The rule is saved. ' +
   "Later, a new chat in Claude Code starts with the AtticDB memory block, which lists that rule. " +
@@ -28,7 +32,15 @@ export default function Demo() {
       </Reveal>
       <Reveal delay={0.075} className={styles.figure}>
         <picture>
-          <source media="(prefers-reduced-motion: reduce)" srcSet={DEMO_STILL} />
+          {/* The first match wins: phone and still, phone, then still. */}
+          <source
+            media={`${DEMO_NARROW_MEDIA} and (prefers-reduced-motion: reduce)`}
+            srcSet={DEMO_NARROW_STILL}
+            width={400}
+            height={884}
+          />
+          <source media={DEMO_NARROW_MEDIA} srcSet={DEMO_NARROW_SRC} width={400} height={884} />
+          <source media="(prefers-reduced-motion: reduce)" srcSet={DEMO_STILL} width={640} height={580} />
           <img
             className={styles.img}
             src={DEMO_SRC}

@@ -83,25 +83,74 @@ describe("home demo", () => {
     expect(demo.querySelector("h2")?.id).toBe("demo-heading");
     const img = within(demo).getByRole("img", { name: DEMO_ALT });
     expect(img).toHaveAttribute("src", "/demo/remember.svg");
-    const still = demo.querySelector("picture source")!;
-    expect(still).toHaveAttribute("media", "(prefers-reduced-motion: reduce)");
-    expect(still).toHaveAttribute("srcset", "/demo/remember.svg#still");
+    const sources = [...demo.querySelectorAll("picture source")].map((s) => [
+      s.getAttribute("media"),
+      s.getAttribute("srcset"),
+    ]);
+    // The first match wins, so the phone sources come first and each keeps a still frame.
+    expect(sources).toEqual([
+      ["(max-width: 40rem) and (prefers-reduced-motion: reduce)", "/demo/remember-narrow.svg#still"],
+      ["(max-width: 40rem)", "/demo/remember-narrow.svg"],
+      ["(prefers-reduced-motion: reduce)", "/demo/remember.svg#still"],
+    ]);
     expect(within(demo).getByRole("link", { name: "Try it in 1 minute" })).toHaveAttribute(
       "href",
       "https://docs.atticdb.com/install#try-it-in-1-minute",
     );
   });
 
-  it("ships an SVG under 40 KB that loops, has a title and desc, and stops for reduced motion", () => {
+  it.each(["remember.svg", "remember-narrow.svg"])(
+    "ships %s under 40 KB, looping, with a title and desc, and stopping for reduced motion",
+    (file) => {
+      const svg = readFileSync(`public/demo/${file}`, "utf8");
+      expect(Buffer.byteLength(svg)).toBeLessThan(40 * 1024);
+      expect(svg).toMatch(/<title[^>]*>[^<]+<\/title>/);
+      expect(svg).toMatch(/<desc[^>]*>[^<]+<\/desc>/);
+      expect(svg).toContain("animation-iteration-count: infinite");
+      expect(svg).toMatch(/@media \(prefers-reduced-motion: reduce\) \{ \.a \{ animation: none; \} \}/);
+      expect(svg).toContain("#still:target ~ * .a, #still:target ~ .a { animation: none; }");
+      expect(svg).toContain('id="still"');
+      expect(svg).not.toMatch(/<script/i);
+      expect(svg).not.toContain("\u2014");
+      expect(svg).toContain("AtticDB memory for repo shop,");
+      expect(svg).toContain("This repo (shop):");
+      expect(svg).toContain("pnpm add lodash");
+    },
+  );
+
+  it("keeps the real command and output on the phone, wrapped to fit, with text 16px or more at 375px", () => {
+    const svg = readFileSync("public/demo/remember-narrow.svg", "utf8");
+    const viewBox = svg.match(/viewBox="0 0 (\d+) (\d+)"/)!;
+    const width = Number(viewBox[1]);
+    expect(width).toBeLessThanOrEqual(400);
+    expect(Number(viewBox[2])).toBeGreaterThan(width);
+    // 375px wide, less the page's 16px gutters.
+    const scale = 343 / width;
+    for (const [, size] of svg.matchAll(/font-size="([\d.]+)"/g)) {
+      expect(Number(size) * scale).toBeGreaterThanOrEqual(16);
+    }
+    const lines = [...svg.matchAll(/<text[^>]*>([^<]*)<\/text>/g)].map((m) => m[1]);
+    const at = (first: string, count: number) => {
+      const i = lines.indexOf(first);
+      expect(i, first).toBeGreaterThanOrEqual(0);
+      return lines.slice(i, i + count);
+    };
+    // A backslash-continued command and output wrapped at its commas: the same bytes as remember.svg.
+    expect(at("atticdb fact set \\", 5)).toEqual([
+      "atticdb fact set \\",
+      "&gt;",
+      "--key repo/shop/rule \\",
+      "&gt;",
+      '--content "Use pnpm, not npm."',
+    ]);
+    expect(at('{"committed":true,', 3).join("")).toBe('{"committed":true,"deduplicated":false,"lsn":2}');
+    expect(svg).toContain(
+      'atticdb fact set --key repo/shop/rule --content "Use pnpm, not npm." It prints {"committed":true,"deduplicated":false,"lsn":2}',
+    );
+  });
+
+  it("ships the wide SVG with the command and output on single lines", () => {
     const svg = readFileSync("public/demo/remember.svg", "utf8");
-    expect(Buffer.byteLength(svg)).toBeLessThan(40 * 1024);
-    expect(svg).toMatch(/<title[^>]*>[^<]+<\/title>/);
-    expect(svg).toMatch(/<desc[^>]*>[^<]+<\/desc>/);
-    expect(svg).toContain("animation-iteration-count: infinite");
-    expect(svg).toMatch(/@media \(prefers-reduced-motion: reduce\) \{ \.a \{ animation: none; \} \}/);
-    expect(svg).toContain('id="still"');
-    expect(svg).not.toMatch(/<script/i);
-    expect(svg).not.toContain("\u2014");
     // Real command syntax and real output shape, from atticdb on a throwaway store.
     expect(svg).toContain("atticdb fact set --key repo/shop/rule \\");
     expect(svg).toContain('--content "Use pnpm, not npm."');
