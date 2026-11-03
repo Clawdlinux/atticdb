@@ -165,8 +165,8 @@ A forget hides turn content, meta, role and time, and fact values. These stay ob
 - `fact_get`, `fact_list`: a hidden newest revision means none. `fact_history`: placeholder revisions, with no `read_facts` call (`engine.rs:1393-1421`).
 - `search`: in `pick`, turns go through `decode_ref` and the hide check before inflate and match. `current` (`engine.rs:1125-1130`) adds `hides_fact`. The walk and the index candidates share `pick`. Hidden records still count as visits.
 - `records`: placeholders with kind, LSN, and agent, session and seq, or the key. Use `decode_ref`. The size counts identifiers. Remove the comment at `engine.rs:1229`.
-- `sessions`: add `SessionInfo.forgotten_up_to: Option<u64>`, the session cutoff. Totals are unchanged: they stay visible metadata (see the inventory). Add `SessionPage.as_of_lsn: u64`, `state.published_lsn` read under the same lock (`engine.rs:1343`). Every turn the page counts is at or below it.
-- `window_snapshot`: add `Window.as_of_lsn: u64`, `state.published_lsn` read under the first lock (`engine.rs:915`). Studio pins a forget to it (Q8).
+- `sessions`: add `SessionInfo.forgotten_up_to: Option<u64>`, the session cutoff. Totals are unchanged: they stay visible metadata (see the inventory). Add `SessionPage.as_of_lsn: u64`: `self.tape.durable_lsn()` read right after the lock (`engine.rs:1343`), as `window_snapshot` does. Not `state.published_lsn`: the state machine publishes before the tape stores `durable_lsn` (`atticdb-tape/src/writer.rs:776-784`), so publication can briefly run ahead. The count may include a turn above `as_of_lsn`. A forget pinned to it then hides less, never more.
+- `window_snapshot`: add `Window.as_of_lsn: u64`, set to the existing `snapshot` (`engine.rs:916`), the same value that filters turns at `engine.rs:952`. So every turn the window shows is at or below it, and no turn above it shows. Never `state.published_lsn`: it can be ahead of `snapshot` while a group publishes, and a forget pinned to it would hide a turn the window skipped. Studio pins a forget to `as_of_lsn` (Q8).
 - Add `pub redacted: bool` to `Turn` and `Revision`.
 - Metrics: `forgotten_sessions`, `forgotten_fact_keys`, `forgotten_lsns`. The existing counts stay as they are (`engine.rs:1459-1466`): visible metadata.
 
@@ -268,7 +268,7 @@ atticdb forget lsns <connect> --lsns <n,n,...> [--up-to-lsn <n>]
 
 ## Task 4: studio forgets behind `--allow-forget` (amends D87 with D99)
 
-**Files.** Modify `atticdb/src/{studio.rs, main.rs}`, `atticdb/studio/{app.js, app.css}`, `atticdb/tests/it/{studio.rs, support.rs}`, `atticdb/README.md:19`, `:632`, and `docs/design/0002-decision-log.md` (D99).
+**Files.** Modify `atticdb/src/{studio.rs, main.rs}`, `atticdb/studio/{app.js, app.css}`, `atticdb/tests/it/{studio.rs, support.rs}`, `atticdb-core/tests/engine_sim.rs` (1 race test), `atticdb/README.md:19`, `:632`, and `docs/design/0002-decision-log.md` (D99).
 
 **Read-only by default (Q7).**
 - New flag `--allow-forget`. `start` removes it as it removes `--no-open` (`studio.rs:99`) and passes a `forget: bool` into `Studio`. `main.rs:133` adds it to studio's allowed flags. `USAGE` (`main.rs:30`, `:50`) says: "studio serves a read-only page on 127.0.0.1 and opens it. With --allow-forget it can also forget sessions and fact keys."
@@ -311,8 +311,13 @@ atticdb forget lsns <connect> --lsns <n,n,...> [--up-to-lsn <n>]
 - Rows for POST `/api/forget`: no Origin 403, a foreign Origin 403, `Sec-Fetch-Site: cross-site` 403, no secret 401, `text/plain` 415, form-encoded 415, no confirm 400, a session item without `up_to_lsn` 400, `up_to_lsn` 0 400, 101 items 400, mixed selectors 400, a body over 64 KiB 413, OPTIONS 405 with no `Access-Control-Allow-Origin`, and GET `/api/forget` 405. The existing `POST /api/v1/sessions` row stays 405.
 - Then load `/api/v1/sessions` and keep its `as_of_lsn` L. Append 1 turn to session X through the store, after L. Bulk forget X and Y with `up_to_lsn` L. Its retry with the same keys comes back `deduplicated`. Re-fetch, as the page does: X's turns at or below L are placeholders, the turn after L shows, and X's `forgotten_up_to` is L. Forwarded records hold placeholders, and `/api/block` drops the note.
 - A data-dir studio started with `--allow-forget` forgets too.
+- The publish race, in `engine_sim.rs`, since only the sim can hold a group between publish and the durable watermark. New `window_as_of_lsn_never_covers_an_unseen_turn`, built like `inline_group_publishes_once_and_replies_with_original_sequences` (`engine_sim.rs:1233`) with `PublishPause` (`atticdb-tape/src/sim.rs:24`):
+  - Append 2 turns to session X. Arm the pause, enqueue a 3rd turn with `enqueue_sim`, and run `step_sim` on a thread until it parks after publish, before `durable_lsn` advances.
+  - While parked, read the window and the sessions page. Neither `as_of_lsn` reaches the 3rd turn's LSN. Both equal `metrics().durable_lsn`. The window shows seqs 1 and 2 only.
+  - Release the pause and finish the reply. Forget X with `up_to_lsn` set to the window's `as_of_lsn`, as the page would.
+  - The window now shows seqs 1 and 2 as placeholders and seq 3 with its content.
 
-**Acceptance:** the test passes. Manual check without the flag: no checkbox, no button. With `--allow-forget`: select, cancel, confirm, see pills and the refreshed view, reload. The D99 row is in 0002.
+**Acceptance:** `cargo test -p atticdb --test it studio::` and `cargo test -p atticdb-core --release --features sim --test engine_sim window_as_of_lsn` pass. Manual check without the flag: no checkbox, no button. With `--allow-forget`: select, cancel, confirm, see pills and the refreshed view, reload. The D99 row is in 0002.
 
 ## Task 5: markdown export
 
@@ -350,7 +355,12 @@ atticdb forget lsns <connect> --lsns <n,n,...> [--up-to-lsn <n>]
 - `skip` is how many bytes of that entry's markdown were already sent. `offset` is the byte count of its file sent so far.
 - The client passes it back as query parameters: `at`, then `after_key`, or `after_agent`, `after_session` and `after_seq`, then `skip` and `offset`. Any other mix is 400. A 1,024-byte key percent-encodes to at most 3 KiB, under the 16 KiB head limit (`http.rs:85`).
 - The server echoes `offset` into the next chunk. It holds no export state between pages.
-- If `skip > 0` and the cursor's entry is now hidden, or its markdown is shorter than `skip`, the page is 409. That happens when a forget lands mid-entry. A forget that lands between entries just applies to the later pages.
+- The server re-renders the cursor's entry and checks `skip` before any slice, in this order:
+  - `skip > 0` and the entry is now hidden: 409. That happens when a forget lands mid-entry.
+  - `skip > markdown.len()`: 409.
+  - `!markdown.is_char_boundary(skip)`: 400 `invalid_input`, "skip is not on a character boundary". The server's own cursors always cut at a boundary, so only a malformed cursor gets here.
+  - Only then does it slice `&markdown[skip..]`. No cursor value can make it panic.
+- A forget that lands between entries just applies to the later pages.
 
 **Encoded-byte accounting.**
 - `max_bytes` bounds the whole response body, exactly. Default 1 MiB (`api.rs:23`), at most 8 MiB (`api.rs:25`), at least 64 KiB. Outside that it's 400.
@@ -400,6 +410,7 @@ atticdb forget lsns <connect> --lsns <n,n,...> [--up-to-lsn <n>]
   - an error after page 2 leaves no `<dir>`, and a partial dir that holds only complete `.md` files and 1 `.part` file;
   - the size calculator equals `serde_json::to_vec(...).len()` for random pages.
 - A `facts::` row for `Conflict`, and `api::` 400 rows for a bad `format`, `max_bytes` below 64 KiB, and `after_key` mixed with `after_agent`.
+- Malformed-cursor rows in `export_writes_one_file_per_session_and_facts_at_one_lsn`: seed a turn of 100,000 `é` chars, which spans pages at 64 KiB. Take a real cursor inside it and add 1 to `skip`, so it lands mid-char: 400 `invalid_input`. `skip` past the entry's end: 409. Non-numeric `skip`: 400. After each, the same server still answers the real cursor with 200.
 
 **Acceptance:** `cargo test -p atticdb --test it export::` and `cargo test -p atticdb --lib export` pass, plus clippy and fmt.
 
