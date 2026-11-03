@@ -187,6 +187,28 @@ describe("separate docs project", () => {
     }
   });
 
+  it("has the blog redirect in the same shape as the other main pages", () => {
+    expect(config("vercel.docs.json").redirects).toContainEqual({
+      source: "/blog/:path*",
+      destination: "https://atticdb.com/blog/:path*",
+      permanent: true,
+    });
+  });
+
+  it.each(["/blog/some-post", "/blog/rss.xml"])("redirects blog path %s from docs and previews", (path) => {
+    for (const host of ["docs.atticdb.com", "preview.vercel.app"]) {
+      expect(routeFor(config("vercel.docs.json").redirects, host, path)).toEqual({
+        destination: `https://atticdb.com${path}`,
+        permanent: true,
+      });
+    }
+  });
+
+  it("catches bare /blog with the same rule", () => {
+    const docs = config("vercel.docs.json");
+    expect(routeFor(docs.redirects, "docs.atticdb.com", "/blog")).toBeDefined();
+  });
+
   it.each(["/", "/mcp", "/sitemap.xml", "/robots.txt"])("serves docs file %s without routing rules", (path) => {
     const docs = config("vercel.docs.json");
     expect(routeFor(docs.redirects, "docs.atticdb.com", path)).toBeUndefined();
