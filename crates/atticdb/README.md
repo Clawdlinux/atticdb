@@ -729,7 +729,8 @@ Every item needs `up_to_lsn`, a whole number from 1. Anything else is 400 `inval
 The studio sends each item in order as `POST /v1/forget`, with its token.
 It stops at the first item not committed, and marks the rest `{"outcome": "not_sent"}`.
 The answer is `{"results": [...]}`, 1 per item. Each is the store's answer, or `not_sent` when nothing reached the store.
-A lost answer is `unknown`. The page resends `unknown` and `not_sent` items with the same keys.
+A lost answer is `unknown`. The page keeps `unknown` and `not_sent` items selected for a retry.
+An `unknown` item keeps its key while its pin is the same. A new pin gets a new key, so the retry hides what the page shows now.
 Each forget logs 1 stderr line with counts only, never a name.
 Content is hidden from normal AtticDB reads. It stays on disk until purge ships (#159).
 See [What a forget leaves visible](https://github.com/Clawdlinux/atticdb#what-a-forget-leaves-visible).

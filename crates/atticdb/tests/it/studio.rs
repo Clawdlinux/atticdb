@@ -643,6 +643,22 @@ fn studio_forwards_reads_and_refuses_the_rest() {
     let text = block.as_str().unwrap();
     assert!(text.contains(LATE) && !text.contains("saw <b>html</b>"), "{text}");
     assert_eq!(forgetful.get("/api/block?repo=app", true).json()["block"], block);
+    // The page reloaded at a newer as_of_lsn, which shows the late turn. A forget now must hide it
+    // too. The old key at the new pin is another request, so the store refuses it. The page makes
+    // a new key for a new pin, and that forget is new, not deduplicated.
+    let newer = forgetful.get(window, true).json()["as_of_lsn"].as_u64().unwrap();
+    assert!(newer > pin, "{newer} > {pin}");
+    let old_key = forgetful.forget("the old key", &hide(json!([item(7, "copilot", json!(newer))])));
+    let result = old_key.json()["results"][0].clone();
+    let refused = (&result["outcome"], &result["error"]);
+    assert_eq!(refused, (&json!("not_committed"), &json!("idempotency_conflict")), "{result}");
+    let new_key = forgetful.forget("a new key", &hide(json!([item(10, "copilot", json!(newer))])));
+    let result = new_key.json()["results"][0].clone();
+    let found = (&result["outcome"], &result["deduplicated"], &result["cutoff"]);
+    assert_eq!(found, (&json!("committed"), &json!(false), &json!(newer)), "{result}");
+    let turns = forgetful.get(window, true).json()["turns"].clone();
+    let hidden: Vec<_> = turns.as_array().unwrap().iter().map(|t| &t["redacted"]).collect();
+    assert_eq!(hidden, [&json!(true); 2], "the late turn the page showed is hidden too: {turns}");
     // A fact key, from the data-dir studio, pinned to the newest revision shown.
     let history = "/api/v1/facts/history?key=repo%2Fweb%2Fdeploy&max_bytes=8388608";
     let newest = by_dir.get(history, true).json()["revisions"][0]["lsn"].clone();

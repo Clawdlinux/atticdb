@@ -300,9 +300,11 @@ const HIDDEN = 'Content is hidden from normal AtticDB reads. It stays on disk un
 const VISIBLE_URL = 'https://github.com/Clawdlinux/atticdb#what-a-forget-leaves-visible';
 const canForget = (info) => Boolean(info && info.forget === true);
 const outcomeOf = (r) => (r && typeof r.outcome === 'string' ? r.outcome : 'unknown');
-// An item that may or may not have been forgotten, or never reached the store, keeps its retry key and its pin. A
-// retry then resends the same request, and the store answers it as done once.
+// An item that may or may not have been forgotten, or never reached the store, stays selected for a retry.
 const retryable = (r) => outcomeOf(r) === 'unknown' || outcomeOf(r) === 'not_sent';
+// The retry key and pin of each `unknown` item. A retry at the same pin resends the same request, and the store
+// answers it as done once. A retry at another pin gets a new key, so it hides what the user sees now. A forget
+// only ever hides more, so the worst case is 1 extra forget record.
 const pendingForgets = new Map();
 function retryKey() {
   const bytes = new Uint8Array(16);
@@ -313,9 +315,10 @@ function retryKey() {
 // result per item, in order.
 async function sendForget(items) {
   const forgets = items.map((item) => {
-    if (!pendingForgets.has(item.id)) pendingForgets.set(item.id, { idem_key: retryKey(), up_to_lsn: item.upTo });
-    const { idem_key, up_to_lsn } = pendingForgets.get(item.id);
-    return { idem_key, ...item.selector, up_to_lsn };
+    const pending = pendingForgets.get(item.id);
+    const idem_key = pending && pending.up_to_lsn === item.upTo ? pending.idem_key : retryKey();
+    pendingForgets.set(item.id, { idem_key, up_to_lsn: item.upTo });
+    return { idem_key, ...item.selector, up_to_lsn: item.upTo };
   });
   let results;
   try {
@@ -327,7 +330,8 @@ async function sendForget(items) {
     const outcome = err.code === 'offline' ? 'unknown' : 'not_sent';
     results = items.map(() => ({ outcome, error: err.code, status: err.status, message: err.detail }));
   }
-  items.forEach((item, i) => { if (!retryable(results[i])) pendingForgets.delete(item.id); });
+  // nothing reached the store for `not_sent`, so only `unknown` keeps its key
+  items.forEach((item, i) => { if (outcomeOf(results[i]) !== 'unknown') pendingForgets.delete(item.id); });
   return results;
 }
 function forgetError(r) {
