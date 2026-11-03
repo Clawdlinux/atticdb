@@ -60,9 +60,34 @@ const HOOK_TIMEOUT: Duration = Duration::from_secs(crate::hook::HARD_STOP.as_sec
 const CODEX_HOOKS_OFF: &str = "Codex: hooks are off ([features] hooks = false in config.toml), so \
                                memory won't load at chat start. Remove that line to turn them on.";
 
-/// What setup says after "found no apps": the shell verbs need no app.
-const TRY_SHELL: &str = "You can still try memory from the shell: atticdb fact set --key \
-                         repo/demo/rule --content \"Use pnpm\" and atticdb search --query pnpm";
+/// What setup says after "found no apps": the shell verbs need no app. `atticdb` is how to
+/// type this binary, from [`typed`].
+fn try_shell(atticdb: &str) -> String {
+    format!(
+        "You can still try memory from the shell: {atticdb} fact set --key repo/demo/rule \
+         --content \"Use pnpm\" and {atticdb} search --query pnpm"
+    )
+}
+
+/// How to type this atticdb in a shell: `atticdb` when that name on `PATH` is this binary,
+/// else its full path. A path with other than letters, digits and `/._+-` is single-quoted,
+/// as `install.sh` quotes it. On Windows, `\` and `:` count as plain too. `atticdb` when the
+/// binary can't be found.
+pub(crate) fn typed() -> String {
+    let this = std::env::current_exe().and_then(std::fs::canonicalize).ok();
+    let found = connect::program("atticdb").and_then(|path| std::fs::canonicalize(path).ok());
+    if this.is_none() || found == this {
+        return "atticdb".into();
+    }
+    let Ok(path) = connect::binary() else { return "atticdb".into() };
+    // Windows paths hold `\` and `:`, which its shells take as typed.
+    let safe = if cfg!(windows) { "/._+-\\:" } else { "/._+-" };
+    if path.chars().all(|c| c.is_ascii_alphanumeric() || safe.contains(c)) {
+        path
+    } else {
+        format!("'{}'", path.replace('\'', r"'\''"))
+    }
+}
 
 /// How long the store may take to answer `fact_list`. 2 s are kept for the read, so a
 /// server that is still starting, such as the one the hook check started, gets 13 s.
@@ -205,7 +230,8 @@ fn choose(
                 println!(
                     "atticdb found no apps: none of VS Code, Copilot CLI, Claude Code or Codex has \
                      a config dir, and none of code, copilot, claude or codex is on PATH. \
-                     Install one, or name it with --harness.\n{TRY_SHELL}"
+                     Install one, or name it with --harness.\n{}",
+                    try_shell(&typed())
                 );
                 return Ok(None);
             }
@@ -375,9 +401,10 @@ fn apply(chosen: &[(Harness, Options)]) -> u8 {
     let exit = code(&applied).max(u8::from(failed_check));
     if exit == 0 && !connected.is_empty() {
         let key = try_key(cwd.ok().as_deref().and_then(crate::home::repo));
-        println!("Try it: atticdb fact set --key {key} --content \"Use pnpm, not npm\"");
+        let atticdb = typed();
+        println!("Try it: {atticdb} fact set --key {key} --content \"Use pnpm, not npm\"");
         println!("Then open a new chat and ask: what are this repo's rules?");
-        println!("See what your agent gets at chat start: atticdb studio");
+        println!("See what your agent gets at chat start: {atticdb} studio");
     }
     exit
 }

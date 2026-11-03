@@ -381,7 +381,12 @@ fn connect_shared(harness: Harness, force: bool, mode: Mode) -> Report {
 
 /// Whether `name` is an executable on `PATH`, as AtticDB finds the harness programs.
 pub fn on_path(name: &str) -> bool {
-    claude::find_program(name).is_some()
+    program(name).is_some()
+}
+
+/// The program `name` on `PATH` that [`on_path`] finds, if any.
+pub(crate) fn program(name: &str) -> Option<PathBuf> {
+    claude::find_program(name)
 }
 
 /// Checks that `codex mcp get atticdb --json`, which only reads config, shows AtticDB's entry.
