@@ -5,6 +5,7 @@ import * as bench from "./bench";
 import * as pricing from "./pricing";
 import * as compare from "./compare";
 import * as faq from "./faq";
+import * as hero from "./hero";
 
 const { ackFor, BENCH_META, BENCH_ROWS } = bench;
 const { PLANS, PLAN_FEATURES } = pricing;
@@ -165,7 +166,7 @@ describe("FAQ content", () => {
   });
 
   it("has no em dashes in any content module string", () => {
-    for (const content of [bench, pricing, compare, faq]) {
+    for (const content of [bench, pricing, compare, faq, hero]) {
       expect(JSON.stringify(content)).not.toContain("\u2014");
     }
   });

@@ -13,6 +13,7 @@ import {
 } from "react";
 import CopyCommand from "@/components/CopyCommand";
 import { ackFor } from "@/content/bench";
+import { HEADLINE, HONEST, SUB, TRUST } from "@/content/hero";
 import { HOVER, PRESS, SPRING, TAP } from "@/lib/motion";
 import { WAITLIST_URL } from "@/lib/site";
 import AckChip, { formatAck } from "./AckChip";
@@ -158,17 +159,40 @@ function HeroBody() {
         <h1 id="hero-title" className={styles.title}>
           <span className={styles.line}>
             <span className={styles.rise} style={line(0)}>
-              <span className={styles.words}>Memory that</span>
-              <AckChip p50us={ack.p50us} pulse={groups} powered={powered} />
+              {HEADLINE[0]}
             </span>
           </span>{" "}
           <span className={styles.line}>
             <span className={styles.rise} style={line(1)}>
-              hits the disk
+              {HEADLINE[1]}
             </span>
           </span>
         </h1>
+        <p className={styles.lead}>{SUB}</p>
+      </div>
 
+      <div className={styles.actions}>
+        <CopyCommand label="Install AtticDB" />
+        <motion.a
+          className={styles.waitlist}
+          href={WAITLIST_URL}
+          whileHover={HOVER}
+          whileTap={TAP}
+          transition={PRESS}
+        >
+          Join the cloud waitlist
+        </motion.a>
+      </div>
+
+      <p className={styles.honest} data-ui="honest">
+        {HONEST}
+      </p>
+
+      <div className={styles.proof} data-ui="proof">
+        <p className={styles.trust}>{TRUST}</p>
+        <span className={styles.ackBox}>
+          <AckChip p50us={ack.p50us} pulse={groups} powered={powered} />
+        </span>
         <p className="visually-hidden" role="status">
           {`${diskLabel}, ${writers} ${writers === 1 ? "writer" : "writers"}: AtticDB acked in ${formatAck(ack.p50us)} at p50, ${numbers.format(ack.acksPerSec)} acks/s.`}
         </p>
@@ -239,24 +263,6 @@ function HeroBody() {
       </div>
 
       <PlugResult view={view} />
-
-      <p className={styles.lead}>
-        AtticDB is an open-source memory database for coding agents. It acks a write only after
-        fdatasync. One Rust binary, no model calls.
-      </p>
-
-      <div className={styles.actions}>
-        <CopyCommand label="Install AtticDB" />
-        <motion.a
-          className={styles.waitlist}
-          href={WAITLIST_URL}
-          whileHover={HOVER}
-          whileTap={TAP}
-          transition={PRESS}
-        >
-          Join the cloud waitlist
-        </motion.a>
-      </div>
     </section>
   );
 }

@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 580" width="640" height="580" role="img" aria-labelledby="demo-title demo-desc">
+  <title id="demo-title">AtticDB demo: save a rule, then a new chat uses it</title>
+  <desc id="demo-desc">In a terminal in the shop repo, someone runs atticdb fact set --key repo/shop/rule --content "Use pnpm, not npm." It prints {"committed":true,"deduplicated":false,"lsn":2}, so the rule is saved. Later, a new chat in Claude Code starts with the AtticDB memory block for repo shop. The block lists repo/shop/rule: Use pnpm, not npm. Asked to add lodash, the agent says the repo uses pnpm and runs pnpm add lodash.</desc>
+  <style>
+    .sans { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+    .ink { fill: #EDE6D8; }
+    .muted { fill: #A89C8C; }
+    .accent { fill: #C8F03C; }
+    .dark { fill: #16110E; }
+    .a { animation-duration: 16s; animation-iteration-count: infinite; animation-fill-mode: both; }
+    .c1 { transform: translateX(380px); animation-name: type1; }
+    .c2 { transform: translateX(320px); animation-name: type2; }
+    .out { animation-name: out; }
+    .saved { animation-name: saved; }
+    .chat { animation-name: chat; }
+    .block { animation-name: block; }
+    .user { animation-name: user; }
+    .agent { animation-name: agent; }
+    @keyframes type1 {
+      0%, 3.75% { transform: translateX(0); animation-timing-function: steps(38, end); }
+      15%, 96% { transform: translateX(380px); }
+      96.5%, 100% { transform: translateX(0); }
+    }
+    @keyframes type2 {
+      0%, 15.6% { transform: translateX(0); animation-timing-function: steps(32, end); }
+      22.5%, 96% { transform: translateX(320px); }
+      96.5%, 100% { transform: translateX(0); }
+    }
+    @keyframes out { 0%, 25% { opacity: 0; } 26%, 96% { opacity: 1; } 97%, 100% { opacity: 0; } }
+    @keyframes saved { 0%, 27.5% { opacity: 0; } 28.5%, 96% { opacity: 1; } 97%, 100% { opacity: 0; } }
+    @keyframes chat {
+      0%, 35% { opacity: 0; transform: translateY(10px); }
+      37%, 96% { opacity: 1; transform: none; }
+      97%, 100% { opacity: 0; transform: none; }
+    }
+    @keyframes block { 0%, 40% { opacity: 0; } 41.5%, 96% { opacity: 1; } 97%, 100% { opacity: 0; } }
+    @keyframes user { 0%, 50% { opacity: 0; } 51%, 96% { opacity: 1; } 97%, 100% { opacity: 0; } }
+    @keyframes agent { 0%, 60% { opacity: 0; } 61%, 96% { opacity: 1; } 97%, 100% { opacity: 0; } }
+    /* Reduced motion, or the #still fragment: no animation, so the last frame shows. */
+    @media (prefers-reduced-motion: reduce) { .a { animation: none; } }
+    #still:target ~ * .a, #still:target ~ .a { animation: none; }
+  </style>
+  <defs>
+    <clipPath id="term"><rect x="0" y="0" width="640" height="166" rx="6"/></clipPath>
+  </defs>
+  <g id="still"/>
+  <rect width="640" height="580" fill="#16110E"/>
+
+  <!-- Terminal -->
+  <rect x="0.5" y="0.5" width="639" height="165" rx="6" fill="#221B17" stroke="#3A302A"/>
+  <circle cx="18" cy="18" r="5" fill="#3A302A"/>
+  <circle cx="34" cy="18" r="5" fill="#3A302A"/>
+  <circle cx="50" cy="18" r="5" fill="#3A302A"/>
+  <text x="320" y="22" text-anchor="middle" font-size="12" class="sans muted">Terminal · ~/shop</text>
+  <text x="20" y="62" font-size="15" class="mono accent">$</text>
+  <text x="36" y="62" font-size="15" class="mono ink">atticdb fact set --key repo/shop/rule \</text>
+  <text x="20" y="86" font-size="15" class="mono muted">&gt;</text>
+  <text x="36" y="86" font-size="15" class="mono ink">--content "Use pnpm, not npm."</text>
+  <g clip-path="url(#term)">
+    <rect class="a c1" x="34" y="46" width="380" height="22" fill="#221B17"/>
+    <rect class="a c2" x="16" y="70" width="320" height="22" fill="#221B17"/>
+  </g>
+  <text class="a out mono muted" x="20" y="124" font-size="14">{"committed":true,"deduplicated":false,"lsn":2}</text>
+  <g class="a saved">
+    <rect x="436" y="108" width="72" height="24" fill="#C8F03C"/>
+    <text x="472" y="125" text-anchor="middle" font-size="13" font-weight="600" class="sans dark">Saved.</text>
+  </g>
+
+  <!-- A new chat, later -->
+  <g class="a chat">
+    <text x="320" y="198" text-anchor="middle" font-size="13" class="sans muted">Later, a new chat in the same repo</text>
+    <rect x="0.5" y="212.5" width="639" height="359" rx="6" fill="#221B17" stroke="#3A302A"/>
+    <text x="20" y="238" font-size="13" class="sans muted">New chat · Claude Code · ~/shop</text>
+    <line x1="1" y1="252" x2="639" y2="252" stroke="#3A302A"/>
+
+    <g class="a block">
+      <rect x="16.5" y="266.5" width="607" height="143" fill="#16110E" stroke="#C8F03C" stroke-dasharray="4 3"/>
+      <text x="28" y="285" font-size="11.5" class="sans accent">What the agent sees at chat start, from AtticDB</text>
+      <g font-size="12.5" class="mono muted">
+        <text x="28" y="305">AtticDB memory for repo shop, a snapshot from chat start:</text>
+        <text x="28" y="322">rules, facts under repo/shop/ and only the 5 newest notes.</text>
+        <text x="28" y="339">Older notes and decisions are not shown. Before saying why</text>
+        <text x="28" y="356">or when something was decided, call memory_search.</text>
+      </g>
+      <g font-size="12.5" class="mono ink">
+        <text x="28" y="378">This repo (shop):</text>
+        <text x="28" y="395">- repo/shop/rule: <tspan class="accent">Use pnpm, not npm.</tspan></text>
+      </g>
+    </g>
+
+    <g class="a user">
+      <rect x="432" y="428" width="192" height="36" rx="4" fill="#3A302A"/>
+      <text x="612" y="451" text-anchor="end" font-size="14" class="sans ink">Add lodash to this repo.</text>
+    </g>
+
+    <g class="a agent">
+      <text x="20" y="490" font-size="12" class="sans muted">Agent</text>
+      <text x="20" y="511" font-size="14" class="sans ink">This repo uses pnpm, not npm. So I'll run:</text>
+      <rect x="20" y="524" width="190" height="30" fill="#16110E"/>
+      <text x="32" y="544" font-size="14" class="mono accent">pnpm add lodash</text>
+    </g>
+  </g>
+</svg>

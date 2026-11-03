@@ -1,10 +1,9 @@
 /*
- * --d is the display size. It also bows to the screen's height, so the headline, the tape,
- * the sentence and the install command share one first screen.
+ * The headline says the pain, the sub line says the fix, and the install command sits right
+ * under them, so all 3 share one first screen. The proof (the ack chip and the tape) follows.
  */
 .hero {
-  --d: min(var(--step-display), 22vw, 13.5svh);
-  /* Headline line-height. The ack chip is exactly one of these tall. */
+  /* The ack chip's line-height. The chip is exactly one of these tall. */
   --lh: 0.85;
   /* The content column of .container, measured inside the full-bleed band. */
   --column: min(80rem, 100% - 2 * clamp(1rem, 4vw, 4rem));
@@ -24,10 +23,11 @@
 }
 
 .title {
-  font-size: var(--d);
-  line-height: var(--lh);
-  letter-spacing: -0.02em;
-  text-wrap: nowrap;
+  max-width: 22ch;
+  font-size: clamp(2rem, 1rem + 3.4vw, 4.25rem);
+  line-height: 0.95;
+  letter-spacing: -0.01em;
+  text-wrap: balance;
 }
 
 .line {
@@ -40,10 +40,9 @@
 
 .rise {
   display: block;
-  white-space: nowrap;
 }
 
-/* The ack chip: one headline line-height tall, its bottom edge on line 1's baseline. */
+/* The ack chip: sized in em, so .ackBox sets its size. */
 
 .ack {
   display: inline-block;
@@ -377,11 +376,45 @@
   color: var(--ink);
 }
 
-/* Supporting sentence and actions */
+/* The sub line, the actions, the honest line, then the proof */
 
 .lead {
-  max-width: 62ch;
-  margin: clamp(1rem, 3svh, 2rem) auto 0;
+  max-width: 54ch;
+  margin-inline: auto;
+  font-size: clamp(1.0625rem, 1rem + 0.45vw, 1.375rem);
+  line-height: 1.45;
+}
+
+.honest {
+  max-width: 80ch;
+  margin: 0.875rem auto 0;
+  color: var(--muted);
+  font-size: var(--step-small);
+}
+
+.proof {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem 1.25rem;
+  margin-top: clamp(2rem, 6svh, 3.5rem);
+}
+
+.trust {
+  max-width: 34ch;
+  text-align: left;
+}
+
+/* The chip's own type size: 4rem makes its words 1rem. */
+.ackBox {
+  display: inline-flex;
+  font-size: 4rem;
+  line-height: var(--lh);
+}
+
+.ackBox .ack {
+  margin-left: 0;
 }
 
 .actions {
@@ -439,6 +472,8 @@
 
   :global(.js) .lead,
   :global(.js) .actions,
+  :global(.js) .honest,
+  :global(.js) .proof,
   :global(.js) .strip,
   :global(.js) .result {
     opacity: 0;
@@ -451,27 +486,10 @@
   }
 }
 
-/* Phone: the ack chip drops to its own line between the halves, and the band stacks. */
+/* Phone: the proof centres, and the band stacks. */
 @media (max-width: 47.99rem) {
-  .line:first-child .rise {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 0.1em;
-  }
-
-  .ack {
-    width: auto;
-    height: 0.56em;
-    margin-left: 0;
-  }
-
-  .ackInner {
-    padding-inline: 0.14em;
-  }
-
-  .ackText {
-    font-size: 0.24em;
+  .trust {
+    text-align: center;
   }
 
   .strip {
@@ -500,7 +518,6 @@
   .stage {
     gap: 0.875rem;
   }
-
 
   .actions {
     margin-top: 1rem;

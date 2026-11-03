@@ -5,7 +5,7 @@ import NotFound, { metadata as notFoundMetadata } from "@/app/not-found";
 import robots from "@/app/robots";
 import sitemap from "@/app/sitemap";
 import JsonLd from "@/components/JsonLd";
-import { PRICING_FAQ } from "@/content/faq";
+import { HOME_FAQ, PRICING_FAQ } from "@/content/faq";
 import { PAGES, RSS_FEED, faqJsonLd, pageMetadata, softwareAppJsonLd } from "@/lib/seo";
 import { absoluteUrl, GITHUB_URL, SITE_URL } from "@/lib/site";
 
@@ -98,6 +98,7 @@ describe("structured data", () => {
 
   it.each([
     ["pricing", PRICING_FAQ, 4],
+    ["home", HOME_FAQ, 4],
   ] as const)("preserves every visible %s FAQ", (_page, items, count) => {
     const data = faqJsonLd(items);
     expect(data["@context"]).toBe("https://schema.org");

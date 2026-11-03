@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { HEADLINE, HONEST, SUB, TRUST } from "@/content/hero";
 import { INSTALL_CMD, WAITLIST_URL } from "@/lib/site";
 import Hero from "./Hero";
 import { LAY_MS, RESTART_MS, runToCut, stillFrame, tapeParams } from "./tape-sim";
@@ -30,11 +31,44 @@ describe("Hero", () => {
     return container.querySelector("canvas")!;
   }
 
-  it("names the h1 by the sentence alone", () => {
+  it("names the h1 by the ICP one-liner alone", () => {
     render(<Hero />);
     expect(
-      screen.getByRole("heading", { level: 1, name: "Memory that hits the disk" }),
+      screen.getByRole("heading", {
+        level: 1,
+        name: "Your coding agent forgets everything between chats. AtticDB remembers, on your own disk.",
+      }),
     ).toBeInTheDocument();
+    expect(HEADLINE.join(" ")).toBe(
+      "Your coding agent forgets everything between chats. AtticDB remembers, on your own disk.",
+    );
+  });
+
+  it("keeps the latency chip and the plug demo out of the h1", () => {
+    const { container } = render(<Hero />);
+    const h1 = container.querySelector("h1")!;
+    expect(h1.querySelector('[data-ui="ack"]')).toBeNull();
+    expect(h1.querySelector("button, canvas, fieldset")).toBeNull();
+    expect(h1.textContent).not.toMatch(/acked|µs/);
+  });
+
+  it("shows the sub line, then install, then the honest line, all before the latency chip and the tape", () => {
+    const { container } = render(<Hero />);
+    const sub = screen.getByText(SUB);
+    expect(SUB).toBe(
+      "It saves your rules and decisions locally and loads them into every new chat in Claude Code, Codex, Copilot and VS Code. Free, open source, 1 small binary, no account.",
+    );
+    const install = screen.getByText(INSTALL_CMD);
+    const honest = screen.getByText(HONEST);
+    expect(HONEST).toBe("Early. Word search, not semantic. Great for your laptop, not for production yet.");
+    const chip = container.querySelector('[data-ui="ack"]')!;
+    const band = container.querySelector('[data-ui="band"]')!;
+    const h1 = container.querySelector("h1")!;
+    const order = [h1, sub, install, honest, chip, band];
+    for (let i = 1; i < order.length; i++) {
+      expect(order[i - 1].compareDocumentPosition(order[i]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    }
+    expect(screen.getByText(TRUST)).toBeInTheDocument();
   });
 
   it("shows the NVMe 1-writer ack and updates it from the chips", () => {
