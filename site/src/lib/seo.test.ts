@@ -127,14 +127,17 @@ describe("structured data", () => {
 
 describe("static discovery routes", () => {
   afterEach(() => vi.unstubAllEnvs());
-  it("lists only the 5 public canonical URLs in the sitemap while there are no posts", async () => {
-    expect((await sitemap()).map(({ url }) => url)).toEqual([
+  it("lists the 5 public canonical URLs, then each published post with its date", async () => {
+    const entries = await sitemap();
+    expect(entries.map(({ url }) => url)).toEqual([
       "https://atticdb.com",
       "https://atticdb.com/pricing",
       "https://atticdb.com/compare",
       "https://atticdb.com/benchmarks",
       "https://atticdb.com/blog",
+      "https://atticdb.com/blog/we-raced-sqlite-and-redis",
     ]);
+    expect(entries.at(-1)?.lastModified).toBe("2026-11-03");
   });
 
   it("allows crawlers and points to the generated sitemap", () => {

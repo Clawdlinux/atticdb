@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 450" role="img" aria-labelledby="t d">
+  <title id="t">Write race on a cloud disk, 16 writers</title>
+  <desc id="d">A 3-lane race track with snails. On a cloud disk with 16 writers, AtticDB's snail leads at 9,328 confirmed saves per second, Redis is mid-track at 5,151 and SQLite is near the start at 1,421. A note says SQLite wins on a laptop SSD with 1 writer.</desc>
+  <defs>
+    <g id="snail">
+      <ellipse cx="0" cy="22" rx="46" ry="12" fill="#FAF7F0" stroke="#1a1a1a" stroke-width="4"/>
+      <line x1="34" y1="14" x2="44" y2="-12" stroke="#1a1a1a" stroke-width="3"/>
+      <line x1="40" y1="16" x2="56" y2="-8" stroke="#1a1a1a" stroke-width="3"/>
+      <circle cx="44" cy="-14" r="4" fill="#1a1a1a"/>
+      <circle cx="56" cy="-10" r="4" fill="#1a1a1a"/>
+      <circle cx="-6" cy="0" r="24" stroke="#1a1a1a" stroke-width="4"/>
+      <path d="M-6 0 m-4 0 a4 4 0 1 1 8 0 a9 9 0 1 1 -18 0 a14 14 0 1 1 28 0" fill="none" stroke="#1a1a1a" stroke-width="3"/>
+    </g>
+  </defs>
+  <rect width="800" height="450" fill="#FAF7F0"/>
+  <g font-family="system-ui, sans-serif" fill="#1a1a1a">
+    <text x="30" y="52" font-size="32" font-weight="700">Write race. Cloud disk. 16 writers.</text>
+    <text x="30" y="86" font-size="24">Confirmed saves per second. Higher is better.</text>
+
+    <!-- lanes -->
+    <line x1="160" y1="110" x2="780" y2="110" stroke="#1a1a1a" stroke-width="3"/>
+    <line x1="160" y1="200" x2="780" y2="200" stroke="#1a1a1a" stroke-width="3" stroke-dasharray="14 10"/>
+    <line x1="160" y1="290" x2="780" y2="290" stroke="#1a1a1a" stroke-width="3" stroke-dasharray="14 10"/>
+    <line x1="160" y1="380" x2="780" y2="380" stroke="#1a1a1a" stroke-width="3"/>
+    <line x1="160" y1="110" x2="160" y2="380" stroke="#1a1a1a" stroke-width="4"/>
+
+    <text x="20" y="164" font-size="26" font-weight="700">AtticDB</text>
+    <text x="20" y="254" font-size="26" font-weight="700">Redis</text>
+    <text x="20" y="344" font-size="26" font-weight="700">SQLite</text>
+
+    <use href="#snail" x="680" y="150" fill="#E8A23A"/>
+    <text x="520" y="190" font-size="24" font-weight="700">9,328/s</text>
+
+    <use href="#snail" x="440" y="240" fill="#FAF7F0"/>
+    <text x="520" y="268" font-size="24">5,151/s</text>
+
+    <use href="#snail" x="230" y="330" fill="#FAF7F0"/>
+    <text x="310" y="358" font-size="24">1,421/s</text>
+
+    <text x="30" y="428" font-size="24" font-style="italic">On a laptop SSD with 1 writer, SQLite wins.</text>
+  </g>
+</svg>

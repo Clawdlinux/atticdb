@@ -62,6 +62,15 @@
   height: auto;
 }
 
+/*
+ * The docs give tables of 3+ columns a 40rem floor. The blog column is 68ch (about 39rem), so
+ * that floor made every such table scroll 20px on a desktop. 36rem fits the column and still
+ * scrolls inside its region on a phone.
+ */
+.blog .prose table:has(th:nth-child(3)) {
+  min-width: 36rem;
+}
+
 /* Try it / Tell us: one tone step up, after the post. */
 .cta {
   display: grid;

@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 450" role="img" aria-labelledby="t d">
+  <title id="t">Your agent after /compact</title>
+  <desc id="d">A goldfish in a round bowl asks "Hi. Have we met?" Next to the bowl is a sticky note of rules agreed yesterday, which the fish has forgotten.</desc>
+  <rect width="800" height="450" fill="#FAF7F0"/>
+  <g font-family="system-ui, sans-serif" fill="#1a1a1a">
+    <text x="40" y="62" font-size="36" font-weight="700">Your agent after /compact</text>
+
+    <!-- table -->
+    <line x1="30" y1="400" x2="770" y2="400" stroke="#1a1a1a" stroke-width="4" stroke-linecap="round"/>
+
+    <!-- bowl -->
+    <path d="M150 170 Q60 250 120 360 Q140 398 200 398 L320 398 Q380 398 400 360 Q460 250 370 170 Z" fill="none" stroke="#1a1a1a" stroke-width="4" stroke-linejoin="round"/>
+    <path d="M110 230 Q260 215 410 230" fill="none" stroke="#1a1a1a" stroke-width="3" stroke-dasharray="10 8"/>
+    <ellipse cx="260" cy="170" rx="110" ry="14" fill="none" stroke="#1a1a1a" stroke-width="4"/>
+
+    <!-- goldfish -->
+    <ellipse cx="250" cy="305" rx="66" ry="40" fill="#E8A23A" stroke="#1a1a1a" stroke-width="4"/>
+    <path d="M316 305 L366 270 L356 305 L366 340 Z" fill="#E8A23A" stroke="#1a1a1a" stroke-width="4" stroke-linejoin="round"/>
+    <path d="M240 268 Q260 248 284 270" fill="#E8A23A" stroke="#1a1a1a" stroke-width="4"/>
+    <circle cx="214" cy="295" r="11" fill="#FAF7F0" stroke="#1a1a1a" stroke-width="3"/>
+    <circle cx="211" cy="295" r="5" fill="#1a1a1a"/>
+    <path d="M190 318 Q198 324 206 318" fill="none" stroke="#1a1a1a" stroke-width="3" stroke-linecap="round"/>
+    <circle cx="176" cy="262" r="6" fill="none" stroke="#1a1a1a" stroke-width="2"/>
+    <circle cx="164" cy="242" r="4" fill="none" stroke="#1a1a1a" stroke-width="2"/>
+
+    <!-- speech bubble -->
+    <path d="M60 96 H330 Q348 96 348 114 V138 Q348 156 330 156 H190 L168 182 L170 156 H60 Q42 156 42 138 V114 Q42 96 60 96 Z" fill="#FAF7F0" stroke="#1a1a1a" stroke-width="4" stroke-linejoin="round"/>
+    <text x="68" y="137" font-size="30" font-weight="600">Hi. Have we met?</text>
+
+    <!-- sticky note -->
+    <g transform="rotate(3 600 270)">
+      <rect x="470" y="130" width="270" height="250" fill="#FAF7F0" stroke="#1a1a1a" stroke-width="4"/>
+      <rect x="470" y="130" width="270" height="44" fill="#E8A23A" stroke="#1a1a1a" stroke-width="4"/>
+      <text x="488" y="162" font-size="26" font-weight="700">Agreed yesterday</text>
+      <text x="488" y="214" font-size="24">Tests: make test</text>
+      <text x="488" y="252" font-size="24">Never npm test</text>
+      <text x="488" y="290" font-size="24">DB: Postgres</text>
+      <text x="488" y="348" font-size="24" font-style="italic">(1 hour of talk)</text>
+    </g>
+  </g>
+</svg>
