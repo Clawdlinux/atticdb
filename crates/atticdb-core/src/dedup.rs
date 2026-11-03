@@ -8,10 +8,12 @@ use crate::error::Result;
 use crate::{EngineError, ErrorKind};
 
 /// Retry scope inside a tenant. A session and a fact key with one name never collide.
+/// Forgets share 1 scope per tenant (I6).
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum Scope {
     Session(String),
     Fact(String),
+    Forget,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]

@@ -1,6 +1,7 @@
 use crate::support::*;
 use atticdb_core::{
-    Appended, Engine, EngineOptions, ErrorKind, Health, NewTurn, Outcome, Scope, WindowQuery,
+    forget::Selector, Appended, Engine, EngineOptions, ErrorKind, Health, NewTurn, Outcome, Scope,
+    WindowQuery,
 };
 use atticdb_tape::sim::SimClock;
 use atticdb_tape::{HookIo, Io, Kind, Op, SimDisk, Tape, TapeOptions};
@@ -80,6 +81,32 @@ fn windows_are_dense_and_read_cost_depends_only_on_returned_turns() {
     let after = engine.metrics().unwrap();
     assert_eq!(after.hot_cache_hits - before.hot_cache_hits, 32, "{after:?}");
     assert_eq!((after.window_reads - before.window_reads, after.hot_cache_dropped), (32, 0));
+    // Forgets hide before the hot cache and the tape. Placeholders keep seqs dense and cost
+    // no reads and no budget bytes. The purge drops the hidden turns' cache entries.
+    let f = crate::support::scope("f");
+    let held = engine.append(&f, (0..6).map(turn).collect(), None).unwrap();
+    engine.window(&f, WindowQuery::Last(6)).unwrap();
+    let cached = engine.metrics().unwrap().hot_cache_bytes;
+    let session = Selector::Session { agent: "agent".into(), session: "f".into() };
+    let up_to = held.first_lsn + 1;
+    assert_eq!(engine.forget("tenant", session, None, Some(up_to)).unwrap().cutoff, up_to);
+    engine.forget("tenant", Selector::Lsns(vec![held.first_lsn + 3]), None, None).unwrap();
+    assert!(engine.metrics().unwrap().hot_cache_bytes < cached, "purged");
+    let later = engine.append(&f, vec![turn(6)], None).unwrap();
+    let before = engine.metrics().unwrap();
+    let window = engine.window_budget(&f, WindowQuery::Last(10), 32).unwrap();
+    let after = engine.metrics().unwrap();
+    let shown: Vec<_> = window.turns.iter().map(|t| (t.seq, t.redacted)).collect();
+    let hidden = [true, true, false, true, false, false, false];
+    assert_eq!(shown, (1..=7).zip(hidden).collect::<Vec<_>>(), "dense, a later turn shows");
+    assert!(!window.truncated, "4 visible turns of 8 bytes fit 32");
+    assert_eq!(window.as_of_lsn, later.last_lsn);
+    for turn in window.turns.iter().filter(|turn| turn.redacted) {
+        assert!(turn.content.is_empty() && turn.meta.is_empty() && turn.commit_time_ns == 0);
+        assert_eq!(turn.role, atticdb_core::Role::System);
+    }
+    assert_eq!(after.window_reads - before.window_reads, 4, "visible turns only");
+    assert_eq!(after.hot_cache_hits - before.hot_cache_hits, 3, "seq 7 was never cached");
     // A huge `last` with no budget after a reopen reads one turn and loads only the
     // newest index page, not one slot per requested turn.
     engine.checkpoint().unwrap();
@@ -173,6 +200,29 @@ fn compression_migrates_one_way_and_retries_match_across_modes() {
     engine.append(&scope("big"), vec![big.clone()], None).unwrap();
     let window = engine.window_budget(&scope("big"), WindowQuery::Last(1), 8 << 20).unwrap();
     assert_eq!(window.turns[0].content, big.content);
+    // A forgotten compressed turn is never inflated for a reader.
+    engine.forget("tenant", Selector::Lsns(vec![packed.first_lsn]), None, None).unwrap();
+    let window = engine.window(&s, WindowQuery::Last(10)).unwrap();
+    assert_eq!(window.iter().map(|t| t.redacted).collect::<Vec<_>>(), [false, true, false, false]);
+    let query = SearchQuery {
+        query: "bravo".into(),
+        before: None,
+        limit: 10,
+        max_bytes: 1 << 20,
+        visits: 1000,
+    };
+    assert!(engine.search("tenant", query).unwrap().hits.is_empty(), "absent from search");
+    let query = atticdb_core::RecordQuery {
+        before: Some(packed.first_lsn + 1),
+        limit: 1,
+        kind: None,
+        max_bytes: 1 << 20,
+        visits: 1,
+    };
+    let records = engine.records("tenant", query).unwrap().records;
+    let atticdb_core::Record::Turn { agent, session, turn } = &records[0] else { panic!() };
+    assert_eq!((agent.as_str(), session.as_str(), turn.seq), ("agent", "s", 2));
+    assert!(turn.redacted && turn.content.is_empty() && turn.lsn == packed.first_lsn);
 }
 
 #[test]
@@ -201,14 +251,39 @@ fn retries_conflicts_scope_isolation_and_replay() {
     engine.append(&scope("other"), vec![turn(9)], Some("key")).unwrap();
     other.tenant = "another-tenant".into();
     engine.append(&other, vec![turn(9)], Some("key")).unwrap();
+    // Forget retries are scoped by tenant. A retry can't move the cutoff.
+    let session = Selector::Session { agent: "agent".into(), session: "s".into() };
+    let forget =
+        |engine: &Engine, up_to| engine.forget("tenant", session.clone(), Some("key"), up_to);
+    let forgot = forget(&engine, None).unwrap();
+    assert!(!forgot.deduplicated && forgot.cutoff == forgot.lsn);
+    let error = forget(&engine, Some(1)).unwrap_err();
+    assert!(matches!(error.kind, ErrorKind::IdempotencyConflict));
+    assert_eq!(error.outcome, Outcome::NotCommitted);
+    let forgotten = |engine: &Engine, case: &str| {
+        let retry = forget(engine, None).unwrap();
+        assert!(retry.deduplicated, "{case}");
+        assert_eq!(atticdb_core::Forgotten { deduplicated: false, ..retry }, forgot, "{case}");
+        // A retried forgotten append returns its receipt and rewrites no content.
+        retried(engine, case);
+        let window = engine.window(&s, WindowQuery::Last(10)).unwrap();
+        assert_eq!(
+            window.iter().map(|t| (t.seq, t.redacted)).collect::<Vec<_>>(),
+            [(1, true), (2, true)],
+            "{case}"
+        );
+    };
+    forgotten(&engine, "forget retry");
     drop(engine);
     let engine = open(disk.clone(), options());
     retried(&engine, "retry after reopen with replay");
+    forgotten(&engine, "forget retry after reopen with replay");
     engine.checkpoint().unwrap();
     drop(engine);
     let engine = open(disk, options());
     assert_eq!(engine.metrics().unwrap().replayed_records, 0);
     retried(&engine, "retry after reopen from a checkpoint");
+    forgotten(&engine, "forget retry after reopen from a checkpoint");
 }
 
 #[test]
@@ -323,6 +398,11 @@ fn checkpoint_bounds_replay_and_corrupt_derived_data_falls_back() {
     let engine = open(disk.clone(), options());
     engine.append(&scope("s"), (0..100).map(turn).collect(), Some("initial")).unwrap();
     let before = engine.fact_put("tenant", new_fact("fact/key", 1, "a"), Some("f"), None).unwrap();
+    // Tags 6 to 9: a forget retry, a session, a fact key and LSNs.
+    let session = Selector::Session { agent: "agent".into(), session: "s".into() };
+    engine.forget("tenant", session, Some("forget"), Some(11)).unwrap();
+    engine.forget("tenant", Selector::FactKey("fact/key".into()), None, None).unwrap();
+    engine.forget("tenant", Selector::Lsns(vec![50, 60]), None, None).unwrap();
     engine.checkpoint().unwrap();
     engine.append(&scope("s"), (100..107).map(turn).collect(), Some("tail")).unwrap();
     let after = engine.fact_put("tenant", new_fact("fact/key", 2, "a"), None, None).unwrap();
@@ -336,10 +416,24 @@ fn checkpoint_bounds_replay_and_corrupt_derived_data_falls_back() {
     };
     let fact_oracle = facts(&engine);
     assert_eq!(fact_oracle.1.revisions.len(), 2);
+    assert!(fact_oracle.1.revisions[1].redacted && !fact_oracle.1.revisions[0].redacted);
+    assert_eq!(oracle.iter().filter(|turn| turn.redacted).count(), 12, "LSNs 2 to 11, 50, 60");
+    let forgets = |engine: &Engine| {
+        let m = engine.metrics().unwrap();
+        (m.forgotten_sessions, m.forgotten_fact_keys, m.forgotten_lsns)
+    };
+    assert_eq!(forgets(&engine), (1, 1, 2));
+    let forget_retry = |engine: &Engine| {
+        let session = Selector::Session { agent: "agent".into(), session: "s".into() };
+        engine.forget("tenant", session, Some("forget"), Some(11)).unwrap().deduplicated
+    };
     drop(engine);
     let engine = open(disk.clone(), options());
     assert_eq!(engine.metrics().unwrap().replayed_records, 8);
     assert_eq!(engine.window(&scope("s"), WindowQuery::Last(200)).unwrap(), oracle);
+    assert_eq!(facts(&engine), fact_oracle, "from a checkpoint");
+    assert_eq!(forgets(&engine), (1, 1, 2), "from a checkpoint");
+    assert!(forget_retry(&engine), "tag 6");
     drop(engine);
     let checkpoint = disk
         .list(std::path::Path::new("db"))
@@ -350,15 +444,17 @@ fn checkpoint_bounds_replay_and_corrupt_derived_data_falls_back() {
     let file = disk.open(&checkpoint).unwrap();
     let mut image = vec![0; disk.len(file).unwrap() as usize];
     disk.read_at(file, 0, &mut image).unwrap();
-    // Tag 4 records are written last, so the key's last occurrence is inside one.
+    // Tag 8 records come after tag 4, so the key's last occurrence is the fact-key forget.
     let offset = image.windows(8).rposition(|w| w == b"fact/key").unwrap();
     disk.flip_bit(file, offset as u64).unwrap();
     disk.close(file).unwrap();
     let engine = open(disk, options());
     assert_eq!(engine.metrics().unwrap().checkpoint_warnings, 1);
-    assert_eq!(engine.metrics().unwrap().replayed_records, 110);
+    assert_eq!(engine.metrics().unwrap().replayed_records, 113);
     assert_eq!(engine.window(&scope("s"), WindowQuery::Last(200)).unwrap(), oracle);
     assert_eq!(facts(&engine), fact_oracle, "full replay rebuilds the same fact reads");
+    assert_eq!(forgets(&engine), (1, 1, 2), "full replay rebuilds the same forget set");
+    assert!(forget_retry(&engine), "replayed forget retry");
     let retry = engine.fact_put("tenant", new_fact("fact/key", 1, "a"), Some("f"), None).unwrap();
     assert!(retry.deduplicated && retry.lsn == before.lsn && retry.txn == before.txn);
     engine.fact_put("tenant", new_fact("fact/key", 3, "a"), None, Some(after.lsn)).unwrap();
@@ -697,14 +793,26 @@ fn concurrent_same_key_writes_once() {
 #[test]
 fn invalid_and_over_limit_writes_are_typed_and_write_nothing() {
     // Compression would shrink the 4 MiB turn below the batch limit. See the compression test.
-    let mut opts = EngineOptions { max_sessions: 1, max_pages: 1, ..options() };
+    let mut opts =
+        EngineOptions { max_sessions: 1, max_pages: 1, max_forgotten_lsns: 4, ..options() };
     opts.compression.mode = atticdb_core::CompressionMode::Off;
     let engine = open(Arc::new(SimDisk::new(9)), opts);
     let s = scope("s");
     let too_big = NewTurn { content: vec![0; 4 * 1024 * 1024], ..turn(1) };
     let append = |turns| engine.append(&s, turns, None).unwrap_err();
     let fact = |key: &str| engine.fact_put("new", new_fact(key, 1, "a"), None, None).unwrap_err();
+    let forget = |selector, up_to| engine.forget("new", selector, None, up_to).unwrap_err();
+    let lsns = |lsns: &[u64]| Selector::Lsns(lsns.to_vec());
     for (case, error, kind) in [
+        ("empty LSN list", forget(lsns(&[]), None), "InvalidInput"),
+        ("LSN 0", forget(lsns(&[3, 0]), None), "InvalidInput"),
+        ("up_to_lsn 0", forget(Selector::FactKey("k".into()), Some(0)), "InvalidInput"),
+        ("1025 LSNs", forget(lsns(&[1; 1025]), None), "InvalidInput"),
+        (
+            "over the LSN cap",
+            forget(lsns(&[1, 2, 3, 4, 5]), None),
+            "ResourceExhausted(\"forgets\")",
+        ),
         ("empty batch", append(vec![]), "InvalidInput"),
         ("1024 turns", append(vec![turn(1); 1024]), "Storage(BatchTooLarge)"),
         ("4 MiB turn", append(vec![too_big]), "Storage(BatchTooLarge)"),
@@ -718,11 +826,20 @@ fn invalid_and_over_limit_writes_are_typed_and_write_nothing() {
     assert_eq!(engine.metrics().unwrap().durable_lsn, 0);
     let seqs = engine.append(&s, vec![turn(1); 16], None).unwrap().seqs;
     assert_eq!(seqs, (1..=16).collect::<Vec<_>>(), "rejections consumed no sequences");
+    // A duplicate LSN counts once toward the cap. Held pairs never count twice.
+    engine.forget("tenant", lsns(&[4, 1, 4, 2, 3, 1]), None, None).unwrap();
+    assert_eq!(engine.metrics().unwrap().forgotten_lsns, 4);
+    let error = engine.forget("tenant", lsns(&[1, 5]), None, None).unwrap_err();
+    assert!(matches!(error.kind, ErrorKind::ResourceExhausted("forgets")), "{error}");
+    assert_eq!(error.outcome, Outcome::NotCommitted);
+    engine.forget("tenant", lsns(&[2, 3]), None, None).unwrap();
     for (session, limit) in [("other", "sessions"), ("s", "page_directory")] {
         let error = engine.append(&scope(session), vec![turn(1)], None).unwrap_err();
         assert!(matches!(error.kind, ErrorKind::ResourceExhausted(l) if l == limit), "{error}");
     }
-    assert_eq!(engine.window(&s, WindowQuery::Last(100)).unwrap().len(), 16);
+    let window = engine.window(&s, WindowQuery::Last(100)).unwrap();
+    assert_eq!(window.iter().filter(|turn| turn.redacted).count(), 3, "LSNs 2 to 4");
+    assert_eq!(window.len(), 16);
 }
 
 #[test]

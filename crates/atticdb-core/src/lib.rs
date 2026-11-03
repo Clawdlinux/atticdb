@@ -10,6 +10,7 @@ mod error;
 pub mod fact;
 mod facts;
 pub mod forget;
+mod forgets;
 mod hot_cache;
 mod machine;
 mod options;
@@ -21,12 +22,12 @@ pub mod turn;
 
 pub use atticdb_tape::Outcome;
 pub use engine::{
-    Appended, Engine, FactHistory, FactPage, FactQuery, FactWritten, Health, Hit, Metrics, NewFact,
-    Record, RecordKind, RecordPage, RecordQuery, Revision, Scope, SearchPage, SearchQuery,
-    SessionInfo, SessionPage, SessionQuery, StoredFact, Turn, Window, WindowQuery,
+    Appended, Engine, FactHistory, FactPage, FactQuery, FactWritten, Forgotten, Health, Hit,
+    Metrics, NewFact, Record, RecordKind, RecordPage, RecordQuery, Revision, Scope, SearchPage,
+    SearchQuery, SessionInfo, SessionPage, SessionQuery, StoredFact, Turn, Window, WindowQuery,
 };
 #[cfg(feature = "sim")]
-pub use engine::{SimAppend, SimFact};
+pub use engine::{SimAppend, SimFact, SimForget};
 pub use error::{EngineError, ErrorKind};
 pub use options::{Compression, CompressionMode, EngineOptions};
 pub use turn::{NewTurn, Role};

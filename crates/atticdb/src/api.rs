@@ -845,7 +845,8 @@ fn fact_json(fact: StoredFact) -> Value {
 }
 
 fn revision_json(revision: Revision) -> Value {
-    let Revision { lsn, commit_time_ns, agent, deleted, content, meta } = revision;
+    // No route writes a forget yet, so no revision here is redacted.
+    let Revision { lsn, commit_time_ns, agent, deleted, content, meta, redacted: _ } = revision;
     let head =
         json!({"lsn": lsn, "commit_time_ns": commit_time_ns, "agent": agent, "deleted": deleted});
     blobs(head, content, meta)

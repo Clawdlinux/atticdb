@@ -19,7 +19,9 @@ pub enum Selector {
     Lsns(Vec<u64>),
 }
 
-/// A hide request. The engine does not apply forgets yet.
+/// A hide request. It covers records at or below its cutoff: `up_to_lsn` when given and lower,
+/// else its own LSN. After the ack, no engine reader returns covered content. It hides and
+/// does not erase: the bytes stay on the tape.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Forget {
     /// Tenant-local target.

@@ -3,16 +3,17 @@ use crate::dedup::{self, digest, DedupKey};
 use crate::error::{lock, Result};
 use crate::fact::Fact;
 use crate::facts::{visible, Rev};
+use crate::forget::Selector;
 use crate::machine::{Machine, REPLY_DEDUPLICATED};
 use crate::session::{address, Key};
 use crate::state::State;
-use crate::turn::{decode, encode};
+use crate::turn::{decode, decode_ref, encode, ParsedTurn};
 use crate::{CompressionMode, EngineError, EngineOptions, ErrorKind, NewTurn, Role};
 use atticdb_tape::{
     Clock, Committed, Digest, Durability, Frame, Header, Io, Kind, RecordInput, StdIo, SystemClock,
     Tape,
 };
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashSet};
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -64,6 +65,18 @@ pub struct FactWritten {
     /// True when a retry key returned an earlier receipt and nothing new was written.
     pub deduplicated: bool,
 }
+/// A durable forget receipt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Forgotten {
+    /// Original transaction, including on retries.
+    pub txn: u64,
+    /// The forget record's LSN.
+    pub lsn: u64,
+    /// Records at or below this LSN are hidden: `up_to_lsn` when given and lower, else `lsn`.
+    pub cutoff: u64,
+    /// True when a retry key returned an earlier receipt and nothing new was written.
+    pub deduplicated: bool,
+}
 /// A fact's current value.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredFact {
@@ -80,7 +93,8 @@ pub struct StoredFact {
     /// Opaque metadata.
     pub meta: Vec<u8>,
 }
-/// One revision of a fact key. A deleted revision has empty content and meta.
+/// One revision of a fact key. A deleted revision has empty content and meta. A forgotten one
+/// is a placeholder: `redacted`, its LSN, and every other field empty, false or 0.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Revision {
     /// The revision's LSN.
@@ -95,6 +109,8 @@ pub struct Revision {
     pub content: Vec<u8>,
     /// Opaque metadata.
     pub meta: Vec<u8>,
+    /// True when a forget hides this revision.
+    pub redacted: bool,
 }
 /// A key's revisions, newest first, at most `fact_history`.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -124,7 +140,8 @@ pub struct FactPage {
     /// The last key the walk finished with, returned or skipped. None once it left the prefix.
     pub next: Option<String>,
 }
-/// A durable turn returned in sequence order.
+/// A durable turn returned in sequence order. A forgotten turn is a placeholder: `redacted`,
+/// its LSN and seq, role `System`, empty content and meta, and `commit_time_ns` 0 (I5).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Turn {
     /// Stable tape address.
@@ -139,6 +156,22 @@ pub struct Turn {
     pub content: Vec<u8>,
     /// Opaque metadata.
     pub meta: Vec<u8>,
+    /// True when a forget hides this turn.
+    pub redacted: bool,
+}
+impl Turn {
+    /// The placeholder of a forgotten turn.
+    fn redacted(lsn: u64, seq: u64) -> Self {
+        let (role, content, meta) = (Role::System, Vec::new(), Vec::new());
+        Self { lsn, seq, commit_time_ns: 0, role, content, meta, redacted: true }
+    }
+}
+impl Revision {
+    /// The placeholder of a forgotten revision.
+    fn redacted(lsn: u64) -> Self {
+        let (agent, content, meta) = (String::new(), Vec::new(), Vec::new());
+        Self { lsn, commit_time_ns: 0, agent, deleted: false, content, meta, redacted: true }
+    }
 }
 /// An ordered session window.
 #[derive(Clone, Copy, Debug)]
@@ -207,8 +240,11 @@ pub struct SessionInfo {
     pub agent: String,
     /// Session identifier.
     pub session: String,
-    /// Published turns. Sequences are dense, so this is also the newest turn's sequence.
+    /// Published turns, forgotten ones included. Sequences are dense, so this is also the
+    /// newest turn's sequence.
     pub turns: u64,
+    /// The session forget's cutoff: its turns at or below this LSN are hidden.
+    pub forgotten_up_to: Option<u64>,
 }
 /// One page of sessions, with totals over all of the tenant's sessions.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -219,8 +255,10 @@ pub struct SessionPage {
     pub next: Option<(String, String)>,
     /// The tenant's sessions with a published turn, not only this page's.
     pub total_sessions: usize,
-    /// The tenant's published turns, not only this page's.
+    /// The tenant's published turns, not only this page's. Forgotten turns count.
     pub total_turns: u64,
+    /// The durable LSN read right after the state lock. Counts may include a turn above it.
+    pub as_of_lsn: u64,
 }
 /// Which records a [`RecordQuery`] returns.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -282,6 +320,9 @@ pub struct Window {
     pub turns: Vec<Turn>,
     /// True when the budget stopped the window before the query's own bound.
     pub truncated: bool,
+    /// The durable LSN the window read at. Every turn shown is at or below it, and no turn
+    /// above it shows. Pass it as `up_to_lsn` to forget only what this window saw.
+    pub as_of_lsn: u64,
 }
 /// Observable bounds and recovery counters.
 #[derive(Clone, Debug)]
@@ -357,6 +398,12 @@ pub struct Metrics {
     pub hot_cache_misses: u64,
     /// Hot cache entries whose checksum failed on a hit. They were read from the tape instead.
     pub hot_cache_dropped: u64,
+    /// Sessions with a forget cutoff.
+    pub forgotten_sessions: usize,
+    /// Fact keys with a forget cutoff.
+    pub forgotten_fact_keys: usize,
+    /// `(tenant, LSN)` pairs LSN-list forgets hold, inert ones included.
+    pub forgotten_lsns: usize,
 }
 
 /// Writer availability. Reads retain the last durable view.
@@ -740,6 +787,112 @@ impl Engine {
         Ok(SimFact { engine: self, reply: self.tape.enqueue_sim(records, digest, if_lsn)? })
     }
 
+    /// Hides a session, a fact key or listed LSNs inside 1 tenant, durably and idempotently.
+    ///
+    /// It covers records at or below its cutoff: `up_to_lsn` when given and lower, else the
+    /// forget's own LSN. So later writes stay visible and a retry can't move the cutoff. After
+    /// the ack no reader returns covered content. Windows, `fact_history` and `records` show
+    /// placeholders; `fact_get`, `fact_list` and `search` skip it. A forgotten newest revision
+    /// leaves the key with no current value (I9). It hides and does not erase.
+    ///
+    /// An empty LSN list, LSN 0 and `up_to_lsn = 0` are `InvalidInput`. Past
+    /// `max_forgotten_lsns` it is `ResourceExhausted("forgets")`. Retry keys are scoped by
+    /// tenant (I6).
+    pub fn forget(
+        &self,
+        tenant: &str,
+        selector: Selector,
+        idem_key: Option<&str>,
+        up_to_lsn: Option<u64>,
+    ) -> Result<Forgotten> {
+        if tenant.len() > 255 {
+            return Err(EngineError::rejected(ErrorKind::InvalidInput));
+        }
+        let (payload, digest) = forget_payload(&selector, idem_key, up_to_lsn)?;
+        let retry = idem_key.zip(digest).map(|(id, digest)| (dedup::Scope::Forget, id, digest));
+        let (committed, cached) = match self.start(tenant, retry)? {
+            Start::Cached(committed) => (committed, true),
+            Start::Write(id, _creation) => {
+                let mut records = Vec::with_capacity(2);
+                if id.is_none() {
+                    records.push(RecordInput {
+                        kind: Kind::TenantCreate,
+                        tenant_id: 0,
+                        content: tenant.as_bytes().to_vec(),
+                    });
+                }
+                records.push(RecordInput {
+                    kind: Kind::Forget,
+                    tenant_id: id.unwrap_or(0),
+                    content: payload,
+                });
+                let committed = self
+                    .tape
+                    .append_with_digest(records, Durability::Durable, digest, None)
+                    .map_err(EngineError::write)?;
+                (committed, false)
+            }
+        };
+        let forgotten = self.forgotten(committed, cached, up_to_lsn)?;
+        self.purge(tenant, &selector, forgotten.cutoff);
+        Ok(forgotten)
+    }
+
+    fn forgotten(
+        &self,
+        committed: Committed,
+        cached: bool,
+        up_to_lsn: Option<u64>,
+    ) -> Result<Forgotten> {
+        let Committed::Durable { txn, last_lsn, reply, .. } = committed;
+        let deduplicated = cached || reply == [REPLY_DEDUPLICATED];
+        let cutoff = crate::forgets::cutoff(up_to_lsn, last_lsn);
+        self.published(|| Ok(Forgotten { txn, lsn: last_lsn, cutoff, deduplicated }))
+    }
+
+    /// Drops hot cache entries a forget covers. Readers check forgets before the cache, so
+    /// this is hygiene. It runs after the ack, outside the state lock.
+    fn purge(&self, tenant: &str, selector: &Selector, cutoff: u64) {
+        let Some(id) = lock(&self.state).ok().and_then(|state| state.tenants.get(tenant)) else {
+            return;
+        };
+        match selector {
+            Selector::Session { agent, session } => self.hot.purge(|lsn, cached| {
+                cached.tenant == id
+                    && lsn <= cutoff
+                    && *cached.agent == **agent
+                    && *cached.session == **session
+            }),
+            Selector::Lsns(lsns) => {
+                let lsns: std::collections::HashSet<u64> = lsns.iter().copied().collect();
+                self.hot.purge(|lsn, cached| {
+                    cached.tenant == id && lsn <= cutoff && lsns.contains(&lsn)
+                });
+            }
+            // The cache holds turns only.
+            Selector::FactKey(_) => {}
+        }
+    }
+
+    /// Queues a forget for a later inline step. Register its tenant first.
+    #[cfg(feature = "sim")]
+    pub fn enqueue_forget_sim(
+        &self,
+        tenant: &str,
+        selector: Selector,
+        idem_key: Option<&str>,
+        up_to_lsn: Option<u64>,
+    ) -> Result<SimForget<'_>> {
+        let id = lock(&self.state)?
+            .tenants
+            .get(tenant)
+            .ok_or_else(|| EngineError::rejected(ErrorKind::InvalidInput))?;
+        let (content, digest) = forget_payload(&selector, idem_key, up_to_lsn)?;
+        let records = vec![RecordInput { kind: Kind::Forget, tenant_id: id, content }];
+        let reply = self.tape.enqueue_sim(records, digest, None)?;
+        Ok(SimForget { engine: self, up_to_lsn, reply })
+    }
+
     /// Runs a receipt builder after the writer acknowledged a commit. Publication failures
     /// and receipt errors report `Committed`.
     fn published<T>(&self, build: impl FnOnce() -> Result<T>) -> Result<T> {
@@ -911,9 +1064,9 @@ impl Engine {
         query: WindowQuery,
         max_bytes: usize,
     ) -> Result<Window> {
-        let empty = Window { turns: Vec::new(), truncated: false };
         let state = lock(&self.state)?;
         let snapshot = self.tape.durable_lsn();
+        let empty = Window { turns: Vec::new(), truncated: false, as_of_lsn: snapshot };
         let Some(tenant) = state.tenants.get(&scope.tenant) else {
             return Ok(empty);
         };
@@ -928,6 +1081,9 @@ impl Engine {
                 (seq.max(1).min(end), end.min(seq.max(1).saturating_add(limit as u64)))
             }
         };
+        // Read under the same lock as the session, so a forget acked before this window started
+        // hides here. A window that started before the ack linearizes before it.
+        let cut = state.forgets.session_cutoff(&key).unwrap_or(0);
         drop(state);
         // Lazy, in query order: a budget stop loads no further pages and reads no more turns.
         let seqs: Box<dyn Iterator<Item = u64>> = match query {
@@ -937,16 +1093,32 @@ impl Engine {
         let mut turns = Vec::with_capacity((end - start).min(64) as usize);
         let mut bytes = 0usize;
         let mut truncated = false;
-        let mut current: Option<(usize, Arc<Vec<u64>>)> = None;
+        let mut current: Option<(usize, Arc<Vec<u64>>, HashSet<u64>)> = None;
         let mut reader = self.tape.reader();
         for seq in seqs {
             let (page, offset) = address(seq);
-            if current.as_ref().is_none_or(|(loaded, _)| *loaded != page) {
-                current = Some((page, self.load_page(&key, page)?));
+            if current.as_ref().is_none_or(|(loaded, _, _)| *loaded != page) {
+                let slots = self.load_page(&key, page)?;
+                // 1 short lock per page. Only the query's slots in this page are checked.
+                let first = seq - offset as u64;
+                let lo = start.max(first) - first;
+                let hi = (end - first).min(slots.len() as u64);
+                let hidden = {
+                    let state = lock(&self.state)?;
+                    match slots.get(lo as usize..hi as usize) {
+                        Some(range) if !state.forgets.lsns.is_empty() => range
+                            .iter()
+                            .copied()
+                            .filter(|&lsn| state.forgets.hides_lsn(tenant, lsn))
+                            .collect(),
+                        _ => HashSet::new(),
+                    }
+                };
+                current = Some((page, slots, hidden));
             }
-            let lsn = *current
+            let (lsn, hidden) = current
                 .as_ref()
-                .and_then(|(_, slots)| slots.get(offset))
+                .and_then(|(_, slots, hidden)| slots.get(offset).map(|lsn| (*lsn, hidden)))
                 .ok_or_else(|| EngineError::rejected(ErrorKind::CorruptIndex))?;
             // Session LSNs grow with seq, so turns past the snapshot form a suffix.
             if lsn > snapshot {
@@ -954,6 +1126,12 @@ impl Engine {
                     WindowQuery::Last(_) => continue,
                     WindowQuery::Since { .. } => break,
                 }
+            }
+            // Checked before the hot cache and the tape: a hidden turn gets no read, no
+            // inflate, and costs no budget bytes.
+            if lsn <= cut || hidden.contains(&lsn) {
+                turns.push(Turn::redacted(lsn, seq));
+                continue;
             }
             self.reads.fetch_add(1, Ordering::Relaxed);
             let turn = match self.hot.get(lsn) {
@@ -974,6 +1152,7 @@ impl Engine {
                         role: cached.role,
                         content: cached.content.clone(),
                         meta: cached.meta.clone(),
+                        redacted: false,
                     }
                 }
                 None => {
@@ -1006,7 +1185,7 @@ impl Engine {
                             meta.clone(),
                         ),
                     );
-                    Turn { lsn, seq, commit_time_ns, role, content, meta }
+                    Turn { lsn, seq, commit_time_ns, role, content, meta, redacted: false }
                 }
             };
             let size = turn.content.len().saturating_add(turn.meta.len());
@@ -1022,7 +1201,7 @@ impl Engine {
         if matches!(query, WindowQuery::Last(_)) {
             turns.reverse();
         }
-        Ok(Window { turns, truncated })
+        Ok(Window { turns, truncated, as_of_lsn: snapshot })
     }
     /// Returns a key's current value at a durable snapshot, or None when it has none.
     pub fn fact_get(&self, tenant: &str, key: &str) -> Result<Option<StoredFact>> {
@@ -1030,8 +1209,13 @@ impl Engine {
             let Some((state, snapshot, id)) = self.fact_snapshot(tenant)? else {
                 return Ok(None);
             };
-            let revs = state.facts.map.get(&(id, key.to_owned()));
-            match revs.and_then(|revs| visible(revs, snapshot).last()).filter(|rev| !rev.deleted) {
+            let fact_key = (id, key.to_owned());
+            let revs = state.facts.map.get(&fact_key);
+            // A forgotten newest revision means no current value, never an older one (I9).
+            match revs
+                .and_then(|revs| visible(revs, snapshot).last())
+                .filter(|rev| !rev.deleted && !state.forgets.hides_fact(&fact_key, rev.lsn))
+            {
                 Some(rev) => (id, *rev),
                 None => return Ok(None),
             }
@@ -1046,26 +1230,38 @@ impl Engine {
             let Some((state, snapshot, id)) = self.fact_snapshot(tenant)? else {
                 return Ok(FactHistory::default());
             };
-            let Some(revs) = state.facts.map.get(&(id, key.to_owned())) else {
+            let fact_key = (id, key.to_owned());
+            let Some(revs) = state.facts.map.get(&fact_key) else {
                 return Ok(FactHistory::default());
             };
             let (shown, history) = (visible(revs, snapshot), state.facts.history);
             let truncated = shown.len() > history || (revs.dropped && !shown.is_empty());
-            (id, shown.iter().rev().take(history).copied().collect::<Vec<_>>(), truncated)
+            let newest = shown.iter().rev().take(history);
+            let hidden = |rev: &Rev| state.forgets.hides_fact(&fact_key, rev.lsn);
+            (id, newest.map(|rev| (*rev, hidden(rev))).collect::<Vec<_>>(), truncated)
         };
-        let newest = newest.into_iter().map(|rev| (key, rev));
-        let (read, cut) = self.read_facts(id, newest, max_bytes)?;
-        let revisions = read
-            .into_iter()
-            .map(|(rev, commit_time_ns, fact)| Revision {
+        // Hidden revisions are placeholders and get no tape read.
+        let shown = newest.iter().filter(|(_, hidden)| !hidden).map(|(rev, _)| (key, *rev));
+        let (read, cut) = self.read_facts(id, shown, max_bytes)?;
+        let mut read = read.into_iter();
+        let mut revisions = Vec::with_capacity(newest.len());
+        for (rev, hidden) in newest {
+            if hidden {
+                revisions.push(Revision::redacted(rev.lsn));
+                continue;
+            }
+            // Past a budget cut, the history ends at the last revision read.
+            let Some((rev, commit_time_ns, fact)) = read.next() else { break };
+            revisions.push(Revision {
                 lsn: rev.lsn,
                 commit_time_ns,
                 agent: fact.agent,
                 deleted: rev.deleted,
                 content: fact.content,
                 meta: fact.meta,
-            })
-            .collect();
+                redacted: false,
+            });
+        }
         Ok(FactHistory { revisions, truncated: cut || truncated })
     }
 
@@ -1084,7 +1280,8 @@ impl Engine {
             };
             let (mut picked, mut next, mut last, mut visited) =
                 (Vec::new(), None, None::<&String>, 0);
-            for ((owner, key), revs) in state.facts.map.range((start, Bound::Unbounded)) {
+            for (fact_key, revs) in state.facts.map.range((start, Bound::Unbounded)) {
+                let (owner, key) = fact_key;
                 if *owner != id || !key.starts_with(&query.prefix) {
                     break;
                 }
@@ -1094,7 +1291,10 @@ impl Engine {
                 }
                 visited += 1;
                 last = Some(key);
-                if let Some(rev) = visible(revs, snapshot).last().filter(|rev| !rev.deleted) {
+                let newest = visible(revs, snapshot).last();
+                if let Some(rev) = newest
+                    .filter(|rev| !rev.deleted && !state.forgets.hides_fact(fact_key, rev.lsn))
+                {
                     picked.push((key.clone(), *rev));
                 }
             }
@@ -1124,9 +1324,12 @@ impl Engine {
         // the walk may be missing from this call, like any record written after it started.
         let current = |id: u32, key: &str, lsn: u64| -> Result<bool> {
             let state = lock(&self.state)?;
-            let revs = state.facts.map.get(&(id, key.to_owned()));
+            let fact_key = (id, key.to_owned());
+            let revs = state.facts.map.get(&fact_key);
             let newest = revs.and_then(|revs| visible(revs, self.tape.durable_lsn()).last());
-            Ok(newest.is_some_and(|rev| rev.lsn == lsn && !rev.deleted))
+            Ok(newest.is_some_and(|rev| {
+                rev.lsn == lsn && !rev.deleted && !state.forgets.hides_fact(&fact_key, lsn)
+            }))
         };
         let found = |fields: &[&[u8]]| {
             let text: Vec<String> =
@@ -1140,7 +1343,12 @@ impl Engine {
         let pick = |frame: &Frame| -> Result<Option<(Hit, usize)>> {
             let hit = match frame.header.kind {
                 Kind::Turn => {
-                    let (agent, session, turn) = turn_frame(frame)?;
+                    // Parsed without inflating, checked, then inflated only when visible.
+                    let parsed = parse_turn(frame)?;
+                    if self.hides_turn(frame, &parsed)? {
+                        return Ok(None);
+                    }
+                    let (agent, session, turn) = turn_parsed(frame, parsed)?;
                     if !found(&[&turn.content]) {
                         return Ok(None);
                     }
@@ -1226,7 +1434,6 @@ impl Engine {
     /// revisions and deletes show too: it is the log, not the current state. Visits at most
     /// `query.visits` records; `next` resumes below them.
     pub fn records(&self, tenant: &str, query: RecordQuery) -> Result<RecordPage> {
-        // Forgets are not applied yet. Once they are, hide here what `window` and `search` hide.
         let walk = Walk {
             before: query.before,
             limit: query.limit,
@@ -1239,19 +1446,41 @@ impl Engine {
             Some(RecordKind::Fact) => header.kind == Kind::Fact,
         };
         let (records, next) = self.newest_first(tenant, walk, wanted, |frame| {
+            let corrupt = |_| EngineError::rejected(ErrorKind::CorruptIndex);
+            let lsn = frame.header.lsn;
+            // A hidden record is a placeholder with its kind, LSN and identifiers.
             let record = match frame.header.kind {
                 Kind::Turn => {
-                    let (agent, session, turn) = turn_frame(frame)?;
-                    Record::Turn { agent, session, turn }
+                    let parsed = parse_turn(frame)?;
+                    if self.hides_turn(frame, &parsed)? {
+                        let (agent, session) = (parsed.agent_id.into(), parsed.session_id.into());
+                        Record::Turn { agent, session, turn: Turn::redacted(lsn, parsed.seq) }
+                    } else {
+                        let (agent, session, turn) = turn_parsed(frame, parsed)?;
+                        Record::Turn { agent, session, turn }
+                    }
                 }
                 Kind::Fact => {
-                    let corrupt = |_| EngineError::rejected(ErrorKind::CorruptIndex);
-                    let fact = crate::fact::decode(&frame.payload).map_err(corrupt)?;
-                    let Fact { key, content, meta, agent, tombstone, .. } = fact;
-                    let (lsn, commit_time_ns) = (frame.header.lsn, frame.header.commit_time_ns);
-                    let deleted = tombstone;
-                    let revision = Revision { lsn, commit_time_ns, agent, deleted, content, meta };
-                    Record::Fact { key, revision }
+                    let (key, _, _) = crate::fact::header(&frame.payload).map_err(corrupt)?;
+                    let fact_key = (frame.header.tenant_id, key);
+                    if lock(&self.state)?.forgets.hides_fact(&fact_key, lsn) {
+                        Record::Fact { key: fact_key.1, revision: Revision::redacted(lsn) }
+                    } else {
+                        let fact = crate::fact::decode(&frame.payload).map_err(corrupt)?;
+                        let Fact { key, content, meta, agent, tombstone, .. } = fact;
+                        let (deleted, redacted) = (tombstone, false);
+                        let commit_time_ns = frame.header.commit_time_ns;
+                        let revision = Revision {
+                            lsn,
+                            commit_time_ns,
+                            agent,
+                            deleted,
+                            content,
+                            meta,
+                            redacted,
+                        };
+                        Record::Fact { key, revision }
+                    }
                 }
                 _ => return Ok(None),
             };
@@ -1341,11 +1570,15 @@ impl Engine {
             return Err(EngineError::rejected(ErrorKind::InvalidInput));
         }
         let state = lock(&self.state)?;
+        // Read after the lock, as windows do. Publication can run ahead of it, so a count may
+        // include a turn above it. A forget pinned to it then hides less, never more.
+        let as_of_lsn = self.tape.durable_lsn();
         let Some(id) = state.tenants.get(tenant) else {
-            return Ok(SessionPage::default());
+            return Ok(SessionPage { as_of_lsn, ..SessionPage::default() });
         };
         let after = query.after.as_ref().map(|(agent, session)| (agent.as_str(), session.as_str()));
-        let (mut page, mut smallest, mut more) = (SessionPage::default(), BinaryHeap::new(), false);
+        let mut page = SessionPage { as_of_lsn, ..SessionPage::default() };
+        let (mut smallest, mut more) = (BinaryHeap::new(), false);
         for (Key(owner, agent, session), entry) in &state.index.sessions {
             // `len` counts published turns. A session with only reserved ones is skipped.
             if *owner != id || entry.len == 0 {
@@ -1370,16 +1603,32 @@ impl Engine {
         }
         let sessions = smallest.into_sorted_vec().into_iter();
         page.sessions = sessions
-            .map(|((agent, session), turns)| SessionInfo {
-                agent: agent.to_owned(),
-                session: session.to_owned(),
-                turns,
+            .map(|((agent, session), turns)| {
+                let key = Key(id, agent.to_owned(), session.to_owned());
+                let forgotten_up_to = state.forgets.session_cutoff(&key);
+                let Key(_, agent, session) = key;
+                SessionInfo { agent, session, turns, forgotten_up_to }
             })
             .collect();
         if more {
             page.next = page.sessions.last().map(|last| (last.agent.clone(), last.session.clone()));
         }
         Ok(page)
+    }
+
+    /// True when a forget hides this turn frame. Uses the header's tenant id (I11).
+    fn hides_turn(&self, frame: &Frame, parsed: &ParsedTurn<'_>) -> Result<bool> {
+        let state = lock(&self.state)?;
+        let forgets = &state.forgets;
+        let (tenant, lsn) = (frame.header.tenant_id, frame.header.lsn);
+        if forgets.hides_lsn(tenant, lsn) {
+            return Ok(true);
+        }
+        if forgets.sessions.is_empty() {
+            return Ok(false);
+        }
+        let key = Key(tenant, parsed.agent_id.to_owned(), parsed.session_id.to_owned());
+        Ok(forgets.hides_turn(&key, lsn))
     }
 
     /// Takes the state lock, then the durable snapshot readers use, and resolves the tenant.
@@ -1469,6 +1718,9 @@ impl Engine {
             hot_cache_hits: hot.hits,
             hot_cache_misses: hot.misses,
             hot_cache_dropped: hot.dropped,
+            forgotten_sessions: state.forgets.sessions.len(),
+            forgotten_fact_keys: state.forgets.keys.len(),
+            forgotten_lsns: state.forgets.lsns.len(),
         })
     }
 }
@@ -1545,6 +1797,43 @@ impl SimFact<'_> {
     }
 }
 
+/// Encodes a forget payload and its retry digest. Rejects what prepare would reject.
+fn forget_payload(
+    selector: &Selector,
+    idem_key: Option<&str>,
+    up_to_lsn: Option<u64>,
+) -> Result<(Vec<u8>, Option<Digest>)> {
+    let empty = matches!(selector, Selector::Lsns(lsns) if lsns.is_empty() || lsns.contains(&0));
+    if empty || up_to_lsn == Some(0) {
+        return Err(EngineError::rejected(ErrorKind::InvalidInput));
+    }
+    let idem = idem_key.map(str::to_owned);
+    let forget = crate::forget::Forget { selector: selector.clone(), idem_key: idem, up_to_lsn };
+    let payload = crate::forget::encode(&forget)?;
+    let digest = idem_key.map(|_| digest([payload.as_slice()]));
+    Ok((payload, digest))
+}
+
+/// One queued simulation forget. Finish it only after stepping its engine.
+#[cfg(feature = "sim")]
+#[derive(Debug)]
+pub struct SimForget<'a> {
+    engine: &'a Engine,
+    up_to_lsn: Option<u64>,
+    reply: std::sync::mpsc::Receiver<atticdb_tape::WriteResult>,
+}
+#[cfg(feature = "sim")]
+impl SimForget<'_> {
+    /// Receives the post-publication receipt without reading the tape.
+    pub fn finish(self) -> Result<Forgotten> {
+        let reply = self.reply.recv().map_err(|_| EngineError {
+            kind: ErrorKind::Poisoned,
+            outcome: atticdb_tape::Outcome::Unknown,
+        })?;
+        self.engine.forgotten(reply.map_err(EngineError::write)?, false, self.up_to_lsn)
+    }
+}
+
 /// A fact frame read for a revision, with its commit time.
 type ReadFact = (Rev, u64, Fact);
 
@@ -1556,19 +1845,24 @@ struct Walk {
     visits: usize,
 }
 
-/// Decodes a turn frame into its agent, session and turn.
-fn turn_frame(frame: &Frame) -> Result<(String, String, Turn)> {
+/// Parses a turn frame's identifiers without inflating its content.
+fn parse_turn(frame: &Frame) -> Result<ParsedTurn<'_>> {
+    decode_ref(&frame.payload).map_err(|_| EngineError::rejected(ErrorKind::CorruptIndex))
+}
+
+/// Builds a parsed turn's agent, session and turn. Inflates version 2 content.
+fn turn_parsed(frame: &Frame, parsed: ParsedTurn<'_>) -> Result<(String, String, Turn)> {
     let corrupt = |_| EngineError::rejected(ErrorKind::CorruptIndex);
-    let decoded = decode(&frame.payload).map_err(corrupt)?;
     let turn = Turn {
         lsn: frame.header.lsn,
-        seq: decoded.seq,
+        seq: parsed.seq,
         commit_time_ns: frame.header.commit_time_ns,
-        role: decoded.turn.role,
-        content: decoded.turn.content,
-        meta: decoded.turn.meta,
+        role: parsed.role,
+        content: parsed.content.bytes().map_err(corrupt)?.into_owned(),
+        meta: parsed.meta.to_vec(),
+        redacted: false,
     };
-    Ok((decoded.agent_id, decoded.session_id, turn))
+    Ok((parsed.agent_id.to_owned(), parsed.session_id.to_owned(), turn))
 }
 
 impl Hit {

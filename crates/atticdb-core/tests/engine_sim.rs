@@ -2,9 +2,9 @@
 #![allow(clippy::unwrap_used)]
 
 use atticdb_core::{
-    turn::decode, Appended, CompressionMode, Engine, EngineError, EngineOptions, ErrorKind,
-    FactQuery, FactWritten, Health, Hit, NewFact, NewTurn, Outcome, Role, Scope, SearchQuery,
-    SimFact, Turn, WindowQuery,
+    forget::Selector, turn::decode, Appended, CompressionMode, Engine, EngineError, EngineOptions,
+    ErrorKind, FactQuery, FactWritten, Health, Hit, NewFact, NewTurn, Outcome, Record, RecordQuery,
+    Role, Scope, SearchQuery, SimFact, Turn, WindowQuery,
 };
 use atticdb_tape::sim::{CapacityError, CapacityPlan, PublishPause, SimClock, StorageFullFault};
 use atticdb_tape::{Clock, Error, HookIo, Io, Kind, Op, SimDisk, Tape, TapeOptions};
@@ -219,6 +219,7 @@ impl Oracle {
                 role: turn.role,
                 content: turn.content.clone(),
                 meta: turn.meta.clone(),
+                redacted: false,
             });
         }
         b.receipt = Some(receipt);
@@ -434,6 +435,7 @@ impl Oracle {
                 role: decoded.turn.role,
                 content: decoded.turn.content,
                 meta: decoded.turn.meta,
+                redacted: false,
             });
         }
         for (&txn, turns) in &transactions {
@@ -1431,6 +1433,91 @@ fn publish_during_checkpoint_keeps_the_new_page_dirty() {
         vec![vec![1], vec![2], vec![3]]
     );
     assert_eq!(engine.metrics().unwrap().replayed_records, 0);
+}
+
+#[test]
+fn publish_during_checkpoint_keeps_new_forget_dirty() {
+    let (io, clock, opts) =
+        (Arc::new(HookIo::sim(32)), Arc::new(SimClock::default()), inline_opts());
+    let engine = Arc::new(open(io.clone(), clock.clone(), &opts));
+    let (a, b) = (one_scope(), Scope { session: "b".into(), ..one_scope() });
+    let turn = |value| NewTurn { role: Role::User, content: vec![value], meta: vec![] };
+    let fact = |key: &str, value| NewFact {
+        key: key.into(),
+        content: vec![value],
+        meta: vec![],
+        agent: "a".into(),
+    };
+    let seeded = engine.append(&a, vec![turn(1), turn(2), turn(3)], None).unwrap();
+    let in_b = engine.append(&b, vec![turn(4), turn(5)], None).unwrap();
+    let k1 = engine.fact_put("t", fact("k", 1), None, None).unwrap();
+    engine.fact_put("t", fact("j", 1), None, None).unwrap();
+    engine.checkpoint().unwrap();
+    let session_a = Selector::Session { agent: "a".into(), session: "s".into() };
+    let (x, y) = (in_b.first_lsn, in_b.last_lsn);
+    engine.forget("t", session_a.clone(), None, Some(seeded.first_lsn + 1)).unwrap();
+    engine.forget("t", Selector::FactKey("k".into()), None, Some(k1.lsn)).unwrap();
+    engine.forget("t", Selector::Lsns(vec![x]), None, None).unwrap();
+    let later = engine.append(&a, vec![turn(6), turn(7)], None).unwrap();
+    let k2 = engine.fact_put("t", fact("k", 2), None, None).unwrap();
+    // Published after the snapshot, before the dirty clear: 2 raised entries, 1 new key, a
+    // held pair again and a new one. A conditional put sees the forget staged before it.
+    let queued = [
+        engine.enqueue_forget_sim("t", session_a, None, Some(later.first_lsn)).unwrap(),
+        engine.enqueue_forget_sim("t", Selector::FactKey("j".into()), None, None).unwrap(),
+        engine.enqueue_forget_sim("t", Selector::FactKey("k".into()), None, None).unwrap(),
+        engine.enqueue_forget_sim("t", Selector::Lsns(vec![x, y]), None, None).unwrap(),
+    ];
+    let put = engine.enqueue_fact_sim("t", fact("j", 2), false, None, Some(0)).unwrap();
+    let (weak, fired) = (Arc::downgrade(&engine), Arc::new(AtomicBool::new(false)));
+    let completed = fired.clone();
+    after_nth(&io, 2, move || {
+        weak.upgrade().unwrap().step_sim().unwrap();
+        completed.store(true, Ordering::SeqCst);
+    });
+    assert_eq!(engine.checkpoint().unwrap(), k2.lsn, "the boundary is below the queued forgets");
+    assert!(fired.load(Ordering::SeqCst));
+    let forgotten = queued.map(|reply| reply.finish().unwrap());
+    // A staged forget hides j, so `if_lsn = 0` passes.
+    let put = put.finish().unwrap();
+    assert_eq!(forgotten[2].cutoff, forgotten[2].lsn);
+    assert_eq!(engine.checkpoint().unwrap(), put.lsn, "the boundary is above them");
+    type Seen = (Vec<Turn>, Vec<Turn>, Option<u64>, Option<u64>, Vec<String>, [usize; 3]);
+    let seen = |engine: &Engine| -> Seen {
+        let window = |scope| engine.window(scope, WindowQuery::Last(10)).unwrap();
+        let lsn = |key| engine.fact_get("t", key).unwrap().map(|fact| fact.lsn);
+        let query =
+            RecordQuery { before: None, limit: 100, kind: None, max_bytes: 1 << 20, visits: 100 };
+        let page = engine.records("t", query).unwrap();
+        let records = page.records.iter().map(|record| match record {
+            Record::Turn { turn, .. } => format!("{} {}", turn.lsn, turn.redacted),
+            Record::Fact { revision, .. } => format!("{} {}", revision.lsn, revision.redacted),
+        });
+        let m = engine.metrics().unwrap();
+        let counts = [m.forgotten_sessions, m.forgotten_fact_keys, m.forgotten_lsns];
+        (window(&a), window(&b), lsn("k"), lsn("j"), records.collect(), counts)
+    };
+    let before = seen(&engine);
+    let hidden = |turns: &[Turn]| turns.iter().map(|t| t.redacted).collect::<Vec<_>>();
+    assert_eq!(hidden(&before.0), [true, true, true, true, false], "A up to its 4th turn");
+    assert_eq!(hidden(&before.1), [true, true], "x and y");
+    assert_eq!((before.2, before.3), (None, Some(put.lsn)), "k forgotten, j written again");
+    assert_eq!(before.5, [1, 2, 2]);
+    drop(engine);
+    let image = io.inner.crash().unwrap();
+    let engine = open(Arc::new(image.clone()), clock.clone(), &opts);
+    assert_eq!(engine.metrics().unwrap().replayed_records, 0, "nothing came from replay");
+    assert_eq!(seen(&engine), before, "every queued forget stayed dirty, so it was written");
+    drop(engine);
+    for path in image.list(Path::new("db")).unwrap() {
+        let name = path.file_name().unwrap().to_str().unwrap();
+        if name.starts_with("ckpt-") || name == "CHECKPOINT" {
+            image.remove(&path).unwrap();
+        }
+    }
+    let engine = open(Arc::new(image), clock, &opts);
+    assert!(engine.metrics().unwrap().replayed_records > 0);
+    assert_eq!(seen(&engine), before, "a full replay gives the same answers");
 }
 
 #[test]
