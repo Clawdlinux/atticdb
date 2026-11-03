@@ -6,7 +6,7 @@ import robots from "@/app/robots";
 import sitemap from "@/app/sitemap";
 import JsonLd from "@/components/JsonLd";
 import { PRICING_FAQ } from "@/content/faq";
-import { PAGES, faqJsonLd, pageMetadata, softwareAppJsonLd } from "@/lib/seo";
+import { PAGES, RSS_FEED, faqJsonLd, pageMetadata, softwareAppJsonLd } from "@/lib/seo";
 import { absoluteUrl, GITHUB_URL, SITE_URL } from "@/lib/site";
 
 const expectedPages = [
@@ -14,6 +14,7 @@ const expectedPages = [
   ["/pricing", "AtticDB pricing: free locally, cloud planned"],
   ["/compare", "AtticDB vs Mem0, Zep, Letta and Supermemory"],
   ["/benchmarks", "AtticDB benchmarks: durable acks vs Redis and SQLite"],
+  ["/blog", "AtticDB engineering blog"],
 ];
 
 const expectedDescriptions = [
@@ -21,26 +22,33 @@ const expectedDescriptions = [
   "AtticDB is free on your own disk, forever. Cloud sync, backups and team memory are planned. No per-memory or per-call fees.",
   "How AtticDB compares with Mem0, Zep, Letta, Supermemory, Redis Agent Memory, Cognee and Engram. Sourced facts, including where we lose.",
   "Durable acks per second and latency for AtticDB, Redis, Valkey, DiceDB and SQLite on NVMe and Premium SSD v2. 7 runs, raw data linked.",
+  "How AtticDB is built and measured: durable writes, the append-only tape, benchmarks and memory for coding agents.",
 ];
 
 describe("page metadata", () => {
-  it("lists exactly the 4 public pages with the specified titles", () => {
+  it("lists exactly the 5 public pages with the specified titles", () => {
     expect(PAGES.map(({ path, title }) => [path, title])).toEqual(expectedPages);
   });
 
   it("keeps titles unique and within 60 characters", () => {
-    expect(new Set(PAGES.map(({ title }) => title)).size).toBe(4);
+    expect(new Set(PAGES.map(({ title }) => title)).size).toBe(5);
     for (const { title } of PAGES) expect(title.length).toBeLessThanOrEqual(60);
   });
 
   it("keeps the specified descriptions unique and within 155 characters", () => {
     expect(PAGES.map(({ description }) => description)).toEqual(expectedDescriptions);
-    expect(new Set(PAGES.map(({ description }) => description)).size).toBe(4);
+    expect(new Set(PAGES.map(({ description }) => description)).size).toBe(5);
     for (const { description } of PAGES) expect(description.length).toBeLessThanOrEqual(155);
   });
 
   it("uses an absolute home title without a template suffix", () => {
     expect(pageMetadata("/").title).toEqual({ absolute: expectedPages[0][1] });
+  });
+
+  it("links the blog feed absolutely, so the docs host points at the main host", () => {
+    expect(RSS_FEED).toEqual({
+      "application/rss+xml": [{ url: "https://atticdb.com/blog/rss.xml", title: "AtticDB engineering blog" }],
+    });
   });
 
   it("uses the pricing canonical without a trailing slash", () => {
@@ -52,6 +60,7 @@ describe("page metadata", () => {
       const metadata = pageMetadata(path);
       expect(metadata.description).toBe(description);
       expect(metadata.alternates?.canonical).toBe(absoluteUrl(path));
+      expect(metadata.alternates?.types).toEqual(RSS_FEED);
       if (path !== "/") expect(metadata.title).toBe(title);
       expect(metadata.openGraph).toEqual({
         title,
@@ -117,12 +126,13 @@ describe("structured data", () => {
 
 describe("static discovery routes", () => {
   afterEach(() => vi.unstubAllEnvs());
-  it("lists only the 4 public canonical URLs in the sitemap", () => {
-    expect(sitemap().map(({ url }) => url)).toEqual([
+  it("lists only the 5 public canonical URLs in the sitemap while there are no posts", async () => {
+    expect((await sitemap()).map(({ url }) => url)).toEqual([
       "https://atticdb.com",
       "https://atticdb.com/pricing",
       "https://atticdb.com/compare",
       "https://atticdb.com/benchmarks",
+      "https://atticdb.com/blog",
     ]);
   });
 

@@ -1,9 +1,14 @@
 import type { MetadataRoute } from "next";
-import { PAGES } from "@/lib/seo";
+import { listPosts } from "@/content/blog";
+import { blogPostUrl, PAGES } from "@/lib/seo";
 import { absoluteUrl } from "@/lib/site";
 
 export const dynamic = "force-static";
 
-export default function sitemap(): MetadataRoute.Sitemap {
-  return PAGES.map(({ path }) => ({ url: absoluteUrl(path) }));
+export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
+  const posts = await listPosts();
+  return [
+    ...PAGES.map(({ path }) => ({ url: absoluteUrl(path) })),
+    ...posts.map(({ slug, date }) => ({ url: blogPostUrl(slug), lastModified: date })),
+  ];
 }

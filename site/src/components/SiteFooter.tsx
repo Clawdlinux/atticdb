@@ -8,6 +8,7 @@ const LINKS = [
   { label: "Pricing", href: "/pricing" },
   { label: "Compare", href: "/compare" },
   { label: "Benchmarks", href: "/benchmarks" },
+  { label: "Blog", href: "/blog" },
   { label: "Issues", href: `${GITHUB_URL}/issues` },
 ];
 

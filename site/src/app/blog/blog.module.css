@@ -1,0 +1,99 @@
+/* Blog: one readable column. Post bodies reuse the docs prose class; this adds the blog's parts. */
+.blog {
+  max-width: 68ch;
+  padding-block: 1rem 2rem;
+}
+
+.title {
+  margin-bottom: 1rem;
+}
+
+.lead {
+  font-size: var(--step-lead);
+  line-height: 1.35;
+}
+
+.meta {
+  margin-bottom: 2rem;
+  color: var(--muted);
+  font-size: var(--step-small);
+}
+
+/* The index: one entry per post, newest first. */
+.posts {
+  display: grid;
+  gap: 2.5rem;
+  margin-top: 3rem;
+  padding: 0;
+  list-style: none;
+}
+
+.entryTitle {
+  font-size: var(--step-lead);
+  line-height: 1.1;
+}
+
+.entryTitle a {
+  text-decoration: none;
+}
+
+.entryTitle a:hover {
+  text-decoration: underline;
+}
+
+.entry .meta {
+  margin-block: 0.5rem;
+}
+
+.description {
+  font-size: var(--step-body);
+  line-height: 1.6;
+}
+
+.empty {
+  margin-top: 3rem;
+  color: var(--muted);
+}
+
+/* Illustrations live in public/blog/<slug>/ and never overflow the column. */
+.prose img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+/* Try it / Tell us: one tone step up, after the post. */
+.cta {
+  display: grid;
+  gap: 1.5rem;
+  margin-top: 4rem;
+  padding: 1.5rem;
+  background: var(--surface);
+  line-height: 1.6;
+}
+
+.ctaTitle {
+  margin-bottom: 0.5rem;
+  font-size: var(--step-lead);
+  line-height: 1.1;
+}
+
+.cta a {
+  text-decoration-color: var(--muted);
+}
+
+.cta a:hover {
+  text-decoration-color: var(--ink);
+}
+
+.cta code {
+  padding: 0.1em 0.3em;
+  background: var(--bg);
+}
+
+@media (min-width: 48rem) {
+  .cta {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 2rem;
+  }
+}

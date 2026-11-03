@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { Bebas_Neue, EB_Garamond, JetBrains_Mono } from "next/font/google"; // taste-skill-ignore: mono is set on pre and code only
 import SiteFooter from "@/components/SiteFooter";
 import SiteNav from "@/components/SiteNav";
-import { pageMetadata } from "@/lib/seo";
+import { pageMetadata, RSS_FEED } from "@/lib/seo";
 import { revealBootScript } from "@/lib/motion";
 import { SITE_URL } from "@/lib/site";
 import "./globals.css";
@@ -44,6 +44,7 @@ const code = JetBrains_Mono({ // taste-skill-ignore: code blocks only
 export const metadata: Metadata = {
   metadataBase: new URL(SITE_URL),
   title: "AtticDB",
+  alternates: { types: RSS_FEED },
   openGraph: pageMetadata("/").openGraph,
   twitter: pageMetadata("/").twitter,
 };

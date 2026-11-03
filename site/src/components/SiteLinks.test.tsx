@@ -16,11 +16,13 @@ describe("shared site links", () => {
 
     for (const name of ["Main navigation", "Footer"]) {
       const links = Array.from(document.querySelectorAll(`nav[aria-label="${name}"] a`));
-      for (const [label, path] of [["Pricing", "/pricing"], ["Compare", "/compare"], ["Benchmarks", "/benchmarks"]]) {
+      for (const [label, path] of [["Pricing", "/pricing"], ["Compare", "/compare"], ["Benchmarks", "/benchmarks"], ["Blog", "/blog"]]) {
         expect(links.find((a) => a.textContent === label)?.getAttribute("href")).toBe(`${base}${path}`);
       }
       expect(links.find((a) => a.textContent === "Docs")?.getAttribute("href")).toBe("https://docs.atticdb.com");
     }
+    const nav = Array.from(document.querySelectorAll('nav[aria-label="Main navigation"] a')).map((a) => a.textContent);
+    expect(nav).toEqual(["Pricing", "Compare", "Benchmarks", "Blog", "Docs"]);
     expect(document.querySelector('a[href="#main"]')?.textContent).toBe("Back to top");
     expect(document.querySelector('[aria-label="AtticDB on GitHub"]')?.getAttribute("href"))
       .toBe("https://github.com/Clawdlinux/atticdb");

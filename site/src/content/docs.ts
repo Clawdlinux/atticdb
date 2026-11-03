@@ -99,7 +99,7 @@ export function findDoc(slug: string): DocPage | undefined {
 
 const ENTITIES: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
 
-function escapeHtml(text: string): string {
+export function escapeHtml(text: string): string {
   return text.replace(/[&<>"']/g, (c) => ENTITIES[c]);
 }
 
@@ -119,22 +119,27 @@ function slugify(text: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
-function rewriteDocsLink(href: string): string {
+function rewriteDocsLink(href: string, docLink: (slug: string) => string): string {
   const [target, hash] = href.slice("docs:".length).split("#");
-  return docsHref(target) + (hash ? `#${hash}` : "");
+  return docLink(target) + (hash ? `#${hash}` : "");
 }
 
-function render(md: string): { html: string; headings: DocHeading[] } {
+// docLink maps a docs: link target to its URL. Docs pages link within their own host.
+// Blog posts live on the main host, so they pass docCanonical.
+export function render(
+  md: string,
+  docLink: (slug: string) => string = (slug) => docsHref(slug),
+): { html: string; headings: DocHeading[] } {
   const headings: DocHeading[] = [];
   const marked = new Marked({
     gfm: true,
     walkTokens(token) {
       if (token.type === "link" && token.href.startsWith("docs:")) {
-        token.href = rewriteDocsLink(token.href);
+        token.href = rewriteDocsLink(token.href, docLink);
       }
     },
     renderer: {
-      // The READMEs never need raw HTML, so any that slips in shows as text.
+      // The READMEs and blog posts never need raw HTML, so any that slips in shows as text.
       html({ text }) {
         return escapeHtml(text);
       },

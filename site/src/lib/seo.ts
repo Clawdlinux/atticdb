@@ -1,9 +1,10 @@
 import type { Metadata } from "next";
+import { BLOG_DESCRIPTION, BLOG_TITLE, type Post } from "@/content/blog";
 import { docCanonical, findDoc } from "@/content/docs";
 import type { Qa } from "@/content/faq";
 import { absoluteUrl, GITHUB_URL, SITE_URL } from "@/lib/site";
 
-type PagePath = "/" | "/pricing" | "/compare" | "/benchmarks";
+type PagePath = "/" | "/pricing" | "/compare" | "/benchmarks" | "/blog";
 
 export const PAGES: { path: PagePath; title: string; description: string }[] = [
   {
@@ -30,6 +31,11 @@ export const PAGES: { path: PagePath; title: string; description: string }[] = [
     description:
       "Durable acks per second and latency for AtticDB, Redis, Valkey, DiceDB and SQLite on NVMe and Premium SSD v2. 7 runs, raw data linked.",
   },
+  {
+    path: "/blog",
+    title: BLOG_TITLE,
+    description: BLOG_DESCRIPTION,
+  },
 ];
 
 const OG_IMAGE = {
@@ -37,6 +43,11 @@ const OG_IMAGE = {
   width: 1200,
   height: 630,
   alt: "AtticDB: memory that hits the disk. Acked 94 µs.",
+};
+
+// Next replaces a layout's alternates with a page's, so every page repeats the feed link.
+export const RSS_FEED = {
+  "application/rss+xml": [{ url: absoluteUrl("/blog/rss.xml"), title: BLOG_TITLE }],
 };
 
 export function pageMetadata(path: PagePath): Metadata {
@@ -47,7 +58,7 @@ export function pageMetadata(path: PagePath): Metadata {
   return {
     title: path === "/" ? { absolute: title } : title,
     description,
-    alternates: { canonical: absoluteUrl(path) },
+    alternates: { canonical: absoluteUrl(path), types: RSS_FEED },
     openGraph: {
       title,
       description,
@@ -76,7 +87,7 @@ export function docMetadata(slug: string): Metadata {
   return {
     title: { absolute: title },
     description,
-    alternates: { canonical: url },
+    alternates: { canonical: url, types: RSS_FEED },
     openGraph: {
       title,
       description,
@@ -91,6 +102,57 @@ export function docMetadata(slug: string): Metadata {
       description,
       images: ["/og.png"],
     },
+  };
+}
+
+export function blogPostUrl(slug: string): string {
+  return absoluteUrl(`/blog/${slug}`);
+}
+
+export function blogPostMetadata(post: Post): Metadata {
+  const title = `${post.title} · AtticDB blog`;
+  const { description } = post;
+  const url = blogPostUrl(post.slug);
+  const image = post.image ? { url: absoluteUrl(post.image), alt: post.title } : OG_IMAGE;
+
+  return {
+    title: { absolute: title },
+    description,
+    alternates: { canonical: url, types: RSS_FEED },
+    openGraph: {
+      title,
+      description,
+      url,
+      siteName: "AtticDB",
+      images: [image],
+      type: "article",
+      publishedTime: post.date,
+      authors: [post.author],
+      tags: post.tags,
+    },
+    twitter: {
+      card: "summary_large_image",
+      title,
+      description,
+      images: [image.url],
+    },
+  };
+}
+
+export function blogPostingJsonLd(post: Post) {
+  const url = blogPostUrl(post.slug);
+  return {
+    "@context": "https://schema.org",
+    "@type": "BlogPosting",
+    headline: post.title,
+    description: post.description,
+    datePublished: post.date,
+    author: { "@type": "Person", name: post.author },
+    publisher: { "@type": "Organization", name: "AtticDB", url: SITE_URL },
+    url,
+    mainEntityOfPage: url,
+    keywords: post.tags.join(", "),
+    ...(post.image ? { image: absoluteUrl(post.image) } : {}),
   };
 }
 

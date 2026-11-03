@@ -12,6 +12,7 @@ export default function SiteNav() {
         <Link href={siteHref("/pricing")}>Pricing</Link>
         <Link href={siteHref("/compare")}>Compare</Link>
         <Link href={siteHref("/benchmarks")}>Benchmarks</Link>
+        <Link href={siteHref("/blog")}>Blog</Link>
         <a href={DOCS_URL}>Docs</a>
       </nav>
       <Link className="button button--ink" href={siteHref("/#install")}>
