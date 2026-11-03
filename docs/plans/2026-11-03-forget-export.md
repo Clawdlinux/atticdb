@@ -1,6 +1,6 @@
 # S5: forget and markdown export. Implementation plan
 
-**Status, 2026-11-03: draft. Supersedes the 2026-10-30 plan** (`docs/plans/2026-10-30-forget-export.md` on branch `docs/s5-plan`, commit `6176d3d`, written at `239107f`). That file stays on its branch for history. Issue #45. Studio forget is the owner ask of 2026-11-03. It replaces the old plan's "no studio forget button". Base: `main` at `51271cc`.
+**Status, 2026-11-03: done. Shipped in #165, #166, #167, #168, #169 and the Task 6 docs PR. Supersedes the 2026-10-30 plan** (`docs/plans/2026-10-30-forget-export.md` on branch `docs/s5-plan`, commit `6176d3d`, written at `239107f`). That file stays on its branch for history. Issue #45. Studio forget is the owner ask of 2026-11-03. It replaces the old plan's "no studio forget button". Base: `main` at `51271cc`.
 
 > For agents: 1 implementer per task. Each task is 1 PR from `main`, built TDD. Before merge it gets a spec review, a code-quality review and a Copilot review. A task branches from `main` only after every task it depends on is merged to `main`. Branching from an unmerged task branch doesn't count. Tasks 2 and 3 may run in parallel once Task 1 is merged. Tasks 4 and 5 may run in parallel once Task 3 is merged. See "Order".
 
@@ -118,7 +118,7 @@ A forget hides turn content, meta, role and time, and fact values. These stay ob
 - Counts: each session's `turns`, session totals, and the `/v1/stats` and `/metrics` fields `facts`, `fact_revisions`, `compressed_turns` and `search_index_terms`. They include forgotten records.
 - Sizes and times: `atticdb dump` prints every record's payload length and commit time.
 - Retry oracles: a retry with a guessed payload and a known retry key confirms the guess. `turn_repeats` counts repeated content.
-- RAM: the word index keeps tokens of hidden text until restart. Hot cache entries stay until purged or evicted. Reads never serve either.
+- RAM: the word index keeps tokens of hidden text. A restart rebuilds it from the log, hidden text included. Hot cache entries stay until purged or evicted. Reads never serve either.
 - Bytes: segment files, unsalted retry digests in checkpoints, filesystem and SSD remanence, copies, backups and exports already taken.
 - `recover --truncate-at` below a forget's LSN drops the forget, and the content shows again.
 - A retry that arrives after its key left the dedup window writes the content again.

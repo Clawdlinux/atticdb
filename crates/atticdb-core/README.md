@@ -146,15 +146,28 @@ The forget set holds session and fact-key cutoffs and `(tenant, LSN)` pairs. Eve
 A session forget stores a cutoff only for a session with a published turn. A fact-key forget stores one only for a key in the fact index.
 So both stay bounded by `max_sessions` and `max_facts`.
 `max_forgotten_lsns` caps the pairs (default 100,000). Past it, a forget is `ResourceExhausted("forgets")`.
+A cap lowered below the pairs already held makes open fail with that error. Raise it again, as for `max_facts`.
 A pair carries the forget's tenant, so a pair naming another tenant's record, or no turn or fact, hides nothing.
 Session counts, `facts`, `fact_revisions`, `compressed_turns` and `search_index_terms` still count hidden records.
 `forgotten_sessions`, `forgotten_fact_keys` and `forgotten_lsns` count the set.
-The hot cache drops covered entries after the ack, for hygiene only. The word index keeps hidden tokens in RAM until restart.
+The hot cache drops covered entries after the ack, for hygiene only.
+The word index keeps hidden tokens in RAM. A restart rebuilds it from the log, hidden text included. Search still never returns a hidden record.
 
 Checkpoints write tag 6 forget retry entries, in tag 5's layout with an empty scope.
 Tag 7 holds a session cutoff and tag 8 a fact-key cutoff. Tag 9 holds up to 1,024 LSNs of 1 tenant.
 A delta writes only dirty forget entries. A full checkpoint writes them all.
 A binary from before S5 fails replay on a `Forget` frame with `corrupt_index`, and truncates nothing.
+
+## Export
+
+`Engine::export(tenant, ExportQuery)` reads 1 page of a tenant's memory for markdown export (D100).
+Facts come first, file refs included, in byte order of key. Then every session's turns, by agent, session and seq.
+The first page pins `at` to the durable LSN. Later pages pass it back, so every page reads the same state.
+`at` above the durable LSN, or `max_items` 0, is `InvalidInput`.
+Forgets apply at the current state (D45), so a forget between pages hides content in the pages after it.
+A forgotten turn is a placeholder. Forgotten and deleted facts are left out.
+A key whose revision at `at` was trimmed is `Conflict`. The client then starts again.
+Reads use the hot cache but never insert into it, so an export doesn't evict agents' recent turns.
 
 ## Health
 
