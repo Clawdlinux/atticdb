@@ -109,7 +109,7 @@ The hook shows only the 5 newest notes, so the 10 fillers push it out of the blo
 Every text match ignores case and is a plain substring match:
 
 - S1: `nextest` in the reply.
-- S2: the reply holds both parts of the reason. The round trips: `round trip`, `round-trip` or `roundtrip`. The budget: `p99`, `1 ms` or `1ms`. One part alone fails, so "its license forbids p99 metrics" fails.
+- S2: an integration check that the agent searched, plus a coarse reason check. It is not proof of factual accuracy; the `handoff_eval` graders cover accuracy. S2 uses regexes, not substrings. The reply needs both parts of the reason. The round trips: `round trip`, `round-trip`, `roundtrip`, `hop`, `hops` or `extra trip`. The budget: `p99`, or a whole `1 ms`, `1ms` or `1 millisecond` (`11 ms`, `0.1 ms` and `21ms` don't count). `tail latency` counts only next to a 1 ms match. A reply that names a competing cause fails: `licens`, `cost`, `price`, `pricing`, `memory usage`, `ram`, `crash`, `deprecat` or `vendor lock`, as whole words or word starts.
 - S3: a block line `- <key>: ...` holds `22`, for a key the agent set under `repo/evalrepo/`.
 - S4: an added line of `git diff <first commit> -- calc.py` holds `def add(a, b)`. The `memory_append` has no `session`, or an empty or null one, as AtticDB reads those as none. The first 60 characters of the note, with whitespace collapsed, appear in the block.
 
