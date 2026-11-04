@@ -34,6 +34,39 @@ fn contents_of_hits(result: &Value) -> Vec<&str> {
     hits.iter().map(|hit| hit["content"].as_str().unwrap()).collect()
 }
 
+/// `text` with each `YYYY-MM-DD` date as `DATE`.
+fn undated(text: &str) -> String {
+    let is_date = |word: &str| {
+        let digit =
+            |(i, b): (usize, u8)| if i == 4 || i == 7 { b == b'-' } else { b.is_ascii_digit() };
+        word.len() == 10 && word.bytes().enumerate().all(digit)
+    };
+    let (mut out, mut rest) = (String::new(), text);
+    while let Some(c) = rest.chars().next() {
+        if rest.get(..10).is_some_and(is_date) {
+            out.push_str("DATE");
+            rest = &rest[10..];
+        } else {
+            out.push(c);
+            rest = &rest[c.len_utf8()..];
+        }
+    }
+    out
+}
+
+/// `tree --json` output without `newest_ns` and `lsn`, which change from run to run.
+fn unstamped(value: &mut Value) {
+    match value {
+        Value::Object(fields) => {
+            fields.remove("newest_ns");
+            fields.remove("lsn");
+            fields.values_mut().for_each(unstamped);
+        }
+        Value::Array(items) => items.iter_mut().for_each(unstamped),
+        _ => {}
+    }
+}
+
 fn appended(result: &Value, case: &str) -> u64 {
     receipt(result, "seq", &["committed", "deduplicated", "lsn", "seq"], case)
 }
@@ -508,6 +541,110 @@ fn tool_calls_over_stdio() {
         json!([{"seq": 1, "lsn": hi, "redacted": true}])
     );
     assert_eq!(reader.close().0.code(), Some(0));
+    // `atticdb tree` draws the keys under a prefix, with counts and dates, never a forgotten
+    // key. It reads only through `fact_list`.
+    let long = format!("{}\nline 2", "a".repeat(100));
+    for (key, content) in [
+        ("tree/user/style", long.as_str()),
+        ("tree/repo/app/api/retry", "Retry 3 times."),
+        ("tree/repo/app/api/timeout", "30 s"),
+        ("tree/repo/app/tests/runner", "cargo test"),
+        ("tree/repo/other/x", "x"),
+        ("tree/agent/claude/notes", "secret plan"),
+        ("odd/x/", "a key that ends in /"),
+    ] {
+        cli(&["fact", "set", "--key", key, "--content", content], 0);
+    }
+    forget(&["key", "--key", "tree/agent/claude/notes"]);
+    let nested = "tree/  5 facts, newest DATE\n\
+        |-- repo/  4 facts, newest DATE\n\
+        |   |-- app/  3 facts, newest DATE\n\
+        |   |   |-- api/  2 facts, newest DATE\n\
+        |   |   |   |-- retry  DATE\n\
+        |   |   |   `-- timeout  DATE\n\
+        |   |   `-- tests/  1 fact, newest DATE\n\
+        |   |       `-- runner  DATE\n\
+        |   `-- other/  1 fact, newest DATE\n\
+        |       `-- x  DATE\n\
+        `-- user/  1 fact, newest DATE\n    \
+            `-- style  DATE\n";
+    let depth = "tree/  5 facts, newest DATE\n\
+        |-- repo/  4 facts, newest DATE\n\
+        |   |-- app/  3 facts, newest DATE\n\
+        |   `-- other/  1 fact, newest DATE\n\
+        `-- user/  1 fact, newest DATE\n    \
+            `-- style  DATE\n\
+        Deeper levels show as counts. Pass --depth <n> to see more.\n";
+    let content =
+        format!("tree/user/  1 fact, newest DATE\n`-- style  DATE  {}...\n", "a".repeat(77));
+    // (case, command, what stdout says with dates as DATE)
+    for (case, verb, expected) in [
+        ("nested tree", &["tree", "tree/"][..], nested.to_owned()),
+        (
+            "prefix filter",
+            &["tree", "tree/repo/app/api/"],
+            "tree/repo/app/api/  2 facts, newest DATE\n|-- retry  DATE\n`-- timeout  DATE\n".into(),
+        ),
+        (
+            "prefix inside a segment",
+            &["tree", "tree/repo/o"],
+            "tree/repo/o  1 fact, newest DATE\n`-- other/  1 fact, newest DATE\n    `-- x  DATE\n"
+                .into(),
+        ),
+        ("--depth", &["tree", "tree/", "--depth", "2"], depth.to_owned()),
+        ("--content cuts the first line", &["tree", "tree/user/", "--content"], content),
+        (
+            "a key that ends in /",
+            &["tree", "odd/"],
+            "odd/  1 fact, newest DATE\n`-- x/  1 fact, newest DATE\n    `-- (empty)  DATE\n"
+                .into(),
+        ),
+    ] {
+        let (out, err) = cli(verb, 0);
+        assert_eq!(undated(&out), expected, "{case}");
+        assert!(err.is_empty(), "{case}: {err}");
+    }
+    // In JSON the empty name stays "".
+    let (out, _) = cli(&["tree", "odd/x/", "--json"], 0);
+    let printed: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(printed["nodes"][0]["name"], "", "{out}");
+    // The only key under tree/agent/ is forgotten, so the tree is empty and says how to save
+    // one. It names this atticdb by its full path when it isn't on PATH, and repeats the
+    // store flags, so the fact lands in the store the tree read.
+    let (empty, save) = ("No facts under \"tree/agent/\". Save one: ", " fact set --url ");
+    let (out, _) = cli(&["tree", "tree/agent/"], 0);
+    let typed = out.strip_prefix(empty).and_then(|rest| rest.split_once(save)).map(|s| s.0);
+    assert!(typed.is_some_and(|typed| typed.contains("atticdb")), "{out}");
+    let store = format!("--url {} --token-file {}", args[1], args[3]);
+    let saved = format!(" fact set {store} --key tree/agent/rule --content \"...\"\n");
+    assert!(out.ends_with(&saved), "{out}");
+    // `--json` prints 1 line of nested nodes. A folder past `--depth` has null children.
+    let (out, _) = cli(&["tree", "tree/repo/", "--json", "--depth", "2", "--content"], 0);
+    let mut printed: Value = serde_json::from_str(&out).unwrap();
+    let newest = printed["newest_ns"].as_u64().unwrap();
+    let (app, x) = (&printed["nodes"][0], &printed["nodes"][1]["children"][0]);
+    assert!(app["newest_ns"].as_u64() <= Some(newest) && app["newest_ns"].as_u64() > Some(0));
+    assert!(x["lsn"].as_u64() > Some(0) && x["children"].is_null(), "a key: {x}");
+    unstamped(&mut printed);
+    let expected = json!({"prefix": "tree/repo/", "facts": 4, "truncated": false, "nodes": [
+        {"name": "app/", "path": "tree/repo/app/", "facts": 3, "children": [
+            {"name": "api/", "path": "tree/repo/app/api/", "facts": 2, "children": null},
+            {"name": "tests/", "path": "tree/repo/app/tests/", "facts": 1, "children": null},
+        ]},
+        {"name": "other/", "path": "tree/repo/other/", "facts": 1, "children": [
+            {"name": "x", "path": "tree/repo/other/x", "facts": 1, "content": "x"},
+        ]},
+    ]});
+    assert_eq!(printed, expected, "--json shape");
+    // With no facts, `--json` prints an empty tree and the hint goes to stderr.
+    let (out, err) = cli(&["tree", "tree/agent/", "--json", "--content"], 0);
+    let printed: Value = serde_json::from_str(&out).unwrap();
+    let none = json!({"prefix": "tree/agent/", "facts": 0, "newest_ns": null, "truncated": false,
+                      "nodes": []});
+    assert_eq!(printed, none, "empty --json");
+    assert!(err.starts_with(empty) && err.contains(&format!("{store} --key tree/agent/rule")));
+    let (all, _) = cli(&["tree", "tree/", "--content", "--json"], 0);
+    assert!(!all.contains("agent") && !all.contains("secret plan"), "forgotten: {all}");
     // A search that finds nothing prints the same JSON, and a hint on stderr.
     let (out, err) = cli(&["search", "--query", "hi there"], 0);
     assert_eq!(serde_json::from_str::<Value>(&out).unwrap(), json!({"hits": [], "next": null}));
@@ -522,6 +659,8 @@ fn tool_calls_over_stdio() {
         // `cli` passes --agent but no --session.
         (&["forget", "session"], 2, "forget session needs --session"),
         (&["forget", "key", "--key", "k"], 2, "atticdb forget key <connect>"),
+        (&["tree", "--depth", "x"], 2, "--depth must be a whole number"),
+        (&["tree", "a/", "b/"], 2, "atticdb tree [<prefix>] <connect>"),
     ] {
         let (out, err) = cli(verb, code);
         assert!(out.is_empty() && err.contains(reason), "{verb:?}: {out} {err}");

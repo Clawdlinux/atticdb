@@ -35,6 +35,7 @@ const USAGE: &str = "usage:
   atticdb fact set <connect> --key <key> (--content <text> | --delete)
   atticdb fact get <connect> --key <key>
   atticdb fact list <connect> --prefix <prefix> [--after <key>] [--limit <n>] [--max-bytes <n>]
+  atticdb tree [<prefix>] <connect> [--depth <n>] [--content] [--json]
   atticdb file save <connect> --path <file> --about <text>
   atticdb file get <connect> --path <file or folder> [--versions]
   atticdb forget session <connect> --agent <a> --session <s> [--up-to-lsn <n>]
@@ -53,6 +54,9 @@ const USAGE: &str = "usage:
   after the folder holding .git. A worktree takes its main repo's name.
   append, recent, search, fact and file print one JSON line. They exit 1 when nothing was written,
   3 when a write may or may not be saved.
+  tree prints fact keys as a tree of / segments, with counts and the newest change date.
+  With no <prefix>, --depth defaults to 2. --content adds each value's first line. --json
+  prints 1 JSON line. Deleted and forgotten keys never show.
   forget hides records up to --up-to-lsn, or up to the forget itself. It exits like append.
   Content is hidden from normal AtticDB reads. It stays on disk until purge ships (#159).
   What stays visible: https://github.com/Clawdlinux/atticdb#what-a-forget-leaves-visible
@@ -68,9 +72,9 @@ const USAGE: &str = "usage:
 
 /// Commands that use the home. A relative `ATTICDB_HOME` fails them with exit 2, so none falls
 /// back to the default home. The hook prints `{}` for it, as for any error.
-const HOME_COMMANDS: [&str; 12] = [
-    "mcp", "connect", "setup", "doctor", "studio", "append", "recent", "search", "fact", "file",
-    "forget", "export",
+const HOME_COMMANDS: [&str; 13] = [
+    "mcp", "connect", "setup", "doctor", "studio", "append", "recent", "search", "fact", "tree",
+    "file", "forget", "export",
 ];
 
 /// Flags of every command that talks to a server as a tenant. The first 5 pick the store.
@@ -164,6 +168,15 @@ fn main() -> ExitCode {
                 }
                 _ => None,
             },
+            "tree" => {
+                let (prefix, rest) = match rest.split_first() {
+                    Some((prefix, rest)) if !prefix.starts_with("--") => (Some(prefix), rest),
+                    _ => (None, rest),
+                };
+                let valued = [&CONNECT[..], &["--depth"]].concat();
+                flags(rest, &valued, &["--content", "--json"])
+                    .map(|flags| atticdb::tree::command(prefix.cloned(), flags))
+            }
             "file" => match rest.split_first().map(|(verb, rest)| (verb.as_str(), rest)) {
                 Some(("save", rest)) => tool(rest, "file_ref", &["--path", "--about"], &[]),
                 Some(("get", rest)) => tool(rest, "file_get", &["--path"], &["--versions"]),
