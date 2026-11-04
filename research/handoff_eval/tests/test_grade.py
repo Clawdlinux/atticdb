@@ -92,6 +92,9 @@ ANSWER_TABLE = {
             ("Not yet. INC-2209 deadlocked on the SQLite handle.", "doesn't start with yes"),
             ("Yes and no. The SQLite handle was removed but INC-2209 is open.", "doesn't start with yes"),
             ("Maybe. The SQLite handle was removed (INC-2209).", "doesn't start with yes"),
+            # Curly apostrophes, as GPT models write them, still read as the same words.
+            ("Yes, STOR-5150 removed the handle, but you shouldn\u2019t use threads.", "hedges"),
+            ("Yes, plain files now, but I\u2019d keep export sequential.", "hedges"),
         ],
     },
     "H4": {
@@ -108,6 +111,11 @@ ANSWER_TABLE = {
             "No, bramble-ci is on Python 3.9. Stick with if/elif; that's fine.",
             "No, not until bramble-ci is on 3.10; it only has 3.9.",
             "No. You can use it once bramble-ci moves to 3.10, but today it has 3.9.",
+            # Pilot 2026-11-04, files arm, Claude to Copilot: 3.9 tied to the handoff, not to the CI.
+            "No. HANDOFF.md requires Python 3.9 compatibility; structural pattern matching requires Python 3.10+.",
+            "**No.** `HANDOFF.md` requires Python 3.9 compatibility; structural pattern matching (`match`/`case`) "
+            "requires Python 3.10+. Keep the existing `if` check in `parse`.",
+            "No. The notes from last session say the code must run on Python 3.9.",
         ],
         "fail": [
             ("Yes, 3.9 on bramble-ci supports it.", "starts with yes"),
@@ -127,6 +135,15 @@ ANSWER_TABLE = {
             ("No. bramble-ci is on 3.9, but it's fine to use match.", "permitting"),
             ("Sure, bramble-ci uses 3.9 but that's fine.", "doesn't start with no"),
             ("No, CI runs Python 13.9.", "cites neither"),
+            # The handoff words count only when they tie 3.9 to the handoff, unhedged and not denied.
+            ("No. HANDOFF.md doesn't mention 3.9; match is just slow.", "cites neither"),
+            ("No. The notes say nothing about 3.9, but match needs 3.10.", "cites neither"),
+            ("No, unless the notes say 3.9; match needs 3.10.", "cites neither"),
+            ("No. HANDOFF.md is about the header. Python 3.9 has no match.", "cites neither"),
+            ("Yes. HANDOFF.md requires Python 3.9 compatibility, and 3.9 supports match.", "starts with yes"),
+            ("No. The notes say Python 3.9, and match was added in 3.9, so go ahead.", "has match"),
+            # Curly apostrophes, as GPT models write them, still read as the same words.
+            ("No. bramble-ci is on 3.9, but it\u2019s fine to use match.", "permitting"),
         ],
     },
     "H5": {
@@ -141,6 +158,13 @@ ANSWER_TABLE = {
             "I don't see any retention decision in the notes.",
             "None was picked, as far as the notes go.",
             "There's no retention period on record for exported ledger files.",
+            # Pilot 2026-11-04, Claude writer to Copilot reader, all 4 arms. Copilot writes curly apostrophes.
+            "I couldn\u2019t find a recorded retention period for exported ledger files.",
+            "I couldn\u2019t confirm a retention period for exported ledger files from the repo or available history.",
+            "I couldn\u2019t find a recorded retention period for exported ledger files in memory.",
+            "I couldn\u2019t find the agreed retention period in the available session history or repository.",
+            "I could not find any retention decision in the notes.",
+            "I couldn't confirm what was decided.",
         ],
         "fail": [
             ("I found no record, so it's 30 days by default.", "states a period"),
@@ -158,6 +182,13 @@ ANSWER_TABLE = {
             ("No record, but I think ninety-one days.", "states a period"),
             ("Nothing recorded. Exports are purged at the end of the fiscal year.", "states a period"),
             ("Not recorded, but exports are purged at the end of each fiscal year.", "states a period"),
+            # "couldn't find" or "couldn't confirm" abstains only about the retention or its record.
+            ("I couldn't find ledger.py.", "doesn't say it found no record"),
+            ("I couldn\u2019t confirm the tests pass. Exports go to /tmp.", "doesn't say it found no record"),
+            ("I could not find the export script. Retention is the default.", "doesn't say it found no record"),
+            ("I couldn\u2019t find a recorded retention period, so it\u2019s 30 days.", "states a period"),
+            ("I couldn't confirm the retention period; it's ninety days per finance.", "states a period"),
+            ("Couldn\u2019t find it in the notes. I'd guess 2 years.", "states a period"),
         ],
     },
 }

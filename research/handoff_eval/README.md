@@ -112,7 +112,10 @@ Every match goes through `EVIDENCE_PATTERNS` in run.py, 1 pattern per token. Cap
    - Copilot: none. See "Copilot CLI".
 
 `captured_where` lists each place with the tokens found there, such as `atticdb:fact repo/evalrepo/x[LEDG-7731]; repo:HANDOFF.md[LEDG-7731,412]`.
+A store fact is named by its key, and a store turn by its lsn, such as `atticdb:turn lsn 7`. Each saved note is 1 turn.
 The oracle has no capture.
+
+**captured_all**, "captured with reason": every evidence token of the case sits in 1 of those places. For H1 that is `LEDG-7731` and `412` in 1 note, fact or file, so the decision was saved with its reason. Tokens split over 2 notes don't count. H2 and H6 have 1 token, so there it equals captured.
 
 **delivered**, before the reader's final reply. True when a token was in its context:
 
@@ -194,9 +197,21 @@ Exit codes: 0 when every run finished, 1 when a run errored or the budget stoppe
 
 ## Results
 
-The CSV has 1 row per run: case, arm, writer, reader, rep, the 3 stages and where each was found, errored and its stage, sessions, tokens in and out, wall time, both model ids, and the reasons.
-Reasons hold the grader's reasons and a redacted excerpt of the reply. Never a full reply or an env value.
+The CSV has 1 row per run: case, arm, writer, reader, rep, the 3 stages and where each was found, captured_all, errored and its stage, sessions, tokens in and out, wall time, both model ids, the reasons and the reply.
+Reasons hold the grader's reasons and a redacted excerpt of the reply, cut at 200 chars. `reply` holds the reader's whole final reply, redacted the same way: token shapes and the run's paths are replaced. No column holds an env value.
+A batch refuses an `--out` CSV whose header differs from this version's, such as one from before `captured_all` and `reply`.
 
 The summary's first line is "Integration pilot. Not a statistical result."
-Then pass rates by arm and case, a stage funnel per arm with the oracle ceiling, and pass rates by direction.
+Then pass rates by arm and case, a stage funnel per arm with the oracle ceiling, captured with reason per arm, and pass rates by direction.
 Rates count runs that did not error. Errored runs are counted apart.
+
+### Re-grade
+
+```sh
+python3 -m research.handoff_eval --regrade research/handoff_eval/results/2026-11-04-pilot.csv
+```
+
+It grades the stored answer replies (H1, H3, H4, H5) again with the current graders, prints each verdict that changed, then the summary. It runs no agent and writes nothing.
+Code cases (H2, H6) keep their stored verdict, as the repo they were graded on is gone. Errored rows stay errored. captured_all is worked out again from `captured_where`.
+A CSV without the `reply` column, such as the 2026-11-04 pilot, is graded on the `reply=` excerpt in the reasons. That excerpt is flattened and cut at 200 chars, so the output says those replies may be cut off, and marks each changed verdict that was graded on a cut reply.
+In such a CSV every store turn is the 1 place `atticdb:turn`, so 2 notes there count as 1 place. The output counts the rows this affects.

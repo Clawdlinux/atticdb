@@ -30,6 +30,8 @@ Stages, each None when not measured or not applicable:
 
 - captured: after the writers, an evidence token is in the run's AtticDB store (`atticdb search`),
   in a file of the repo working tree, or in the writer harness's native memory for this repo.
+  captured_all: every evidence token sits in 1 of those places, such as 1 note or 1 file. For H1
+  that is the decision's ticket and its reason, 412 bytes, saved together.
 - delivered: before the reader's final reply, an evidence token was in its context: the
   SessionStart hook block for the reader harness (atticdb arm), a tool result or file read in the
   reader's transcript, or the reader prompt (oracle arm only). None for H5.
@@ -143,6 +145,8 @@ class HandoffResult:
     run: int
     captured: bool | None = None
     captured_where: str = ""
+    # Every evidence token of the case in 1 capture place: for H1, LEDG-7731 and 412 in 1 note.
+    captured_all: bool | None = None
     delivered: bool | None = None
     delivered_where: str = ""
     passed: bool | None = None
@@ -157,6 +161,7 @@ class HandoffResult:
     premium_requests: int | None = None  # Copilot CLI sessions only, from their `result` line
     writer_model: str = ""
     reader_model: str = ""
+    reply: str = ""  # the reader's final reply, whole, redacted as the reasons are
 
     def fail(self, stage: str, why: str) -> None:
         self.errored = True
@@ -404,8 +409,32 @@ def _where(found: list[tuple[str, str]]) -> str:
     return "; ".join(f"{place}[{','.join(toks)}]" for place, toks in by.items())
 
 
+def parse_where(where: str) -> list[tuple[str, str]]:
+    """`_where` read back into (place, token) pairs. A place holding "; " or "[" can't be read back.
+    Tokens never hold "," or "]"."""
+    found = []
+    for part in filter(None, (where or "").split("; ")):
+        place, sep, toks = part.rpartition("[")
+        if not sep or not toks.endswith("]"):
+            raise ValueError(f"not a place[tokens] entry: {part!r}")
+        found += [(place, t) for t in toks[:-1].split(",") if t]
+    return found
+
+
+def all_in_one_place(found: list[tuple[str, str]], tokens) -> bool:
+    """Whether 1 place holds every token. For H1 that is LEDG-7731 and 412 in 1 note or file, so the
+    decision was saved with its reason. Tokens split over 2 notes don't count."""
+    want = set(tokens)
+    by: dict[str, set[str]] = {}
+    for place, token in found:
+        by.setdefault(place, set()).add(token)
+    return bool(want) and any(want <= toks for toks in by.values())
+
+
 def store_hits(stdout: bytes, token: str) -> list[str]:
-    """The places in an `atticdb search` JSON line whose content or key holds `token`."""
+    """The places in an `atticdb search` JSON line whose content or key holds `token`. A fact is
+    named by its key. A turn is named by its lsn, as each saved note is its own turn, so 2 notes
+    are 2 places."""
     places = []
     for line in stdout.decode("utf-8", "replace").splitlines():
         try:
@@ -420,6 +449,9 @@ def store_hits(stdout: bytes, token: str) -> list[str]:
             if has_token(text, token):
                 kind = hit.get("kind") if isinstance(hit.get("kind"), str) else "record"
                 key = f" {hit['key']}" if isinstance(hit.get("key"), str) else ""
+                lsn = hit.get("lsn")
+                if not key and isinstance(lsn, int) and not isinstance(lsn, bool):
+                    key = f" lsn {lsn}"
                 places.append(f"atticdb:{kind}{key}")
     return places
 
@@ -884,6 +916,7 @@ def run_handoff(cfg: HandoffConfig, runner: Runner, case: Case, arm: str, writer
                 label = "claude-memory" if writer == "claude-code" else "codex-memory"
                 found += file_hits(mem, case.evidence, label, only=changed_files(mem_before, guard.snapshot(mem)))
             res.captured, res.captured_where = bool(found), _where(found)
+            res.captured_all = all_in_one_place(found, case.evidence)
             # The writer's transcripts and sessions hold its prompts. The reader gets the writer's
             # config dir in its env, so all but the login goes before the reader starts.
             try:
@@ -929,6 +962,7 @@ def run_handoff(cfg: HandoffConfig, runner: Runner, case: Case, arm: str, writer
         if res.check_timed_out and not verdict.passed:
             res.reasons.append("check timed out")
         res.reasons.append("reply=" + guard.excerpt(out.reply, redact_paths))
+        res.reply = guard.redact(out.reply or "", redact_paths)
         return res
     except HarnessError as e:
         res.fail(stage, guard.redact(str(e), redact_paths))

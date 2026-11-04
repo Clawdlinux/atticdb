@@ -986,3 +986,34 @@ def test_copilot_skill_note(env, monkeypatch):
     assert not res.errored, res.reasons
     assert "copilot writer: 1 non-builtin skills offered (activitykit)" in res.reasons
     assert_cleaned_up(env)
+
+
+# ---- captured with reason, and the whole reply ----
+
+@needs_atticdb
+@pytest.mark.parametrize("arm,want", [("atticdb", True), ("files", True), ("native", False), ("oracle", None)])
+def test_captured_all_and_the_whole_reply(env, arm, want):
+    """The stub writer saves its whole prompt in 1 fact or 1 HANDOFF.md line, so LEDG-7731 and 412 sit
+    together. Native has no capture path here. The oracle has no capture."""
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], arm, "claude-code", "codex", 1)
+    assert not res.errored, res.reasons
+    assert res.captured_all is want
+    row = results.row("2026-11-04", res)
+    assert row["captured_all"] == results.flag(want)
+    stub_reply = "JSON headers were 412 bytes and struct cut them to 24 bytes, per ticket LEDG-7731."
+    want_reply = stub_reply if arm in ("atticdb", "files", "oracle") else "I have no record of that."
+    assert res.reply == row["reply"] == want_reply
+    assert_cleaned_up(env)
+
+
+@needs_atticdb
+def test_batch_refuses_a_csv_with_old_columns(env, tmp_path, capsys):
+    out = tmp_path / "old.csv"
+    out.write_text("date,case,arm,reasons\n2026-11-04,H1,files,reply=x\n")
+    before = out.read_text()
+    args = ["--cases", "H1", "--arms", "files", "--directions", "claude-code:codex", "--claude-model", "X",
+            "--codex-model", "Y", "--atticdb", ATTICDB, "--max-sessions", "2", "--out", str(out)]
+    assert cli.main(args) == 2
+    assert "has other columns than this version writes" in capsys.readouterr().err
+    assert stub_calls(env["log"]) == [] and out.read_text() == before
+    assert not (tmp_path / "old.md").exists()

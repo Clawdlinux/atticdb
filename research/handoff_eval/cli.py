@@ -1,6 +1,7 @@
 """Run the cross-harness handoff eval, plan it, or check the eval logins.
 
     python3 -m research.handoff_eval --check
+    python3 -m research.handoff_eval --regrade research/handoff_eval/results/<date>.csv
     python3 -m research.handoff_eval --claude-model ID --codex-model ID --dry-run
     python3 -m research.handoff_eval --directions claude-code:copilot,copilot:claude-code \
         --claude-model ID --copilot-model ID --dry-run
@@ -14,6 +15,7 @@ README.md has the details.
 from __future__ import annotations
 
 import argparse
+import csv
 import datetime
 import os
 import shutil
@@ -96,6 +98,9 @@ def parse(argv) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="python3 -m research.handoff_eval", description=__doc__.split("\n\n")[0])
     p.add_argument("--check", action="store_true",
                    help="check that the 2 eval config dirs are safe and logged in, then exit")
+    p.add_argument("--regrade", metavar="CSV",
+                   help="grade the answer replies stored in a results CSV again with the current graders, and "
+                        "print the summary. Runs no agent and writes nothing")
     p.add_argument("--cases", type=case_list, default=list(CASES), help="comma list of " + ",".join(CASES))
     p.add_argument("--arms", type=arm_list, default=list(arms.ARMS), help="comma list of " + ",".join(arms.ARMS))
     p.add_argument("--directions", type=direction_list, default=direction_list(DEFAULT_DIRECTIONS),
@@ -121,7 +126,9 @@ def parse(argv) -> argparse.Namespace:
     p.add_argument("--keep-api-keys", action="store_true",
                    help=f"pass {agents.account_names()} on to the children")
     a = p.parse_args(argv)
-    if a.check:
+    if a.check and a.regrade:
+        p.error("--check and --regrade don't go together")
+    if a.check or a.regrade:
         return a
     a.models = {"claude-code": a.claude_model, "codex": a.codex_model, "copilot": a.copilot_model}
     used = {h for d in a.directions for h in d}
@@ -206,6 +213,10 @@ def batch(a: argparse.Namespace, cfg: HandoffConfig, out=print, runner: Runner |
                                 f"{agents.login_hint(harness, cfg.claude_dir, cfg.codex_dir)}, then run --check")
     if not (os.path.isfile(cfg.atticdb) and os.access(cfg.atticdb, os.X_OK)):
         raise guard.Refused(f"--atticdb {cfg.atticdb} is not an executable file. Build it: cargo build -p atticdb")
+    try:
+        results.check_header(a.out)
+    except ValueError as e:
+        raise guard.Refused(str(e)) from None
     cfg.budget = Budget(a.max_sessions)
     data_dirs = guard.watched_data_dirs(cfg.base_env)
     before = {label: guard.snapshot(path) for label, path in data_dirs}
@@ -286,8 +297,22 @@ def check_run_dirs(cfg: HandoffConfig, out=print) -> int:
     return 0 if ok else 1
 
 
+def regrade(path: str, out=print) -> int:
+    """Re-grade a results CSV and print what changed and the summary. Exit 2 if it can't be read."""
+    try:
+        rg = results.regrade(results.read(path))
+    except (OSError, ValueError, KeyError, csv.Error) as e:
+        print(f"regrade: {path}: {e}", file=sys.stderr)
+        return 2
+    for line in results.regrade_report(path, rg):
+        out(line)
+    return 0
+
+
 def main(argv=None) -> int:
     a = parse(sys.argv[1:] if argv is None else list(argv))
+    if a.regrade:
+        return regrade(a.regrade)
     try:
         if a.check:
             code = setup_cli.check()

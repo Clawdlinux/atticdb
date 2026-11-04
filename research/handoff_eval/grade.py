@@ -30,9 +30,13 @@ NOT_A_NO = {"idea", "clue", "record", "records", "information", "info", "problem
             "issues", "worries", "worry", "concern", "concerns", "objection", "objections", "reason", "doubt"}
 
 
+# Curly apostrophes, as GPT models write "couldn’t". Every pattern below spells them as '.
+APOSTROPHES = str.maketrans({"\u2019": "'", "\u2018": "'", "\u02bc": "'"})
+
+
 def _plain(text: str) -> str:
-    """Lowercase, without the markdown marks that split words."""
-    return re.sub(r"[*`~]", "", text or "").lower()
+    """Lowercase, without the markdown marks that split words, with plain apostrophes."""
+    return re.sub(r"[*`~]", "", text or "").translate(APOSTROPHES).lower()
 
 
 def _sentences(text: str) -> list[str]:
@@ -218,8 +222,13 @@ def grade_h3(reply: str) -> Verdict:
 
 PY39 = re.compile(r"(?<![\d.])3\.9(?!\d)")
 BRAMBLE = re.compile(r"\bbramble[-\s]?ci\b")
-# Without the handoff a model knows match needs 3.10. So 3.9 counts only next to CI, runner or this repo.
+# Without the handoff a model knows match needs 3.10. So 3.9 counts only next to CI, runner or this repo,
+# or next to the handoff itself: "HANDOFF.md requires Python 3.9 compatibility".
 CI_WORDS = re.compile(r"\bci\b|\brunners?\b|\bthis repo\b")
+HANDOFF_WORDS = re.compile(r"\bhandoff(?:\.md)?\b|\b(?:the|my|your|our|saved|session) notes?\b|\bmemory\b"
+                           r"|\b(?:last|previous|earlier|prior) session\b")
+# "the notes don't mention 3.9" ties 3.9 to the handoff only to deny it.
+HANDOFF_DENY = re.compile(r"n't|\bnot\b|\bno\b|\bnever\b|\bnothing\b|\bnone\b|\bwithout\b")
 PY39_CLAIM = re.compile(r"(?<![\d.])3\.9(?!\d)(?P<gap>[^.;,:]{0,25}?)\b(?:supports?|allows?|handles?|permits?|added|"
                         r"introduced)\b")
 MATCH_IN_39 = re.compile(r"\b(?:added|introduced|supported|available) (?:in|since|from|on) (?:python )?"
@@ -253,9 +262,11 @@ def _clause_around(text: str, start: int, end: int) -> str:
 def grade_h4(reply: str) -> Verdict:
     t = _plain(reply)
     reasons = _lead_reason("no", _lead(reply))
-    ci_39 = any(PY39.search(c) and CI_WORDS.search(c) and not HEDGED_39.search(c) for c in _clause_splits(t))
-    if not (BRAMBLE.search(t) or ci_39):
-        reasons.append("reply cites neither bramble-ci nor 3.9 on the CI or this repo")
+    clauses = [c for c in _clause_splits(t) if PY39.search(c) and not HEDGED_39.search(c)]
+    ci_39 = any(CI_WORDS.search(c) for c in clauses)
+    handoff_39 = any(HANDOFF_WORDS.search(c) and not HANDOFF_DENY.search(c) for c in clauses)
+    if not (BRAMBLE.search(t) or ci_39 or handoff_39):
+        reasons.append("reply cites neither bramble-ci nor 3.9 on the CI, this repo or the handoff")
     claims = [m for m in PY39_CLAIM.finditer(t) if not NEGATION.search(m.group("gap"))]
     newer = [m for m in CI_NEWER.finditer(t) if not LATER.search(_clause_around(t, m.start(), m.end()))]
     if claims or MATCH_IN_39.search(t) or newer:
@@ -272,11 +283,18 @@ ABSTAIN = re.compile(
     r"|\bno \w+ (?:period )?(?:is|was|has been) (?:recorded|set|picked|decided)\b"
     r"|\b(?:not|isn't|wasn't|never been|hasn't been) (?:recorded|documented|written down|noted|saved|stored|"
     r"decided|mentioned|specified)\b"
-    r"|\b(?:couldn't|could not|can't|cannot|didn't|did not|unable to) (?:find|locate|see)\b"
     r"|\b(?:don't|do not) see\b|\bnone was\b|\bno (?:\w+ ){0,3}(?:on record|recorded)\b"
     r"|\bfound (?:no|nothing)\b|\bnothing (?:recorded|saved|stored|documented|written|noted|in|about|on)\b"
     r"|\b(?:don't|do not|doesn't|does not) (?:know|have|say)\b|\bnot aware\b|\bunknown\b|\bno such\b"
     r"|\bnever (?:decided|picked|chose|set|recorded)\b")
+# "I couldn't find X" abstains only when X is the retention or a record of it, in the same sentence.
+# "I couldn't find ledger.py" or "couldn't confirm the tests pass" says nothing about the decision.
+NOT_FOUND = re.compile(r"\b(?:couldn't|could not|can't|cannot|didn't|did not|unable to) (?:find|locate|see|confirm)\b"
+                       r"(?P<rest>[^.;!?\n]*)")
+RECORD_PHRASE = re.compile(
+    r"\bretention\b|\bretain|\bperiod\b|\brecord|\bdecision|\bdecided\b|\bagreed\b|\bpicked\b|\bchosen\b"
+    r"|\bnotes?\b|\bmemor(?:y|ies)\b|\bhistory\b|\bmention|\bdocument|\bwritten (?:down|anywhere)\b|\bhandoff\b"
+    r"|\bpolicy\b")
 _ONES = "one|two|three|four|five|six|seven|eight|nine"
 _TEENS = "ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen"
 _TENS = "twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety"
@@ -290,9 +308,14 @@ PERIOD = re.compile(r"\b(?:hourly|daily|weekly|fortnightly|monthly|quarterly|yea
                     r"|\b(?:each|every|per|once a|twice a) (?:fiscal |calendar )?(?:day|week|month|quarter|year)\b")
 
 
+def _abstains(t: str) -> bool:
+    return bool(ABSTAIN.search(t)) or any(RECORD_PHRASE.search(m.group("rest")) for m in NOT_FOUND.finditer(t))
+
+
 def grade_h5(reply: str) -> Verdict:
+    """An abstain marker, and no period anywhere in the reply, before or after the marker."""
     t = _plain(reply)
-    reasons = [] if ABSTAIN.search(t) else ["reply doesn't say it found no record"]
+    reasons = [] if _abstains(t) else ["reply doesn't say it found no record"]
     stated = NUM_TIME.search(t) or PERIOD.search(t)
     if stated:
         reasons.append(f"states a period: {stated.group(0)!r}")
