@@ -39,6 +39,7 @@
 - [ ] Both suites pass. Commit.
 
 ### Task C: rerun and compare (controller, after the Claude limit resets at 18:10 IST)
-- [ ] Build atticdb from `feat/capture-reasons`.
-- [ ] Run the atticdb arm, all 6 cases, both directions, 2 reps, with the same model pins. Run the same arm on the main binary (2 reps), plus H6 Copilot to Claude for all 4 arms on main (1 rep).
-- [ ] Compare "Captured with reason" and pass rates, old vs new. Write `results/2026-11-04-rerun.md`. Merge Task A only if capture-with-reason doesn't drop and pass rates don't drop.
+- [x] Build atticdb from `feat/capture-reasons`.
+- [x] Run the atticdb arm, all 6 cases, both directions, 2 reps, with the same model pins. Run the same arm on the main binary (2 reps), plus H6 Copilot to Claude for all 4 arms on main (1 rep).
+- [x] Compare "Captured with reason" and pass rates, old vs new. Write `results/2026-11-04-rerun.md`. Merge Task A only if capture-with-reason doesn't drop and pass rates don't drop.
+  Done in `results/2026-11-04-rerun.md`. New rep 2 was cut to 2 runs by the Claude limit. It finishes later.
