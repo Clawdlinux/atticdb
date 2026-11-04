@@ -17,6 +17,8 @@ const PAGE_KEYS: usize = 200;
 const PAGE_BYTES: u64 = 1 << 20;
 /// Longest first line `--content` shows, in characters.
 const LINE: usize = 80;
+/// The flags that pick the store. The empty-tree hint repeats them.
+const STORE_FLAGS: [&str; 5] = ["--url", "--data-dir", "--config", "--tenant", "--token-file"];
 /// The depth with no prefix and no `--depth`.
 const TOP_DEPTH: usize = 2;
 /// What the text tree says last when `--depth` hid levels.
@@ -63,6 +65,9 @@ pub fn command(prefix: Option<String>, mut flags: HashMap<String, String>) -> u8
     let (content, as_json) =
         (flags.remove("--content").is_some(), flags.remove("--json").is_some());
     let prefix = prefix.unwrap_or_default();
+    // The hint's `fact set` needs them to save to the same store.
+    let store: Vec<(&str, String)> =
+        STORE_FLAGS.iter().filter_map(|&flag| Some((flag, flags.get(flag)?.clone()))).collect();
     let (facts, truncated) = match Client::new(flags).and_then(|client| read(client, &prefix)) {
         Ok(read) => read,
         Err(message) => {
@@ -78,7 +83,7 @@ pub fn command(prefix: Option<String>, mut flags: HashMap<String, String>) -> u8
         let rest = key.strip_prefix(base).unwrap_or(key);
         root.add(&rest.split('/').collect::<Vec<_>>(), fact);
     }
-    let hint = (root.facts == 0).then(|| empty_hint(&prefix));
+    let hint = (root.facts == 0).then(|| empty_hint(&prefix, &store));
     if as_json {
         let nodes = json_nodes(&root, base, 1, depth, content);
         let newest = (root.facts > 0).then_some(root.newest_ns);
@@ -129,7 +134,8 @@ fn read(mut client: Client, prefix: &str) -> Result<(Vec<Value>, bool), String> 
 }
 
 /// What `atticdb tree` prints when no fact is under `prefix`, with a command that saves one.
-fn empty_hint(prefix: &str) -> String {
+/// The command repeats the `store` flags, so it saves to the store the tree read.
+fn empty_hint(prefix: &str, store: &[(&str, String)]) -> String {
     let atticdb = crate::setup::typed();
     let (start, key) = match prefix {
         "" => ("No facts yet.".to_owned(), "user/style".to_owned()),
@@ -138,12 +144,17 @@ fn empty_hint(prefix: &str) -> String {
         }
         _ => (format!("No facts under {prefix:?}."), format!("{prefix}/rule")),
     };
-    format!("{start} Save one: {atticdb} fact set --key {} --content \"...\"", quoted(&key))
+    let flags: String =
+        store.iter().map(|(flag, value)| format!(" {flag} {}", quoted(value))).collect();
+    let key = quoted(&key);
+    format!("{start} Save one: {atticdb} fact set{flags} --key {key} --content \"...\"")
 }
 
 /// `text` as typed in a shell: as is when every character is plain, else single-quoted.
 fn quoted(text: &str) -> String {
-    if text.chars().all(|c| c.is_ascii_alphanumeric() || "/._+-".contains(c)) {
+    if !text.is_empty()
+        && text.chars().all(|c| c.is_ascii_alphanumeric() || "/._+-:@=,".contains(c))
+    {
         text.to_owned()
     } else {
         format!("'{}'", text.replace('\'', r"'\''"))
@@ -173,7 +184,7 @@ fn text_lines(
             Some(_) => date(child.newest_ns),
             None => folder_stats(child),
         };
-        lines.push(format!("{indent}{branch}{}  {stats}", shown(name)));
+        lines.push(format!("{indent}{branch}{}  {stats}", named(name)));
         if child.fact.is_none() {
             let indent = format!("{indent}{more}");
             text_lines(child, &indent, depth + 1, max, content, lines, collapsed);
@@ -225,6 +236,15 @@ fn first_line(fact: &Value) -> String {
     }
     let cut: String = line.chars().take(LINE - 3).collect();
     format!("{}...", shown(&cut))
+}
+
+/// A node's name in the text tree. An empty segment, as in `a/` or `a//b`, shows as `(empty)`.
+fn named(name: &str) -> String {
+    match name {
+        "" => "(empty)".into(),
+        "/" => "(empty)/".into(),
+        _ => shown(name),
+    }
 }
 
 /// `text` with control characters escaped, so a key or value can't drive the terminal.

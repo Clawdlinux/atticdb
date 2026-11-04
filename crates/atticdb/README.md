@@ -421,7 +421,8 @@ Paths start after the prefix's last `/`. So `atticdb tree repo/at` shows `atticd
 `--content` adds the first line of each value, at most 80 characters. A longer line ends in `...`.
 Control characters in keys and values print escaped.
 It reads at most 10,000 keys in at most 1,000 pages. Past that it prints `showing the first 10,000 keys` on stderr.
-With no facts it prints how to save one, as a full `fact set` command.
+With no facts it prints how to save one, as a full `fact set` command with the same store flags.
+A key that ends in `/` leaves an empty name, shown as `(empty)`.
 Deleted and forgotten keys never show. Exit 0, 1 when a read failed, 2 on a bad flag.
 
 `--json` prints 1 line. Here is `atticdb tree repo/ --depth 2 --json` on several lines:
@@ -439,6 +440,7 @@ Deleted and forgotten keys never show. Exit 0, 1 when a read failed, 2 on a bad 
 
 A folder's `name` ends in `/`, and it has `children`. `children` is null below `--depth`. So is `nodes` with `--depth 0`.
 A key has `lsn` and no `children`. With `--content` it has `content` too, cut as in the text.
+An empty name stays `""` in JSON.
 `newest_ns` is the newest commit time in ns. It is null when there are no facts. `truncated` is true past the 10,000-key bound.
 With no facts, the hint goes to stderr.
 

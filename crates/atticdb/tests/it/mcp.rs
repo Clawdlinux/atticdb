@@ -551,6 +551,7 @@ fn tool_calls_over_stdio() {
         ("tree/repo/app/tests/runner", "cargo test"),
         ("tree/repo/other/x", "x"),
         ("tree/agent/claude/notes", "secret plan"),
+        ("odd/x/", "a key that ends in /"),
     ] {
         cli(&["fact", "set", "--key", key, "--content", content], 0);
     }
@@ -592,18 +593,31 @@ fn tool_calls_over_stdio() {
         ),
         ("--depth", &["tree", "tree/", "--depth", "2"], depth.to_owned()),
         ("--content cuts the first line", &["tree", "tree/user/", "--content"], content),
+        (
+            "a key that ends in /",
+            &["tree", "odd/"],
+            "odd/  1 fact, newest DATE\n`-- x/  1 fact, newest DATE\n    `-- (empty)  DATE\n"
+                .into(),
+        ),
     ] {
         let (out, err) = cli(verb, 0);
         assert_eq!(undated(&out), expected, "{case}");
         assert!(err.is_empty(), "{case}: {err}");
     }
+    // In JSON the empty name stays "".
+    let (out, _) = cli(&["tree", "odd/x/", "--json"], 0);
+    let printed: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(printed["nodes"][0]["name"], "", "{out}");
     // The only key under tree/agent/ is forgotten, so the tree is empty and says how to save
-    // one, with the full path of this atticdb when it isn't on PATH.
-    let (empty, save) = ("No facts under \"tree/agent/\". Save one: ", " fact set --key ");
+    // one. It names this atticdb by its full path when it isn't on PATH, and repeats the
+    // store flags, so the fact lands in the store the tree read.
+    let (empty, save) = ("No facts under \"tree/agent/\". Save one: ", " fact set --url ");
     let (out, _) = cli(&["tree", "tree/agent/"], 0);
     let typed = out.strip_prefix(empty).and_then(|rest| rest.split_once(save)).map(|s| s.0);
     assert!(typed.is_some_and(|typed| typed.contains("atticdb")), "{out}");
-    assert!(out.ends_with(" --key tree/agent/rule --content \"...\"\n"), "{out}");
+    let store = format!("--url {} --token-file {}", args[1], args[3]);
+    let saved = format!(" fact set {store} --key tree/agent/rule --content \"...\"\n");
+    assert!(out.ends_with(&saved), "{out}");
     // `--json` prints 1 line of nested nodes. A folder past `--depth` has null children.
     let (out, _) = cli(&["tree", "tree/repo/", "--json", "--depth", "2", "--content"], 0);
     let mut printed: Value = serde_json::from_str(&out).unwrap();
@@ -628,7 +642,7 @@ fn tool_calls_over_stdio() {
     let none = json!({"prefix": "tree/agent/", "facts": 0, "newest_ns": null, "truncated": false,
                       "nodes": []});
     assert_eq!(printed, none, "empty --json");
-    assert!(err.starts_with(empty) && err.contains("--key tree/agent/rule"), "{err}");
+    assert!(err.starts_with(empty) && err.contains(&format!("{store} --key tree/agent/rule")));
     let (all, _) = cli(&["tree", "tree/", "--content", "--json"], 0);
     assert!(!all.contains("agent") && !all.contains("secret plan"), "forgotten: {all}");
     // A search that finds nothing prints the same JSON, and a hint on stderr.
