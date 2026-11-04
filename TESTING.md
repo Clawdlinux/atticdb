@@ -67,6 +67,8 @@ The `windows` job in the `ci` workflow runs on `windows-latest`.
 It runs clippy and the tests of the storage crates and of `atticdb`, and both sims on 2,000 seeds.
 In `atticdb`'s `tests/it`, Windows runs `portable`, `apps` and `cli`. The rest need the Unix socket, Unix modes or Unix tools.
 `apps` runs `atticdb setup` against a temp user profile, with a fake `claude.cmd` on `PATH`.
+The shim runs the ignored test `apps::fake_claude` in the `it` binary itself, so it needs no Python and starts in milliseconds.
+Setup gives each `claude` command 10 s, and a cold Python interpreter on a loaded runner can take longer.
 Then it runs each written hook as its app does: the Copilot hook in PowerShell, Claude Code's in exec form.
 It never reads or writes the real profile. Each test stops the servers it started, by the pid in `LOCK`.
 Check Windows code from macOS or Linux with:
