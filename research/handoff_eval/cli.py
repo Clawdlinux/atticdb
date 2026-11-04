@@ -144,10 +144,10 @@ def config(a: argparse.Namespace) -> HandoffConfig:
 def dry_run(a: argparse.Namespace, cfg: HandoffConfig, out=print) -> int:
     guard.check_config_dirs(cfg.claude_dir, cfg.codex_dir, cfg.home)  # paths only
     out(f"Dry run: nothing is started. Rows would go to {a.out}.")
-    out(f"<root> is a new temp dir per run in {cfg.tmp_parent}. Env: as setup_eval, by name only: the inherited "
-        f"env without ATTICDB_*, GIT_*, CLAUDE_CONFIG_DIR, CODEX_HOME"
+    out(f"<root> and <harness-root> are 2 new temp dirs per run in {cfg.tmp_parent}. Env: as setup_eval, by name "
+        f"only: the inherited env without ATTICDB_*, GIT_*, CLAUDE_CONFIG_DIR, CODEX_HOME"
         f"{'' if cfg.keep_api_keys else ' and the credential and provider vars'}, then HOME, ATTICDB_HOME "
-        f"(<root>/zh), CLAUDE_CONFIG_DIR (<root>/claude), CODEX_HOME (<root>/codex), and "
+        f"(<root>/zh), CLAUDE_CONFIG_DIR (<harness-root>/claude), CODEX_HOME (<harness-root>/codex), and "
         f"{SECURE_STORAGE_ENV} ({cfg.claude_dir}), so Claude finds the eval login in the Keychain.")
     models = ", ".join(f"{h}={m}" for h, m in a.models.items() if m)
     out(f"Models: {models}.")
@@ -235,13 +235,13 @@ def check_run_dirs(cfg: HandoffConfig, out=print) -> int:
     runner, ok = Runner(), True
     try:
         try:
-            prepare_config_dirs(cfg, root)
+            prepare_config_dirs(cfg, root)  # a check has no repo, so 1 temp dir serves as both roots
         except HarnessError as e:
             out(f"run dirs: {e}")
             return 1
         for harness in agents.HARNESSES:
             step = Step("check", agents.check_argv(harness), root, agents.CHECK_TIMEOUT)
-            r = runner.run(step.argv, env=env_for(cfg, root, step), root=root, cwd=root, timeout=step.timeout)
+            r = runner.run(step.argv, env=env_for(cfg, root, step, root), root=root, cwd=root, timeout=step.timeout)
             if r.code == 0:
                 out(f"{harness}: logged in from a run's own config dir")
             else:

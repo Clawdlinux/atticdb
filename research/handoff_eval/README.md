@@ -15,9 +15,10 @@ This package reuses setup_eval's guard, env, process runner and cleanup. It does
 
 - The shared eval config dirs stay `~/.cache/atticdb-setup-eval/{claude,codex}`. The guard refuses any that is, or lies in, `~/.claude*`, `~/.codex` or `~/.copilot`.
 - Each run gets a new temp root. It has its own AtticDB home, `<root>/zh`, and its own fixture repo, `<root>/evalrepo`.
-- Each run also gets its own config dirs. The guard checks them too:
-  - `CODEX_HOME` is `<root>/codex`. It gets copies of the eval dir's `auth.json` and `config.toml`, nothing else. So Codex sessions, memories and history never carry over. Without `auth.json` the run errors at `setup` with the login hint.
-  - `CLAUDE_CONFIG_DIR` is `<root>/claude`, and starts empty.
+- Each run also gets its own config dirs, in a second temp dir, `<harness-root>`. It's made apart from the root, so it's neither a parent nor a sibling of the repo. A reader's `grep -r ..` can't reach it. The guard checks these dirs too:
+  - `CODEX_HOME` is `<harness-root>/codex`. It gets copies of the eval dir's `auth.json` and `config.toml`, nothing else. So Codex sessions, memories and history never carry over. Without `auth.json` the run errors at `setup` with the login hint.
+  - `CLAUDE_CONFIG_DIR` is `<harness-root>/claude`, and starts empty.
+- The reader's env still names the writer harness's dir, and its transcripts and sessions hold the writer's prompts. So after the capture scan, that dir loses everything but its login file: `.credentials.json` for Claude, `auth.json` for Codex.
 - Every child gets setup_eval's env: no inherited `ATTICDB_*`, `GIT_*`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME` or credential vars. A child whose `ATTICDB_HOME` is not under its run root is refused.
 - Before and after a batch, the real AtticDB home and the top level of `~/.claude*`, `~/.codex` and `~/.copilot` are compared by stat only. A change prints a warning.
 
@@ -45,7 +46,7 @@ Each run starts clean, and checks that it did:
 
 No agent runs in a run that errored there.
 
-After each run: `atticdb disconnect` for both harnesses, stop the AtticDB server the run started, delete the root with its config dirs.
+After each run: `atticdb disconnect` for both harnesses, delete `<harness-root>`, stop the AtticDB server the run started, delete the root.
 
 ## Arms
 
@@ -78,7 +79,7 @@ Every match goes through `EVIDENCE_PATTERNS` in run.py, 1 pattern per token. Cap
 |---|---|
 | `LEDG-7731`, `INC-2209`, `STOR-5150`, `bramble-ci`, `FIN-88` | the whole token, any case, with no letter or digit next to it |
 | `412` | `412 bytes` or `412-byte`. A bare 412, such as a file size of 4120, doesn't count |
-| `3.9` | `Python 3.9`, or 3.9 within 40 chars of `bramble-ci`. `Python 3.9.6` from a version check doesn't count |
+| `3.9` | `Python 3.9` as words, or 3.9 within 40 chars of `bramble-ci`. `Python 3.9.6`, `python3.9` and a path part such as `/python 3.9/` or `3.9/site-packages` don't count |
 | `plain files` | `plain file`, `plain-file` or `plain files` |
 
 **captured**, after the writer sessions. True when any of the case's evidence tokens is found in 1 of 3 places:

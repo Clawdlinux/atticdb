@@ -1,18 +1,24 @@
 """One handoff run: writer sessions in harness A, 1 reader session in harness B, and 3 stages.
 
-Each run gets a new temp root from `setup_eval.harness.make_root` with:
+Each run gets a new temp root from `setup_eval.harness.make_root` with its own AtticDB home,
+`<root>/zh`, and its own fixture repo, `<root>/evalrepo`.
 
-- its own AtticDB home, `<root>/zh`, and its own fixture repo, `<root>/evalrepo`;
-- its own `CODEX_HOME`, `<root>/codex`, holding copies of the eval dir's `auth.json` and
+Its harness config dirs sit in a second temp dir, `<harness-root>`, made apart from the root. It
+is neither a parent nor a sibling of the repo, so a reader's `grep -r ..` can't reach them:
+
+- `CODEX_HOME`, `<harness-root>/codex`, holding copies of the eval dir's `auth.json` and
   `config.toml` only. So Codex sessions, memories and history never carry over;
-- its own `CLAUDE_CONFIG_DIR`, `<root>/claude`, empty. Claude's claude.ai login sits in the macOS
+- `CLAUDE_CONFIG_DIR`, `<harness-root>/claude`, empty. Claude's claude.ai login sits in the macOS
   Keychain under a name made from the config dir. `CLAUDE_SECURESTORAGE_CONFIG_DIR` points that
   lookup at the eval Claude dir, so the login is found and nothing else is shared.
+
+After the capture scan, the writer harness's dir loses everything but its login file, as the
+reader's env names it and its transcripts hold the writer's prompts.
 
 Before any agent starts, the run checks that no harness config it will use mentions atticdb
 (outside the setup the atticdb arm does itself), and that the store, the repo and both config dirs
 hold none of the case's evidence. After the run it disconnects both harnesses, stops the AtticDB
-server the run started, and deletes the root.
+server the run started, and deletes both temp dirs.
 
 Stages, each None when not measured or not applicable:
 
@@ -37,6 +43,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 
 from ..setup_eval import agents, guard
@@ -62,8 +69,8 @@ def _anchor(token: str) -> re.Pattern:
     return re.compile(rf"(?<![A-Za-z0-9]){re.escape(token)}(?![A-Za-z0-9])", re.I)
 
 
-# 3.9 that is not the start of 3.9.6 or 3.95.
-_PY39 = r"(?<![\d.])3\.9(?!\d|\.\d)"
+# 3.9 that is not the start of 3.9.6, 3.95 or a path part such as python3.9/site-packages.
+_PY39 = r"(?<![\d.])3\.9(?!\d|\.\d|/)"
 # 1 pattern per evidence token in cases.CASES. Capture, delivery and the clean start all use it.
 EVIDENCE_PATTERNS: dict[str, re.Pattern] = {
     "LEDG-7731": _anchor("LEDG-7731"),
@@ -73,8 +80,9 @@ EVIDENCE_PATTERNS: dict[str, re.Pattern] = {
     "FIN-88": _anchor("FIN-88"),
     # A bare 412 is a file size, a line number or an HTTP status. Only the header size counts.
     "412": re.compile(r"\b412\s*(?:-\s*)?bytes?\b", re.I),
-    # A bare 3.9 is any Python's version line. Only Python 3.9 by name, or next to the runner, counts.
-    "3.9": re.compile(rf"python\s*{_PY39}|bramble-ci[\s\S]{{0,40}}?{_PY39}|{_PY39}[\s\S]{{0,40}}?bramble-ci",
+    # A bare 3.9 is any Python's version line, and python3.9 is an interpreter path. Only "Python 3.9" as
+    # words, not inside a path, or 3.9 next to the runner, counts.
+    "3.9": re.compile(rf"(?<!/)python\s+{_PY39}|bramble-ci[\s\S]{{0,40}}?{_PY39}|{_PY39}[\s\S]{{0,40}}?bramble-ci",
                       re.I),
     "plain files": re.compile(r"\bplain[- ]files?\b", re.I),
 }
@@ -157,25 +165,52 @@ CODEX_REQUIRED = "auth.json"
 WIRING_FILES = {"claude": ("settings.json", ".claude.json"), "codex": ("config.toml", "hooks.json", "AGENTS.md")}
 
 
-def run_dirs(root: str) -> tuple[str, str]:
-    """The run's own CLAUDE_CONFIG_DIR and CODEX_HOME."""
-    return os.path.join(root, "claude"), os.path.join(root, "codex")
+def make_harness_root(cfg: Config) -> str:
+    """The temp dir for a run's own harness config dirs. It is made apart from the run root, so it
+    is neither a parent nor a sibling of the repo, and `grep -r ..` in the repo can't reach it."""
+    return tempfile.mkdtemp(prefix="zhh-", dir=cfg.tmp_parent)
 
 
-def env_for(cfg: Config, root: str, step: Step) -> dict:
+def run_dirs(hroot: str) -> tuple[str, str]:
+    """The run's own CLAUDE_CONFIG_DIR and CODEX_HOME, in its harness root."""
+    return os.path.join(hroot, "claude"), os.path.join(hroot, "codex")
+
+
+# What a harness dir keeps once its writer is done: the login, and nothing a reader could read.
+LOGIN_FILES = {"claude-code": (".credentials.json",), "codex": ("auth.json",)}
+
+
+def scrub_harness_dir(hroot: str, harness: str) -> list[str]:
+    """Deletes everything in `harness`'s run dir but its login files: transcripts, sessions,
+    history, memory and config. Returns the top-level names it deleted."""
+    folder = run_dirs(hroot)[0 if harness == "claude-code" else 1]
+    gone = []
+    for name in sorted(os.listdir(folder)) if os.path.isdir(folder) else []:
+        if name in LOGIN_FILES[harness]:
+            continue
+        path = os.path.join(folder, name)
+        if os.path.isdir(path) and not os.path.islink(path):
+            shutil.rmtree(path)
+        else:
+            os.remove(path)
+        gone.append(name)
+    return gone
+
+
+def env_for(cfg: Config, root: str, step: Step, hroot: str) -> dict:
     """setup_eval's child env, with the run's own config dirs, and Claude's login looked up under
     the eval Claude dir. An inherited CLAUDE_SECURESTORAGE_CONFIG_DIR is always replaced."""
     zh, _ = paths(root)
-    claude, codex = run_dirs(root)
+    claude, codex = run_dirs(hroot)
     return agents.child_env(cfg.base_env, home=cfg.home, atticdb_home=zh, claude_dir=claude, codex_dir=codex,
                             extra={SECURE_STORAGE_ENV: cfg.claude_dir, **step.extra_env},
                             keep_api_keys=cfg.keep_api_keys)
 
 
-def prepare_config_dirs(cfg: Config, root: str) -> None:
+def prepare_config_dirs(cfg: Config, hroot: str) -> None:
     """Makes the run's config dirs and copies Codex's login and config into its own. Raises
     HarnessError without the eval Codex login, and guard.Refused for an unsafe dir."""
-    claude, codex = run_dirs(root)
+    claude, codex = run_dirs(hroot)
     for folder in (claude, codex):
         os.makedirs(folder, mode=0o700, exist_ok=True)
     guard.check_config_dirs(claude, codex, cfg.home)
@@ -191,10 +226,10 @@ def prepare_config_dirs(cfg: Config, root: str) -> None:
         os.chmod(dst, 0o600)
 
 
-def sync_codex_auth(cfg: Config, root: str) -> str | None:
+def sync_codex_auth(cfg: Config, hroot: str) -> str | None:
     """Codex may refresh its login during a run and retire the old refresh token. Then the
     run's `auth.json` replaces the eval dir's, atomically. Returns a note, or None."""
-    src = os.path.join(run_dirs(root)[1], CODEX_REQUIRED)
+    src = os.path.join(run_dirs(hroot)[1], CODEX_REQUIRED)
     dst = os.path.join(cfg.codex_dir, CODEX_REQUIRED)
     try:
         with open(src, "rb") as f:
@@ -218,11 +253,11 @@ def sync_codex_auth(cfg: Config, root: str) -> str | None:
     return "codex refreshed its login; the eval dir's auth.json was updated"
 
 
-def wiring_hits(root: str) -> list[str]:
+def wiring_hits(hroot: str) -> list[str]:
     """The run's config files that mention atticdb. Codex's `[projects."<path>"]` trust headers
     are skipped, as a path is not wiring."""
     hits = []
-    for kind, folder in zip(("claude", "codex"), run_dirs(root)):
+    for kind, folder in zip(("claude", "codex"), run_dirs(hroot)):
         for name in WIRING_FILES[kind]:
             text = _read(os.path.join(folder, name))
             lines = [ln for ln in text.splitlines()
@@ -267,17 +302,17 @@ def plan(cfg: HandoffConfig, case: Case, arm: str, writer: str, reader: str, roo
     }
 
 
-def _exec(cfg: Config, runner: Runner, root: str, step: Step) -> Result:
-    return runner.run(step.argv, env=env_for(cfg, root, step), root=root, cwd=step.cwd, timeout=step.timeout,
-                      stdin=step.stdin)
+def _exec(cfg: Config, runner: Runner, root: str, step: Step, hroot: str) -> Result:
+    return runner.run(step.argv, env=env_for(cfg, root, step, hroot), root=root, cwd=step.cwd,
+                      timeout=step.timeout, stdin=step.stdin)
 
 
 def _code(r: Result) -> int:
     return 127 if r.missing else (-1 if r.code is None else r.code)
 
 
-def _required(cfg: Config, runner: Runner, root: str, step: Step) -> Result:
-    r = _exec(cfg, runner, root, step)
+def _required(cfg: Config, runner: Runner, root: str, step: Step, hroot: str) -> Result:
+    r = _exec(cfg, runner, root, step, hroot)
     if r.code != 0:
         what = "timed out" if r.timed_out else f"exited {_code(r)}"
         raise HarnessError(f"{os.path.basename(step.argv[0])} {step.argv[1]} {what}")
@@ -353,9 +388,9 @@ def claude_project_slug(path: str) -> str:
     return re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(path))
 
 
-def native_memory_dir(root: str, harness: str, repo: str) -> str:
+def native_memory_dir(hroot: str, harness: str, repo: str) -> str:
     """The harness's own memory for `repo`, in the run's config dirs."""
-    claude, codex = run_dirs(root)
+    claude, codex = run_dirs(hroot)
     if harness == "claude-code":
         return os.path.join(claude, "projects", claude_project_slug(repo), "memory")
     if harness == "codex":
@@ -489,12 +524,12 @@ def _add(total: int | None, n: int | None) -> int | None:
     return total if n is None else (total or 0) + n
 
 
-def _session(cfg: HandoffConfig, runner: Runner, root: str, step: Step, harness: str, res: HandoffResult,
-             label: str) -> tuple[Result, Outcome]:
+def _session(cfg: HandoffConfig, runner: Runner, root: str, hroot: str, step: Step, harness: str,
+             res: HandoffResult, label: str) -> tuple[Result, Outcome]:
     if cfg.budget is not None:
         cfg.budget.take()
     res.sessions += 1
-    r = _exec(cfg, runner, root, step)
+    r = _exec(cfg, runner, root, step, hroot)
     out = PARSERS[harness](r.stdout)
     res.wall_s = (res.wall_s or 0.0) + r.wall_s
     res.input_tokens = _add(res.input_tokens, out.input_tokens)
@@ -507,10 +542,10 @@ def _session(cfg: HandoffConfig, runner: Runner, root: str, step: Step, harness:
     return r, out
 
 
-def _searches(cfg: Config, runner: Runner, root: str, steps: list[Step]) -> list[tuple[str, str]]:
+def _searches(cfg: Config, runner: Runner, root: str, hroot: str, steps: list[Step]) -> list[tuple[str, str]]:
     found = []
     for step in steps:
-        r = _required(cfg, runner, root, step)
+        r = _required(cfg, runner, root, step, hroot)
         token = step.argv[step.argv.index("--query") + 1]
         found += [(place, token) for place in store_hits(r.stdout, token)]
     return found
@@ -537,10 +572,16 @@ def run_handoff(cfg: HandoffConfig, runner: Runner, case: Case, arm: str, writer
     res = HandoffResult(case.id, arm, writer, reader, index, writer_model=cfg.models.get(writer, ""),
                         reader_model=cfg.models[reader])
     root = make_root(cfg)
+    try:
+        hroot = make_harness_root(cfg)
+    except BaseException:
+        shutil.rmtree(root, ignore_errors=True)
+        raise
     _, repo = paths(root)
-    claude_run, codex_run = run_dirs(root)
+    claude_run, codex_run = run_dirs(hroot)
     steps = plan(cfg, case, arm, writer, reader, root)
-    redact_paths = {root: "<root>", os.path.realpath(root): "<root>", cfg.claude_dir: "<claude-dir>",
+    redact_paths = {root: "<root>", os.path.realpath(root): "<root>", hroot: "<harness-root>",
+                    os.path.realpath(hroot): "<harness-root>", cfg.claude_dir: "<claude-dir>",
                     cfg.codex_dir: "<codex-dir>", cfg.atticdb: "<atticdb>", cfg.home: "~"}
     stage, touched = "fixture", False
     try:
@@ -552,25 +593,25 @@ def run_handoff(cfg: HandoffConfig, runner: Runner, case: Case, arm: str, writer
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
             raise HarnessError(f"the fixture could not be written: {type(e).__name__}: {e}") from e
         for step in steps["fixture"]:
-            _required(cfg, runner, root, step)
+            _required(cfg, runner, root, step, hroot)
 
         stage = "setup"
-        prepare_config_dirs(cfg, root)
+        prepare_config_dirs(cfg, hroot)
         # Any AtticDB wiring left in the copied config goes first. Outside the atticdb arm, a
         # disconnect that fails may have left it in place, so the run stops.
         touched = True
         for step in steps["disconnect"]:
-            r = _exec(cfg, runner, root, step)
+            r = _exec(cfg, runner, root, step, hroot)
             if r.code != 0:
                 if not arms.uses_atticdb(arm):
                     raise HarnessError(f"pre-disconnect {step.argv[-1]} exited {_code(r)}")
                 res.reasons.append(f"pre-disconnect {step.argv[-1]} exited {_code(r)}")
-        wired = wiring_hits(root)
+        wired = wiring_hits(hroot)
         if wired:
             raise HarnessError(f"harness config mentions atticdb before the run: {', '.join(wired)}")
 
         stage = "start"
-        dirty = _searches(cfg, runner, root, steps["start"])
+        dirty = _searches(cfg, runner, root, hroot, steps["start"])
         dirty += file_hits(repo, case.evidence, "repo")
         dirty += file_hits(claude_run, case.evidence, "claude-dir")
         dirty += file_hits(codex_run, case.evidence, "codex-dir", skip_files=(CODEX_REQUIRED,))
@@ -579,27 +620,33 @@ def run_handoff(cfg: HandoffConfig, runner: Runner, case: Case, arm: str, writer
 
         stage = "setup"
         for step in steps["setup"]:
-            _required(cfg, runner, root, step)
+            _required(cfg, runner, root, step, hroot)
 
         if arms.has_writer(arm):
             stage = "writer"
-            mem = native_memory_dir(root, writer, repo)
+            mem = native_memory_dir(hroot, writer, repo)
             mem_before = guard.snapshot(mem)
             for i, step in enumerate(steps["writer"], 1):
-                _session(cfg, runner, root, step, writer, res, f"writer {i}")
+                _session(cfg, runner, root, hroot, step, writer, res, f"writer {i}")
 
             stage = "capture"
-            found = _searches(cfg, runner, root, steps["capture"])
+            found = _searches(cfg, runner, root, hroot, steps["capture"])
             found += file_hits(repo, case.evidence, "repo")
             label = "claude-memory" if writer == "claude-code" else "codex-memory"
             found += file_hits(mem, case.evidence, label, only=changed_files(mem_before, guard.snapshot(mem)))
             res.captured, res.captured_where = bool(found), _where(found)
+            # The writer's transcripts and sessions hold its prompts. The reader gets the writer's
+            # config dir in its env, so all but the login goes before the reader starts.
+            try:
+                scrub_harness_dir(hroot, writer)
+            except OSError as e:
+                raise HarnessError(f"could not clear the {writer} dir before the reader: {e}") from e
 
         delivered: list[tuple[str, str]] = []
         if arms.uses_atticdb(arm):
             stage = "hook"
             (hook,) = steps["hook"]
-            r = _exec(cfg, runner, root, hook)
+            r = _exec(cfg, runner, root, hook, hroot)
             if r.code != 0:
                 res.reasons.append(f"hook exited {_code(r)}")
             delivered += [("hook", t) for t in tokens_in(hook_block(r.stdout), case.evidence)]
@@ -608,7 +655,7 @@ def run_handoff(cfg: HandoffConfig, runner: Runner, case: Case, arm: str, writer
 
         stage = "reader"
         (step,) = steps["reader"]
-        r, out = _session(cfg, runner, root, step, reader, res, "reader")
+        r, out = _session(cfg, runner, root, hroot, step, reader, res, "reader")
         outputs = "\n".join(tool_outputs(reader, r.stdout))
         delivered += [("transcript", t) for t in tokens_in(outputs, case.evidence)]
         if case.id not in NO_DELIVERY:
@@ -616,7 +663,7 @@ def run_handoff(cfg: HandoffConfig, runner: Runner, case: Case, arm: str, writer
 
         stage = "grade"
         (diff_step,) = steps["grade"]
-        d = _exec(cfg, runner, root, diff_step)
+        d = _exec(cfg, runner, root, diff_step, hroot)
         if d.code != 0:
             res.reasons.append(f"git diff exited {_code(d)}")
         try:
@@ -639,12 +686,13 @@ def run_handoff(cfg: HandoffConfig, runner: Runner, case: Case, arm: str, writer
     finally:
         if touched:
             for step in steps["teardown"]:
-                r = _exec(cfg, runner, root, step)
+                r = _exec(cfg, runner, root, step, hroot)
                 if r.code != 0:
                     res.reasons.append(f"disconnect {step.argv[-1]} exited {_code(r)}")
-        note = sync_codex_auth(cfg, root)
+        note = sync_codex_auth(cfg, hroot)
         if note:
             res.reasons.append(note)
+        shutil.rmtree(hroot, ignore_errors=True)
         problem = stop_server(cfg, runner, root)
         if problem:
             res.fail("teardown", problem)
@@ -652,10 +700,11 @@ def run_handoff(cfg: HandoffConfig, runner: Runner, case: Case, arm: str, writer
             shutil.rmtree(root, ignore_errors=True)
 
 
-def describe(cfg: HandoffConfig, case: Case, arm: str, writer: str, reader: str, root: str = "<root>") -> list[str]:
+def describe(cfg: HandoffConfig, case: Case, arm: str, writer: str, reader: str, root: str = "<root>",
+             hroot: str = "<harness-root>") -> list[str]:
     """The dry-run lines of 1 run: each command, its cwd and timeout, and its env by name only."""
     zh, repo = paths(root)
-    claude, codex = run_dirs(root)
+    claude, codex = run_dirs(hroot)
     extra = ", ".join(arms.instruction_files(arm))
     lines = [f"  write the ledger fixture into {repo} and commit it" + (f", then write {extra}" if extra else "")]
     for phase, steps in plan(cfg, case, arm, writer, reader, root).items():
@@ -670,12 +719,13 @@ def describe(cfg: HandoffConfig, case: Case, arm: str, writer: str, reader: str,
                          "any hit stops the run")
         if phase == "capture" and steps:
             lines.append(f"  [capture] also scan {repo} and the files {writer} memory changed during the run")
+            lines.append(f"  [capture] then delete all but {', '.join(LOGIN_FILES[writer])} in the {writer} dir")
         for step in steps:
             env = f" + {', '.join(sorted(step.extra_env))}" if step.extra_env else ""
             stdin = " <stdin: hook JSON>" if step.stdin is not None else ""
             session = " (agent session)" if phase in ("writer", "reader") else ""
             lines.append(f"  [{phase}]{session} cd {step.cwd} && {shlex.join(step.argv)}{stdin}")
             lines.append(f"      timeout {step.timeout:g} s; env: base{env}")
-    lines.append(f"  grade with grade.grade, copy a refreshed codex auth.json back, stop the atticdb server named "
-                 f"in {zh}/data/LOCK, then delete {root}")
+    lines.append(f"  grade with grade.grade, copy a refreshed codex auth.json back, delete {hroot}, stop the atticdb "
+                 f"server named in {zh}/data/LOCK, then delete {root}")
     return lines

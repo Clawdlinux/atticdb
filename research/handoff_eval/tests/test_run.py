@@ -152,8 +152,14 @@ def test_run_gets_its_own_config_dirs(env, monkeypatch):
         assert call["dirs"]["CLAUDE_CONFIG_DIR"].startswith(env["tmp"] + "/")
         assert call["dirs"]["CODEX_HOME"].startswith(env["tmp"] + "/")
         assert call["dirs"]["CLAUDE_SECURESTORAGE_CONFIG_DIR"] == env["claude_dir"]
-        assert {"auth.json", "config.toml"} <= set(call["codex_home_files"])
         assert not {"memories", "sessions"} & set(call["codex_home_files"])
+        # The harness dirs are neither under the repo's parent nor next to the repo.
+        run_root = os.path.dirname(call["cwd"])
+        for d in (call["dirs"]["CLAUDE_CONFIG_DIR"], call["dirs"]["CODEX_HOME"]):
+            assert not d.startswith(run_root + "/") and os.path.dirname(d) != run_root
+    assert {"auth.json", "config.toml"} <= set(writer["codex_home_files"])
+    # The Codex writer's dir kept only its login once the writer was done.
+    assert reader["codex_home_files"] == ["auth.json"]
     assert_cleaned_up(env)
 
 
@@ -186,6 +192,24 @@ def test_stale_token_in_a_copied_config_is_a_start_error(env):
     assert res.errored and res.error_stage == "start"
     assert any("did not start clean: codex-dir:config.toml[LEDG-7731]" in r for r in res.reasons), res.reasons
     assert agent_calls(env["log"]) == []
+
+
+@needs_atticdb
+@pytest.mark.parametrize("arm", ["native", "files"])
+@pytest.mark.parametrize("writer,reader", DIRECTIONS)
+def test_reader_grep_finds_no_writer_transcript(env, monkeypatch, arm, writer, reader):
+    """The reader greps the repo's parent and both harness dirs its env names. The writer's
+    transcripts live in a separate temp dir and are deleted before the reader, so it finds none."""
+    monkeypatch.setenv("STUB_READER_GREP", "1")
+    monkeypatch.setenv("STUB_WRITER", "silent")
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], arm, writer, reader, 1)
+    assert not res.errored, res.reasons
+    assert res.captured is False and res.delivered is False and res.delivered_where == ""
+    assert_cleaned_up(env)
+    # Control: without the clean-up, the same grep finds the writer's prompt in its transcript.
+    monkeypatch.setattr(run, "scrub_harness_dir", lambda hroot, harness: [])
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], arm, writer, reader, 1)
+    assert res.delivered is True and res.delivered_where == "transcript[LEDG-7731,412]"
 
 
 def fake_atticdb(tmp_path, disconnect_exit: int) -> str:
@@ -317,15 +341,23 @@ def test_run_starts_clean(env, monkeypatch):
     monkeypatch.setattr(run, "make_root", real_root)
 
     # 3: Claude memory for this repo path, left by an earlier run with the same temp name.
-    def remembered_root(c):
-        root = real_root(c)
-        mem = run.native_memory_dir(root, "claude-code", run.paths(root)[1])
+    made = []
+    real_hroot = run.make_harness_root
+
+    def recorded_root(c):
+        made.append(real_root(c))
+        return made[-1]
+
+    def remembered_hroot(c):
+        hroot = real_hroot(c)
+        mem = run.native_memory_dir(hroot, "claude-code", run.paths(made[-1])[1])
         os.makedirs(mem)
         with open(os.path.join(mem, "MEMORY.md"), "w") as f:
             f.write("bramble-ci\n")
-        return root
+        return hroot
 
-    monkeypatch.setattr(run, "make_root", remembered_root)
+    monkeypatch.setattr(run, "make_root", recorded_root)
+    monkeypatch.setattr(run, "make_harness_root", remembered_hroot)
     res = run_handoff(cfg, Runner(), CASES["H4"], "files", "codex", "claude-code", 1)
     assert res.errored and res.error_stage == "start"
     assert any("claude-dir:projects/" in r and "/memory/MEMORY.md[bramble-ci]" in r for r in res.reasons), res.reasons
@@ -509,9 +541,11 @@ def test_every_evidence_token_has_a_pattern():
     ("412", "412 bytes", True), ("412", "412-byte headers", True), ("412", "412bytes", True),
     ("412", "HTTP 412", False), ("412", "-rw-r--r--  1 eval  staff  4120 Nov  4 ledger.py", False),
     ("412", "line 412: bytes", False),
-    ("3.9", "only has Python 3.9.", True), ("3.9", "python3.9", True), ("3.9", "Python 3.9.6", False),
+    ("3.9", "only has Python 3.9.", True), ("3.9", "python3.9", False), ("3.9", "Python 3.9.6", False),
     ("3.9", "Python 3.95", False), ("3.9", "requires 3.9", False), ("3.9", "bramble-ci runs 3.9 only", True),
-    ("3.9", "3.9 is what bramble-ci has", True), ("3.9", "bramble-ci" + "x" * 50 + " 3.9", False),
+    ("3.9", "3.9 is what bramble-ci has", True),
+    ("3.9", 'File "/usr/lib/python 3.9/site-packages/x.py", line 3', False),
+    ("3.9", "bramble-ci at /opt/py/3.9/bin", False), ("3.9", "bramble-ci" + "x" * 50 + " 3.9", False),
     ("plain files", "plain-file storage", True), ("plain files", "Plain files now", True),
     ("plain files", "explain files", False),
 ])
@@ -525,6 +559,19 @@ def test_python_version_output_is_not_delivery():
               {"type": "item.completed", "item": {"type": "agent_message", "text": "Yes."}}]
     outputs = "\n".join(run.tool_outputs("codex", "\n".join(map(json.dumps, stream)).encode()))
     assert "Python 3.9.6" in outputs
+    assert run.tokens_in(outputs, CASES["H4"].evidence) == []
+
+
+@pytest.mark.parametrize("output", [
+    'Traceback (most recent call last):\n  File "/usr/local/lib/python3.9/site-packages/ledger/x.py", line 4\n',
+    'Traceback (most recent call last):\n  File "/opt/Python 3.9/lib/x.py", line 4\n',
+    "Name: pip\nVersion: 21.2\nLocation: /usr/lib/python3.9/site-packages\n",
+])
+def test_interpreter_paths_are_not_delivery(output):
+    stream = [{"type": "item.completed", "item": {"type": "command_execution", "command": "pip show pip",
+                                                  "aggregated_output": output}},
+              {"type": "item.completed", "item": {"type": "agent_message", "text": "Yes."}}]
+    outputs = "\n".join(run.tool_outputs("codex", "\n".join(map(json.dumps, stream)).encode()))
     assert run.tokens_in(outputs, CASES["H4"].evidence) == []
 
 

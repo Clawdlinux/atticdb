@@ -11,6 +11,8 @@ Installed under both names. It appends each call's argv to $STUB_LOG, then:
   atticdb is wired in, else appends it to HANDOFF.md when the repo's CLAUDE.md or AGENTS.md asks
   for that, else writes nothing. STUB_WRITER=silent makes it write nothing anyway.
   STUB_NATIVE_MEMORY=1 also writes the prompt to the harness's native memory for the repo.
+  Every writer session also leaves a transcript of its prompt in its config dir.
+  STUB_READER_GREP=1 makes a reader grep the repo's parent and both harness dirs for the tokens.
   Any other prompt is a reader. It runs the SessionStart hook, reads HANDOFF.md if there is one
   (a tool result in its stream), and answers H1 right only if LEDG-7731 reached it.
 """
@@ -125,6 +127,13 @@ def native_memory():
     return os.path.join(os.environ["CODEX_HOME"], "memories", "stub.md")
 
 
+def transcript():
+    if PROG == "claude":
+        slug = re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(os.getcwd()))
+        return os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "projects", slug, "s1.jsonl")
+    return os.path.join(os.environ["CODEX_HOME"], "sessions", "2026", "11", "04", "rollout-s1.jsonl")
+
+
 def asks_for_handoff():
     for name in ("CLAUDE.md", "AGENTS.md"):
         try:
@@ -149,6 +158,11 @@ def write(prompt, server):
             with open("HANDOFF.md", "a") as f:
                 f.write(f"- {prompt}\n")
             calls.append(("file", "Write", {"file_path": "HANDOFF.md"}, "ok"))
+    # Every session leaves a transcript in its config dir, as the real agents do.
+    path = transcript()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a") as f:
+        f.write(json.dumps({"type": "user", "prompt": prompt}) + "\n")
     if os.environ.get("STUB_NATIVE_MEMORY"):
         path = native_memory()
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -159,6 +173,14 @@ def write(prompt, server):
 
 def read(prompt, context):
     calls, known = [], context + "\n" + prompt
+    if os.environ.get("STUB_READER_GREP"):
+        # Look everywhere a reader could: the repo's parent, and both harness dirs from the env.
+        where = ["..", os.environ["CLAUDE_CONFIG_DIR"], os.environ["CODEX_HOME"]]
+        marks = [x for m in WRITER_MARKS for x in ("-e", m)]
+        out = subprocess.run(["grep", "-r", "-I", "-h", *marks, *where], capture_output=True, text=True,
+                             timeout=30).stdout
+        calls.append(("file", "Bash", {"file_path": f"grep -r {' '.join(where)}"}, out or "(no matches)"))
+        known += "\n" + out
     if os.path.exists("HANDOFF.md"):
         with open("HANDOFF.md") as f:
             text = f.read()
