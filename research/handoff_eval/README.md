@@ -55,7 +55,7 @@ After each run: `atticdb disconnect` for both harnesses, delete `<harness-root>`
 | native | The repo files only. |
 | files | AGENTS.md and CLAUDE.md in the fixture say: "Keep HANDOFF.md at the repo root. After each task, record decisions, their reasons, rejected approaches and constraints. Read it before you start." Nothing is pre-filled. The writer has to keep the file. |
 | atticdb | `atticdb setup --yes --harness <h>` for both harnesses before the writer. Both are disconnected after the reader. |
-| oracle | No writer session. The reader prompt starts with "Notes from the last session: " and the case's gold note. |
+| oracle | No writer session. The reader prompt starts with "Notes from the last session: " and the case's gold note. A case whose writer changes code has an `oracle_state` in cases.py. Its files go over the fixture and are committed as "writer work" before the reader, so the repo matches the note. Only H1 and H5 have one: `pack_header` packs with `struct.pack`. |
 
 In the files arm, AGENTS.md and CLAUDE.md are committed with the fixture. So they are not part of any diff.
 
@@ -105,6 +105,8 @@ H5 has no delivery stage. Its evidence is H1's tokens, which are unrelated histo
 `check_timed_out` is 1 when a code check timed out. grade.py has no flag of its own yet, so its reasons are read for "timed out". A fail with it also gets "check timed out" in the reasons.
 
 **errored**: a session that timed out, did not start, exited non-zero, reported an error, or gave no final reply.
+The reason names errors from the JSON stream first, such as Codex's `turn.failed` or Claude's failed `result`. Then the last stderr line.
+Stderr often holds only a banner, such as "Reading additional input from stdin...".
 `error_stage` says where: `fixture`, `setup`, `start`, `writer`, `capture`, `hook`, `reader`, `grade`, `budget` or `teardown`.
 An errored run is kept in the CSV. It's never a pass or a fail, and the batch goes on.
 

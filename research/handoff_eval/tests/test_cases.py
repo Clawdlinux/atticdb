@@ -70,3 +70,26 @@ def test_fixture_refuses_a_used_dir(tmp_path):
     (tmp_path / "left.txt").write_text("from a previous run")
     with pytest.raises(FileExistsError):
         fixture.write_fixture(str(tmp_path))
+
+
+def test_oracle_state_leaks_no_evidence():
+    tokens = {tok.lower() for c in CASES.values() for tok in c.evidence}
+    leaks = [(c.id, path, tok) for c in CASES.values() for path, body in c.oracle_state.items()
+             for tok in tokens if tok in body.lower()]
+    assert leaks == []
+
+
+def test_oracle_state_only_where_the_writer_changes_code():
+    # H1 and H5 run the struct switch. H2 and H3 add a docstring only, H4 and H6 state rules.
+    assert {c.id for c in CASES.values() if c.oracle_state} == {"H1", "H5"}
+    assert CASES["H5"].oracle_state == CASES["H1"].oracle_state
+
+
+def test_h1_oracle_state_packs_with_struct_and_passes_the_fixture_tests(tmp_path):
+    body = CASES["H1"].oracle_state["ledger.py"]
+    assert "import struct\n" in body and "struct.pack(" in body and "json.dumps({\"version\"" not in body
+    repo = str(tmp_path / "repo")
+    fixture.write_fixture(repo)
+    with open(os.path.join(repo, "ledger.py"), "w") as f:
+        f.write(body)
+    assert run_python(repo, fixture.TEST_LEDGER_PY) == (True, "")

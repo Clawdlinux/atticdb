@@ -243,6 +243,11 @@ def agent(prompt):
     if replay:
         with open(replay) as f:
             sys.stdout.write(f.read())
+        sys.stdout.flush()
+        if os.environ.get("STUB_STDERR"):
+            sys.stderr.write(os.environ["STUB_STDERR"] + "\n")
+        if os.environ.get("STUB_EXIT_AFTER"):  # a stream, then a failing exit, as a real agent may
+            sys.exit(int(os.environ["STUB_EXIT_AFTER"]))
         return
     if PROG == "claude":
         server = read_json(claude_state(), {}).get("mcpServers", {}).get("atticdb")

@@ -273,6 +273,23 @@ def search_step(cfg: Config, repo: str, phase: str, token: str) -> Step:
     return Step(phase, [cfg.atticdb, "search", "--query", token], repo, agents.ATTICDB_TIMEOUT)
 
 
+def oracle_state(case: Case, arm: str) -> dict[str, str]:
+    """The files the oracle reader's repo gets in place of the writer's work. Other arms get none."""
+    return dict(case.oracle_state) if arm == "oracle" else {}
+
+
+def write_files(repo: str, files: dict[str, str]) -> None:
+    """Writes each relative path under `repo`. A path that leaves the repo is refused."""
+    real = os.path.realpath(repo)
+    for rel, body in files.items():
+        path = os.path.realpath(os.path.join(repo, rel))
+        if os.path.isabs(rel) or not path.startswith(real + os.sep):
+            raise ValueError(f"oracle_state path leaves the repo: {rel!r}")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(body)
+
+
 def plan(cfg: HandoffConfig, case: Case, arm: str, writer: str, reader: str, root: str) -> dict[str, list[Step]]:
     """Every child of 1 run, by phase. A dry run prints these; a real run runs them."""
     _, repo = paths(root)
@@ -282,6 +299,11 @@ def plan(cfg: HandoffConfig, case: Case, arm: str, writer: str, reader: str, roo
     if arms.instruction_files(arm):
         fixture += [Step("fixture", ["git", "add", *arms.instruction_files(arm)], repo, agents.GIT_TIMEOUT, git),
                     Step("fixture", ["git", "commit", "-q", "--no-verify", "-m", "Handoff instructions"], repo,
+                         agents.GIT_TIMEOUT, git)]
+    state = oracle_state(case, arm)
+    if state:
+        fixture += [Step("fixture", ["git", "add", "--", *state], repo, agents.GIT_TIMEOUT, git),
+                    Step("fixture", ["git", "commit", "-q", "--no-verify", "-m", "writer work"], repo,
                          agents.GIT_TIMEOUT, git)]
     fixture.append(Step("fixture", ["git", "update-ref", BASE_REF, "HEAD"], repo, agents.GIT_TIMEOUT, git))
     return {
@@ -504,20 +526,61 @@ def tool_outputs(harness: str, stdout: bytes) -> list[str]:
 
 # ---- 1 run ----
 
-def _unfinished(r: Result, out: Outcome, step: Step) -> str | None:
-    """Why a session did not end cleanly, or None."""
+def _message(value) -> str | None:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for key in ("message", "error", "detail"):
+            if isinstance(value.get(key), str):
+                return value[key]
+    return None
+
+
+def stream_errors(harness: str, stdout: bytes) -> list[str]:
+    """The errors an agent reported in its JSON stream, first 2, redacted and cut. Codex:
+    `turn.failed`, `error`, error items and legacy error messages. Claude: a failed `result`,
+    and an `error` on an assistant message."""
+    found = []
+    for ev in _events(stdout):
+        kind = ev.get("type")
+        text = None
+        if harness == "codex":
+            if kind == "turn.failed":
+                text = _message(ev.get("error")) or "turn failed"
+            elif kind == "error":
+                text = _message(ev) or "error"
+            elif kind in ("item.completed", "item.started") and _codex_item(ev).get("type") == "error":
+                text = _message(_codex_item(ev))
+            elif isinstance(ev.get("msg"), dict) and ev["msg"].get("type") in ("error", "stream_error"):
+                text = _message(ev["msg"])
+        elif kind == "result" and (ev.get("is_error") or ev.get("subtype") not in (None, "success")):
+            text = _message(ev.get("result")) or _message(ev.get("error")) or str(ev.get("subtype"))
+        elif kind == "assistant" and ev.get("error"):
+            text = _message(ev.get("error")) or str(ev.get("error"))
+        if text:
+            found.append(guard.excerpt(text, None, 160))
+    return list(dict.fromkeys(found))[:2]
+
+
+def _unfinished(r: Result, out: Outcome, step: Step, harness: str) -> str | None:
+    """Why a session did not end cleanly, or None. Errors from the JSON stream come first, as
+    stderr often holds only a banner such as "Reading additional input from stdin..."."""
     if agent_finished(r, out):
         return None
     if r.missing:
         return f"{step.argv[0]} is not on PATH"
+    errors = [f"stream error: {e}" for e in stream_errors(harness, r.stdout)]
     if r.timed_out:
-        return f"timed out after {step.timeout:g} s"
-    if r.code != 0:
+        why = f"timed out after {step.timeout:g} s"
+    elif r.code != 0:
+        why = f"exited {r.code}"
         tail = [ln for ln in r.stderr.decode("utf-8", "replace").splitlines() if ln.strip()][-1:]
-        return f"exited {r.code}" + (f" ({guard.excerpt(tail[0], None, 160)})" if tail else "")
-    if out.is_error:
-        return "the agent reported an error"
-    return "no final reply"
+        errors += [f"stderr: {guard.excerpt(tail[0], None, 160)}"] if tail else []
+    elif out.is_error:
+        why = "the agent reported an error"
+    else:
+        why = "no final reply"
+    return why + (": " + "; ".join(errors) if errors else "")
 
 
 def _add(total: int | None, n: int | None) -> int | None:
@@ -536,7 +599,7 @@ def _session(cfg: HandoffConfig, runner: Runner, root: str, hroot: str, step: St
     res.output_tokens = _add(res.output_tokens, out.output_tokens)
     if out.unparsed:
         res.reasons.append(f"{label} unparsed={out.unparsed}")
-    why = _unfinished(r, out, step)
+    why = _unfinished(r, out, step, harness)
     if why:
         raise HarnessError(f"{label} {why}")
     return r, out
@@ -587,10 +650,9 @@ def run_handoff(cfg: HandoffConfig, runner: Runner, case: Case, arm: str, writer
     try:
         try:
             write_fixture(repo)
-            for name, body in arms.instruction_files(arm).items():
-                with open(os.path.join(repo, name), "w") as f:
-                    f.write(body)
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
+            write_files(repo, arms.instruction_files(arm))
+            write_files(repo, oracle_state(case, arm))
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, ValueError) as e:
             raise HarnessError(f"the fixture could not be written: {type(e).__name__}: {e}") from e
         for step in steps["fixture"]:
             _required(cfg, runner, root, step, hroot)
@@ -707,6 +769,9 @@ def describe(cfg: HandoffConfig, case: Case, arm: str, writer: str, reader: str,
     claude, codex = run_dirs(hroot)
     extra = ", ".join(arms.instruction_files(arm))
     lines = [f"  write the ledger fixture into {repo} and commit it" + (f", then write {extra}" if extra else "")]
+    state = oracle_state(case, arm)
+    if state:
+        lines.append(f"  write the case's oracle_state ({', '.join(state)}) as the writer's work")
     for phase, steps in plan(cfg, case, arm, writer, reader, root).items():
         if phase == "disconnect":
             lines.append(f"  [setup] make {claude} (empty) and {codex} (auth.json and config.toml copied from "

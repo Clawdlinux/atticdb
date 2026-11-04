@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from research.handoff_eval import arms, cli, results, run
+from research.handoff_eval import arms, cli, fixture, results, run
 from research.handoff_eval.cases import CASES
 from research.handoff_eval.run import Budget, HandoffConfig, run_handoff
 from research.setup_eval import agents
@@ -290,6 +290,68 @@ def test_oracle_skips_writer(env, writer, reader):
     prompt = call["argv"][1] if reader == "claude-code" else call["argv"][-1]
     assert prompt == f"Notes from the last session: {CASES['H1'].gold_note}\n\n{CASES['H1'].reader_prompt}"
     assert_cleaned_up(env)
+
+
+@needs_atticdb
+@pytest.mark.parametrize("cid,writer_work", [("H1", True), ("H2", False)])
+def test_oracle_repo_holds_the_writer_work(env, monkeypatch, cid, writer_work):
+    """The oracle has no writer, so a case whose writer changes code gets that change committed as
+    "writer work" before the reader. The diff base is after it, so the reader's diff is its own."""
+    seen = {}
+
+    def spy(case, reply, diff, repo):
+        with open(os.path.join(repo, "ledger.py")) as f:
+            seen["ledger"] = f.read()
+        log = subprocess.run(["git", "log", "--format=%s"], cwd=repo, capture_output=True, text=True,
+                             env={"PATH": os.environ["PATH"], **agents.git_env()}, timeout=30)
+        seen["log"], seen["diff"] = log.stdout.splitlines(), diff
+        return Verdict(True, [])
+
+    monkeypatch.setattr(run, "grade", spy)
+    res = run_handoff(make_cfg(env), Runner(), CASES[cid], "oracle", "codex", "claude-code", 1)
+    assert not res.errored, res.reasons
+    if writer_work:
+        assert seen["ledger"] == CASES[cid].oracle_state["ledger.py"]
+        assert seen["log"] == ["writer work", "Initial commit"]
+    else:
+        assert seen["ledger"] == fixture.LEDGER_PY and seen["log"] == ["Initial commit"]
+    assert seen["diff"] == ""
+    # Other arms never get it: their writer does the work.
+    assert run.oracle_state(CASES["H1"], "native") == {}
+    assert_cleaned_up(env)
+
+
+CODEX_FAILED = ('{"type":"thread.started","thread_id":"t1"}\n{"type":"turn.started"}\n'
+                '{"type":"turn.failed","error":{"message":"usage limit"}}\n')
+CLAUDE_FAILED = ('{"type":"system","subtype":"init","session_id":"s1","tools":[]}\n'
+                 '{"type":"result","subtype":"success","is_error":true,"num_turns":1,'
+                 '"result":"Claude AI usage limit reached"}\n')
+
+
+@needs_atticdb
+@pytest.mark.parametrize("writer,stream,message", [("codex", CODEX_FAILED, "usage limit"),
+                                                   ("claude-code", CLAUDE_FAILED, "Claude AI usage limit reached")])
+def test_stream_errors_come_before_stderr(env, monkeypatch, tmp_path, writer, stream, message):
+    replay = tmp_path / "failed.jsonl"
+    replay.write_text(stream)
+    monkeypatch.setenv("STUB_REPLAY", str(replay))
+    monkeypatch.setenv("STUB_STDERR", "Reading additional input from stdin...")
+    monkeypatch.setenv("STUB_EXIT_AFTER", "1")
+    reader = "claude-code" if writer == "codex" else "codex"
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], "native", writer, reader, 1)
+    assert res.errored and res.error_stage == "writer" and res.passed is None
+    assert (f"error in writer: writer 1 exited 1: stream error: {message}; "
+            "stderr: Reading additional input from stdin...") in res.reasons
+    assert_cleaned_up(env)
+
+
+def test_stream_errors_without_a_failing_exit():
+    assert run.stream_errors("codex", b'{"type":"error","message":"stream disconnected"}\n'
+                                      b'{"type":"item.completed","item":{"type":"error","message":"bad"}}\n') == [
+        "stream disconnected", "bad"]
+    assert run.stream_errors("codex", b'{"type":"turn.completed","usage":{}}\n') == []
+    assert run.stream_errors("claude-code", b'{"type":"result","subtype":"error_max_turns","is_error":true}\n') == [
+        "error_max_turns"]
 
 
 @needs_atticdb

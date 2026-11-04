@@ -95,13 +95,21 @@ def _h1_items(sentence: str) -> list[str]:
             for m in H1_ITEM.finditer(sentence)]
 
 
+# "json headers were 412 bytes": a format word right before "header(s) were N" binds to N, whatever
+# comes before it. Else "struct chosen because json headers were 412 vs 24" pairs struct with 412.
+HEADERS_WERE = re.compile(rf"\b(json|structs?)\s+headers?\s+(?:were|was|are|is|measured(?:\s+at)?)\s+"
+                          rf"(?:about\s+|around\s+|~)?({N412}|{N24})")
+
+
 def _h1_pairs(sentence: str) -> list[tuple[str, str]]:
     """Pair each number with its label.
 
-    "X vs Y: a vs b" pairs in order: (X, a), (Y, b). Otherwise each number pairs with the label next
-    to it: "JSON 412 vs 24 struct" gives (json, 412) and (struct, 24)."""
-    items = _h1_items(sentence)
-    pairs, i = [], 0
+    "<format> headers were N" binds first, then leaves the sentence. "X vs Y: a vs b" pairs in order:
+    (X, a), (Y, b). Otherwise each number pairs with the label next to it: "JSON 412 vs 24 struct"
+    gives (json, 412) and (struct, 24)."""
+    pairs = [(m.group(1).rstrip("s"), m.group(2)) for m in HEADERS_WERE.finditer(sentence)]
+    items = _h1_items(HEADERS_WERE.sub(" ", sentence))
+    i = 0
     while i < len(items) - 1:
         run = items[i:i + 4]
         kinds = "".join("n" if x.isdigit() else "l" for x in run)
