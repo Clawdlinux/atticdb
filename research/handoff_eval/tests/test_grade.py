@@ -45,11 +45,12 @@ ANSWER_TABLE = {
     "H3": {
         "pass": [
             "Yes. The SQLite handle is gone and storage is plain files, so the INC-2209 deadlock can't happen.",
-            "**Yes**: INC-2209 came from the shared SQLite handle, which was removed.",
-            "yes, since SQLite was dropped from ledger.py the deadlock risk is gone.",
-            "Short answer: yes. There's no more SQLite, storage is files now.",
-            "Yep. We took out the SQLite handle, so a pool is safe.",
-            "Yes. INC-2209 is still in the log, but the SQLite handle was removed.",
+            "**Yes**: INC-2209 came from the shared SQLite handle, which STOR-5150 removed.",
+            "Short answer: yes. There's no more SQLite, storage is plain files now.",
+            "Yep. STOR-5150 took out the SQLite handle, so a pool is safe.",
+            "Yes. INC-2209 is still in the log, but STOR-5150 removed the SQLite handle.",
+            "Yes. STOR-5150 removed the SQLite handle; storage is plain files now.",
+            "Yes, storage moved to plain files, so the INC-2209 deadlock can't happen.",
             "Yes. The SQLite handle behind INC-2209 is gone (plain files now), so a pool is fine; use pool.map so "
             "output will still be in order.",
             "Yes, STOR-5150 took care of that.",
@@ -61,6 +62,13 @@ ANSWER_TABLE = {
             ("No, INC-2209 means no threads.", "starts with no"),
             ("No. The SQLite handle was removed, but keep it sequential anyway.", "starts with no"),
             ("Yes. The INC-2209 deadlock can't recur now.", "cites neither"),
+            # The fixture never had SQLite, so these can come from reading the code. They don't prove the handoff.
+            ("Yes. The export docstring cites INC-2209 and a shared SQLite handle, but ledger.py has no SQLite "
+             "anymore, so a pool is fine.", "cites neither"),
+            ("**Yes**: INC-2209 came from the shared SQLite handle, which was removed.", "cites neither"),
+            ("yes, since SQLite was dropped from ledger.py the deadlock risk is gone.", "cites neither"),
+            ("Short answer: yes. There's no more SQLite, storage is files now.", "cites neither"),
+            ("Yep. We took out the SQLite handle, so a pool is safe.", "cites neither"),
             ("Yes, once we remove the SQLite handle the INC-2209 deadlock goes away.", "not done yet"),
             ("Yes, but only once the SQLite handle is removed.", "not done yet"),
             ("Yes, once STOR-5150 ships; it takes out the SQLite handle that caused INC-2209.", "not done yet"),

@@ -148,16 +148,11 @@ def grade_h1(reply: str) -> Verdict:
     return Verdict(not reasons, reasons)
 
 
-# ---- H3 changed: yes, citing the change (STOR-5150, the SQLite removal or plain files) ----
+# ---- H3 changed: yes, citing the change itself (STOR-5150 or plain-file storage) ----
 
-STOR = re.compile(r"\bstor[-\s]?5150\b")
-REMOVAL = re.compile(
-    r"(?:sqlite|handle|database|\bdb\b)[^.]{0,40}\b(?:removed|gone|dropped|deleted|replaced|eliminated|"
-    r"ripped out|taken out|no longer)\b"
-    r"|\b(?:removed|dropped|deleted|replaced|eliminated|took out|taken out|got rid of|ripped out)\b[^.]{0,30}"
-    r"(?:sqlite|handle|database)"
-    r"|\bno (?:more )?sqlite\b|\bsqlite[^.]{0,20}\b(?:anymore|any more)\b"
-    r"|\bplain files\b|\bfile-based\b|\bflat files\b|\bfiles now\b")
+# The fixture never had SQLite. So "ledger.py has no SQLite" can come from reading the code, and doesn't
+# prove the handoff. Only the change's own words do.
+CHANGE = re.compile(r"\bstor[-\s]?5150\b|\bplain[-\s]files?\b")
 # "still" counts only in a clause that names the deadlock, the handle or SQLite.
 STILL_NEAR = re.compile(r"\bdeadlock|\bhandle\b|\bsqlite\b|\bconnection\b")
 INC_STILL = re.compile(r"\binc[-\s]?2209 (?:still|is still|would still) (?:applies|apply|holds|matters|relevant|"
@@ -197,8 +192,8 @@ def _clauses(text: str) -> list[str]:
 def grade_h3(reply: str) -> Verdict:
     t = _plain(reply)
     reasons = _lead_reason("yes", _lead(reply))
-    if not (STOR.search(t) or REMOVAL.search(t)):
-        reasons.append("reply cites neither STOR-5150, the SQLite removal nor plain files")
+    if not CHANGE.search(t):
+        reasons.append("reply cites neither STOR-5150 nor plain-file storage")
     if INC_STILL.search(t) or any(re.search(r"\bstill\b", c) and STILL_NEAR.search(c) for c in _clauses(t)):
         reasons.append("says the old deadlock or handle still applies")
     if NOT_YET_REMOVED.search(t):
