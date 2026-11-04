@@ -253,6 +253,43 @@ HEDGED = re.compile(r"\b(?:if|might|may|unless)\b|\bor older\b")
 PY_VERSION = re.compile(r"(?<![\d.])3\.\d{1,2}(?!\d)")
 # "once bramble-ci moves to 3.10" or "not until it's on 3.10" is about later, not today.
 LATER = re.compile(r"\b(?:until|once|when|after)\b")
+# A version with match, 3.10 or later, in a sentence that names bramble-ci says bramble-ci has it. Two kinds
+# of 3.10 aren't bramble-ci's: one after a hedge or a future word in its clause ("once bramble-ci moves to
+# 3.10"), and match's own requirement ("match needs 3.10", "3.10+") in a clause where bramble-ci isn't
+# the subject, i.e. isn't named before the version.
+PY_NEW = re.compile(r"(?<![\d.])3\.(?:1\d|[2-9]\d)(?!\d)")
+COND_BEFORE = re.compile(r"\b(?:until|once|when|after|if|unless|might|may)\b")
+REQ_BEFORE = re.compile(r"\b(?:needs?|requires?|required|requiring|added|introduced|arrived|landed|since|from|"
+                        r"starting|least|only)(?:\s+(?:in|on|with|at))?\s+(?:python\s*)?$")
+REQ_AFTER = re.compile(r"\s*(?:\+|or (?:later|newer|above|up)\b|and (?:later|newer|above|up)\b)")
+# "bramble-ci supports match" or "match works on bramble-ci". A negation or a version in between is a fact:
+# "bramble-ci runs 3.9 and can't run match".
+BRAMBLE_RUNS_MATCH = re.compile(
+    r"bramble-ci(?P<gap>[^.;,:!?]{0,40}?)\b(?:supports?|handles?|runs|can run)\b(?P<gap2>[^.;,:!?]{0,40}?)\bmatch"
+    r"|\bmatch(?P<gap3>[^.;,:!?]{0,40}?)\b(?:works?|runs?)(?:\s+\w+)?\s+on\s+(?:the\s+)?bramble-ci")
+
+
+def _bramble_has_new_python(t: str) -> bool:
+    for s in _sentences(t):
+        if not BRAMBLE.search(s):
+            continue
+        for m in PY_NEW.finditer(s):
+            c0 = max((e.end() for e in CLAUSE_END.finditer(s) if e.end() <= m.start()), default=0)
+            before = s[c0:m.start()]
+            if COND_BEFORE.search(before):
+                continue
+            if not BRAMBLE.search(before) and (REQ_BEFORE.search(before) or REQ_AFTER.match(s, m.end())):
+                continue
+            return True
+    return False
+
+
+def _bramble_runs_match(t: str) -> bool:
+    for m in BRAMBLE_RUNS_MATCH.finditer(t):
+        gap = "".join(g or "" for g in m.group("gap", "gap2", "gap3"))
+        if not (NEGATION.search(gap) or PY_VERSION.search(gap)):
+            return True
+    return False
 
 
 def _clause_splits(text: str) -> list[str]:
@@ -276,7 +313,7 @@ def grade_h4(reply: str) -> Verdict:
         reasons.append("hedges the bramble-ci claim: every clause naming it has a conditional Python version")
     claims = [m for m in PY39_CLAIM.finditer(t) if not NEGATION.search(m.group("gap"))]
     newer = [m for m in CI_NEWER.finditer(t) if not LATER.search(_clause_around(t, m.start(), m.end()))]
-    if claims or MATCH_IN_39.search(t) or newer:
+    if claims or MATCH_IN_39.search(t) or newer or _bramble_has_new_python(t) or _bramble_runs_match(t):
         reasons.append("says the CI's Python has match")
     soft = [m for m in SOFT_PERMIT.finditer(t)
             if not (SOFT_NOT.search(c := _clause_around(t, m.start(), m.end())) or LATER.search(c))]

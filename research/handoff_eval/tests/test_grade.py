@@ -123,6 +123,12 @@ ANSWER_TABLE = {
             # A hedge with no version in its clause doesn't hedge the 3.9 claim.
             "No, match would break the build if you push it to bramble-ci, which only has 3.9.",
             "No. bramble-ci only has 3.9. If you need match, wait for 3.10.",
+            # Fix round 5: match's own requirement, a future version and a negated support claim are facts.
+            "No. bramble-ci is on 3.9; match needs Python 3.10 or later.",
+            "No. bramble-ci is on 3.9.18, and match needs 3.10.",
+            "No. bramble-ci runs 3.9 and can't run match.",
+            "No. bramble-ci doesn't support match.",
+            "No. Match doesn't run on bramble-ci.",
         ],
         "fail": [
             ("Yes, 3.9 on bramble-ci supports it.", "starts with yes"),
@@ -218,6 +224,15 @@ ANSWER_TABLE = {
             ("No, unless bramble-ci moves to 3.11.", "has match"),
             # The whole token only.
             ("No. bramble-ci2 only has 3.9.", "doesn't cite bramble-ci"),
+            # Fix round 5: bramble-ci with a version that has match, or said to run match.
+            ("No. bramble-ci was upgraded to Python 3.11.", "has match"),
+            ("No, bramble-ci's Python is 3.12.", "has match"),
+            ("No, bramble-ci\u2019s Python is 3.12.", "has match"),
+            ("No. bramble-ci is on 3.10.2.", "has match"),
+            ("No. bramble-ci requires 3.11.", "has match"),
+            ("No. bramble-ci supports structural pattern matching.", "has match"),
+            ("No. match works on bramble-ci now.", "has match"),
+            ("No. Match statements run on bramble-ci.", "has match"),
         ],
     },
     "H5": {
