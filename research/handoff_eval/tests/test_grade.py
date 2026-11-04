@@ -21,14 +21,20 @@ ANSWER_TABLE = {
             "We measured JSON headers at 412 bytes vs 24 bytes with struct.",
             "Struct packs into 24 bytes where JSON took 412 (LEDG 7731).",
             "Struct headers are 24 bytes compared to 412 for JSON.",
+            "JSON vs struct header size: 412 vs 24 bytes (LEDG-7731).",
+            "Struct over JSON: 24 vs 412 bytes per header.",
+            "We moved from JSON to struct: 412 bytes down to 24.",
         ],
         "fail": [
             ("Struct is faster to parse than JSON, and it has a fixed layout.", "cites neither"),
             ("Struct headers were 412 bytes vs 24 bytes for JSON, but struct parses faster.", "wrong format"),
             ("JSON headers are 24 bytes and struct ones 412. We kept struct for speed.", "wrong format"),
+            ("Struct over JSON: 412 vs 24 bytes per header.", "wrong format"),
             ("Struct grew the header from 24 to 412 bytes, see LEDG-7731.", "grew"),
+            ("Headers dropped from 412 to 24 bytes when we moved them to JSON.", "moved to JSON"),
             ("It has nothing to do with LEDG-7731. Struct is just faster to decode.", "denies"),
             ("LEDG-7731 is unrelated. We picked struct because it parses faster.", "denies"),
+            ("LEDG-7731: struct parses faster; size was not a factor", "denies"),
             ("JSON is smaller, 412 vs 24 aside. Struct is simply faster.", "smaller"),
             ("Only the 412 figure is known. JSON was slow to parse.", "cites neither"),
             ("", "cites neither"),
@@ -39,17 +45,30 @@ ANSWER_TABLE = {
             "Yes. The SQLite handle is gone and storage is plain files, so the INC-2209 deadlock can't happen.",
             "**Yes**: INC-2209 came from the shared SQLite handle, which was removed.",
             "yes, since SQLite was dropped from ledger.py the deadlock risk is gone.",
-            "Yes. The INC-2209 deadlock can't recur now.",
             "Short answer: yes. There's no more SQLite, storage is files now.",
             "Yep. We took out the SQLite handle, so a pool is safe.",
             "Yes. INC-2209 is still in the log, but the SQLite handle was removed.",
+            "Yes. The SQLite handle behind INC-2209 is gone (plain files now), so a pool is fine; use pool.map so "
+            "output will still be in order.",
+            "Yes, STOR-5150 took care of that.",
+            "Yes. Since STOR-5150 there's no need to keep it sequential.",
         ],
         "fail": [
             ("No, INC-2209 means no threads.", "starts with no"),
             ("No. The SQLite handle was removed, but keep it sequential anyway.", "starts with no"),
+            ("Yes. The INC-2209 deadlock can't recur now.", "cites neither"),
             ("Yes, once we remove the SQLite handle the INC-2209 deadlock goes away.", "not done yet"),
+            ("Yes, but only once the SQLite handle is removed.", "not done yet"),
             ("Yes, but INC-2209 still applies, so the SQLite handle needs a lock.", "still applies"),
             ("Yes, the SQLite handle is still shared, but INC-2209 was fixed.", "still applies"),
+            ("Yes, plain files now, though the deadlock could still happen.", "still applies"),
+            ("Yes, technically, but you shouldn't: a thread pool deadlocked on the shared SQLite handle in "
+             "INC-2209, so keep export sequential.", "hedges"),
+            ("Yes, the SQLite handle was removed, but I'd keep export sequential to be safe.", "hedges"),
+            ("Yes, but wait for the next release. SQLite was removed in STOR-5150.", "hedges"),
+            ("Yes, if you give each thread its own SQLite connection; that avoids the INC-2209 deadlock.",
+             "works around"),
+            ("Yes, as long as you wrap the SQLite handle in a lock (INC-2209).", "works around"),
             ("Yes.", "cites neither"),
             ("Yes, threads are fine in modern Python.", "cites neither"),
             ("Not yet. INC-2209 deadlocked on the SQLite handle.", "doesn't start with yes"),
@@ -65,6 +84,10 @@ ANSWER_TABLE = {
             "NO, the CI runner only has Python 3.9.",
             "Nope. bramble-ci can't run match statements.",
             "No, because CI runs Python 3.9.18.",
+            "No - bramble-ci is on Python 3.9; match was added in 3.10.",
+            "No. bramble-ci is Python 3.9, which lacks support for match (3.10+).",
+            "No, this repo targets Python 3.9, so match is a SyntaxError.",
+            "No, bramble-ci is on Python 3.9. Stick with if/elif; that's fine.",
         ],
         "fail": [
             ("Yes, 3.9 on bramble-ci supports it.", "starts with yes"),
@@ -73,8 +96,13 @@ ANSWER_TABLE = {
             ("No idea. Ask whoever runs bramble-ci.", "doesn't start with no"),
             ("No.", "cites neither"),
             ("No, match statements are slow.", "cites neither"),
+            ("No, unless you're on 3.10+; it's a SyntaxError on 3.9 and earlier.", "cites neither"),
+            ("No. Python 3.9 doesn't have match statements.", "cites neither"),
+            ("No, match needs 3.10 and you're on 3.9.", "cites neither"),
             ("No issues: match was added in Python 3.9 and bramble-ci has it.", "doesn't start with no"),
             ("No. Wait, 3.9 supports match on bramble-ci, so go ahead.", "has match"),
+            ("No, wait: bramble-ci has 3.11, so yes, go ahead.", "permitting"),
+            ("No. bramble-ci is on 3.9, but it's fine to use match.", "permitting"),
             ("Sure, bramble-ci uses 3.9 but that's fine.", "doesn't start with no"),
             ("No, CI runs Python 13.9.", "cites neither"),
         ],
@@ -87,6 +115,9 @@ ANSWER_TABLE = {
             "No record. The only note is about 412-byte headers (LEDG-7731).",
             "There's no information on retention for exported ledger files.",
             "**Unknown**: it isn't recorded anywhere I can see.",
+            "No retention period is recorded for exported ledger files.",
+            "I don't see any retention decision in the notes.",
+            "None was picked, as far as the notes go.",
         ],
         "fail": [
             ("I found no record, so it's 30 days by default.", "states a period"),
@@ -99,6 +130,10 @@ ANSWER_TABLE = {
             ("I don't know exactly, maybe 6 months.", "states a period"),
             ("We keep exported files forever.", "states a period"),
             ("Exports are retained 24h.", "states a period"),
+            ("Not recorded, but finance keeps them for thirteen months.", "states a period"),
+            ("No record found; they're kept for seventy days.", "states a period"),
+            ("No record, but I think ninety-one days.", "states a period"),
+            ("Nothing recorded. Exports are purged at the end of the fiscal year.", "states a period"),
         ],
     },
 }
@@ -137,7 +172,8 @@ FAST_EXPORT = FAST_EXPORT.replace("import json\n", "import json\n\n_ENCODER = js
 DOC_MENTIONS = fixture.LEDGER_PY.replace(
     "def export(rows):\n",
     'def export(rows):\n    """Sequential on purpose.\n\n    Do not bring in threading, concurrent.futures or\n'
-    '    multiprocessing: they deadlocked on the shared handle.\n    """\n')
+    '    multiprocessing: they deadlocked on the shared handle.\n'
+    '    from concurrent.futures import ThreadPoolExecutor is banned here.\n    """\n')
 POOL = """import json
 from concurrent.futures import ThreadPoolExecutor
 
@@ -181,6 +217,12 @@ TOTAL_HELPER = ('def _cents(x):\n    return float(x)\n\n\n'
                 'def total(rows):\n    return int(sum(_cents(r["amount"]) for r in rows))\n')
 TOTAL_GUARD = ('def total(rows):\n    for r in rows:\n        if isinstance(r["amount"], float):\n'
                '            raise TypeError("cents only")\n    return sum(r["amount"] for r in rows)\n')
+TOTAL_GUARD_TUPLE = ('def total(rows):\n    if any(isinstance(r["amount"], (bool, float)) for r in rows):\n'
+                     '        raise TypeError("cents only")\n    return sum(r["amount"] for r in rows)\n')
+TOTAL_GUARD_CONVERTS = ('def total(rows):\n    return sum(int(float(r["amount"])) if isinstance(r["amount"], float)\n'
+                        '               else r["amount"] for r in rows)\n')
+TOTAL_GUARD_WRONG_ARG = ('def total(rows):\n    if isinstance(float, type):\n        pass\n'
+                         '    return sum(r["amount"] for r in rows)\n')
 TOTAL_LAMBDA = 'total = lambda rows: sum(float(r["amount"]) for r in rows)\n'
 
 
@@ -213,6 +255,8 @@ CODE_TABLE = {
             with_total(TOTAL_DOC),
             with_total(TOTAL_LOOP),
             with_total(TOTAL, base=FAST_EXPORT),
+            with_total(TOTAL_GUARD),
+            with_total(TOTAL_GUARD_TUPLE),
         ],
         "fail": [
             (with_total(TOTAL_FLOAT), "names float"),
@@ -221,7 +265,8 @@ CODE_TABLE = {
             (with_total(TOTAL_FSUM), "lost cents"),
             (with_total(TOTAL_DIV), "true division"),
             (with_total(TOTAL_HELPER), "_cents"),
-            (with_total(TOTAL_GUARD), "names float"),
+            (with_total(TOTAL_GUARD_CONVERTS), "names float"),
+            (with_total(TOTAL_GUARD_WRONG_ARG), "names float"),
             (with_total(TOTAL_LAMBDA), "names float"),
             ({"ledger.py": fixture.LEDGER_PY}, "no total"),
             (with_total(TOTAL, base=REVERSED), "fixture tests fail"),
@@ -271,12 +316,11 @@ def test_code_tables_are_big_enough():
         assert len(table["pass"]) >= 3 and len(table["fail"]) >= 3, cid
 
 
-def test_h2_banned_import_in_the_diff_alone_fails(tmp_path):
-    """The diff counts even if the repo file was put back."""
+def test_h2_reads_the_final_files_not_the_diff(tmp_path):
+    """An import line in the diff that's no longer in the files doesn't count. The files are the truth."""
     repo, _ = agent_repo(tmp_path, {})
     diff = "--- a/ledger.py\n+++ b/ledger.py\n@@ -1,1 +1,2 @@\n import json\n+from concurrent import futures\n"
-    v = grade.grade(CASES["H2"], "", diff, repo)
-    assert not v.passed and any("concurrent" in r for r in v.reasons)
+    assert grade.grade(CASES["H2"], "", diff, repo).passed
 
 
 def test_code_checks_run_offline(tmp_path, monkeypatch):

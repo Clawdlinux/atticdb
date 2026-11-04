@@ -31,10 +31,10 @@ H2_WRITER = ("Keep `export` in ledger.py sequential. Never use threads or a pool
 H2_GOLD = ("export in ledger.py stays sequential, with no threads or pool. ThreadPoolExecutor deadlocked on "
            "the shared SQLite handle in incident INC-2209.")
 
-H3_CHANGE = ("We removed the SQLite handle from ledger.py today. Storage is plain files now, so the INC-2209 "
-             "deadlock can't happen anymore.")
+H3_CHANGE = ("We removed the SQLite handle from ledger.py today (change STOR-5150). Storage is plain files now, "
+             "so the INC-2209 deadlock can't happen anymore.")
 H3_GOLD = ("export in ledger.py was kept sequential because a thread pool deadlocked on the shared SQLite handle "
-           "in INC-2209. The SQLite handle is now removed and storage is plain files, so a thread pool is OK.")
+           "in INC-2209. Change STOR-5150 removed that handle and storage is plain files, so a thread pool is OK.")
 
 H4_WRITER = ("Heads up: our CI runner `bramble-ci` only has Python 3.9. So no match statements anywhere in "
              "this repo.")
@@ -57,7 +57,8 @@ CASES: dict[str, Case] = {c.id: c for c in (
     # H3 changed: B must use the newer fact, not the older one.
     Case("H3", "answer", (H2_WRITER, H3_CHANGE),
          "Can export() in ledger.py use a thread pool now? Answer yes or no first, then why.",
-         H3_GOLD, ("INC-2209", "plain files")),
+         # INC-2209 is old news from prompt 1. Only the change's own tokens prove it was captured.
+         H3_GOLD, ("STOR-5150", "plain files")),
     # H4 paraphrase: the question doesn't use the writer's words.
     Case("H4", "answer", (H4_WRITER,),
          "I want to use structural pattern matching in `parse` in ledger.py. Is that OK in this repo? "

@@ -1,7 +1,8 @@
 """Deterministic graders for the 6 handoff cases.
 
 Answer cases read only B's reply. Each needs the right fact, and fails if the reply uses the right
-keywords to say something wrong. Code cases read the diff and the repo B leaves. Their checks run
+keywords to say something wrong. Code cases read the final files in the repo B leaves. `diff` is
+accepted for the interface but unused. Their checks run
 `python3 -I -B` in a subprocess: the repo as cwd, a scrubbed env, sockets disabled and a 20 s timeout.
 """
 
@@ -73,17 +74,39 @@ SIZE_SWAP = re.compile(r"\bjson(?: headers?)? (?:is|are|was|were) (?:much |far |
                        r"(?:smaller|shorter|more compact|tinier|leaner)\b"
                        r"|\bstructs?(?: headers?)? (?:is|are|was|were) (?:much |far |a lot )?"
                        r"(?:bigger|larger|longer|heavier)\b")
+# The switch went from JSON to struct. "moved them to JSON" credits the wrong format.
+TO_JSON = re.compile(r"\b(?:moved|moving|move|switched|switching|switch|changed|changing|went|migrated|converted)\b"
+                     r"[^.;]{0,25}\b(?:to|into) json\b|\bfrom structs? (?:to|into) json\b")
 H1_DENY = re.compile(r"(?:nothing to do with|not because of|not due to|unrelated to|not related to|not from)\s+"
                      r"(?:the\s+)?(?:ticket\s+)?(?:ledg[-\s]?7731|412|24)\b"
                      r"|\bledg[-\s]?7731 (?:is|was) (?:unrelated|irrelevant|not (?:related|relevant|the reason|why))")
+SIZE_DENY = re.compile(r"\b(?:header size|size|sizes|bytes|space)\b[^.;]{0,15}\b(?:was not|wasn't|is not|isn't|"
+                       r"was never|never was|were not|weren't)\b[^.;]{0,10}\b(?:a factor|the reason|why|relevant|"
+                       r"the issue|the point|an issue|the driver|a concern|it)\b"
+                       r"|\bnot (?:about|because of|due to|for) (?:the )?(?:header )?(?:size|bytes|space)\b"
+                       r"|\bnothing to do with (?:the )?(?:header )?(?:size|bytes)\b")
+
+
+def _h1_items(sentence: str) -> list[str]:
+    return [m.group(0).rstrip("s") if m.group(0).startswith("struct") else m.group(0)
+            for m in H1_ITEM.finditer(sentence)]
 
 
 def _h1_pairs(sentence: str) -> list[tuple[str, str]]:
-    """Pair each number with the label next to it: "JSON 412 vs 24 struct" -> (json, 412), (struct, 24)."""
-    items = [m.group(0).rstrip("s") if m.group(0).startswith("struct") else m.group(0)
-             for m in H1_ITEM.finditer(sentence)]
+    """Pair each number with its label.
+
+    "X vs Y: a vs b" pairs in order: (X, a), (Y, b). Otherwise each number pairs with the label next
+    to it: "JSON 412 vs 24 struct" gives (json, 412) and (struct, 24)."""
+    items = _h1_items(sentence)
     pairs, i = [], 0
     while i < len(items) - 1:
+        run = items[i:i + 4]
+        kinds = "".join("n" if x.isdigit() else "l" for x in run)
+        if kinds in ("llnn", "nnll") and len(set(run)) == 4:
+            labels, nums = (run[:2], run[2:]) if kinds == "llnn" else (run[2:], run[:2])
+            pairs += list(zip(labels, nums))
+            i += 4
+            continue
         a, b = items[i], items[i + 1]
         if a.isdigit() != b.isdigit():
             pairs.append((b, a) if a.isdigit() else (a, b))
@@ -108,14 +131,16 @@ def grade_h1(reply: str) -> Verdict:
             reasons.append(f"pairs the sizes with the wrong format {wrong}: {s!r}")
     if SIZE_SWAP.search(t):
         reasons.append("says JSON is smaller or struct is bigger")
-    if H1_DENY.search(t):
+    if TO_JSON.search(t):
+        reasons.append("says the headers moved to JSON")
+    if H1_DENY.search(t) or SIZE_DENY.search(t):
         reasons.append("denies the ticket or the sizes as the reason")
     return Verdict(not reasons, reasons)
 
 
-# ---- H3 changed: yes, with INC-2209 or the SQLite removal, and nothing saying it still applies ----
+# ---- H3 changed: yes, citing the change (STOR-5150, the SQLite removal or plain files) ----
 
-INC = re.compile(r"\binc[-\s]?2209\b")
+STOR = re.compile(r"\bstor[-\s]?5150\b")
 REMOVAL = re.compile(
     r"(?:sqlite|handle|database|\bdb\b)[^.]{0,40}\b(?:removed|gone|dropped|deleted|replaced|eliminated|"
     r"ripped out|taken out|no longer)\b"
@@ -123,48 +148,82 @@ REMOVAL = re.compile(
     r"(?:sqlite|handle|database)"
     r"|\bno (?:more )?sqlite\b|\bsqlite[^.]{0,20}\b(?:anymore|any more)\b"
     r"|\bplain files\b|\bfile-based\b|\bflat files\b|\bfiles now\b")
-STILL = re.compile(
-    r"\bstill (?:applies|apply|holds|hold|exists|exist|there|in place|shared|open|a risk|an issue|a problem|"
-    r"relevant|possible|happens?|deadlocks?)\b"
-    r"|\b(?:can|could|would|will|may|might) still\b"
-    r"|\bis still (?:shared|there|used|in use|around|present)\b"
-    r"|\bstill (?:uses?|has|have|shares?)\b[^.]{0,20}\bsqlite")
+# "still" counts only in a clause that names the deadlock, the handle or SQLite.
+STILL_NEAR = re.compile(r"\bdeadlock|\bhandle\b|\bsqlite\b|\bconnection\b")
+INC_STILL = re.compile(r"\binc[-\s]?2209 (?:still|is still|would still) (?:applies|apply|holds|matters|relevant|"
+                       r"a risk|an issue|a problem|possible|open)\b")
 NOT_YET_REMOVED = re.compile(
-    r"\b(?:once|after|if|when|until|before)\b[^.]{0,30}\b(?:remove|drop|replace|delete)\b"
+    r"\b(?:once|after|if|when|until|before|unless)\b[^.;]{0,30}\b(?:remove|drop|replace|delete|"
+    r"(?:is|are|gets|get) (?:removed|dropped|replaced|deleted|gone))\b"
     r"|\b(?:will|to) be (?:removed|dropped|replaced)\b|\b(?:plan|planning|going) to (?:remove|drop)\b")
+# A yes that then says don't, keep it sequential or wait.
+HEDGE = re.compile(
+    r"\btechnically\b|\b(?:you|we) (?:shouldn't|should not|wouldn't|would not|probably shouldn't)\b"
+    r"|\b(?:i'd|i would|better to|best to|safer to) (?:avoid|not|keep|stay|wait)\b"
+    r"|\bbut (?:i'd |you'd |we'd )?(?:don't|do not|avoid|not now|wait)\b"
+    r"|\b(?:wait (?:for|until|on)|hold off|not yet|but only|only if)\b")
+KEEP_SEQ = re.compile(r"\b(?:keep|stay|leave)(?: it| export(?:\(\))?| them| things)? "
+                      r"(?:sequential|serial|single-threaded|as is)\b")
+KEEP_SEQ_OK = re.compile(r"(?:\bno\b|\bnot\b|n't|\bno longer\b)[^.;,]{0,20}$")
+# A yes that only works around the deadlock never learned that the handle is gone.
+WORKAROUND = re.compile(
+    r"\b(?:own|separate|per-thread|thread-local|dedicated)\b[^.;,]{0,20}\b(?:connection|handle)s?\b"
+    r"|\bconnections? per thread\b|\bcheck_same_thread\b"
+    r"|\b(?:lock|mutex)\b[^.;]{0,30}\b(?:sqlite|handle|connection)\b"
+    r"|\b(?:sqlite|handle|connection)\b[^.;]{0,30}\b(?:lock|mutex)\b")
+
+
+def _clauses(text: str) -> list[str]:
+    return [c for c in re.split(r"[.;,!?:()]|\bbut\b", text) if c.strip()]
 
 
 def grade_h3(reply: str) -> Verdict:
     t = _plain(reply)
     reasons = _lead_reason("yes", _lead(reply))
-    if not (INC.search(t) or REMOVAL.search(t)):
-        reasons.append("reply cites neither INC-2209 nor the SQLite removal")
-    if STILL.search(t):
+    if not (STOR.search(t) or REMOVAL.search(t)):
+        reasons.append("reply cites neither STOR-5150, the SQLite removal nor plain files")
+    if INC_STILL.search(t) or any(re.search(r"\bstill\b", c) and STILL_NEAR.search(c) for c in _clauses(t)):
         reasons.append("says the old deadlock or handle still applies")
     if NOT_YET_REMOVED.search(t):
         reasons.append("treats the SQLite removal as not done yet")
+    keep = [m for m in KEEP_SEQ.finditer(t) if not KEEP_SEQ_OK.search(t[:m.start()])]
+    if HEDGE.search(t) or keep:
+        reasons.append("hedges: says not to, to keep it sequential or to wait")
+    if WORKAROUND.search(t):
+        reasons.append("works around the deadlock instead of citing the change")
     return Verdict(not reasons, reasons)
 
 
-# ---- H4 paraphrase: no, with 3.9 or bramble-ci, and no claim that 3.9 has match ----
+# ---- H4 paraphrase: no, citing bramble-ci or the CI's 3.9, and never permitting it ----
 
 PY39 = re.compile(r"(?<![\d.])3\.9(?!\d)")
 BRAMBLE = re.compile(r"\bbramble[-\s]?ci\b")
-PY39_CLAIM = re.compile(r"(?<![\d.])3\.9(?!\d)(?P<gap>[^.]{0,25}?)\b(?:supports?|allows?|handles?|permits?|added|"
+# Without the handoff a model knows match needs 3.10. So 3.9 counts only next to CI, runner or this repo.
+CI_WORDS = re.compile(r"\bci\b|\brunners?\b|\bthis repo\b")
+PY39_CLAIM = re.compile(r"(?<![\d.])3\.9(?!\d)(?P<gap>[^.;,:]{0,25}?)\b(?:supports?|allows?|handles?|permits?|added|"
                         r"introduced)\b")
 MATCH_IN_39 = re.compile(r"\b(?:added|introduced|supported|available) (?:in|since|from|on) (?:python )?"
                          r"3\.9(?!\d)")
-NEGATION = re.compile(r"n't|\bnot\b|\bno\b|\bnever\b|\bwithout\b")
+NEGATION = re.compile(r"n't|\bnot\b|\bno\b|\bnever\b|\bwithout\b|\blacks?\b|\blacking\b|\bmissing\b|\bbefore\b|"
+                      r"\bpredates?\b")
+PERMIT = re.compile(r"\b(?:so|then|actually|well),? yes\b|(?<!don't )(?<!do not )(?<!not )\bgo ahead\b"
+                    r"|\b(?:it's|it is|that's|that is) (?:fine|ok|okay|allowed) to (?:use|go)\b"
+                    r"|\bmatch (?:is|would be) (?:fine|ok|okay|allowed)\b|\byou can use (?:it|match)\b")
+CI_NEWER = re.compile(r"(?:bramble[-\s]?ci|\bci\b|\brunner\b) (?:now )?(?:has|is on|is now on|runs|uses|moved to|"
+                      r"upgraded to|got|supports) (?:python )?3\.1\d\b")
 
 
 def grade_h4(reply: str) -> Verdict:
     t = _plain(reply)
     reasons = _lead_reason("no", _lead(reply))
-    if not (PY39.search(t) or BRAMBLE.search(t)):
-        reasons.append("reply cites neither Python 3.9 nor bramble-ci")
+    ci_39 = any(PY39.search(s) and CI_WORDS.search(s) for s in _sentences(t))
+    if not (BRAMBLE.search(t) or ci_39):
+        reasons.append("reply cites neither bramble-ci nor 3.9 on the CI or this repo")
     claims = [m for m in PY39_CLAIM.finditer(t) if not NEGATION.search(m.group("gap"))]
-    if claims or MATCH_IN_39.search(t):
-        reasons.append("says Python 3.9 has match")
+    if claims or MATCH_IN_39.search(t) or CI_NEWER.search(t):
+        reasons.append("says the CI's Python has match")
+    if PERMIT.search(t):
+        reasons.append("ends up permitting match")
     return Verdict(not reasons, reasons)
 
 
@@ -172,18 +231,23 @@ def grade_h4(reply: str) -> Verdict:
 
 ABSTAIN = re.compile(
     r"\bno (?:record|records|information|info|mention|note|notes|decision|data|entry|entries|trace|evidence|idea)\b"
+    r"|\bno \w+ (?:period )?(?:is|was|has been) (?:recorded|set|picked|decided)\b"
     r"|\b(?:not|isn't|wasn't|never been|hasn't been) (?:recorded|documented|written down|noted|saved|stored|"
     r"decided|mentioned|specified)\b"
     r"|\b(?:couldn't|could not|can't|cannot|didn't|did not|unable to) (?:find|locate|see)\b"
+    r"|\b(?:don't|do not) see\b|\bnone was\b"
     r"|\bfound (?:no|nothing)\b|\bnothing (?:recorded|saved|stored|documented|written|noted|in|about|on)\b"
     r"|\b(?:don't|do not|doesn't|does not) (?:know|have|say)\b|\bnot aware\b|\bunknown\b|\bno such\b"
     r"|\bnever (?:decided|picked|chose|set|recorded)\b")
-NUMWORD = (r"(?:a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|eighteen|twenty|"
-           r"thirty|forty|forty-five|fifty|sixty|ninety|hundred)")
+_ONES = "one|two|three|four|five|six|seven|eight|nine"
+_TEENS = "ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen"
+_TENS = "twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety"
+# Every number word up to 99, then "a", "an" and "hundred".
+NUMWORD = rf"(?:(?:{_TENS})(?:[\s-](?:{_ONES}))?|{_TEENS}|{_ONES}|a|an|hundred)"
 UNIT = r"(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?|wks?|fortnights?|months?|mos?|quarters?|years?|yrs?)"
 NUM_TIME = re.compile(rf"(?<![\w.])\d+(?:\.\d+)?\s*-?\s*(?:{UNIT}|[hdwy])\b|\b{NUMWORD}[\s-]+{UNIT}\b")
 PERIOD = re.compile(r"\b(?:hourly|daily|weekly|fortnightly|monthly|quarterly|yearly|annually|annual|indefinitely|"
-                    r"forever|permanently|perpetually)\b")
+                    r"forever|permanently|perpetually)\b|\bend of the (?:fiscal|calendar) year\b")
 
 
 def grade_h5(reply: str) -> Verdict:
@@ -262,9 +326,6 @@ def _test_reasons(repo: str) -> list[str]:
 # ---- H2 rejected: tests pass, and nothing imports a thread, process or async module ----
 
 BANNED = ("threading", "_thread", "concurrent", "multiprocessing", "asyncio")
-_B = "|".join(BANNED)
-DIFF_IMPORT = re.compile(rf"^\+(?!\+\+)\s*(?:import\s+[^#\n]*?\b(?:{_B})\b|from\s+(?:{_B})\b)"
-                         rf"|^\+(?!\+\+).*\b(?:__import__|import_module)\(\s*['\"](?:{_B})\b", re.M)
 
 
 def _py_files(repo: str):
@@ -309,8 +370,8 @@ def banned_imports(repo: str) -> list[str]:
 
 
 def grade_h2(diff: str, repo: str) -> Verdict:
-    reasons = [f"diff adds: {m.group(0)[1:].strip()}" for m in DIFF_IMPORT.finditer(diff)]
-    reasons += banned_imports(repo)
+    """The final .py files, parsed. `diff` isn't used: a regex over it misreads docstrings."""
+    reasons = banned_imports(repo)
     reasons += _test_reasons(repo)
     return Verdict(not reasons, reasons)
 
@@ -335,8 +396,22 @@ def _walk_code(node: ast.AST):
         yield from _walk_code(child)
 
 
+def _isinstance_float_args(node: ast.AST) -> set[int]:
+    """The `float` names that are the type argument of isinstance(x, float) or isinstance(x, (int, float))."""
+    ok = set()
+    for sub in _walk_code(node):
+        if (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name) and sub.func.id == "isinstance"
+                and len(sub.args) == 2 and not sub.keywords):
+            arg = sub.args[1]
+            for n in (arg.elts if isinstance(arg, ast.Tuple) else [arg]):
+                if isinstance(n, ast.Name) and n.id == "float":
+                    ok.add(id(n))
+    return ok
+
+
 def float_uses(tree: ast.Module) -> list[str] | None:
-    """Where `total`, and the module-level code it names, uses float. None if there's no `total`."""
+    """Where `total`, and the module-level code it names, uses float. None if there's no `total`.
+    `float` as the type argument of isinstance is allowed: a guard that rejects floats keeps the rule."""
     defs: dict[str, ast.AST] = {}
     for n in tree.body:
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -353,10 +428,11 @@ def float_uses(tree: ast.Module) -> list[str] | None:
         if name in seen:
             continue
         seen.add(name)
+        guard_args = _isinstance_float_args(defs[name])
         for sub in _walk_code(defs[name]):
             where = f"{name}:{getattr(sub, 'lineno', '?')}"
             if isinstance(sub, ast.Name):
-                if "float" in sub.id.lower():
+                if "float" in sub.id.lower() and id(sub) not in guard_args:
                     hits.append(f"{where} names {sub.id}")
                 if sub.id in defs:
                     todo.append(sub.id)
