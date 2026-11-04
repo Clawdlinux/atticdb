@@ -26,6 +26,7 @@ mod redact;
 pub mod serve;
 pub mod setup;
 pub mod studio;
+pub mod tree;
 
 #[cfg(unix)]
 use std::io::Read;

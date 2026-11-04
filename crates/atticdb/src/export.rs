@@ -473,7 +473,7 @@ fn fenced(out: &mut String, content: &str, meta: Option<String>) {
 }
 
 /// UTC time to the second, as `2026-11-03T13:17:17Z`.
-fn utc(ns: u64) -> String {
+pub(crate) fn utc(ns: u64) -> String {
     let secs = ns / 1_000_000_000;
     let (days, rem) = ((secs / 86_400) as i64, secs % 86_400);
     // Howard Hinnant's civil_from_days.

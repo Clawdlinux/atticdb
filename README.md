@@ -56,6 +56,43 @@ atticdb doctor            # checks the install; it may start the server
 
 `atticdb doctor` prints 1 line per check, with what to do when one fails. [Set up](crates/atticdb/README.md#set-up) and [`atticdb doctor`](crates/atticdb/README.md#atticdb-doctor) give the details.
 
+## Memory tree
+
+AtticDB saves facts under keys that work like folder paths. Use these top-level folders:
+
+| Key | What goes there | Loaded at chat start |
+|---|---|---|
+| `user/<topic>` | Your preferences and style | Yes, in every repo |
+| `repo/<repo>/<area>/<topic>` | This project's rules and decisions | Yes, in that repo |
+| `agent/<agent>/<topic>` | Notes for 1 app only | Not yet |
+| `team/<team>/` | Reserved for sync later | Don't write here yet |
+
+`<repo>` is the folder name of the repo's main checkout. `<area>` is optional. It helps once a repo has many rules, as in `repo/myrepo/api/retry`.
+Your agents save a rule here when you state it in a chat. You can save one yourself:
+
+```sh
+atticdb fact set --key user/style --content "Short commit messages."
+atticdb fact set --key repo/myrepo/tests/runner --content "Run cargo test before a PR."
+```
+
+`atticdb tree` shows how your memory is organized. Each folder gets a fact count and the date of its newest change:
+
+```text
+$ atticdb tree
+(all keys)  6 facts, newest 2026-11-04
+|-- repo/  4 facts, newest 2026-11-04
+|   |-- myrepo/  3 facts, newest 2026-11-04
+|   `-- web/  1 fact, newest 2026-11-04
+`-- user/  2 facts, newest 2026-11-04
+    |-- style  2026-11-04
+    `-- tone  2026-11-04
+Deeper levels show as counts. Pass --depth <n> to see more.
+```
+
+With no prefix it shows 2 levels. `atticdb tree repo/myrepo/` shows 1 folder, all levels.
+`--depth <n>` sets the levels. `--content` adds each value's first line. `--json` prints 1 JSON line for scripts.
+Deleted and forgotten keys never show. [`atticdb tree`](crates/atticdb/README.md#atticdb-tree) has the details.
+
 ## Forget and export
 
 Content is hidden from normal AtticDB reads. It stays on disk until purge ships (#159).
@@ -173,7 +210,7 @@ AtticDB does a few things on purpose. We add features when people ask for them.
 
 ## Docs
 
-- [atticdb](crates/atticdb/README.md): server, HTTP API, MCP, studio, `forget`, `export`, `stats`, `load`, `verify`, `dump` and `recover`. It also has these:
+- [atticdb](crates/atticdb/README.md): server, HTTP API, MCP, studio, `tree`, `forget`, `export`, `stats`, `load`, `verify`, `dump` and `recover`. It also has these:
   - [Run a server by hand](crates/atticdb/README.md#run-a-server-by-hand), [Keys](crates/atticdb/README.md#keys) and [Where to keep the data directory](crates/atticdb/README.md#where-to-keep-the-data-directory).
   - [MCP](crates/atticdb/README.md#atticdb-mcp), [Secrets](crates/atticdb/README.md#secrets), [Shell verbs](crates/atticdb/README.md#shell-verbs) and [Connect](crates/atticdb/README.md#atticdb-connect-and-atticdb-disconnect).
   - [Studio](crates/atticdb/README.md#atticdb-studio), [`atticdb export`](crates/atticdb/README.md#atticdb-export) and [Windows](crates/atticdb/README.md#windows).

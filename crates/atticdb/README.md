@@ -70,6 +70,7 @@ That appends over TCP and reads over the Unix socket. A repeated `idem_key` retu
 ## Keys
 
 Each tenant has 1 key space. Keys are 1 to 1024 bytes and never go in URL paths. Agents keep keys apart with prefixes such as `repo/<area>/`. A prefix matches bytes, so `repo/pay` also matches `repo/payments/`. End it with `/` to match whole path segments.
+[Memory tree](../../README.md#memory-tree) lists the top-level prefixes to use, and `atticdb tree` draws them.
 
 ## Where to keep the data directory
 
@@ -405,6 +406,41 @@ A retry that found the forget already done adds ` (already done)` to line 1. See
 
 Each write picks 1 random `idem_key` and retries with it until `--retry-deadline` (default 30 s). Exit 0 means done. Exit 1 means nothing was written, or a read failed. Exit 2 is a usage error.
 Exit 3 means the write may have landed. Running the command again uses a new key, so it can write a duplicate.
+
+## `atticdb tree`
+
+```sh
+atticdb tree [<prefix>] <connect> [--depth <n>] [--content] [--json]
+```
+
+It lists the current facts under `<prefix>` with `fact_list` and draws their keys as a tree of `/` segments.
+It takes the same store flags as `fact list`. With none, it reads the home.
+Each folder shows how many facts are under it and the UTC date of its newest change. Each key shows its last segment and its date.
+With no `<prefix>`, `--depth` is 2. With a `<prefix>`, there is no limit. A folder at the last level shows its count only.
+Paths start after the prefix's last `/`. So `atticdb tree repo/at` shows `atticdb/` and any other folder that starts with `at`.
+`--content` adds the first line of each value, at most 80 characters. A longer line ends in `...`.
+Control characters in keys and values print escaped.
+It reads at most 10,000 keys in at most 1,000 pages. Past that it prints `showing the first 10,000 keys` on stderr.
+With no facts it prints how to save one, as a full `fact set` command.
+Deleted and forgotten keys never show. Exit 0, 1 when a read failed, 2 on a bad flag.
+
+`--json` prints 1 line. Here is `atticdb tree repo/ --depth 2 --json` on several lines:
+
+```json
+{"prefix": "repo/", "facts": 3, "newest_ns": 1793762760976544000, "truncated": false, "nodes": [
+  {"name": "myrepo/", "path": "repo/myrepo/", "facts": 2, "newest_ns": 1793762760966865000,
+   "children": [{"name": "style", "path": "repo/myrepo/style", "facts": 1,
+                 "newest_ns": 1793762760966865000, "lsn": 12},
+                {"name": "tests/", "path": "repo/myrepo/tests/", "facts": 1,
+                 "newest_ns": 1793762760901234000, "children": null}]},
+  {"name": "web/", "path": "repo/web/", "facts": 1, "newest_ns": 1793762760976544000,
+   "children": null}]}
+```
+
+A folder's `name` ends in `/`, and it has `children`. `children` is null below `--depth`. So is `nodes` with `--depth 0`.
+A key has `lsn` and no `children`. With `--content` it has `content` too, cut as in the text.
+`newest_ns` is the newest commit time in ns. It is null when there are no facts. `truncated` is true past the 10,000-key bound.
+With no facts, the hint goes to stderr.
 
 ## `atticdb connect` and `atticdb disconnect`
 
