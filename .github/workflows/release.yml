@@ -45,7 +45,7 @@ jobs:
       previous: ${{ steps.plan.outputs.previous }}
     steps:
       # All history and tags, to find the latest tag and count the commits since.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 0
@@ -178,7 +178,7 @@ jobs:
       CARGO_PROFILE_RELEASE_STRIP: debuginfo
     steps:
       # Every job checks out github.sha, the commit the publish job tags.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       # Installs the toolchain and components from rust-toolchain.toml. No build cache, so a
@@ -269,7 +269,7 @@ jobs:
             Write-Output "::error::$zip holds $($names -join ', '), want $($want -join ', ')"
             exit 1
           }
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: atticdb-${{ matrix.target }}
           path: dist/atticdb-${{ matrix.target }}.${{ runner.os == 'Windows' && 'zip' || 'tar.gz' }}
@@ -291,11 +291,11 @@ jobs:
       SHA: ${{ github.sha }}
     steps:
       # All history, for the list of changes since the previous tag.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 0
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: atticdb-*
           path: dist
