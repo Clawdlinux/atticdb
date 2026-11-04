@@ -10,13 +10,13 @@ sim = []
 
 [dependencies]
 crc32c = "=0.6.8"
-rustix = { version = "=1.1.2", default-features = false, features = ["fs", "std"] }
+rustix = { version = "=1.1.6", default-features = false, features = ["fs", "std"] }
 
 [target.'cfg(windows)'.dependencies]
 atticdb-sys = { path = "../atticdb-sys" }
 
 [dev-dependencies]
-criterion = { version = "0.5", default-features = false }
+criterion = { version = "0.8", default-features = false }
 proptest = { version = "1.9", default-features = false, features = ["std"] }
 atticdb-tape = { path = ".", features = ["sim"] }
 
