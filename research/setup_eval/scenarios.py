@@ -17,8 +17,12 @@ FACT_PREFIX = f"repo/{REPO}/"
 TEST_RUNNER_KEY = f"{FACT_PREFIX}test-runner"
 TEST_RUNNER_FACT = "This repo runs its tests with cargo nextest run."
 REDIS_NOTE = "We dropped Redis because its 2 extra round trips per append broke the 1 ms p99 budget."
-# Any of these in the reply counts as giving the seeded reason.
-REDIS_MARKERS = ("round trip", "round-trip", "roundtrip", "p99")
+# The reply gives the seeded reason only if it holds a marker from every group: the round
+# trips and the budget they broke. One keyword alone passes wrong reasons.
+REDIS_MARKERS = (
+    ("round trip", "round-trip", "roundtrip"),
+    ("p99", "1 ms", "1ms"),
+)
 FILLER_NOTES = [
     "Renamed the helper in calc.py so the name says what it returns.",
     "Reviewed the README wording; no change needed.",
@@ -87,7 +91,7 @@ def check_recall(out: Outcome) -> Verdict:
 
 def check_search(out: Outcome) -> Verdict:
     searched = any(c.name == "memory_search" for c in out.calls)
-    reason = any(_has(out.reply, m) for m in REDIS_MARKERS)
+    reason = all(any(_has(out.reply, m) for m in group) for group in REDIS_MARKERS)
     reasons = ([] if searched else ["no memory_search call"]) + ([] if reason else ["reply lacks the reason"])
     return Verdict(searched and reason, reasons)
 

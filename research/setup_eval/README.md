@@ -109,7 +109,7 @@ The hook shows only the 5 newest notes, so the 10 fillers push it out of the blo
 Every text match ignores case and is a plain substring match:
 
 - S1: `nextest` in the reply.
-- S2: `round trip`, `round-trip`, `roundtrip` or `p99` in the reply.
+- S2: the reply holds both parts of the reason. The round trips: `round trip`, `round-trip` or `roundtrip`. The budget: `p99`, `1 ms` or `1ms`. One part alone fails, so "its license forbids p99 metrics" fails.
 - S3: a block line `- <key>: ...` holds `22`, for a key the agent set under `repo/evalrepo/`.
 - S4: an added line of `git diff <first commit> -- calc.py` holds `def add(a, b)`. The `memory_append` has no `session`, or an empty or null one, as AtticDB reads those as none. The first 60 characters of the note, with whitespace collapsed, appear in the block.
 
