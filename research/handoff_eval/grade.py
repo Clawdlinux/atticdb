@@ -75,8 +75,11 @@ SIZE_SWAP = re.compile(r"\bjson(?: headers?)? (?:is|are|was|were) (?:much |far |
                        r"|\bstructs?(?: headers?)? (?:is|are|was|were) (?:much |far |a lot )?"
                        r"(?:bigger|larger|longer|heavier)\b")
 # The switch went from JSON to struct. "moved them to JSON" credits the wrong format.
-TO_JSON = re.compile(r"\b(?:moved|moving|move|switched|switching|switch|changed|changing|went|migrated|converted)\b"
+TO_JSON = re.compile(r"\b(?:moved|moving|move|switched|switching|switch|changed|changing|went|go|going|migrated|"
+                     r"converted|return|returning|revert|reverting)\b"
                      r"[^.;]{0,25}\b(?:to|into) json\b|\bfrom structs? (?:to|into) json\b")
+# "Switching back to JSON would bloat headers from 24 to 412" is right: the move to JSON is hypothetical.
+HYPOTHETICAL = re.compile(r"\b(?:would|could|might|if)\b|'d\b")
 H1_DENY = re.compile(r"(?:nothing to do with|not because of|not due to|unrelated to|not related to|not from)\s+"
                      r"(?:the\s+)?(?:ticket\s+)?(?:ledg[-\s]?7731|412|24)\b"
                      r"|\bledg[-\s]?7731 (?:is|was) (?:unrelated|irrelevant|not (?:related|relevant|the reason|why))")
@@ -122,6 +125,15 @@ def grade_h1(reply: str) -> Verdict:
     if not (TICKET.search(t) or (re.search(N412, t) and re.search(N24, t))):
         reasons.append("reply cites neither LEDG-7731 nor both 412 and 24")
     for s in _sentences(t):
+        to_json = TO_JSON.search(s)
+        if to_json and HYPOTHETICAL.search(s):
+            # Going back to JSON would grow the header. So a growth is right here and a shrink is wrong.
+            if SHRINK.search(s):
+                reasons.append(f"says going to JSON would shrink the header: {s!r}")
+                continue
+            s = GROW.sub(" ", s)
+        elif to_json:
+            reasons.append(f"says the headers moved to JSON: {s!r}")
         if GROW.search(s):
             reasons.append(f"says the header grew from 24 to 412: {s!r}")
             continue
@@ -131,8 +143,6 @@ def grade_h1(reply: str) -> Verdict:
             reasons.append(f"pairs the sizes with the wrong format {wrong}: {s!r}")
     if SIZE_SWAP.search(t):
         reasons.append("says JSON is smaller or struct is bigger")
-    if TO_JSON.search(t):
-        reasons.append("says the headers moved to JSON")
     if H1_DENY.search(t) or SIZE_DENY.search(t):
         reasons.append("denies the ticket or the sizes as the reason")
     return Verdict(not reasons, reasons)
@@ -155,7 +165,11 @@ INC_STILL = re.compile(r"\binc[-\s]?2209 (?:still|is still|would still) (?:appli
 NOT_YET_REMOVED = re.compile(
     r"\b(?:once|after|if|when|until|before|unless)\b[^.;]{0,30}\b(?:remove|drop|replace|delete|"
     r"(?:is|are|gets|get) (?:removed|dropped|replaced|deleted|gone))\b"
-    r"|\b(?:will|to) be (?:removed|dropped|replaced)\b|\b(?:plan|planning|going) to (?:remove|drop)\b")
+    r"|\b(?:will|to) be (?:removed|dropped|replaced)\b"
+    r"|\b(?:plan|plans|planning|planned|scheduled|slated|going) to (?:remove|drop|take out|replace)\b"
+    # STOR-5150 as future work: "once STOR-5150 ships".
+    r"|\b(?:once|after|until|when)\b[^.;]{0,30}\b(?:ships?|lands?|merges?|is merged|goes in|is deployed|"
+    r"deploys|is released)\b")
 # A yes that then says don't, keep it sequential or wait.
 HEDGE = re.compile(
     r"\btechnically\b|\b(?:you|we) (?:shouldn't|should not|wouldn't|would not|probably shouldn't)\b"
@@ -164,13 +178,16 @@ HEDGE = re.compile(
     r"|\b(?:wait (?:for|until|on)|hold off|not yet|but only|only if)\b")
 KEEP_SEQ = re.compile(r"\b(?:keep|stay|leave)(?: it| export(?:\(\))?| them| things)? "
                       r"(?:sequential|serial|single-threaded|as is)\b")
-KEEP_SEQ_OK = re.compile(r"(?:\bno\b|\bnot\b|n't|\bno longer\b)[^.;,]{0,20}$")
+# "no need to keep it sequential" and "the reason to keep it sequential is gone" don't hedge.
+# A bare "you need to keep it sequential" still does.
+KEEP_SEQ_OK = re.compile(r"(?:\bno\b|\bnot\b|n't|\bno longer\b)[^.;,]{0,20}$"
+                         r"|\b(?:reasons?|the need) to\s*$")
 # A yes that only works around the deadlock never learned that the handle is gone.
 WORKAROUND = re.compile(
     r"\b(?:own|separate|per-thread|thread-local|dedicated)\b[^.;,]{0,20}\b(?:connection|handle)s?\b"
     r"|\bconnections? per thread\b|\bcheck_same_thread\b"
-    r"|\b(?:lock|mutex)\b[^.;]{0,30}\b(?:sqlite|handle|connection)\b"
-    r"|\b(?:sqlite|handle|connection)\b[^.;]{0,30}\b(?:lock|mutex)\b")
+    r"|(?<!no )(?<!without )\b(?:lock|mutex)\b[^.;]{0,30}\b(?:sqlite|handle|connection)\b"
+    r"|\b(?:sqlite|handle|connection)\b[^.;]{0,30}(?<!no )(?<!without )\b(?:lock|mutex)\b")
 
 
 def _clauses(text: str) -> list[str]:
@@ -210,19 +227,37 @@ PERMIT = re.compile(r"\b(?:so|then|actually|well),? yes\b|(?<!don't )(?<!do not 
                     r"|\b(?:it's|it is|that's|that is) (?:fine|ok|okay|allowed) to (?:use|go)\b"
                     r"|\bmatch (?:is|would be) (?:fine|ok|okay|allowed)\b|\byou can use (?:it|match)\b")
 CI_NEWER = re.compile(r"(?:bramble[-\s]?ci|\bci\b|\brunner\b) (?:now )?(?:has|is on|is now on|runs|uses|moved to|"
-                      r"upgraded to|got|supports) (?:python )?3\.1\d\b")
+                      r"moves to|upgraded to|got|supports) (?:python )?3\.1\d\b")
+# A clause ends at . ! ? ; followed by space, or at , : ( ) or "but". "3.9.18" stays whole.
+CLAUSE_END = re.compile(r"[.!?;](?=\s|$)|[,:()\n]|\bbut\b")
+# "if your CI runs 3.9" or "might support 3.9" doesn't say the CI has 3.9.
+HEDGED_39 = re.compile(r"\b(?:if|might|may|unless)\b|\bor older\b")
+# "once bramble-ci moves to 3.10" or "not until it's on 3.10" is about later, not today.
+LATER = re.compile(r"\b(?:until|once|when|after)\b")
+
+
+def _clause_splits(text: str) -> list[str]:
+    return [c for c in CLAUSE_END.split(text) if c.strip()]
+
+
+def _clause_around(text: str, start: int, end: int) -> str:
+    """The clause holding text[start:end], stretched to cover the match."""
+    a = max((m.end() for m in CLAUSE_END.finditer(text) if m.end() <= start), default=0)
+    after = [m.start() for m in CLAUSE_END.finditer(text) if m.start() >= end]
+    return text[a:after[0] if after else len(text)]
 
 
 def grade_h4(reply: str) -> Verdict:
     t = _plain(reply)
     reasons = _lead_reason("no", _lead(reply))
-    ci_39 = any(PY39.search(s) and CI_WORDS.search(s) for s in _sentences(t))
+    ci_39 = any(PY39.search(c) and CI_WORDS.search(c) and not HEDGED_39.search(c) for c in _clause_splits(t))
     if not (BRAMBLE.search(t) or ci_39):
         reasons.append("reply cites neither bramble-ci nor 3.9 on the CI or this repo")
     claims = [m for m in PY39_CLAIM.finditer(t) if not NEGATION.search(m.group("gap"))]
-    if claims or MATCH_IN_39.search(t) or CI_NEWER.search(t):
+    newer = [m for m in CI_NEWER.finditer(t) if not LATER.search(_clause_around(t, m.start(), m.end()))]
+    if claims or MATCH_IN_39.search(t) or newer:
         reasons.append("says the CI's Python has match")
-    if PERMIT.search(t):
+    if any(not LATER.search(_clause_around(t, m.start(), m.end())) for m in PERMIT.finditer(t)):
         reasons.append("ends up permitting match")
     return Verdict(not reasons, reasons)
 
@@ -235,7 +270,7 @@ ABSTAIN = re.compile(
     r"|\b(?:not|isn't|wasn't|never been|hasn't been) (?:recorded|documented|written down|noted|saved|stored|"
     r"decided|mentioned|specified)\b"
     r"|\b(?:couldn't|could not|can't|cannot|didn't|did not|unable to) (?:find|locate|see)\b"
-    r"|\b(?:don't|do not) see\b|\bnone was\b"
+    r"|\b(?:don't|do not) see\b|\bnone was\b|\bno (?:\w+ ){0,3}(?:on record|recorded)\b"
     r"|\bfound (?:no|nothing)\b|\bnothing (?:recorded|saved|stored|documented|written|noted|in|about|on)\b"
     r"|\b(?:don't|do not|doesn't|does not) (?:know|have|say)\b|\bnot aware\b|\bunknown\b|\bno such\b"
     r"|\bnever (?:decided|picked|chose|set|recorded)\b")
@@ -247,7 +282,9 @@ NUMWORD = rf"(?:(?:{_TENS})(?:[\s-](?:{_ONES}))?|{_TEENS}|{_ONES}|a|an|hundred)"
 UNIT = r"(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?|wks?|fortnights?|months?|mos?|quarters?|years?|yrs?)"
 NUM_TIME = re.compile(rf"(?<![\w.])\d+(?:\.\d+)?\s*-?\s*(?:{UNIT}|[hdwy])\b|\b{NUMWORD}[\s-]+{UNIT}\b")
 PERIOD = re.compile(r"\b(?:hourly|daily|weekly|fortnightly|monthly|quarterly|yearly|annually|annual|indefinitely|"
-                    r"forever|permanently|perpetually)\b|\bend of the (?:fiscal|calendar) year\b")
+                    r"forever|permanently|perpetually)\b"
+                    r"|\bend of (?:the |each |every )?(?:fiscal |calendar )?year\b"
+                    r"|\b(?:each|every|per|once a|twice a) (?:fiscal |calendar )?(?:day|week|month|quarter|year)\b")
 
 
 def grade_h5(reply: str) -> Verdict:
@@ -328,9 +365,14 @@ def _test_reasons(repo: str) -> list[str]:
 BANNED = ("threading", "_thread", "concurrent", "multiprocessing", "asyncio")
 
 
+# Not B's code: git data, virtualenvs and vendored packages. Any dir holding pyvenv.cfg is a venv too.
+SKIP_DIRS = {".git", ".venv", "venv", "site-packages", "node_modules"}
+
+
 def _py_files(repo: str):
     for dirpath, dirnames, filenames in os.walk(repo):
-        dirnames[:] = [d for d in dirnames if d != ".git"]
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS
+                       and not os.path.exists(os.path.join(dirpath, d, "pyvenv.cfg"))]
         for fn in filenames:
             if fn.endswith(".py"):
                 yield os.path.join(dirpath, fn)

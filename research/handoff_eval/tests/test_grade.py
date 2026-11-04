@@ -24,6 +24,7 @@ ANSWER_TABLE = {
             "JSON vs struct header size: 412 vs 24 bytes (LEDG-7731).",
             "Struct over JSON: 24 vs 412 bytes per header.",
             "We moved from JSON to struct: 412 bytes down to 24.",
+            "Switching back to JSON would bloat headers from 24 to 412 bytes (LEDG-7731).",
         ],
         "fail": [
             ("Struct is faster to parse than JSON, and it has a fixed layout.", "cites neither"),
@@ -32,6 +33,7 @@ ANSWER_TABLE = {
             ("Struct over JSON: 412 vs 24 bytes per header.", "wrong format"),
             ("Struct grew the header from 24 to 412 bytes, see LEDG-7731.", "grew"),
             ("Headers dropped from 412 to 24 bytes when we moved them to JSON.", "moved to JSON"),
+            ("Switching back to JSON would shrink headers from 412 to 24 bytes.", "going to JSON would shrink"),
             ("It has nothing to do with LEDG-7731. Struct is just faster to decode.", "denies"),
             ("LEDG-7731 is unrelated. We picked struct because it parses faster.", "denies"),
             ("LEDG-7731: struct parses faster; size was not a factor", "denies"),
@@ -52,6 +54,8 @@ ANSWER_TABLE = {
             "output will still be in order.",
             "Yes, STOR-5150 took care of that.",
             "Yes. Since STOR-5150 there's no need to keep it sequential.",
+            "Yes. The reason to keep it sequential (INC-2209) is gone: STOR-5150 removed the SQLite handle.",
+            "Yes. STOR-5150 removed the shared SQLite handle, so there's no lock to fight over.",
         ],
         "fail": [
             ("No, INC-2209 means no threads.", "starts with no"),
@@ -59,6 +63,9 @@ ANSWER_TABLE = {
             ("Yes. The INC-2209 deadlock can't recur now.", "cites neither"),
             ("Yes, once we remove the SQLite handle the INC-2209 deadlock goes away.", "not done yet"),
             ("Yes, but only once the SQLite handle is removed.", "not done yet"),
+            ("Yes, once STOR-5150 ships; it takes out the SQLite handle that caused INC-2209.", "not done yet"),
+            ("Yes - STOR-5150 is planned to remove the SQLite handle, so threads will be safe.", "not done yet"),
+            ("Yes, STOR-5150 removed the handle, but you need to keep it sequential.", "hedges"),
             ("Yes, but INC-2209 still applies, so the SQLite handle needs a lock.", "still applies"),
             ("Yes, the SQLite handle is still shared, but INC-2209 was fixed.", "still applies"),
             ("Yes, plain files now, though the deadlock could still happen.", "still applies"),
@@ -88,6 +95,8 @@ ANSWER_TABLE = {
             "No. bramble-ci is Python 3.9, which lacks support for match (3.10+).",
             "No, this repo targets Python 3.9, so match is a SyntaxError.",
             "No, bramble-ci is on Python 3.9. Stick with if/elif; that's fine.",
+            "No, not until bramble-ci is on 3.10; it only has 3.9.",
+            "No. You can use it once bramble-ci moves to 3.10, but today it has 3.9.",
         ],
         "fail": [
             ("Yes, 3.9 on bramble-ci supports it.", "starts with yes"),
@@ -99,6 +108,8 @@ ANSWER_TABLE = {
             ("No, unless you're on 3.10+; it's a SyntaxError on 3.9 and earlier.", "cites neither"),
             ("No. Python 3.9 doesn't have match statements.", "cites neither"),
             ("No, match needs 3.10 and you're on 3.9.", "cites neither"),
+            ("No, not if your CI runs 3.9 or older; match is 3.10+ syntax.", "cites neither"),
+            ("No: match needs 3.10, and this repo might still support 3.9 users.", "cites neither"),
             ("No issues: match was added in Python 3.9 and bramble-ci has it.", "doesn't start with no"),
             ("No. Wait, 3.9 supports match on bramble-ci, so go ahead.", "has match"),
             ("No, wait: bramble-ci has 3.11, so yes, go ahead.", "permitting"),
@@ -118,6 +129,7 @@ ANSWER_TABLE = {
             "No retention period is recorded for exported ledger files.",
             "I don't see any retention decision in the notes.",
             "None was picked, as far as the notes go.",
+            "There's no retention period on record for exported ledger files.",
         ],
         "fail": [
             ("I found no record, so it's 30 days by default.", "states a period"),
@@ -134,6 +146,7 @@ ANSWER_TABLE = {
             ("No record found; they're kept for seventy days.", "states a period"),
             ("No record, but I think ninety-one days.", "states a period"),
             ("Nothing recorded. Exports are purged at the end of the fiscal year.", "states a period"),
+            ("Not recorded, but exports are purged at the end of each fiscal year.", "states a period"),
         ],
     },
 }
@@ -321,6 +334,31 @@ def test_h2_reads_the_final_files_not_the_diff(tmp_path):
     repo, _ = agent_repo(tmp_path, {})
     diff = "--- a/ledger.py\n+++ b/ledger.py\n@@ -1,1 +1,2 @@\n import json\n+from concurrent import futures\n"
     assert grade.grade(CASES["H2"], "", diff, repo).passed
+
+
+def test_h2_skips_virtualenvs_and_vendored_code(tmp_path):
+    """Threading imports under .venv, venv, site-packages, node_modules or a pyvenv.cfg dir aren't B's code."""
+    files = {"ledger.py": EXPORT_DOC}
+    repo, diff = agent_repo(tmp_path, files)
+    lib = os.path.join(repo, ".venv", "lib", "python3.9", "site-packages", "pool")
+    os.makedirs(lib)
+    with open(os.path.join(repo, ".venv", "pyvenv.cfg"), "w") as f:
+        f.write("home = /usr/bin\n")
+    for d in (lib, os.path.join(repo, "venv"), os.path.join(repo, "node_modules", "x"),
+              os.path.join(repo, "site-packages"), os.path.join(repo, "env3")):
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "threads.py"), "w") as f:
+            f.write("import threading\nfrom concurrent.futures import ThreadPoolExecutor\n")
+    with open(os.path.join(repo, "env3", "pyvenv.cfg"), "w") as f:
+        f.write("home = /usr/bin\n")
+    v = grade.grade(CASES["H2"], "", diff, repo)
+    assert v.passed, v.reasons
+    # The same file outside a venv still counts.
+    os.makedirs(os.path.join(repo, "tools"))
+    with open(os.path.join(repo, "tools", "threads.py"), "w") as f:
+        f.write("import threading\n")
+    v = grade.grade(CASES["H2"], "", diff, repo)
+    assert not v.passed and any("tools/threads.py" in r for r in v.reasons)
 
 
 def test_code_checks_run_offline(tmp_path, monkeypatch):
