@@ -1,0 +1,21 @@
+# Keeps pinned GitHub Actions SHAs and Cargo dependencies current. Every update is a PR that
+# goes through CI and review. CONTRIBUTING.md still applies: a new direct dependency needs an
+# issue first, and Dependabot only bumps the ones we already have.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
+    open-pull-requests-limit: 2
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      cargo:
+        patterns: ["*"]
+    open-pull-requests-limit: 2
