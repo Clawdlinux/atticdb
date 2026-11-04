@@ -988,6 +988,27 @@ def test_copilot_skill_note(env, monkeypatch):
     assert_cleaned_up(env)
 
 
+def test_copilot_skill_note_flags_a_missing_skills_list(tmp_path):
+    """Builtins are always offered, so 0 skills means the list wasn't found, not a clean setup."""
+    assert run.copilot_skill_note(str(tmp_path), "reader") == f"{run.SKILLS_NOT_FOUND} (reader)"
+    log = tmp_path / run.HARNESS_DIRS["copilot"] / "session-state" / "s1" / "events.jsonl"
+    log.parent.mkdir(parents=True)
+    log.write_text(json.dumps({"type": "system.message", "data": {"content": "You are Copilot."}}) + "\n")
+    assert run.copilot_skill_note(str(tmp_path), "writer") == f"{run.SKILLS_NOT_FOUND} (writer)"
+    log.write_text(json.dumps({"type": "system.message", "data": {"content": (
+        "<skill>\n<name>github-pr-media</name>\n<location>builtin</location>\n</skill>")}}) + "\n")
+    assert run.copilot_skill_note(str(tmp_path), "writer") is None
+
+
+@needs_atticdb
+def test_copilot_skill_note_when_the_session_lists_no_skills(env, monkeypatch):
+    monkeypatch.setenv("STUB_COPILOT_NO_SKILLS", "1")
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], "files", "claude-code", "copilot", 1)
+    assert not res.errored, res.reasons
+    assert f"{run.SKILLS_NOT_FOUND} (reader)" in res.reasons
+    assert_cleaned_up(env)
+
+
 # ---- captured with reason, and the whole reply ----
 
 @needs_atticdb

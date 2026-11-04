@@ -700,10 +700,17 @@ def copilot_skills(hroot: str) -> list[tuple[str, str]]:
     return list(dict.fromkeys(found))
 
 
+SKILLS_NOT_FOUND = "copilot skills list not found; skills check skipped"
+
+
 def copilot_skill_note(hroot: str, who: str) -> str | None:
     """A note naming any skill that is not builtin, or None. Builtin skills ship with the CLI, so
-    every Copilot session has them; any other skill would differ from the user's own setup."""
-    other = sorted({n for n, loc in copilot_skills(hroot) if loc != "builtin"})
+    every Copilot session has them; any other skill would differ from the user's own setup. So 0
+    skills means the list wasn't found (a moved log or a new format), and the check can't see."""
+    skills = copilot_skills(hroot)
+    if not skills:
+        return f"{SKILLS_NOT_FOUND} ({who})"
+    other = sorted({n for n, loc in skills if loc != "builtin"})
     if not other:
         return None
     shown = ", ".join(other[:5]) + (", ..." if len(other) > 5 else "")

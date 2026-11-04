@@ -27,6 +27,10 @@ ANSWER_TABLE = {
             "Switching back to JSON would bloat headers from 24 to 412 bytes (LEDG-7731).",
             "the last session's note (struct chosen because json headers were 412 bytes vs 24, ticket ledg-7731)",
             "struct headers were 24 bytes vs 412 for JSON",
+            # Verbatim pilot reply. "24-byte ... struct" binds 24 to struct, not to the JSON before it.
+            "the switch came from ticket LEDG-7731 (in the README and memory notes), which replaced the JSON "
+            "header with a fixed 24-byte big-endian !qq8x struct, but neither the code, the README nor the "
+            "notes say why",
         ],
         "fail": [
             ("Struct is faster to parse than JSON, and it has a fixed layout.", "cites neither"),
@@ -42,6 +46,8 @@ ANSWER_TABLE = {
             ("LEDG-7731: struct parses faster; size was not a factor", "denies"),
             ("JSON is smaller, 412 vs 24 aside. Struct is simply faster.", "smaller"),
             ("Only the 412 figure is known. JSON was slow to parse.", "cites neither"),
+            ("JSON was swapped for a 24-byte struct header.", "cites neither"),
+            ("the 412-byte struct replaced a 24-byte JSON header (LEDG-7731)", "wrong format"),
             ("", "cites neither"),
         ],
     },

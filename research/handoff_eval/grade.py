@@ -103,16 +103,25 @@ def _h1_items(sentence: str) -> list[str]:
 # comes before it. Else "struct chosen because json headers were 412 vs 24" pairs struct with 412.
 HEADERS_WERE = re.compile(rf"\b(json|structs?)\s+headers?\s+(?:were|was|are|is|measured(?:\s+at)?)\s+"
                           rf"(?:about\s+|around\s+|~)?({N412}|{N24})")
+# "24-byte big-endian struct": a size word binds to the format word right after it. Up to 3 modifier
+# tokens may sit between them, but no number, no format word, no punctuation that ends a phrase and no
+# linking word. So "412 bytes vs 24 bytes with struct" doesn't bind 412 to struct.
+_GAP_STOP = (r"(?:vs|versus|with|for|to|than|where|while|compared|and|or|but|instead|of|in|on|per|from|by|"
+             r"into|over|like|as|at|is|are|was|were|the|a|an|json|structs?|\d+)\b")
+BYTES_BEFORE = re.compile(rf"({N412}|{N24})(?:-|\s+)bytes?\b((?:\s+(?!{_GAP_STOP})[^\s,;:()]+){{0,3}}?)"
+                          rf"\s+(json|structs?)\b")
 
 
 def _h1_pairs(sentence: str) -> list[tuple[str, str]]:
     """Pair each number with its label.
 
-    "<format> headers were N" binds first, then leaves the sentence. "X vs Y: a vs b" pairs in order:
-    (X, a), (Y, b). Otherwise each number pairs with the label next to it: "JSON 412 vs 24 struct"
-    gives (json, 412) and (struct, 24)."""
+    "<format> headers were N" binds first, then leaves the sentence. Next, "N-byte <format>" binds N to
+    the format after it and leaves too. "X vs Y: a vs b" pairs in order: (X, a), (Y, b). Otherwise each
+    number pairs with the label next to it: "JSON 412 vs 24 struct" gives (json, 412) and (struct, 24)."""
     pairs = [(m.group(1).rstrip("s"), m.group(2)) for m in HEADERS_WERE.finditer(sentence)]
-    items = _h1_items(HEADERS_WERE.sub(" ", sentence))
+    sentence = HEADERS_WERE.sub(" ", sentence)
+    pairs += [(m.group(3).rstrip("s"), m.group(1)) for m in BYTES_BEFORE.finditer(sentence)]
+    items = _h1_items(BYTES_BEFORE.sub(" ", sentence))
     i = 0
     while i < len(items) - 1:
         run = items[i:i + 4]

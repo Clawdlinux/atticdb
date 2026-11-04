@@ -129,7 +129,11 @@ def copilot_session_log(event):
 
 def copilot_system_message():
     """The system message Copilot logs at session start, with its skills block: the 2 builtin skills,
-    plus a personal one named by STUB_COPILOT_SKILL."""
+    plus a personal one named by STUB_COPILOT_SKILL. STUB_COPILOT_NO_SKILLS logs no skills block, as
+    a Copilot whose log format moved would."""
+    if os.environ.get("STUB_COPILOT_NO_SKILLS"):
+        copilot_session_log({"type": "system.message", "data": {"content": "You are Copilot."}})
+        return
     skills = [("customize-cloud-agent", "builtin"), ("github-pr-media", "builtin")]
     if os.environ.get("STUB_COPILOT_SKILL"):
         skills.append((os.environ["STUB_COPILOT_SKILL"], "personal"))
