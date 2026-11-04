@@ -217,6 +217,10 @@ fn tool_calls_over_stdio() {
     assert_eq!(tools[6]["inputSchema"]["required"], json!(["path", "about"]));
     assert_eq!(tools[6]["annotations"]["destructiveHint"], false, "file_ref keeps versions");
     assert_eq!(tools[2]["annotations"]["destructiveHint"], true, "fact_set replaces and deletes");
+    // Agents saved decisions without their reasons (handoff pilot, 2026-11-04).
+    let described = |i: usize| tools[i]["description"].as_str().unwrap();
+    assert!(described(0).contains("what changed and why, with its evidence"), "{}", described(0));
+    assert!(described(2).contains("Put the reason and its evidence"), "{}", described(2));
     let (set, get, list) =
         (&tools[2]["inputSchema"], &tools[3]["inputSchema"], &tools[4]["inputSchema"]);
     assert_eq!((&set["required"], &get["required"]), (&json!(["key"]), &json!(["key"])));
@@ -1268,4 +1272,12 @@ fn unknown_outcome_never_downgrades() {
         }
         assert_eq!(mcp.close().0.code(), Some(0), "{case}");
     }
+}
+
+/// The guide goes into every chat-start guide, so its size is budgeted. It had 240 words before
+/// it asked for reasons with their evidence. It may grow by at most 30.
+#[test]
+fn instructions_stay_within_word_budget() {
+    let words = atticdb::mcp::INSTRUCTIONS.split_whitespace().count();
+    assert!(words <= 240 + 30, "INSTRUCTIONS has {words} words, over the budget of 270");
 }
