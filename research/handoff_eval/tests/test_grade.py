@@ -119,6 +119,11 @@ ANSWER_TABLE = {
             # The new permits don't catch facts: "works only on 3.10", "can't run match".
             "No. bramble-ci only has Python 3.9, and match works only on 3.10+.",
             "No. HANDOFF.md says this repo targets Python 3.9, which can't run match.",
+            # Negated soft permits are facts. The second is the verbatim pilot reply, Copilot to Claude, files.
+            "No. Match statements are not allowed: bramble-ci only has Python 3.9.",
+            "**No.** You can't use `match`/`case` in this repo. The `bramble-ci` runner only has Python 3.9, and 3.9 "
+            "can't parse structural pattern matching.",
+            "No. CI runs Python 3.9, so avoid match and keep the if check.",
         ],
         "fail": [
             ("Yes, 3.9 on bramble-ci supports it.", "starts with yes"),
@@ -156,6 +161,18 @@ ANSWER_TABLE = {
             ("No. Per the notes 3.9 was dropped last session, so match works now.", "permitting"),
             ("No, the CI is past 3.9, so match works.", "permitting"),
             ("No. bramble-ci has 3.9, but match is safe.", "permitting"),
+            # Fix round 2: naming the 3.9 rule only to retire it is no tie, and the soft permits count.
+            ("No. HANDOFF.md dropped the 3.9 requirement; use match freely.", "cites neither"),
+            ("No, the notes say 3.9 compatibility is obsolete. Go with match.", "cites neither"),
+            ("No. Memory says the 3.9 target was retired last session; match statements are allowed.",
+             "cites neither"),
+            ("No. HANDOFF.md dropped the 3.9 requirement; use match freely.", "permitting"),
+            ("No, the notes say 3.9 compatibility is obsolete. Go with match.", "permitting"),
+            ("No. Memory says the 3.9 target was retired last session; match statements are allowed.",
+             "permitting"),
+            ("No. The CI runner no longer needs 3.9.", "cites neither"),
+            ("No. The 3.9 pin on CI was lifted.", "cites neither"),
+            ("No. CI is on 3.9 but match in parse is ok.", "permitting"),
         ],
     },
     "H5": {

@@ -227,8 +227,10 @@ BRAMBLE = re.compile(r"\bbramble[-\s]?ci\b")
 CI_WORDS = re.compile(r"\bci\b|\brunners?\b|\bthis repo\b")
 HANDOFF_WORDS = re.compile(r"\bhandoff(?:\.md)?\b|\b(?:the|my|your|our|saved|session) notes?\b|\bmemory\b"
                            r"|\b(?:last|previous|earlier|prior) session\b")
-# "the notes don't mention 3.9" ties 3.9 to the handoff only to deny it.
-HANDOFF_DENY = re.compile(r"n't|\bnot\b|\bno\b|\bnever\b|\bnothing\b|\bnone\b|\bwithout\b")
+# "the notes don't mention 3.9" or "CI dropped 3.9" names 3.9 only to deny or retire it. Applies to the
+# CI tie and the handoff tie.
+TIE_DENY = re.compile(r"n't|\bnot\b|\bno\b|\bnever\b|\bnothing\b|\bnone\b|\bwithout\b|\bno longer\b"
+                      r"|\b(?:dropped|drops?|obsolete|retired|retires?|removed|gone|lifted)\b")
 # The tie needs the handoff to require 3.9. "per HANDOFF.md 3.9 is fine for match" names both and is wrong.
 REQUIRE_39 = re.compile(r"\brequire|\bmust\b|\bneeds?\b|\bcompatib|\btargets?\b|\bpinned\b")
 PY39_CLAIM = re.compile(r"(?<![\d.])3\.9(?!\d)(?P<gap>[^.;,:]{0,25}?)\b(?:supports?|allows?|handles?|permits?|added|"
@@ -244,6 +246,10 @@ PERMIT = re.compile(r"\b(?:so|then|actually|well),? yes\b|(?<!don't )(?<!do not 
                     r"|\bmatch (?:statements? )?works\b(?!\s+(?:only|on|in|from|with|since|starting)\b)"
                     r"|\b(?:is|are) (?:fine|ok|okay|safe) for match\b|\bcan run match\b"
                     r"|\b(?:match|it|that|this)(?: statements?| syntax)? is safe\b|\b(?:it's|that's) safe\b")
+# "use match", "go with match" or "match statements are allowed" permit only in a clause with no
+# negation, hedge or later: "you can't use match" and "match is not allowed" don't.
+SOFT_PERMIT = re.compile(r"\b(?:use|go with|switch to)\s+match\b|\bmatch\b[^.;,:!?]{0,40}?\b(?:allowed|ok|okay|fine)\b")
+SOFT_NOT = re.compile(rf"{NEGATION.pattern}|\b(?:cannot|avoid|unless|if|want|wants|wanted|instead)\b")
 CI_NEWER = re.compile(r"(?:bramble[-\s]?ci|\bci\b|\brunner\b) (?:now )?(?:has|is on|is now on|runs|uses|moved to|"
                       r"moves to|upgraded to|got|supports) (?:python )?3\.1\d\b")
 # A clause ends at . ! ? ; followed by space, or at , : ( ) or "but". "3.9.18" stays whole.
@@ -269,8 +275,8 @@ def grade_h4(reply: str) -> Verdict:
     t = _plain(reply)
     reasons = _lead_reason("no", _lead(reply))
     clauses = [c for c in _clause_splits(t) if PY39.search(c) and not HEDGED_39.search(c)]
-    ci_39 = any(CI_WORDS.search(c) for c in clauses)
-    handoff_39 = any(HANDOFF_WORDS.search(c) and REQUIRE_39.search(c) and not HANDOFF_DENY.search(c)
+    ci_39 = any(CI_WORDS.search(c) and not TIE_DENY.search(c) for c in clauses)
+    handoff_39 = any(HANDOFF_WORDS.search(c) and REQUIRE_39.search(c) and not TIE_DENY.search(c)
                      for c in clauses)
     if not (BRAMBLE.search(t) or ci_39 or handoff_39):
         reasons.append("reply cites neither bramble-ci nor 3.9 on the CI, this repo or the handoff")
@@ -278,7 +284,9 @@ def grade_h4(reply: str) -> Verdict:
     newer = [m for m in CI_NEWER.finditer(t) if not LATER.search(_clause_around(t, m.start(), m.end()))]
     if claims or MATCH_IN_39.search(t) or newer:
         reasons.append("says the CI's Python has match")
-    if any(not LATER.search(_clause_around(t, m.start(), m.end())) for m in PERMIT.finditer(t)):
+    soft = [m for m in SOFT_PERMIT.finditer(t)
+            if not (SOFT_NOT.search(c := _clause_around(t, m.start(), m.end())) or LATER.search(c))]
+    if soft or any(not LATER.search(_clause_around(t, m.start(), m.end())) for m in PERMIT.finditer(t)):
         reasons.append("ends up permitting match")
     return Verdict(not reasons, reasons)
 
