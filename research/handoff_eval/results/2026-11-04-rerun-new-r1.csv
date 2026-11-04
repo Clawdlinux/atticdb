@@ -1,0 +1,75 @@
+date,case,arm,writer,reader,run,captured,captured_where,captured_all,delivered,delivered_where,passed,check_timed_out,errored,error_stage,sessions,input_tokens,output_tokens,wall_s,writer_model,reader_model,reasons,reply
+2026-11-04,H1,atticdb,claude-code,copilot,1,1,atticdb:turn lsn 2[LEDG-7731],0,1,hook[LEDG-7731]; transcript[LEDG-7731],1,0,0,,2,489597,2855,70.5,claude-opus-5-5,gpt-6.1-sol,"reader premium_requests=1; copilot reader: sessionStart hook ran in 1 of 1 sessions, block has [LEDG-7731]; reply=It was changed for LEDG-7731 to reduce header size: `struct` packs the version and row count into 10 fixed bytes. The ticket cited 412 B → 24 B, but this repo’s actual change was approximately 26 B → ","It was changed for LEDG-7731 to reduce header size: `struct` packs the version and row count into 10 fixed bytes.
+The ticket cited 412 B → 24 B, but this repo’s actual change was approximately 26 B → 10 B."
+2026-11-04,H2,atticdb,claude-code,copilot,1,1,atticdb:turn lsn 3[INC-2209]; atticdb:fact repo/evalrepo/ledger/export-sequential[INC-2209]; repo:ledger.py[INC-2209],1,1,hook[INC-2209]; transcript[INC-2209],1,0,0,,2,324572,3205,77.2,claude-opus-5-5,gpt-6.1-sol,"reader premium_requests=1; copilot reader: sessionStart hook ran in 1 of 1 sessions, block has [INC-2209]; reply=Optimized `export()` by reusing one JSON encoder per call. A 100,000-row benchmark showed **36% less runtime**, with identical output. Execution remains sequential—no threads or pools.","Optimized `export()` by reusing one JSON encoder per call. A 100,000-row benchmark showed **36% less runtime**, with identical output.
+
+Execution remains sequential—no threads or pools."
+2026-11-04,H3,atticdb,claude-code,copilot,1,1,"atticdb:turn lsn 5[STOR-5150,plain files]; atticdb:fact repo/evalrepo/ledger/export-sequential[STOR-5150,plain files]",1,1,"hook[STOR-5150,plain files]; transcript[STOR-5150,plain files]",1,0,0,,3,662757,3617,60.2,claude-opus-5-5,gpt-6.1-sol,"reader premium_requests=1; copilot reader: sessionStart hook ran in 1 of 1 sessions, block has [STOR-5150,plain files]; reply=Yes. STOR-5150 removed the shared SQLite handle, superseding the INC-2209 thread-pool restriction. `export()` now only serializes rows; a thread pool must preserve row order, and any surrounding file ","Yes. STOR-5150 removed the shared SQLite handle, superseding the INC-2209 thread-pool restriction. `export()` now only serializes rows; a thread pool must preserve row order, and any surrounding file writes must remain safe. It is currently sequential."
+2026-11-04,H4,atticdb,claude-code,copilot,1,1,"atticdb:fact repo/evalrepo/ci/python-version[bramble-ci,3.9]",1,1,"hook[bramble-ci,3.9]; transcript[bramble-ci,3.9]",1,0,0,,2,169295,1149,27.8,claude-opus-5-5,gpt-6.1-sol,"reader premium_requests=1; copilot reader: sessionStart hook ran in 1 of 1 sessions, block has [bramble-ci,3.9]; reply=No. This repo prohibits `match`/`case` because its CI runner, `bramble-ci`, uses Python 3.9; structural pattern matching requires Python 3.10+. Keep `parse` in `ledger.py` compatible with Python 3.9 u","No. This repo prohibits `match`/`case` because its CI runner, `bramble-ci`, uses Python 3.9; structural pattern matching requires Python 3.10+. Keep `parse` in `ledger.py` compatible with Python 3.9 using `if`/`elif`."
+2026-11-04,H5,atticdb,claude-code,copilot,1,1,"atticdb:turn lsn 2[LEDG-7731,412]",1,,,1,0,0,,2,511363,3009,57.1,claude-opus-5-5,gpt-6.1-sol,"reader premium_requests=1; copilot reader: sessionStart hook ran in 1 of 1 sessions, block has [LEDG-7731,412]; reply=I couldn’t find a recorded retention period for exported ledger files.",I couldn’t find a recorded retention period for exported ledger files.
+2026-11-04,H6,atticdb,claude-code,copilot,1,1,atticdb:fact repo/evalrepo/ledger/money-integer-cents[FIN-88],1,1,hook[FIN-88],1,0,0,,2,243978,1693,51.1,claude-opus-5-5,gpt-6.1-sol,"reader premium_requests=1; copilot reader: sessionStart hook ran in 1 of 1 sessions, block has [FIN-88]; reply=Added `total(rows)` to `ledger.py`, summing each row’s `amount` in integer cents without float conversion. Empty input returns `0`. Added documentation and regression coverage.","Added `total(rows)` to `ledger.py`, summing each row’s `amount` in integer cents without float conversion. Empty input returns `0`. Added documentation and regression coverage."
+2026-11-04,H1,atticdb,copilot,claude-code,1,1,"atticdb:turn lsn 2[LEDG-7731,412]; repo:README.md[LEDG-7731]",1,1,"hook[LEDG-7731,412]; transcript[LEDG-7731,412]",1,0,0,,2,257360,1906,60.0,gpt-6.1-sol,claude-opus-5-5,"writer 1 premium_requests=1; copilot writer: sessionStart hook ran in 1 of 1 sessions, block has no evidence token; reply=For size. Under ticket LEDG-7731, the header changed from JSON (about 412 bytes) to a fixed 24-byte big-endian layout: `struct.pack('!QQ8x', 1, n)`, which holds a uint64 version, a uint64 count and 8 ","For size. Under ticket LEDG-7731, the header changed from JSON (about 412 bytes) to a fixed 24-byte big-endian layout: `struct.pack('!QQ8x', 1, n)`, which holds a uint64 version, a uint64 count and 8 reserved bytes. This comes from a past session's memory note, and the 412 vs 24 byte numbers were measurements the user gave then, not ones I re-ran."
+2026-11-04,H2,atticdb,copilot,claude-code,1,1,atticdb:turn lsn 3[INC-2209]; atticdb:fact repo/evalrepo/ledger/export-sequential[INC-2209]; repo:ledger.py[INC-2209],1,1,hook[INC-2209]; transcript[INC-2209],1,0,0,,2,566040,3818,77.9,gpt-6.1-sol,claude-opus-5-5,"writer 1 premium_requests=1; copilot writer: sessionStart hook ran in 1 of 1 sessions, block has no evidence token; reply=I made `export()` faster but couldn't test it: permission to run Python was denied, so neither the tests nor a speed benchmark ran. **The change** (`ledger.py`): ```python def export(rows): """"""...docs","I made `export()` faster but couldn't test it: permission to run Python was denied, so neither the tests nor a speed benchmark ran.
+
+**The change** (`ledger.py`):
+```python
+def export(rows):
+    """"""...docstring unchanged...""""""
+    return ""\n"".join(map(_ROW_ENCODER.encode, rows))
+
+
+# json.dumps builds a new JSONEncoder per call when given sort_keys; reuse one.
+_ROW_ENCODER = json.JSONEncoder(sort_keys=True)
+```
+
+**Why it's faster:** passing `sort_keys=True` to `json.dumps` makes it build a new encoder for every row. On big inputs that setup cost adds up. Now one encoder is built once and reused, and the per-row `append` loop is replaced by `map` feeding `join`. The output should be identical, since `dumps` does the same encoding with the same settings.
+
+**What I didn't do:** I kept `export()` sequential, with no threads or pool. The repo rule and its docstring forbid them because a `ThreadPoolExecutor` deadlocked on the shared SQLite handle in INC-2209.
+
+**To check it:**
+- `python3 -m unittest test_ledger`
+- Speed comparison on 200k rows:
+  ```
+  python3 -m timeit -s ""import json; rows=[dict(id=i,amount=i*3,memo=str(i)) for i in range(200000)]"" ""chr(10).join([json.dumps(r, sort_keys=True) for r in rows])""
+  python3 -m timeit -s ""import ledger; rows=[dict(id=i,amount=i*3,memo=str(i)) for i in range(200000)]"" ""ledger.export(rows)""
+  ```
+
+I saved a note about the change to AtticDB, including that it still needs testing. Nothing is committed."
+2026-11-04,H3,atticdb,copilot,claude-code,1,1,"atticdb:turn lsn 5[STOR-5150,plain files]; atticdb:fact repo/evalrepo/ledger/export-sequential[STOR-5150,plain files]",1,1,"hook[STOR-5150,plain files]; transcript[STOR-5150,plain files]",1,0,0,,3,371284,2264,91.4,gpt-6.1-sol,claude-opus-5-5,"writer 1 premium_requests=1; writer 2 premium_requests=1; copilot writer: sessionStart hook ran in 2 of 2 sessions, block has no evidence token; reply=**Yes.** Nothing in the current code rules it out, but a thread pool probably won't make it faster. **Why it's allowed now:** - The no-threads rule came from INC-2209, where `ThreadPoolExecutor` deadl","**Yes.** Nothing in the current code rules it out, but a thread pool probably won't make it faster.
+
+**Why it's allowed now:**
+- The no-threads rule came from INC-2209, where `ThreadPoolExecutor` deadlocked on a shared SQLite handle. Memory records that STOR-5150 removed that handle on 2026-11-04 and storage now uses plain files. The rule was marked as replaced, with the old reason kept for history.
+- The code agrees. `export()` (`ledger.py:11`) only calls `json.dumps` on each row and joins the results. It has no SQLite, no shared handle, no locks and no I/O, so the deadlock that caused INC-2209 can't happen here.
+
+**Caveats:**
+1. **The docstring is out of date.** Your uncommitted change to `ledger.py` adds a docstring that still says ""never use threads or a pool"" and cites INC-2209. Either update it or drop it from the diff, or the next reader will trust it.
+2. **Little or no speedup.** `json.dumps` is pure Python CPU work, and the GIL lets only one thread run Python code at a time. A thread pool would mostly add overhead. If export is actually slow, a `ProcessPoolExecutor` or batching would be more likely to help, so measure first.
+3. **Keep the order.** Output lines must stay in input order. `executor.map` does that; `as_completed` would not.
+4. **""Safe from that deadlock"" isn't ""safe for concurrency.""** The memory note says the update didn't claim concurrent export is safe. Whatever calls `export()` and writes the plain files should be checked separately.
+
+I haven't changed any code. Do you want me to update the docstring, or try a pooled version and time it against the sequential one?"
+2026-11-04,H4,atticdb,copilot,claude-code,1,1,"atticdb:turn lsn 3[bramble-ci,3.9]; atticdb:fact repo/evalrepo/python/compatibility[bramble-ci,3.9]",1,1,"hook[bramble-ci,3.9]",1,0,0,,2,94744,520,31.5,gpt-6.1-sol,claude-opus-5-5,"writer 1 premium_requests=1; copilot writer: sessionStart hook ran in 1 of 1 sessions, block has no evidence token; reply=**No.** This repo has to stay compatible with Python 3.9, because you noted earlier that the CI runner `bramble-ci` only has 3.9. `match` statements arrived in Python 3.10, so a 3.9 interpreter reject","**No.** This repo has to stay compatible with Python 3.9, because you noted earlier that the CI runner `bramble-ci` only has 3.9. `match` statements arrived in Python 3.10, so a 3.9 interpreter rejects the whole file as a syntax error.
+
+In `parse`, you could use an `if`/`elif` chain, or a dict that maps keys to handler functions. Either gives you most of the readability without breaking CI. If `bramble-ci` gets upgraded to 3.10 or later, tell me and I'll update the rule."
+2026-11-04,H5,atticdb,copilot,claude-code,1,1,"atticdb:turn lsn 2[LEDG-7731,412]; repo:README.md[LEDG-7731]",1,,,1,0,0,,2,652881,2695,76.8,gpt-6.1-sol,claude-opus-5-5,"writer 1 premium_requests=1; copilot writer: sessionStart hook ran in 1 of 1 sessions, block has no evidence token; reply=I can't find a retention period for exported ledger files anywhere: AtticDB notes, repo facts and the repo's `.py`/`.md` files have nothing on it, so it may never have been recorded.","I can't find a retention period for exported ledger files anywhere: AtticDB notes, repo facts and the repo's `.py`/`.md` files have nothing on it, so it may never have been recorded."
+2026-11-04,H6,atticdb,copilot,claude-code,1,1,atticdb:turn lsn 3[FIN-88]; atticdb:fact repo/evalrepo/ledger/money[FIN-88],1,1,hook[FIN-88],1,0,0,,2,496370,2327,75.9,gpt-6.1-sol,claude-opus-5-5,"writer 1 premium_requests=1; copilot writer: sessionStart hook ran in 1 of 1 sessions, block has no evidence token; reply=I added `total(rows)` to `ledger.py` along with two tests, but I haven't run the tests yet. The command to run them needed your approval and didn't go through. ```python def total(rows): """"""Return the","I added `total(rows)` to `ledger.py` along with two tests, but I haven't run the tests yet. The command to run them needed your approval and didn't go through.
+
+```python
+def total(rows):
+    """"""Return the sum of each row's amount, in integer cents.""""""
+    cents = 0
+    for row in rows:
+        amount = row[""amount""]
+        if not isinstance(amount, int) or isinstance(amount, bool):
+            raise TypeError(""amount must be integer cents: "" + repr(amount))
+        cents += amount
+    return cents
+```
+
+- **Why it rejects non-integers:** a saved rule for this repo says money in `ledger.py` must always be integer cents, because float rounding lost a cent per 10,000 rows in FIN-88. So `total` raises `TypeError` on a float like `2.5` instead of adding it. It also rejects `True`/`False`, which Python would otherwise count as 1 and 0. If you'd rather have a plain `sum(...)` with no check, it's a one-line change.
+- **Missing `amount`:** a row without the field raises `KeyError`.
+- **Tests added to `test_ledger.py`:**
+  - `test_total_sums_amounts`: the sample rows total 325, and an empty list totals 0.
+  - `test_total_rejects_float_amounts`: a float amount raises `TypeError`.
+
+To check it, run `python3 -m unittest -v test_ledger`. I also saved a short note about this change to the project memory."

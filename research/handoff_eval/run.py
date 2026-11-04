@@ -88,7 +88,8 @@ EVIDENCE_PATTERNS: dict[str, re.Pattern] = {
     "bramble-ci": _anchor("bramble-ci"),
     "FIN-88": _anchor("FIN-88"),
     # A bare 412 is a file size, a line number or an HTTP status. Only the header size counts.
-    "412": re.compile(r"\b412\s*(?:-\s*)?bytes?\b", re.I),
+    # "412 B" and "412 vs 24 bytes" count too: agents wrote both in the rerun and the regex missed them.
+    "412": re.compile(r"\b412(?:\s*(?:vs\.?|to|→|->)\s*24)?\s*(?:-\s*)?(?:bytes?|B)\b", re.I),
     # A bare 3.9 is any Python's version line, and python3.9 is an interpreter path. Only "Python 3.9" as
     # words, not inside a path, or 3.9 next to the runner, counts.
     "3.9": re.compile(rf"(?<!/)python\s+{_PY39}|bramble-ci[\s\S]{{0,40}}?{_PY39}|{_PY39}[\s\S]{{0,40}}?bramble-ci",
