@@ -19,7 +19,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       # Installs the toolchain and components from rust-toolchain.toml.
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -33,7 +33,7 @@ jobs:
       - run: cargo test --locked -p atticdb-core --release --features sim --test engine_sim
         env:
           ATTICDB_SIM_SEEDS: "2000"
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
       - run: python3 -m pip install -r clients/python/requirements-test.txt
@@ -54,7 +54,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo clippy --locked -p atticdb-sys -p atticdb-tape -p atticdb-core --all-targets -- -D warnings
@@ -63,7 +63,7 @@ jobs:
       - run: cargo clippy --locked -p atticdb --all-targets --all-features -- -D warnings
       - run: cargo test --locked -p atticdb --lib
       # The fake claude in the apps tests is Python.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
       - run: cargo test --locked -p atticdb --test it
