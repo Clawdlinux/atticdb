@@ -1,7 +1,8 @@
 """The scenarios, their seeds and their pass rules.
 
-Every text match is a case-insensitive substring match. Each rule returns whether the run
-passed and short reasons for the notes column, never the reply itself.
+Every text match is a case-insensitive substring match, except S2, which uses regexes. Each
+rule returns whether the run passed and short reasons for the notes column, never the reply
+itself.
 """
 
 from __future__ import annotations
@@ -17,8 +18,17 @@ FACT_PREFIX = f"repo/{REPO}/"
 TEST_RUNNER_KEY = f"{FACT_PREFIX}test-runner"
 TEST_RUNNER_FACT = "This repo runs its tests with cargo nextest run."
 REDIS_NOTE = "We dropped Redis because its 2 extra round trips per append broke the 1 ms p99 budget."
-# Any of these in the reply counts as giving the seeded reason.
-REDIS_MARKERS = ("round trip", "round-trip", "roundtrip", "p99")
+# S2 is a coarse reason check, not proof of accuracy. The reply needs the round trips and the
+# budget they broke, and must not blame a competing cause. These are case-insensitive regexes.
+REDIS_ROUND_TRIP = re.compile(r"round[\s-]?trips?|\bhops?\b|\bextra trips?\b", re.I)
+REDIS_P99 = re.compile(r"\bp99\b", re.I)
+# A whole 1, so 11 ms, 0.1 ms and 21ms don't count.
+REDIS_ONE_MS = re.compile(r"(?<![\d.])1\s?(?:ms|milliseconds?)\b", re.I)
+# Tail latency counts as the budget only next to a 1 ms match.
+REDIS_TAIL_LATENCY = re.compile(r"\btail[\s-]latency\b", re.I)
+REDIS_OTHER_CAUSES = re.compile(
+    r"\blicens|\bcosts?\b|\bcostly\b|\bprices?\b|\bpricing\b|\bmemory usage\b|\bram\b|\bcrash"
+    r"|\bdeprecat|\bvendor[\s-]lock", re.I)
 FILLER_NOTES = [
     "Renamed the helper in calc.py so the name says what it returns.",
     "Reviewed the README wording; no change needed.",
@@ -87,9 +97,14 @@ def check_recall(out: Outcome) -> Verdict:
 
 def check_search(out: Outcome) -> Verdict:
     searched = any(c.name == "memory_search" for c in out.calls)
-    reason = any(_has(out.reply, m) for m in REDIS_MARKERS)
-    reasons = ([] if searched else ["no memory_search call"]) + ([] if reason else ["reply lacks the reason"])
-    return Verdict(searched and reason, reasons)
+    reply = out.reply or ""
+    one_ms = bool(REDIS_ONE_MS.search(reply))
+    budget = bool(REDIS_P99.search(reply)) or one_ms or (bool(REDIS_TAIL_LATENCY.search(reply)) and one_ms)
+    reason = bool(REDIS_ROUND_TRIP.search(reply)) and budget
+    other = bool(REDIS_OTHER_CAUSES.search(reply))
+    reasons = (([] if searched else ["no memory_search call"]) + ([] if reason else ["reply lacks the reason"])
+               + (["reply blames another cause"] if other else []))
+    return Verdict(searched and reason and not other, reasons)
 
 
 def _block_lines(block: str) -> list[str]:

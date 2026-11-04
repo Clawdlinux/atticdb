@@ -31,7 +31,8 @@ Then it seeds the store, and runs `atticdb disconnect <h>` and `atticdb setup --
 It names 1 harness at a time, so `connect vscode` and `connect copilot` never run.
 After the agent, it runs `atticdb disconnect <h>`, stops the AtticDB server the run started, and deletes the root.
 
-Every child gets the inherited env without `ATTICDB_*`, `GIT_*`, `CLAUDE_CONFIG_DIR` and `CODEX_HOME`, then the run's own values.
+Every child gets the inherited env without `ATTICDB_*`, `GIT_*`, `COPILOT_*` (`COPILOT_HOME` included), `CLAUDE_CONFIG_DIR` and `CODEX_HOME`, then the run's own values.
+`COPILOT_*` goes even with `--keep-api-keys`. setup_eval never runs Copilot, and this keeps an inherited `COPILOT_HOME`, token or provider switch from reaching any child.
 Dropping `GIT_*` keeps an inherited `GIT_DIR`, `GIT_WORK_TREE` or `GIT_INDEX_FILE` from pointing the fixture's git steps at a real repo.
 It also drops the credential and provider vars, so runs use the logins in the eval dirs and nothing else:
 
@@ -109,7 +110,7 @@ The hook shows only the 5 newest notes, so the 10 fillers push it out of the blo
 Every text match ignores case and is a plain substring match:
 
 - S1: `nextest` in the reply.
-- S2: `round trip`, `round-trip`, `roundtrip` or `p99` in the reply.
+- S2: an integration check that the agent searched, plus a coarse reason check. It is not proof of factual accuracy; the `handoff_eval` graders cover accuracy. S2 uses regexes, not substrings. The reply needs both parts of the reason. The round trips: `round trip`, `round-trip`, `roundtrip`, `hop`, `hops` or `extra trip`. The budget: `p99`, or a whole `1 ms`, `1ms` or `1 millisecond` (`11 ms`, `0.1 ms` and `21ms` don't count). `tail latency` counts only next to a 1 ms match. A reply that names a competing cause fails: `licens`, `cost`, `price`, `pricing`, `memory usage`, `ram`, `crash`, `deprecat` or `vendor lock`, as whole words or word starts.
 - S3: a block line `- <key>: ...` holds `22`, for a key the agent set under `repo/evalrepo/`.
 - S4: an added line of `git diff <first commit> -- calc.py` holds `def add(a, b)`. The `memory_append` has no `session`, or an empty or null one, as AtticDB reads those as none. The first 60 characters of the note, with whitespace collapsed, appear in the block.
 

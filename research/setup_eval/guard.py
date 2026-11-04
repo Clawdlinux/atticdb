@@ -128,13 +128,17 @@ def _check_against_own(what: str, path: str, home: str) -> None:
                 raise Refused(f"{what} {path} and {name}, the user's own config, overlap. Refused")
 
 
-def check_config_dirs(claude_dir: str, codex_dir: str, home: str) -> None:
-    """Refuses unless both dirs are the eval's own: absolute, distinct, and neither `~` nor
-    in `~/.claude*`, `~/.codex` or `~/.copilot`, as written or after symlinks resolve. Every
+def check_config_dirs(claude_dir: str, codex_dir: str, home: str, copilot_dir: str | None = None) -> None:
+    """Refuses unless the dirs are the eval's own: absolute, distinct, and none `~` nor in
+    `~/.claude*`, `~/.codex` or `~/.copilot`, as written or after symlinks resolve. Every
     existing `~/.claude*`, `~/.codex` and `~/.copilot` entry is also compared by file identity
-    and ancestry, both ways, so a link from either side is caught."""
+    and ancestry, both ways, so a link from either side is caught. `copilot_dir`, a run's
+    COPILOT_HOME, is checked the same way when given."""
     real_home = os.path.realpath(home)
-    for what, path in (("CLAUDE_CONFIG_DIR", claude_dir), ("CODEX_HOME", codex_dir)):
+    dirs = [("CLAUDE_CONFIG_DIR", claude_dir), ("CODEX_HOME", codex_dir)]
+    if copilot_dir is not None:
+        dirs.append(("COPILOT_HOME", copilot_dir))
+    for what, path in dirs:
         if not os.path.isabs(path):
             raise Refused(f"{what} must be an absolute path")
         for form, base in ((os.path.abspath(path), home), (os.path.realpath(path), real_home)):
@@ -150,6 +154,9 @@ def check_config_dirs(claude_dir: str, codex_dir: str, home: str) -> None:
         _check_against_own(what, path, home)
     if os.path.realpath(claude_dir) == os.path.realpath(codex_dir):
         raise Refused("CLAUDE_CONFIG_DIR and CODEX_HOME must differ")
+    if copilot_dir is not None and os.path.realpath(copilot_dir) in (os.path.realpath(claude_dir),
+                                                                     os.path.realpath(codex_dir)):
+        raise Refused("COPILOT_HOME must differ from CLAUDE_CONFIG_DIR and CODEX_HOME")
 
 
 def check_env(env: dict, root: str) -> None:

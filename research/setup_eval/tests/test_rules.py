@@ -22,11 +22,35 @@ def test_recall():
 
 def test_search_needs_the_call_and_the_reason():
     search = Call("memory_search", {"query": "Redis"})
-    assert sc.check_search(out("2 extra Round Trips per append.", search)).passed
-    assert sc.check_search(out("It broke the 1 ms P99 budget.", search)).passed
-    assert not sc.check_search(out("2 extra round trips.")).passed, "no memory_search call"
+    assert sc.check_search(out("2 extra Round Trips per append broke the 1 ms P99 budget.", search)).passed
+    assert not sc.check_search(out("2 extra round trips broke the p99 budget.")).passed, "no memory_search call"
     v = sc.check_search(out("It was slow.", search))
     assert not v.passed and v.reasons == ["reply lacks the reason"]
+
+
+def test_search_needs_the_real_reason():
+    search = Call("memory_search", {"query": "Redis"})
+    table = [
+        ("Its 2 extra round trips per append broke our 1 ms p99 budget.", True),
+        ("Redis added two round-trips on every append, so we missed the p99 target of 1ms.", True),
+        ("two extra network hops per write blew our 1 millisecond tail-latency budget.", True),
+        ("The round trips in our program broke the p99 budget.", True),
+        ("We dropped Redis because its license forbids reporting p99 metrics.", False),
+        ("Its license forbids publishing round-trip p99 numbers.", False),
+        ("We had a 0.1 ms p99 budget but round trips weren't the issue, cost was.", False),
+        ("Redis cost too much at p99.", False),
+        ("Round trips.", False),
+        ("p99", False),
+        ("2 extra round trips broke the 11 ms budget.", False),
+        ("2 extra round trips broke the 0.1 ms budget.", False),
+        ("2 extra round trips broke the 21ms budget.", False),
+        ("Extra hops hurt our tail latency.", False),
+        ("Round trips used too much RAM and broke the p99 budget.", False),
+    ]
+    for reply, want in table:
+        assert sc.check_search(out(reply, search)).passed is want, reply
+    v = sc.check_search(out("Its license forbids publishing round-trip p99 numbers.", search))
+    assert v.reasons == ["reply blames another cause"]
 
 
 def test_save():

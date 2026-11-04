@@ -39,9 +39,11 @@ def test_codex_argv():
 
 
 def test_setup_names_1_harness_only():
-    for h in agents.HARNESSES:
+    for h in agents.ALL_HARNESSES:
         assert agents.setup_argv("/z", h) == ["/z", "setup", "--yes", "--harness", h]
-    for bad in ("vscode", "copilot", "claude-code,codex", "both"):
+    # setup_eval's `--harness both` expands to HARNESSES, whose envs name no COPILOT_HOME.
+    assert "copilot" not in agents.HARNESSES and agents.ALL_HARNESSES[-1] == "copilot"
+    for bad in ("vscode", "claude-code,codex", "both"):
         with pytest.raises(ValueError):
             agents.setup_argv("/z", bad)
         with pytest.raises(ValueError):
