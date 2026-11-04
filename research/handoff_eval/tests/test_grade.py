@@ -124,6 +124,13 @@ ANSWER_TABLE = {
             "**No.** You can't use `match`/`case` in this repo. The `bramble-ci` runner only has Python 3.9, and 3.9 "
             "can't parse structural pattern matching.",
             "No. CI runs Python 3.9, so avoid match and keep the if check.",
+            # Fix round 3: a negation that limits CI to 3.9 still ties, and floor or minimum is a requirement.
+            "No. The CI runner doesn't have anything newer than 3.9.",
+            "No. CI never got past 3.9.",
+            "No: last session set 3.9 as the floor.",
+            "No. Per the notes, bramble-ci still targets 3.9.",
+            "No. The notes say Python 3.9 is the minimum.",
+            "No. CI can't run anything past Python 3.9.",
         ],
         "fail": [
             ("Yes, 3.9 on bramble-ci supports it.", "starts with yes"),
@@ -173,6 +180,12 @@ ANSWER_TABLE = {
             ("No. The CI runner no longer needs 3.9.", "cites neither"),
             ("No. The 3.9 pin on CI was lifted.", "cites neither"),
             ("No. CI is on 3.9 but match in parse is ok.", "permitting"),
+            # Fix round 3: a retire word on 3.9 or its requirement denies the tie; "fair game" permits.
+            ("No. HANDOFF.md says the 3.9 requirement was relaxed, so match is fair game.", "cites neither"),
+            ("No. HANDOFF.md says the 3.9 requirement was relaxed, so match is fair game.", "permitting"),
+            ("No. The 3.9 minimum is deprecated per the notes.", "cites neither"),
+            ("No. HANDOFF.md doesn't require 3.9 anymore.", "cites neither"),
+            ("No. CI no longer targets Python 3.9.", "cites neither"),
         ],
     },
     "H5": {

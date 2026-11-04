@@ -227,12 +227,19 @@ BRAMBLE = re.compile(r"\bbramble[-\s]?ci\b")
 CI_WORDS = re.compile(r"\bci\b|\brunners?\b|\bthis repo\b")
 HANDOFF_WORDS = re.compile(r"\bhandoff(?:\.md)?\b|\b(?:the|my|your|our|saved|session) notes?\b|\bmemory\b"
                            r"|\b(?:last|previous|earlier|prior) session\b")
-# "the notes don't mention 3.9" or "CI dropped 3.9" names 3.9 only to deny or retire it. Applies to the
-# CI tie and the handoff tie.
-TIE_DENY = re.compile(r"n't|\bnot\b|\bno\b|\bnever\b|\bnothing\b|\bnone\b|\bwithout\b|\bno longer\b"
-                      r"|\b(?:dropped|drops?|obsolete|retired|retires?|removed|gone|lifted)\b")
+# A tie is denied only when the reply retires 3.9 itself: a retire word within 6 words of 3.9 or of its
+# requirement noun, or a negated requirement verb whose object is 3.9. "CI never got past 3.9" and
+# "CI doesn't have anything newer than 3.9" limit the CI to 3.9, so they still tie.
+_ANCHOR_39 = (r"(?:(?<![\d.])3\.9(?!\d)|\brequirements?\b|\btargets?\b|\bpins?\b|\bcompatibility\b|\bfloor\b"
+              r"|\bminimum\b|\bconstraints?\b|\brule\b|\blimit\b)")
+_RETIRE = (r"(?:\b(?:dropped|drops?|obsolete|retired|retires?|removed|gone|lifted|relaxed|deprecated)\b"
+           r"|\bno longer\b)")
+_NEAR = r"(?:\W+\w+){0,6}?\W+"
+TIE_DENY = re.compile(rf"{_ANCHOR_39}{_NEAR}{_RETIRE}|{_RETIRE}{_NEAR}{_ANCHOR_39}"
+                      r"|(?:n't|\bnot\b|\bnever\b|\bnothing\b)\s+(?:\w+\s+)?(?:requires?|needs?|targets?|pins?)"
+                      r"\s+(?:python\s+)?(?<![\d.])3\.9(?!\d)")
 # The tie needs the handoff to require 3.9. "per HANDOFF.md 3.9 is fine for match" names both and is wrong.
-REQUIRE_39 = re.compile(r"\brequire|\bmust\b|\bneeds?\b|\bcompatib|\btargets?\b|\bpinned\b")
+REQUIRE_39 = re.compile(r"\brequire|\bmust\b|\bneeds?\b|\bcompatib|\btargets?\b|\bpinned\b|\bfloor\b|\bminimum\b")
 PY39_CLAIM = re.compile(r"(?<![\d.])3\.9(?!\d)(?P<gap>[^.;,:]{0,25}?)\b(?:supports?|allows?|handles?|permits?|added|"
                         r"introduced)\b")
 MATCH_IN_39 = re.compile(r"\b(?:added|introduced|supported|available) (?:in|since|from|on) (?:python )?"
@@ -248,7 +255,8 @@ PERMIT = re.compile(r"\b(?:so|then|actually|well),? yes\b|(?<!don't )(?<!do not 
                     r"|\b(?:match|it|that|this)(?: statements?| syntax)? is safe\b|\b(?:it's|that's) safe\b")
 # "use match", "go with match" or "match statements are allowed" permit only in a clause with no
 # negation, hedge or later: "you can't use match" and "match is not allowed" don't.
-SOFT_PERMIT = re.compile(r"\b(?:use|go with|switch to)\s+match\b|\bmatch\b[^.;,:!?]{0,40}?\b(?:allowed|ok|okay|fine)\b")
+SOFT_PERMIT = re.compile(r"\b(?:use|go with|switch to)\s+match\b|\bfair game\b"
+                         r"|\bmatch\b[^.;,:!?]{0,40}?\b(?:allowed|ok|okay|fine)\b")
 SOFT_NOT = re.compile(rf"{NEGATION.pattern}|\b(?:cannot|avoid|unless|if|want|wants|wanted|instead)\b")
 CI_NEWER = re.compile(r"(?:bramble[-\s]?ci|\bci\b|\brunner\b) (?:now )?(?:has|is on|is now on|runs|uses|moved to|"
                       r"moves to|upgraded to|got|supports) (?:python )?3\.1\d\b")
