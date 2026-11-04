@@ -2012,12 +2012,13 @@ fn seeded_engine_recovery() {
         |v| v.parse::<u64>().unwrap(),
     );
     assert!(count > 0, "ATTICDB_SIM_SEEDS must be positive");
-    for offset in 0..count {
-        let seed = first.wrapping_add(offset);
-        if let Err(error) = std::panic::catch_unwind(|| run_seed(seed)) {
-            eprintln!("engine simulation seed={seed}\nrepro: ATTICDB_SIM_SEED={seed} cargo test -p atticdb-core --release --features sim --test engine_sim");
-            std::panic::resume_unwind(error);
-        }
+    let threads = atticdb_tape::sim::sim_threads();
+    let swept = atticdb_tape::sim::try_each_seed(first, count, threads, |seed| {
+        run_seed(seed);
+    });
+    if let Err((seed, error)) = swept {
+        eprintln!("engine simulation seed={seed}\nrepro: ATTICDB_SIM_SEED={seed} cargo test -p atticdb-core --release --features sim --test engine_sim");
+        std::panic::resume_unwind(error);
     }
-    eprintln!("engine simulation passed: {count} seeds starting at {first}");
+    eprintln!("engine simulation passed: {count} seeds starting at {first} on {threads} threads");
 }
