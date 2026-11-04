@@ -102,7 +102,8 @@ fn sessions(engine: &Engine, tenant: &str, limit: usize) -> Vec<String> {
 
 #[test]
 fn search_finds_current_records_newest_first() {
-    let engine = open(Arc::new(SimDisk::new(60)), options());
+    let disk = Arc::new(SimDisk::new(60));
+    let engine = open(disk.clone(), options());
     say(&engine, &scope("s1"), "Retry rule: back off 2 s");
     say(&engine, &scope("s1"), "unrelated");
     say(&engine, &Scope { tenant: "other".into(), ..scope("s1") }, "retry secret");
@@ -131,6 +132,8 @@ fn search_finds_current_records_newest_first() {
     }
     assert_eq!(search(&engine, "other", q("retry")), ["s1:retry secret"], "tenants");
     assert!(search(&engine, "nobody", q("retry")).is_empty(), "unknown tenant");
+    // Indexed before the forgets, so the live index holds every token until restart.
+    indexed(&engine);
     // Forgets hide hits. Another tenant can't hide this tenant's records (I11).
     let session = |name: &str| Selector::Session { agent: "agent".into(), session: name.into() };
     for (case, tenant, selector, expected) in [
@@ -147,6 +150,25 @@ fn search_finds_current_records_newest_first() {
         let kind = engine.search("tenant", bad).unwrap_err().kind;
         assert!(matches!(kind, ErrorKind::InvalidInput));
     }
+    // A live forget keeps its tokens in the word index until restart. The rebuild at reopen
+    // skips hidden records. 6 tokens stay: "unrelated", "repo/api/gone", "retry" and "gone"
+    // here, "retry" and "secret" in the other tenant. 15 hidden ones go, "idempotency" too.
+    // Forgets come back by replay first, then from a checkpoint.
+    assert_eq!(engine.metrics().unwrap().search_index_terms, 21, "before restart");
+    let mut engine = engine;
+    for case in ["reopen with replay", "reopen from a checkpoint"] {
+        if case == "reopen from a checkpoint" {
+            engine.checkpoint().unwrap();
+        }
+        drop(engine);
+        engine = open(disk.clone(), options());
+        indexed(&engine);
+        let m = engine.metrics().unwrap();
+        assert_eq!((m.search_index_terms, m.search_index_lsn), (6, m.durable_lsn), "{case}");
+        assert!(search(&engine, "tenant", q("idempotency")).is_empty(), "{case}");
+        assert_eq!(search(&engine, "other", q("retry")), ["s1:retry secret"], "{case}");
+    }
+    assert!(engine.metrics().unwrap().checkpoint_files > 0, "a checkpoint was installed");
 }
 
 #[test]

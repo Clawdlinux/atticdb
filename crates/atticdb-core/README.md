@@ -148,10 +148,10 @@ So both stay bounded by `max_sessions` and `max_facts`.
 `max_forgotten_lsns` caps the pairs (default 100,000). Past it, a forget is `ResourceExhausted("forgets")`.
 A cap lowered below the pairs already held makes open fail with that error. Raise it again, as for `max_facts`.
 A pair carries the forget's tenant, so a pair naming another tenant's record, or no turn or fact, hides nothing.
-Session counts, `facts`, `fact_revisions`, `compressed_turns` and `search_index_terms` still count hidden records.
+Session counts, `facts`, `fact_revisions` and `compressed_turns` still count hidden records. `search_index_terms` counts their tokens until the next restart.
 `forgotten_sessions`, `forgotten_fact_keys` and `forgotten_lsns` count the set.
 The hot cache drops covered entries after the ack, for hygiene only.
-The word index keeps hidden tokens in RAM. A restart rebuilds it from the log, hidden text included. Search still never returns a hidden record.
+In-memory index tokens stay until the next restart. The rebuild at open skips hidden records. Search still never returns a hidden record.
 
 Checkpoints write tag 6 forget retry entries, in tag 5's layout with an empty scope.
 Tag 7 holds a session cutoff and tag 8 a fact-key cutoff. Tag 9 holds up to 1,024 LSNs of 1 tenant.

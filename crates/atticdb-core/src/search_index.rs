@@ -11,7 +11,16 @@
 //! wrong. It's built off the writer from durable records in LSN order, from plain text, so it
 //! never inflates at query time. It lives in memory. After a restart it rebuilds in the
 //! background, and search scans the records above its watermark.
+//!
+//! The builder skips a record that the forget set hides when it reads it. Open loads that
+//! set before the builder starts, so a rebuild never holds forgotten text. Hides never undo,
+//! so a skipped record stays hidden. A forget of a record already indexed keeps its tokens
+//! until the next restart.
 
+use crate::facts::FactKey;
+use crate::forgets::Forgets;
+use crate::session::Key;
+use crate::state::State;
 use atticdb_tape::{DurableReads, Kind};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -32,7 +41,7 @@ const IDLE: Duration = Duration::from_millis(20);
 #[derive(Debug, Default)]
 pub(crate) struct Index {
     tenants: HashMap<u32, Terms>,
-    /// Every record at or below this LSN is indexed.
+    /// Every record at or below this LSN is indexed, or skipped as hidden.
     pub(crate) lsn: u64,
     /// Approximate heap bytes held.
     pub(crate) bytes: usize,
@@ -289,33 +298,75 @@ impl Terms {
     }
 }
 
+/// What a forget can hide a record by: its session or its fact key. Other kinds hold no text.
+enum Owner {
+    Session(Key),
+    Fact(FactKey),
+    None,
+}
+
+impl Owner {
+    /// True when `forgets` hides the record at `lsn`, as the engine's readers check it (I11).
+    fn hidden(&self, forgets: &Forgets, lsn: u64) -> bool {
+        match self {
+            Self::Session(key) => forgets.hides_turn(key, lsn),
+            Self::Fact(key) => forgets.hides_fact(key, lsn),
+            Self::None => false,
+        }
+    }
+}
+
 /// The text of a durable record that search matches: turn content, or fact key and content.
-fn fields(kind: Kind, payload: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+/// Also its owner, keyed by the header's tenant id.
+fn fields(tenant: u32, kind: Kind, payload: &[u8]) -> Result<(Owner, Vec<Vec<u8>>), String> {
     let bad = |what: &str| format!("undecodable {what} payload");
     Ok(match kind {
-        Kind::Turn => vec![crate::turn::decode(payload).map_err(|_| bad("turn"))?.turn.content],
+        Kind::Turn => {
+            let turn = crate::turn::decode(payload).map_err(|_| bad("turn"))?;
+            let owner = Owner::Session(Key(tenant, turn.agent_id, turn.session_id));
+            (owner, vec![turn.turn.content])
+        }
         Kind::Fact => {
             let fact = crate::fact::decode(payload).map_err(|_| bad("fact"))?;
-            vec![fact.key.into_bytes(), fact.content]
+            let owner = Owner::Fact((tenant, fact.key.clone()));
+            (owner, vec![fact.key.into_bytes(), fact.content])
         }
-        _ => Vec::new(),
+        _ => (Owner::None, Vec::new()),
     })
 }
 
-/// Indexes every durable record above the watermark, in batches.
-fn catch_up(reads: &DurableReads, index: &Mutex<Index>) -> Result<(), String> {
+/// Where the builder reads records, and the forget set it checks them against.
+#[derive(Debug)]
+struct Source {
+    reads: DurableReads,
+    state: Arc<Mutex<State>>,
+}
+
+/// Indexes every durable record above the watermark, in batches. A record hidden when its
+/// batch is checked is skipped: the watermark passes it, and none of its tokens are kept.
+fn catch_up(source: &Source, index: &Mutex<Index>) -> Result<(), String> {
     let lock = || index.lock().map_err(|_| "index lock poisoned".to_owned());
-    let (from, end) = (lock()?.lsn + 1, reads.durable_lsn());
-    let mut reader = reads.reader();
+    let (from, end) = (lock()?.lsn + 1, source.reads.durable_lsn());
+    let mut reader = source.reads.reader();
     let mut batch = Vec::with_capacity(BATCH);
     for lsn in from..=end {
         let frame = reader.read(lsn).map_err(|e| e.to_string())?;
         let frame = frame.ok_or_else(|| format!("durable LSN {lsn} is unreadable"))?;
         let header = &frame.header;
-        batch.push((header.tenant_id, lsn, fields(header.kind, &frame.payload)?));
+        let (owner, fields) = fields(header.tenant_id, header.kind, &frame.payload)?;
+        batch.push((header.tenant_id, lsn, owner, fields));
         if batch.len() == BATCH || lsn == end {
+            // The state lock and the index lock are never held together.
+            {
+                let state = source.state.lock().map_err(|_| "state lock poisoned".to_owned())?;
+                for (_, lsn, owner, fields) in &mut batch {
+                    if owner.hidden(&state.forgets, *lsn) {
+                        fields.clear();
+                    }
+                }
+            }
             let mut index = lock()?;
-            for (tenant, lsn, fields) in batch.drain(..) {
+            for (tenant, lsn, _, fields) in batch.drain(..) {
                 if !index.add(tenant, lsn, &fields) {
                     return Ok(());
                 }
@@ -332,12 +383,21 @@ pub(crate) struct Indexer {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
     /// Simulations catch up inline, before each search, so runs stay deterministic.
-    inline: Option<DurableReads>,
+    inline: Option<Source>,
 }
 
 impl Indexer {
     /// A zero `budget` turns the index off: search scans, as before it existed.
-    pub(crate) fn start(reads: DurableReads, budget: usize, inline: bool) -> std::io::Result<Self> {
+    ///
+    /// `state` must already hold the forget set recovered at open, so the build skips every
+    /// record hidden then.
+    pub(crate) fn start(
+        reads: DurableReads,
+        state: Arc<Mutex<State>>,
+        budget: usize,
+        inline: bool,
+    ) -> std::io::Result<Self> {
+        let source = Source { reads, state };
         let index = Arc::new(Mutex::new(Index::new(budget)));
         let stop = Arc::new(AtomicBool::new(false));
         let mut indexer =
@@ -349,12 +409,12 @@ impl Indexer {
             return Ok(indexer);
         }
         if inline {
-            indexer.inline = Some(reads);
+            indexer.inline = Some(source);
             return Ok(indexer);
         }
         let build = move || {
             while !stop.load(Ordering::Acquire) {
-                if let Err(error) = catch_up(&reads, &index) {
+                if let Err(error) = catch_up(&source, &index) {
                     if let Ok(mut index) = index.lock() {
                         index.stopped = Some(error);
                     }
@@ -379,8 +439,8 @@ impl Indexer {
     /// Like [`Indexer::with`]. Inline, it first catches up, so search sees every durable
     /// record through the index.
     pub(crate) fn current<T>(&self, f: impl FnOnce(&Index) -> T) -> Option<T> {
-        if let Some(reads) = &self.inline {
-            if let Err(error) = catch_up(reads, &self.index) {
+        if let Some(source) = &self.inline {
+            if let Err(error) = catch_up(source, &self.index) {
                 self.index.lock().ok()?.stopped = Some(error);
             }
         }
