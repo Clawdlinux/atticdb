@@ -1,19 +1,29 @@
 """One handoff run: writer sessions in harness A, 1 reader session in harness B, and 3 stages.
 
-Each run gets a new temp root from `setup_eval.harness.make_root`: its own AtticDB home
-(`<root>/zh`) and its own fixture repo (`<root>/evalrepo`). Before any agent starts, the run
-checks that the store, the repo and the writer's native memory for this repo hold none of the
-case's evidence tokens. After the run it disconnects both harnesses, stops the AtticDB server
-the run started, and deletes the root, as setup_eval does.
+Each run gets a new temp root from `setup_eval.harness.make_root` with:
+
+- its own AtticDB home, `<root>/zh`, and its own fixture repo, `<root>/evalrepo`;
+- its own `CODEX_HOME`, `<root>/codex`, holding copies of the eval dir's `auth.json` and
+  `config.toml` only. So Codex sessions, memories and history never carry over;
+- its own `CLAUDE_CONFIG_DIR`, `<root>/claude`, empty. Claude's claude.ai login sits in the macOS
+  Keychain under a name made from the config dir. `CLAUDE_SECURESTORAGE_CONFIG_DIR` points that
+  lookup at the eval Claude dir, so the login is found and nothing else is shared.
+
+Before any agent starts, the run checks that no harness config it will use mentions atticdb
+(outside the setup the atticdb arm does itself), and that the store, the repo and both config dirs
+hold none of the case's evidence. After the run it disconnects both harnesses, stops the AtticDB
+server the run started, and deletes the root.
 
 Stages, each None when not measured or not applicable:
 
 - captured: after the writers, an evidence token is in the run's AtticDB store (`atticdb search`),
-  in any file of the repo working tree, or in the writer harness's native memory for this repo.
+  in a file of the repo working tree, or in the writer harness's native memory for this repo.
 - delivered: before the reader's final reply, an evidence token was in its context: the
-  SessionStart hook block for the reader harness (atticdb arm), a tool result in the reader's
-  transcript, or the reader prompt (oracle arm only). None for H5.
+  SessionStart hook block for the reader harness (atticdb arm), a tool result or file read in the
+  reader's transcript, or the reader prompt (oracle arm only). None for H5.
 - passed: `grade.grade` on the reader's final reply and the repo it leaves.
+
+Tokens match through `EVIDENCE_PATTERNS`, never as bare substrings.
 
 A session that times out, crashes, reports an error or has no final reply makes the run
 `errored`, with the stage it died in. It is never a pass or a fail.
@@ -26,11 +36,12 @@ import os
 import re
 import shlex
 import shutil
+import subprocess
 from dataclasses import dataclass, field
 
 from ..setup_eval import agents, guard
-from ..setup_eval.harness import (BASE_REF, Config, HarnessError, Step, agent_finished, env_for, hook_block,
-                                  hook_input, make_root, paths, stop_server)
+from ..setup_eval.harness import (BASE_REF, Config, HarnessError, Step, agent_finished, hook_block, hook_input,
+                                  make_root, paths, stop_server)
 from ..setup_eval.parse import PARSERS, Outcome
 from ..setup_eval.proc import Result, Runner
 from . import arms
@@ -41,7 +52,44 @@ from .grade import grade
 # H5's reader needs no fact. Its evidence is H1's, which is unrelated history there, so delivery
 # is not a stage of H5. Capture still is.
 NO_DELIVERY = frozenset({"H5"})
-MAX_SCAN_BYTES = 2_000_000  # a bigger file in the repo or a memory dir is read up to this size
+MAX_SCAN_BYTES = 2_000_000  # a bigger file is read up to this size
+
+# ---- evidence matching ----
+
+
+def _anchor(token: str) -> re.Pattern:
+    """The token whole: no letter or digit right before or after it."""
+    return re.compile(rf"(?<![A-Za-z0-9]){re.escape(token)}(?![A-Za-z0-9])", re.I)
+
+
+# 3.9 that is not the start of 3.9.6 or 3.95.
+_PY39 = r"(?<![\d.])3\.9(?!\d|\.\d)"
+# 1 pattern per evidence token in cases.CASES. Capture, delivery and the clean start all use it.
+EVIDENCE_PATTERNS: dict[str, re.Pattern] = {
+    "LEDG-7731": _anchor("LEDG-7731"),
+    "INC-2209": _anchor("INC-2209"),
+    "STOR-5150": _anchor("STOR-5150"),
+    "bramble-ci": _anchor("bramble-ci"),
+    "FIN-88": _anchor("FIN-88"),
+    # A bare 412 is a file size, a line number or an HTTP status. Only the header size counts.
+    "412": re.compile(r"\b412\s*(?:-\s*)?bytes?\b", re.I),
+    # A bare 3.9 is any Python's version line. Only Python 3.9 by name, or next to the runner, counts.
+    "3.9": re.compile(rf"python\s*{_PY39}|bramble-ci[\s\S]{{0,40}}?{_PY39}|{_PY39}[\s\S]{{0,40}}?bramble-ci",
+                      re.I),
+    "plain files": re.compile(r"\bplain[- ]files?\b", re.I),
+}
+
+
+def has_token(text: str, token: str) -> bool:
+    """Whether `text` holds `token` by its pattern. A token without one raises KeyError."""
+    return bool(EVIDENCE_PATTERNS[token].search(text or ""))
+
+
+def tokens_in(text: str, tokens) -> list[str]:
+    return [t for t in tokens if has_token(text, t)]
+
+
+# ---- budget, config and result ----
 
 
 class BudgetExceeded(Exception):
@@ -65,7 +113,8 @@ class Budget:
 
 @dataclass
 class HandoffConfig(Config):
-    """setup_eval's Config, plus the model per harness and the session budget."""
+    """setup_eval's Config, plus the model per harness and the session budget. `claude_dir` and
+    `codex_dir` are the shared eval dirs that each run's own dirs are made from."""
     models: dict[str, str] = field(default_factory=dict)
     budget: Budget | None = None
 
@@ -82,6 +131,7 @@ class HandoffResult:
     delivered: bool | None = None
     delivered_where: str = ""
     passed: bool | None = None
+    check_timed_out: bool = False  # a code check of the grader timed out
     errored: bool = False
     error_stage: str = ""
     reasons: list[str] = field(default_factory=list)
@@ -96,6 +146,90 @@ class HandoffResult:
         self.errored = True
         self.error_stage = self.error_stage or stage
         self.reasons.append(f"error in {stage}: {why}")
+
+
+# ---- the run's own config dirs ----
+
+SECURE_STORAGE_ENV = "CLAUDE_SECURESTORAGE_CONFIG_DIR"
+CODEX_COPIES = ("auth.json", "config.toml")
+CODEX_REQUIRED = "auth.json"
+# Files that would wire AtticDB into a harness, by run config dir.
+WIRING_FILES = {"claude": ("settings.json", ".claude.json"), "codex": ("config.toml", "hooks.json", "AGENTS.md")}
+
+
+def run_dirs(root: str) -> tuple[str, str]:
+    """The run's own CLAUDE_CONFIG_DIR and CODEX_HOME."""
+    return os.path.join(root, "claude"), os.path.join(root, "codex")
+
+
+def env_for(cfg: Config, root: str, step: Step) -> dict:
+    """setup_eval's child env, with the run's own config dirs, and Claude's login looked up under
+    the eval Claude dir. An inherited CLAUDE_SECURESTORAGE_CONFIG_DIR is always replaced."""
+    zh, _ = paths(root)
+    claude, codex = run_dirs(root)
+    return agents.child_env(cfg.base_env, home=cfg.home, atticdb_home=zh, claude_dir=claude, codex_dir=codex,
+                            extra={SECURE_STORAGE_ENV: cfg.claude_dir, **step.extra_env},
+                            keep_api_keys=cfg.keep_api_keys)
+
+
+def prepare_config_dirs(cfg: Config, root: str) -> None:
+    """Makes the run's config dirs and copies Codex's login and config into its own. Raises
+    HarnessError without the eval Codex login, and guard.Refused for an unsafe dir."""
+    claude, codex = run_dirs(root)
+    for folder in (claude, codex):
+        os.makedirs(folder, mode=0o700, exist_ok=True)
+    guard.check_config_dirs(claude, codex, cfg.home)
+    for name in CODEX_COPIES:
+        src = os.path.join(cfg.codex_dir, name)
+        if not os.path.isfile(src):
+            if name == CODEX_REQUIRED:
+                raise HarnessError(f"the eval Codex dir has no {name}. Log in once: "
+                                   f"{agents.login_hint('codex', cfg.claude_dir, cfg.codex_dir)}")
+            continue
+        dst = os.path.join(codex, name)
+        shutil.copyfile(src, dst)
+        os.chmod(dst, 0o600)
+
+
+def sync_codex_auth(cfg: Config, root: str) -> str | None:
+    """Codex may refresh its login during a run and retire the old refresh token. Then the
+    run's `auth.json` replaces the eval dir's, atomically. Returns a note, or None."""
+    src = os.path.join(run_dirs(root)[1], CODEX_REQUIRED)
+    dst = os.path.join(cfg.codex_dir, CODEX_REQUIRED)
+    try:
+        with open(src, "rb") as f:
+            new = f.read()
+        with open(dst, "rb") as f:
+            old = f.read()
+    except OSError:
+        return None
+    if new == old:
+        return None
+    try:
+        if not isinstance(json.loads(new), dict):
+            return "the run's codex auth.json changed but is not a JSON object, so it was not kept"
+    except ValueError:
+        return "the run's codex auth.json changed but is not JSON, so it was not kept"
+    tmp = f"{dst}.handoff-{os.getpid()}"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(new)
+    os.replace(tmp, dst)
+    return "codex refreshed its login; the eval dir's auth.json was updated"
+
+
+def wiring_hits(root: str) -> list[str]:
+    """The run's config files that mention atticdb. Codex's `[projects."<path>"]` trust headers
+    are skipped, as a path is not wiring."""
+    hits = []
+    for kind, folder in zip(("claude", "codex"), run_dirs(root)):
+        for name in WIRING_FILES[kind]:
+            text = _read(os.path.join(folder, name))
+            lines = [ln for ln in text.splitlines()
+                     if not (name == "config.toml" and ln.lstrip().startswith("[projects."))]
+            if any("atticdb" in ln.lower() for ln in lines):
+                hits.append(f"{kind}-dir:{name}")
+    return hits
 
 
 # ---- the commands of 1 run ----
@@ -115,7 +249,7 @@ def plan(cfg: HandoffConfig, case: Case, arm: str, writer: str, reader: str, roo
                     Step("fixture", ["git", "commit", "-q", "--no-verify", "-m", "Handoff instructions"], repo,
                          agents.GIT_TIMEOUT, git)]
     fixture.append(Step("fixture", ["git", "update-ref", BASE_REF, "HEAD"], repo, agents.GIT_TIMEOUT, git))
-    steps = {
+    return {
         "fixture": fixture,
         "disconnect": [Step("disconnect", agents.disconnect_argv(z, h), repo, agents.SETUP_TIMEOUT) for h in both],
         "start": [search_step(cfg, repo, "start", t) for t in case.evidence],
@@ -131,7 +265,6 @@ def plan(cfg: HandoffConfig, case: Case, arm: str, writer: str, reader: str, roo
         "grade": [Step("grade", ["git", "diff", BASE_REF], repo, agents.GIT_TIMEOUT, git)],
         "teardown": [Step("teardown", agents.disconnect_argv(z, h), repo, agents.SETUP_TIMEOUT) for h in both],
     }
-    return steps
 
 
 def _exec(cfg: Config, runner: Runner, root: str, step: Step) -> Result:
@@ -152,10 +285,6 @@ def _required(cfg: Config, runner: Runner, root: str, step: Step) -> Result:
 
 
 # ---- where tokens are found ----
-
-def _has(text: str, token: str) -> bool:
-    return token.lower() in (text or "").lower()
-
 
 def _where(found: list[tuple[str, str]]) -> str:
     """`place[tok,tok]; place[tok]`, places in the order found."""
@@ -179,7 +308,7 @@ def store_hits(stdout: bytes, token: str) -> list[str]:
             if not isinstance(hit, dict):
                 continue
             text = f"{hit.get('content', '')}\n{hit.get('key', '')}"
-            if _has(text, token):
+            if has_token(text, token):
                 kind = hit.get("kind") if isinstance(hit.get("kind"), str) else "record"
                 key = f" {hit['key']}" if isinstance(hit.get("key"), str) else ""
                 places.append(f"atticdb:{kind}{key}")
@@ -194,21 +323,27 @@ def _read(path: str) -> str:
         return ""
 
 
-def file_hits(folder: str, tokens: tuple[str, ...], label: str, only: set[str] | None = None) -> list[tuple[str, str]]:
-    """(label:relpath, token) for each file under `folder` holding a token. `.git` is skipped.
-    With `only`, just those relative paths are read."""
+# Not what an agent wrote down: git data, virtualenvs, caches and vendored packages.
+SKIP_DIRS = frozenset({".git", ".venv", "venv", "__pycache__", ".pytest_cache", "node_modules"})
+
+
+def file_hits(folder: str, tokens, label: str, only: set[str] | None = None,
+              skip_files: tuple[str, ...] = ()) -> list[tuple[str, str]]:
+    """(label:relpath, token) for each file under `folder` holding a token. SKIP_DIRS and any dir
+    holding pyvenv.cfg are skipped, as are links and `skip_files` at the top. With `only`, just
+    those relative paths are read."""
     found = []
     if not os.path.isdir(folder):
         return found
     for dirpath, dirnames, filenames in os.walk(folder):
-        dirnames[:] = sorted(d for d in dirnames if d != ".git")
+        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS
+                             and not os.path.exists(os.path.join(dirpath, d, "pyvenv.cfg")))
         for name in sorted(filenames):
             path = os.path.join(dirpath, name)
             rel = os.path.relpath(path, folder)
-            if (only is not None and rel not in only) or os.path.islink(path):
+            if (only is not None and rel not in only) or rel in skip_files or os.path.islink(path):
                 continue
-            text = _read(path)
-            found += [(f"{label}:{rel}", t) for t in tokens if _has(text, t)]
+            found += [(f"{label}:{rel}", t) for t in tokens_in(_read(path), tokens)]
     return found
 
 
@@ -218,11 +353,13 @@ def claude_project_slug(path: str) -> str:
     return re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(path))
 
 
-def native_memory_dir(cfg: Config, harness: str, repo: str) -> str:
+def native_memory_dir(root: str, harness: str, repo: str) -> str:
+    """The harness's own memory for `repo`, in the run's config dirs."""
+    claude, codex = run_dirs(root)
     if harness == "claude-code":
-        return os.path.join(cfg.claude_dir, "projects", claude_project_slug(repo), "memory")
+        return os.path.join(claude, "projects", claude_project_slug(repo), "memory")
     if harness == "codex":
-        return os.path.join(cfg.codex_dir, "memories")
+        return os.path.join(codex, "memories")
     raise ValueError(f"unknown harness {harness!r}")
 
 
@@ -254,11 +391,15 @@ def _events(stdout: bytes) -> list[dict]:
     return out
 
 
-def _claude_final(ev: dict) -> bool:
+def _content(ev: dict) -> list:
     msg = ev.get("message")
     content = msg.get("content") if isinstance(msg, dict) else None
-    return ev.get("type") == "assistant" and isinstance(content, list) and any(
-        isinstance(b, dict) and b.get("type") == "text" for b in content)
+    return content if isinstance(content, list) else []
+
+
+def _claude_final(ev: dict) -> bool:
+    return ev.get("type") == "assistant" and any(isinstance(b, dict) and b.get("type") == "text"
+                                                 for b in _content(ev))
 
 
 def _codex_item(ev: dict) -> dict:
@@ -279,6 +420,8 @@ def _codex_final(ev: dict) -> bool:
     return isinstance(msg, dict) and msg.get("type") in ("agent_message", "task_complete")
 
 
+# Their results echo what the agent itself wrote, which is not context it received.
+CLAUDE_WRITE_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
 CODEX_OUTPUT_FIELDS = {"command_execution": ("aggregated_output", "output", "stdout", "stderr"),
                        "mcp_tool_call": ("result", "error")}
 CODEX_LEGACY_OUTPUT = {"exec_command_end": ("aggregated_output", "formatted_output", "stdout", "stderr"),
@@ -286,21 +429,34 @@ CODEX_LEGACY_OUTPUT = {"exec_command_end": ("aggregated_output", "formatted_outp
 
 
 def tool_outputs(harness: str, stdout: bytes) -> list[str]:
-    """The text of every tool result and file read in a transcript, before its final reply."""
+    """The text the reader received from tools before its final reply.
+
+    Claude: `tool_result` content, except for Write and Edit tools, plus a Read's
+    `tool_use_result.file.content`. Write and Edit echoes (`content`, `newString`,
+    `structuredPatch`) are left out. Codex: command output and MCP results. The commands the
+    agent typed are not read."""
     events = _events(stdout)
     is_final = _claude_final if harness == "claude-code" else _codex_final
     finals = [i for i, ev in enumerate(events) if is_final(ev)]
     texts: list[str] = []
+    tool_names: dict[str, str] = {}
     for ev in events[:finals[-1] if finals else len(events)]:
         if harness == "claude-code":
+            if ev.get("type") == "assistant":
+                for block in _content(ev):
+                    if isinstance(block, dict) and block.get("type") == "tool_use" and isinstance(block.get("id"), str):
+                        tool_names[block["id"]] = str(block.get("name"))
+                continue
             if ev.get("type") != "user":
                 continue
-            msg = ev.get("message")
-            content = msg.get("content") if isinstance(msg, dict) else None
-            for block in content if isinstance(content, list) else []:
-                if isinstance(block, dict) and block.get("type") == "tool_result":
+            for block in _content(ev):
+                if (isinstance(block, dict) and block.get("type") == "tool_result"
+                        and tool_names.get(block.get("tool_use_id")) not in CLAUDE_WRITE_TOOLS):
                     texts += _strings(block.get("content"))
-            texts += _strings(ev.get("tool_use_result"))
+            result = ev.get("tool_use_result")
+            file = result.get("file") if isinstance(result, dict) else None
+            if isinstance(file, dict) and isinstance(file.get("content"), str):
+                texts.append(file["content"])
         elif ev.get("type") == "item.completed":
             item = _codex_item(ev)
             for name in CODEX_OUTPUT_FIELDS.get(item.get("type") or item.get("item_type"), ()):
@@ -351,7 +507,7 @@ def _session(cfg: HandoffConfig, runner: Runner, root: str, step: Step, harness:
     return r, out
 
 
-def _searches(cfg, runner, root, steps: list[Step]) -> list[tuple[str, str]]:
+def _searches(cfg: Config, runner: Runner, root: str, steps: list[Step]) -> list[tuple[str, str]]:
     found = []
     for step in steps:
         r = _required(cfg, runner, root, step)
@@ -366,45 +522,60 @@ def check_models(cfg: HandoffConfig, *harnesses: str) -> None:
             raise ValueError(f"no model id for {h}. Pass --claude-model and --codex-model")
 
 
+def grader_timed_out(verdict) -> bool:
+    """The grader's own flag when it has one. grade.py has none yet, so its reason text is read."""
+    flag = getattr(verdict, "check_timed_out", None)
+    if isinstance(flag, bool):
+        return flag
+    return any("timed out" in why for why in verdict.reasons)
+
+
 def run_handoff(cfg: HandoffConfig, runner: Runner, case: Case, arm: str, writer: str, reader: str,
                 index: int) -> HandoffResult:
     arms.check_arm(arm)
     check_models(cfg, *((writer, reader) if arms.has_writer(arm) else (reader,)))
-    res = HandoffResult(case.id, arm, writer, reader, index,
-                        writer_model=cfg.models.get(writer, ""),
+    res = HandoffResult(case.id, arm, writer, reader, index, writer_model=cfg.models.get(writer, ""),
                         reader_model=cfg.models[reader])
     root = make_root(cfg)
     _, repo = paths(root)
+    claude_run, codex_run = run_dirs(root)
     steps = plan(cfg, case, arm, writer, reader, root)
     redact_paths = {root: "<root>", os.path.realpath(root): "<root>", cfg.claude_dir: "<claude-dir>",
                     cfg.codex_dir: "<codex-dir>", cfg.atticdb: "<atticdb>", cfg.home: "~"}
     stage, touched = "fixture", False
     try:
-        write_fixture(repo)
-        for name, body in arms.instruction_files(arm).items():
-            with open(os.path.join(repo, name), "w") as f:
-                f.write(body)
+        try:
+            write_fixture(repo)
+            for name, body in arms.instruction_files(arm).items():
+                with open(os.path.join(repo, name), "w") as f:
+                    f.write(body)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
+            raise HarnessError(f"the fixture could not be written: {type(e).__name__}: {e}") from e
         for step in steps["fixture"]:
             _required(cfg, runner, root, step)
 
-        # Any AtticDB wiring a crashed run left in the eval dirs goes first.
-        stage, touched = "setup", True
+        stage = "setup"
+        prepare_config_dirs(cfg, root)
+        # Any AtticDB wiring left in the copied config goes first. Outside the atticdb arm, a
+        # disconnect that fails may have left it in place, so the run stops.
+        touched = True
         for step in steps["disconnect"]:
             r = _exec(cfg, runner, root, step)
             if r.code != 0:
+                if not arms.uses_atticdb(arm):
+                    raise HarnessError(f"pre-disconnect {step.argv[-1]} exited {_code(r)}")
                 res.reasons.append(f"pre-disconnect {step.argv[-1]} exited {_code(r)}")
+        wired = wiring_hits(root)
+        if wired:
+            raise HarnessError(f"harness config mentions atticdb before the run: {', '.join(wired)}")
 
         stage = "start"
         dirty = _searches(cfg, runner, root, steps["start"])
         dirty += file_hits(repo, case.evidence, "repo")
-        dirty += file_hits(native_memory_dir(cfg, "claude-code", repo), case.evidence, "claude-memory")
+        dirty += file_hits(claude_run, case.evidence, "claude-dir")
+        dirty += file_hits(codex_run, case.evidence, "codex-dir", skip_files=(CODEX_REQUIRED,))
         if dirty:
             raise HarnessError(f"the run did not start clean: {_where(dirty)}")
-        # The Codex memories dir is shared by every run. Only files a writer changes count as
-        # capture, but an old one can still reach a Codex reader, so it is named here.
-        stale = file_hits(native_memory_dir(cfg, "codex", repo), case.evidence, "codex-memory")
-        if stale:
-            res.reasons.append(f"stale codex memory from an earlier run: {_where(stale)}")
 
         stage = "setup"
         for step in steps["setup"]:
@@ -412,7 +583,7 @@ def run_handoff(cfg: HandoffConfig, runner: Runner, case: Case, arm: str, writer
 
         if arms.has_writer(arm):
             stage = "writer"
-            mem = native_memory_dir(cfg, writer, repo)
+            mem = native_memory_dir(root, writer, repo)
             mem_before = guard.snapshot(mem)
             for i, step in enumerate(steps["writer"], 1):
                 _session(cfg, runner, root, step, writer, res, f"writer {i}")
@@ -431,17 +602,15 @@ def run_handoff(cfg: HandoffConfig, runner: Runner, case: Case, arm: str, writer
             r = _exec(cfg, runner, root, hook)
             if r.code != 0:
                 res.reasons.append(f"hook exited {_code(r)}")
-            block = hook_block(r.stdout)
-            delivered += [("hook", t) for t in case.evidence if _has(block, t)]
+            delivered += [("hook", t) for t in tokens_in(hook_block(r.stdout), case.evidence)]
         if arm == "oracle":
-            prompt = arms.reader_prompt(case, arm)
-            delivered += [("prompt", t) for t in case.evidence if _has(prompt, t)]
+            delivered += [("prompt", t) for t in tokens_in(arms.reader_prompt(case, arm), case.evidence)]
 
         stage = "reader"
         (step,) = steps["reader"]
         r, out = _session(cfg, runner, root, step, reader, res, "reader")
         outputs = "\n".join(tool_outputs(reader, r.stdout))
-        delivered += [("transcript", t) for t in case.evidence if _has(outputs, t)]
+        delivered += [("transcript", t) for t in tokens_in(outputs, case.evidence)]
         if case.id not in NO_DELIVERY:
             res.delivered, res.delivered_where = bool(delivered), _where(delivered)
 
@@ -456,7 +625,8 @@ def run_handoff(cfg: HandoffConfig, runner: Runner, case: Case, arm: str, writer
             raise HarnessError(f"the grader failed: {e}") from e
         res.passed = verdict.passed
         res.reasons.extend(verdict.reasons)
-        if not verdict.passed and any("timed out" in why for why in verdict.reasons):
+        res.check_timed_out = grader_timed_out(verdict)
+        if res.check_timed_out and not verdict.passed:
             res.reasons.append("check timed out")
         res.reasons.append("reply=" + guard.excerpt(out.reply, redact_paths))
         return res
@@ -472,6 +642,9 @@ def run_handoff(cfg: HandoffConfig, runner: Runner, case: Case, arm: str, writer
                 r = _exec(cfg, runner, root, step)
                 if r.code != 0:
                     res.reasons.append(f"disconnect {step.argv[-1]} exited {_code(r)}")
+        note = sync_codex_auth(cfg, root)
+        if note:
+            res.reasons.append(note)
         problem = stop_server(cfg, runner, root)
         if problem:
             res.fail("teardown", problem)
@@ -482,12 +655,19 @@ def run_handoff(cfg: HandoffConfig, runner: Runner, case: Case, arm: str, writer
 def describe(cfg: HandoffConfig, case: Case, arm: str, writer: str, reader: str, root: str = "<root>") -> list[str]:
     """The dry-run lines of 1 run: each command, its cwd and timeout, and its env by name only."""
     zh, repo = paths(root)
+    claude, codex = run_dirs(root)
     extra = ", ".join(arms.instruction_files(arm))
     lines = [f"  write the ledger fixture into {repo} and commit it" + (f", then write {extra}" if extra else "")]
     for phase, steps in plan(cfg, case, arm, writer, reader, root).items():
+        if phase == "disconnect":
+            lines.append(f"  [setup] make {claude} (empty) and {codex} (auth.json and config.toml copied from "
+                         f"{cfg.codex_dir})")
         if phase == "start":
-            lines.append(f"  [start] scan {repo} and the claude-code memory dir of this repo for "
-                         f"{', '.join(case.evidence)}; any hit errors the run")
+            stop = "any failure stops the run" if not arms.uses_atticdb(arm) else "a failure is noted"
+            lines.append(f"  [setup] the disconnects above: {stop}. Then any atticdb mention in "
+                         f"{', '.join(WIRING_FILES['claude'] + WIRING_FILES['codex'])} stops the run")
+            lines.append(f"  [start] scan {repo}, {claude} and {codex} for {', '.join(case.evidence)}; "
+                         "any hit stops the run")
         if phase == "capture" and steps:
             lines.append(f"  [capture] also scan {repo} and the files {writer} memory changed during the run")
         for step in steps:
@@ -496,5 +676,6 @@ def describe(cfg: HandoffConfig, case: Case, arm: str, writer: str, reader: str,
             session = " (agent session)" if phase in ("writer", "reader") else ""
             lines.append(f"  [{phase}]{session} cd {step.cwd} && {shlex.join(step.argv)}{stdin}")
             lines.append(f"      timeout {step.timeout:g} s; env: base{env}")
-    lines.append(f"  grade with grade.grade, stop the atticdb server named in {zh}/data/LOCK, then delete {root}")
+    lines.append(f"  grade with grade.grade, copy a refreshed codex auth.json back, stop the atticdb server named "
+                 f"in {zh}/data/LOCK, then delete {root}")
     return lines

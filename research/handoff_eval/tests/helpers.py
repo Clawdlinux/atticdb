@@ -9,7 +9,8 @@ import sys
 from research.setup_eval.tests.helpers import ATTICDB, fake_home as _fake_home, stub_calls  # noqa: F401
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-STUB_VARS = ("STUB_WRITER", "STUB_NATIVE_MEMORY")
+STUB_VARS = ("STUB_WRITER", "STUB_NATIVE_MEMORY", "STUB_REFRESH_AUTH", "CLAUDE_SECURESTORAGE_CONFIG_DIR")
+FAKE_AUTH = '{"stub": "login"}\n'
 
 
 def install_stubs(bin_dir) -> None:
@@ -23,10 +24,14 @@ def install_stubs(bin_dir) -> None:
 
 
 def fake_home(monkeypatch, tmp_path, make_eval_dirs: bool = True) -> dict:
+    """setup_eval's fake home, the handoff stub, and a fake Codex login in the eval Codex dir."""
     paths = _fake_home(monkeypatch, tmp_path, make_eval_dirs)
     install_stubs(paths["bin"])
     for name in STUB_VARS:
         monkeypatch.delenv(name, raising=False)
+    if make_eval_dirs:
+        with open(os.path.join(paths["codex_dir"], "auth.json"), "w") as f:
+            f.write(FAKE_AUTH)
     return paths
 
 

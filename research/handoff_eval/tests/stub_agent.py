@@ -42,7 +42,11 @@ def log():
                                 "git_env": sorted(k for k in os.environ if k.startswith("GIT_")),
                                 "outside_home": sorted(
                                     k for k in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "COPILOT_HOME")
-                                    if not os.environ.get(k, os.environ["HOME"]).startswith(os.environ["HOME"]))})
+                                    if not os.environ.get(k, os.environ["HOME"]).startswith(os.environ["HOME"])),
+                                "dirs": {k: os.environ.get(k) for k in ("CLAUDE_CONFIG_DIR", "CODEX_HOME",
+                                                                         "CLAUDE_SECURESTORAGE_CONFIG_DIR")},
+                                "codex_home_files": sorted(os.listdir(os.environ["CODEX_HOME"]))
+                                if os.path.isdir(os.environ.get("CODEX_HOME", "")) else None})
                     + "\n")
 
 
@@ -210,6 +214,9 @@ def agent(prompt):
         sys.exit(int(os.environ["STUB_EXIT"]))
     if os.environ.get("STUB_SLEEP"):
         time.sleep(float(os.environ["STUB_SLEEP"]))
+    if PROG == "codex" and os.environ.get("STUB_REFRESH_AUTH"):  # as a token refresh would
+        with open(os.path.join(os.environ["CODEX_HOME"], "auth.json"), "w") as f:
+            json.dump({"refreshed": os.environ["STUB_REFRESH_AUTH"]}, f)
     replay = os.environ.get("STUB_REPLAY")
     if replay:
         with open(replay) as f:

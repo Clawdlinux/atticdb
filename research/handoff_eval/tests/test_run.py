@@ -4,10 +4,12 @@ or set ATTICDB_BIN. Tests that start no child run without it. The real claude an
 from __future__ import annotations
 
 import csv
+import json
 import os
 import shutil
 import subprocess
 import tempfile
+from dataclasses import dataclass
 
 import pytest
 
@@ -131,17 +133,124 @@ def test_native_memory_counts_as_capture(env, monkeypatch, writer, label, name):
 
 
 @needs_atticdb
-def test_old_codex_memory_is_not_capture(env, monkeypatch):
-    """Only files a writer changed during the run count. An old one is named as stale."""
-    memories = os.path.join(env["codex_dir"], "memories")
-    os.makedirs(memories)
-    with open(os.path.join(memories, "old.md"), "w") as f:
-        f.write("ticket LEDG-7731\n")
-    monkeypatch.setenv("STUB_WRITER", "silent")
+def test_run_gets_its_own_config_dirs(env, monkeypatch):
+    """The shared eval Codex dir's memories and sessions never reach a run. Only auth.json and
+    config.toml are copied. Claude starts empty and finds its login through the eval dir."""
+    for sub in ("memories", "sessions"):
+        os.makedirs(os.path.join(env["codex_dir"], sub))
+        with open(os.path.join(env["codex_dir"], sub, "old.md"), "w") as f:
+            f.write("ticket LEDG-7731\n")
+    with open(os.path.join(env["codex_dir"], "config.toml"), "w") as f:
+        f.write('model_reasoning_effort = "low"\n')
+    with open(os.path.join(env["claude_dir"], "settings.json"), "w") as f:
+        f.write('{"note": "LEDG-7731"}\n')
     res = run_handoff(make_cfg(env), Runner(), CASES["H1"], "native", "codex", "claude-code", 1)
     assert not res.errored, res.reasons
-    assert res.captured is False
-    assert "stale codex memory from an earlier run: codex-memory:old.md[LEDG-7731]" in res.reasons
+    assert res.captured is False and res.delivered is False
+    writer, reader = agent_calls(env["log"])
+    for call in (writer, reader):
+        assert call["dirs"]["CLAUDE_CONFIG_DIR"].startswith(env["tmp"] + "/")
+        assert call["dirs"]["CODEX_HOME"].startswith(env["tmp"] + "/")
+        assert call["dirs"]["CLAUDE_SECURESTORAGE_CONFIG_DIR"] == env["claude_dir"]
+        assert {"auth.json", "config.toml"} <= set(call["codex_home_files"])
+        assert not {"memories", "sessions"} & set(call["codex_home_files"])
+    assert_cleaned_up(env)
+
+
+@needs_atticdb
+def test_missing_codex_login_errors_at_setup(env):
+    os.remove(os.path.join(env["codex_dir"], "auth.json"))
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], "native", "claude-code", "codex", 1)
+    assert res.errored and res.error_stage == "setup" and res.sessions == 0
+    assert any("no auth.json. Log in once: CODEX_HOME=<codex-dir> codex login" in r for r in res.reasons), res.reasons
+    assert agent_calls(env["log"]) == []
+    assert_cleaned_up(env)
+
+
+@needs_atticdb
+def test_codex_login_refresh_is_kept(env, monkeypatch):
+    monkeypatch.setenv("STUB_REFRESH_AUTH", "v2")
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], "native", "claude-code", "codex", 1)
+    assert not res.errored, res.reasons
+    assert "codex refreshed its login; the eval dir's auth.json was updated" in res.reasons
+    with open(os.path.join(env["codex_dir"], "auth.json")) as f:
+        assert json.load(f) == {"refreshed": "v2"}
+    assert oct(os.stat(os.path.join(env["codex_dir"], "auth.json")).st_mode & 0o777) == "0o600"
+
+
+@needs_atticdb
+def test_stale_token_in_a_copied_config_is_a_start_error(env):
+    with open(os.path.join(env["codex_dir"], "config.toml"), "w") as f:
+        f.write("# see LEDG-7731\n")
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], "files", "claude-code", "codex", 1)
+    assert res.errored and res.error_stage == "start"
+    assert any("did not start clean: codex-dir:config.toml[LEDG-7731]" in r for r in res.reasons), res.reasons
+    assert agent_calls(env["log"]) == []
+
+
+def fake_atticdb(tmp_path, disconnect_exit: int) -> str:
+    """The real binary, except `disconnect`, which does nothing and exits `disconnect_exit`."""
+    path = tmp_path / "atticdb-wrap"
+    path.write_text(f'#!/bin/sh\nif [ "$1" = disconnect ]; then exit {disconnect_exit}; fi\nexec "{ATTICDB}" "$@"\n')
+    path.chmod(0o755)
+    return str(path)
+
+
+@needs_atticdb
+def test_stale_atticdb_wiring_errors_at_setup(env, tmp_path):
+    # A failed pre-disconnect stops a run outside the atticdb arm.
+    cfg = make_cfg(env)
+    cfg.atticdb = fake_atticdb(tmp_path, 1)
+    res = run_handoff(cfg, Runner(), CASES["H1"], "native", "claude-code", "codex", 1)
+    assert res.errored and res.error_stage == "setup"
+    assert "error in setup: pre-disconnect claude-code exited 1" in res.reasons
+    # In the atticdb arm, setup rewires the harness anyway, so it is only noted.
+    res = run_handoff(cfg, Runner(), CASES["H1"], "atticdb", "claude-code", "codex", 1)
+    assert not res.errored, res.reasons
+    assert "pre-disconnect claude-code exited 1" in res.reasons
+    # Wiring that a disconnect left in place stops the run before any agent.
+    with open(os.path.join(env["codex_dir"], "config.toml"), "w") as f:
+        f.write('[projects."/src/atticdb-heval"]\ntrust_level = "trusted"\n\n'
+                '[mcp_servers.atticdb]\ncommand = "/old/atticdb"\n')
+    cfg.atticdb = fake_atticdb(tmp_path, 0)
+    before = len(agent_calls(env["log"]))
+    res = run_handoff(cfg, Runner(), CASES["H1"], "files", "codex", "claude-code", 1)
+    assert res.errored and res.error_stage == "setup"
+    assert "error in setup: harness config mentions atticdb before the run: codex-dir:config.toml" in res.reasons
+    assert len(agent_calls(env["log"])) == before
+    assert_cleaned_up(env)
+
+
+def test_wiring_check_skips_trust_headers(tmp_path):
+    root = str(tmp_path)
+    claude, codex = run.run_dirs(root)
+    os.makedirs(claude)
+    os.makedirs(codex)
+    with open(os.path.join(codex, "config.toml"), "w") as f:
+        f.write('[projects."/src/atticdb"]\ntrust_level = "trusted"\n')
+    assert run.wiring_hits(root) == []
+    for folder, name in ((claude, "settings.json"), (claude, ".claude.json"), (codex, "hooks.json"),
+                         (codex, "AGENTS.md")):
+        with open(os.path.join(folder, name), "w") as f:
+            f.write("run atticdb hook session-start\n")
+    assert run.wiring_hits(root) == ["claude-dir:settings.json", "claude-dir:.claude.json", "codex-dir:hooks.json",
+                                     "codex-dir:AGENTS.md"]
+
+
+@needs_atticdb
+@pytest.mark.parametrize("error", [subprocess.CalledProcessError(128, ["git", "commit"]),
+                                   subprocess.TimeoutExpired(["git", "init"], 30)])
+def test_fixture_errors_are_recorded(env, monkeypatch, error):
+    def broken(repo):
+        raise error
+
+    monkeypatch.setattr(run, "write_fixture", broken)
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], "native", "claude-code", "codex", 1)
+    assert res.errored and res.error_stage == "fixture" and res.sessions == 0
+    assert any(r.startswith(f"error in fixture: the fixture could not be written: {type(error).__name__}")
+               for r in res.reasons)
+    assert stub_calls(env["log"]) == []
+    assert_cleaned_up(env)
 
 
 @needs_atticdb
@@ -210,7 +319,7 @@ def test_run_starts_clean(env, monkeypatch):
     # 3: Claude memory for this repo path, left by an earlier run with the same temp name.
     def remembered_root(c):
         root = real_root(c)
-        mem = run.native_memory_dir(c, "claude-code", run.paths(root)[1])
+        mem = run.native_memory_dir(root, "claude-code", run.paths(root)[1])
         os.makedirs(mem)
         with open(os.path.join(mem, "MEMORY.md"), "w") as f:
             f.write("bramble-ci\n")
@@ -219,7 +328,7 @@ def test_run_starts_clean(env, monkeypatch):
     monkeypatch.setattr(run, "make_root", remembered_root)
     res = run_handoff(cfg, Runner(), CASES["H4"], "files", "codex", "claude-code", 1)
     assert res.errored and res.error_stage == "start"
-    assert any("claude-memory:MEMORY.md[bramble-ci]" in r for r in res.reasons), res.reasons
+    assert any("claude-dir:projects/" in r and "/memory/MEMORY.md[bramble-ci]" in r for r in res.reasons), res.reasons
 
     assert agent_calls(env["log"]) == [], "no agent starts in a run that is not clean"
     assert_cleaned_up(env)
@@ -297,9 +406,11 @@ def test_model_flags_are_required(tmp_path, capsys):
         with pytest.raises(SystemExit) as e:
             cli.parse(base + flags)
         assert e.value.code == 2 and f"{missing} is required" in capsys.readouterr().err
-    # A direction that uses 1 harness needs only its model.
-    a = cli.parse(base + ["--directions", "codex:codex", "--codex-model", "Y"])
-    assert a.models == {"claude-code": "", "codex": "Y"}
+    # The pilot is cross-harness only.
+    for same in ("codex:codex", "claude-code:claude-code"):
+        with pytest.raises(SystemExit) as e:
+            cli.parse(base + ["--directions", same, "--claude-model", "X", "--codex-model", "Y"])
+        assert e.value.code == 2 and "the pilot is cross-harness only" in capsys.readouterr().err
 
 
 def test_session_argv_adds_the_model_flag():
@@ -342,7 +453,6 @@ def test_claude_project_slug_follows_claude():
 
 
 def test_tool_outputs_stop_at_the_final_reply():
-    import json
     claude = [
         {"type": "user", "message": {"content": [{"type": "tool_result", "content": "INC-2209 deadlock"}]}},
         {"type": "assistant", "message": {"content": [{"type": "text", "text": "Final."}]}},
@@ -369,6 +479,97 @@ def test_check_timeout_is_flagged(env, monkeypatch):
     monkeypatch.setattr(run, "grade", lambda *a: Verdict(False, ["fixture tests fail: timed out after 20 s"]))
     res = run_handoff(make_cfg(env), Runner(), CASES["H6"], "native", "claude-code", "codex", 1)
     assert not res.errored and res.passed is False and "check timed out" in res.reasons
+    assert res.check_timed_out is True and results.row("d", res)["check_timed_out"] == 1
+
+
+def test_grader_flag_wins_over_reason_text():
+    @dataclass
+    class Flagged:
+        passed: bool
+        reasons: list
+        check_timed_out: bool
+
+    assert run.grader_timed_out(Flagged(False, ["the test says: timed out"], False)) is False
+    assert run.grader_timed_out(Flagged(False, [], True)) is True
+    assert run.grader_timed_out(Verdict(False, ["repo tests fail: timed out after 20 s"])) is True
+    assert run.grader_timed_out(Verdict(False, ["repo tests fail: AssertionError"])) is False
+
+
+# ---- evidence patterns ----
+
+def test_every_evidence_token_has_a_pattern():
+    tokens = {t for case in CASES.values() for t in case.evidence}
+    assert tokens <= set(run.EVIDENCE_PATTERNS), tokens - set(run.EVIDENCE_PATTERNS)
+
+
+@pytest.mark.parametrize("token,text,hit", [
+    ("LEDG-7731", "see ledg-7731.", True), ("LEDG-7731", "LEDG-77310", False), ("LEDG-7731", "XLEDG-7731", False),
+    ("INC-2209", "repo/evalrepo/inc-2209-deadlock", True), ("FIN-88", "FIN-880", False),
+    ("bramble-ci", "`bramble-ci`", True), ("STOR-5150", "STOR-51501", False),
+    ("412", "412 bytes", True), ("412", "412-byte headers", True), ("412", "412bytes", True),
+    ("412", "HTTP 412", False), ("412", "-rw-r--r--  1 eval  staff  4120 Nov  4 ledger.py", False),
+    ("412", "line 412: bytes", False),
+    ("3.9", "only has Python 3.9.", True), ("3.9", "python3.9", True), ("3.9", "Python 3.9.6", False),
+    ("3.9", "Python 3.95", False), ("3.9", "requires 3.9", False), ("3.9", "bramble-ci runs 3.9 only", True),
+    ("3.9", "3.9 is what bramble-ci has", True), ("3.9", "bramble-ci" + "x" * 50 + " 3.9", False),
+    ("plain files", "plain-file storage", True), ("plain files", "Plain files now", True),
+    ("plain files", "explain files", False),
+])
+def test_evidence_patterns(token, text, hit):
+    assert run.has_token(text, token) is hit
+
+
+def test_python_version_output_is_not_delivery():
+    stream = [{"type": "item.completed", "item": {"type": "command_execution", "command": "python3 --version",
+                                                  "aggregated_output": "Python 3.9.6\n"}},
+              {"type": "item.completed", "item": {"type": "agent_message", "text": "Yes."}}]
+    outputs = "\n".join(run.tool_outputs("codex", "\n".join(map(json.dumps, stream)).encode()))
+    assert "Python 3.9.6" in outputs
+    assert run.tokens_in(outputs, CASES["H4"].evidence) == []
+
+
+def test_short_tokens_in_repo_files(tmp_path):
+    (tmp_path / "ls.txt").write_text("-rw-r--r--  1 eval  staff  4120 Nov  4 ledger.py\n")
+    assert run.file_hits(str(tmp_path), CASES["H1"].evidence, "repo") == []
+    (tmp_path / "NOTES.md").write_text("bramble-ci only has Python 3.9\n")
+    assert run.file_hits(str(tmp_path), CASES["H4"].evidence, "repo") == [("repo:NOTES.md", "bramble-ci"),
+                                                                         ("repo:NOTES.md", "3.9")]
+
+
+def test_repo_scan_skips_venvs_and_caches(tmp_path):
+    for d in (".git", ".venv", "venv", "__pycache__", ".pytest_cache", "node_modules", "env/lib"):
+        (tmp_path / d).mkdir(parents=True)
+        (tmp_path / d / "x.txt").write_text("LEDG-7731\n")
+    (tmp_path / "env" / "pyvenv.cfg").write_text("home = /usr/bin\n")
+    assert run.file_hits(str(tmp_path), CASES["H1"].evidence, "repo") == []
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "x.txt").write_text("LEDG-7731\n")
+    assert run.file_hits(str(tmp_path), CASES["H1"].evidence, "repo") == [("repo:src/x.txt", "LEDG-7731")]
+
+
+def test_write_and_edit_echoes_are_not_delivery():
+    stream = [
+        {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "w1", "name": "Write",
+             "input": {"file_path": "n.md", "content": "LEDG-7731"}}]}},
+        {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "w1",
+                                                  "content": "File created successfully at: n.md"}]},
+         "tool_use_result": {"type": "create", "filePath": "n.md", "content": "LEDG-7731",
+                             "structuredPatch": [{"lines": ["+LEDG-7731"]}]}},
+        {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "e1", "name": "Edit", "input": {"new_string": "FIN-88"}}]}},
+        {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "e1",
+                                                  "content": "The file n.md has been updated: 1\tFIN-88"}]},
+         "tool_use_result": {"filePath": "n.md", "oldString": "x", "newString": "FIN-88",
+                             "structuredPatch": [{"lines": ["+FIN-88"]}]}},
+        {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "r1", "name": "Read", "input": {"file_path": "HANDOFF.md"}}]}},
+        {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "r1", "content": "1\tok"}]},
+         "tool_use_result": {"type": "text", "file": {"filePath": "HANDOFF.md", "content": "INC-2209"}}},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "Done."}]}},
+    ]
+    outputs = "\n".join(run.tool_outputs("claude-code", "\n".join(map(json.dumps, stream)).encode()))
+    assert run.tokens_in(outputs, ("LEDG-7731", "FIN-88", "INC-2209")) == ["INC-2209"]
 
 
 @needs_atticdb

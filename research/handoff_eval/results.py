@@ -12,8 +12,8 @@ from .run import HandoffResult
 FIRST_LINE = "Integration pilot. Not a statistical result."
 
 COLUMNS = ["date", "case", "arm", "writer", "reader", "run", "captured", "captured_where", "delivered",
-           "delivered_where", "passed", "errored", "error_stage", "sessions", "input_tokens", "output_tokens",
-           "wall_s", "writer_model", "reader_model", "reasons"]
+           "delivered_where", "passed", "check_timed_out", "errored", "error_stage", "sessions", "input_tokens",
+           "output_tokens", "wall_s", "writer_model", "reader_model", "reasons"]
 
 
 def flag(value: bool | None) -> str:
@@ -38,6 +38,7 @@ def row(date: str, res: HandoffResult) -> dict:
         "delivered": flag(res.delivered),
         "delivered_where": res.delivered_where,
         "passed": flag(res.passed),
+        "check_timed_out": int(res.check_timed_out),
         "errored": int(res.errored),
         "error_stage": res.error_stage,
         "sessions": res.sessions,

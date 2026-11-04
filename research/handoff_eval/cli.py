@@ -14,15 +14,17 @@ from __future__ import annotations
 import argparse
 import datetime
 import os
+import shutil
 import sys
 import tempfile
 
 from ..setup_eval import agents, guard
 from ..setup_eval import cli as setup_cli
+from ..setup_eval.harness import HarnessError, Step
 from ..setup_eval.proc import Runner
 from . import arms, results
 from .cases import CASES
-from .run import Budget, HandoffConfig, describe, run_handoff
+from .run import SECURE_STORAGE_ENV, Budget, HandoffConfig, describe, env_for, prepare_config_dirs, run_handoff
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(os.path.dirname(HERE))
@@ -56,6 +58,9 @@ def direction_list(text: str) -> list[tuple[str, str]]:
         if not sep or writer not in agents.HARNESSES or reader not in agents.HARNESSES:
             raise argparse.ArgumentTypeError(f"bad direction {part.strip()!r}; use writer:reader with "
                                              f"{' or '.join(agents.HARNESSES)}")
+        if writer == reader:
+            raise argparse.ArgumentTypeError(f"same-harness direction {part.strip()!r} is not supported: the pilot "
+                                             "is cross-harness only. Use claude-code:codex or codex:claude-code")
         if (writer, reader) not in out:
             out.append((writer, reader))
     return out
@@ -142,7 +147,8 @@ def dry_run(a: argparse.Namespace, cfg: HandoffConfig, out=print) -> int:
     out(f"<root> is a new temp dir per run in {cfg.tmp_parent}. Env: as setup_eval, by name only: the inherited "
         f"env without ATTICDB_*, GIT_*, CLAUDE_CONFIG_DIR, CODEX_HOME"
         f"{'' if cfg.keep_api_keys else ' and the credential and provider vars'}, then HOME, ATTICDB_HOME "
-        f"(<root>/zh), and the eval dirs under ~/{guard.EVAL_DIR}.")
+        f"(<root>/zh), CLAUDE_CONFIG_DIR (<root>/claude), CODEX_HOME (<root>/codex), and "
+        f"{SECURE_STORAGE_ENV} ({cfg.claude_dir}), so Claude finds the eval login in the Keychain.")
     models = ", ".join(f"{h}={m}" for h, m in a.models.items() if m)
     out(f"Models: {models}.")
     for i, (n, writer, reader, cid, arm) in enumerate(a.runs, 1):
@@ -221,11 +227,42 @@ def batch(a: argparse.Namespace, cfg: HandoffConfig, out=print, runner: Runner |
     return 1 if stopped or any(r.errored for r in done) else 0
 
 
+def check_run_dirs(cfg: HandoffConfig, out=print) -> int:
+    """Logs in from a run's own config dirs, as a run would: an empty CLAUDE_CONFIG_DIR with the
+    Keychain lookup on the eval Claude dir, and a CODEX_HOME with the eval auth.json copied in.
+    Prints only whether each is logged in."""
+    root = tempfile.mkdtemp(prefix="zhe-check-", dir=cfg.tmp_parent)
+    runner, ok = Runner(), True
+    try:
+        try:
+            prepare_config_dirs(cfg, root)
+        except HarnessError as e:
+            out(f"run dirs: {e}")
+            return 1
+        for harness in agents.HARNESSES:
+            step = Step("check", agents.check_argv(harness), root, agents.CHECK_TIMEOUT)
+            r = runner.run(step.argv, env=env_for(cfg, root, step), root=root, cwd=root, timeout=step.timeout)
+            if r.code == 0:
+                out(f"{harness}: logged in from a run's own config dir")
+            else:
+                why = "not on PATH" if r.missing else "no answer" if r.timed_out else f"exit {r.code}"
+                out(f"{harness}: not logged in from a run's own config dir ({why})")
+                ok = False
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+    return 0 if ok else 1
+
+
 def main(argv=None) -> int:
     a = parse(sys.argv[1:] if argv is None else list(argv))
     try:
         if a.check:
-            return setup_cli.check()
+            code = setup_cli.check()
+            home = guard.user_home()
+            claude_dir, codex_dir = guard.eval_dirs(home)
+            cfg = HandoffConfig(atticdb="", home=home, claude_dir=claude_dir, codex_dir=codex_dir,
+                                tmp_parent=tempfile.gettempdir())
+            return max(code, check_run_dirs(cfg))
         cfg = config(a)
         if a.dry_run:
             return dry_run(a, cfg)
