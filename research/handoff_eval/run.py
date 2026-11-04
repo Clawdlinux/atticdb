@@ -10,10 +10,16 @@ is neither a parent nor a sibling of the repo, so a reader's `grep -r ..` can't 
   `config.toml` only. So Codex sessions, memories and history never carry over;
 - `CLAUDE_CONFIG_DIR`, `<harness-root>/claude`, empty. Claude's claude.ai login sits in the macOS
   Keychain under a name made from the config dir. `CLAUDE_SECURESTORAGE_CONFIG_DIR` points that
-  lookup at the eval Claude dir, so the login is found and nothing else is shared.
+  lookup at the eval Claude dir, so the login is found and nothing else is shared;
+- `COPILOT_HOME`, `<harness-root>/copilot`, empty. Copilot CLI keeps its login in the OS keychain,
+  not in COPILOT_HOME, so an empty dir is logged in. Its sessions, logs and session-store.db land
+  there and go with the run.
 
 After the capture scan, the writer harness's dir loses everything but its login file, as the
-reader's env names it and its transcripts hold the writer's prompts.
+reader's env names it and its transcripts hold the writer's prompts. For Copilot that is
+everything, session-store.db included: it is session history, not memory a reader loads.
+
+A run uses the 2 harnesses of its direction. Only those are disconnected, set up and torn down.
 
 Before any agent starts, the run checks that no harness config it will use mentions atticdb
 (outside the setup the atticdb arm does itself), and that the store, the repo and both config dirs
@@ -43,6 +49,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass, field
 
@@ -147,6 +154,7 @@ class HandoffResult:
     input_tokens: int | None = None
     output_tokens: int | None = None
     wall_s: float | None = None  # agent sessions only
+    premium_requests: int | None = None  # Copilot CLI sessions only, from their `result` line
     writer_model: str = ""
     reader_model: str = ""
 
@@ -162,7 +170,9 @@ SECURE_STORAGE_ENV = "CLAUDE_SECURESTORAGE_CONFIG_DIR"
 CODEX_COPIES = ("auth.json", "config.toml")
 CODEX_REQUIRED = "auth.json"
 # Files that would wire AtticDB into a harness, by run config dir.
-WIRING_FILES = {"claude": ("settings.json", ".claude.json"), "codex": ("config.toml", "hooks.json", "AGENTS.md")}
+WIRING_FILES = {"claude": ("settings.json", ".claude.json"), "codex": ("config.toml", "hooks.json", "AGENTS.md"),
+                "copilot": ("mcp-config.json", "settings.json", "config.json", os.path.join("hooks", "atticdb.json"),
+                            os.path.join("instructions", "atticdb.instructions.md"))}
 
 
 def make_harness_root(cfg: Config) -> str:
@@ -176,14 +186,28 @@ def run_dirs(hroot: str) -> tuple[str, str]:
     return os.path.join(hroot, "claude"), os.path.join(hroot, "codex")
 
 
+HARNESS_DIRS = {"claude-code": "claude", "codex": "codex", "copilot": "copilot"}
+
+
+def harness_dir(hroot: str, harness: str) -> str:
+    """The run's own config dir for `harness`: CLAUDE_CONFIG_DIR, CODEX_HOME or COPILOT_HOME."""
+    return os.path.join(hroot, HARNESS_DIRS[harness])
+
+
+def run_harnesses(writer: str, reader: str) -> tuple[str, ...]:
+    """The harnesses a run disconnects, sets up and tears down: its direction's 2, in a fixed order."""
+    return tuple(h for h in agents.ALL_HARNESSES if h in (writer, reader))
+
+
 # What a harness dir keeps once its writer is done: the login, and nothing a reader could read.
-LOGIN_FILES = {"claude-code": (".credentials.json",), "codex": ("auth.json",)}
+# Copilot's login is in the OS keychain, so its dir keeps nothing.
+LOGIN_FILES = {"claude-code": (".credentials.json",), "codex": ("auth.json",), "copilot": ()}
 
 
 def scrub_harness_dir(hroot: str, harness: str) -> list[str]:
     """Deletes everything in `harness`'s run dir but its login files: transcripts, sessions,
     history, memory and config. Returns the top-level names it deleted."""
-    folder = run_dirs(hroot)[0 if harness == "claude-code" else 1]
+    folder = harness_dir(hroot, harness)
     gone = []
     for name in sorted(os.listdir(folder)) if os.path.isdir(folder) else []:
         if name in LOGIN_FILES[harness]:
@@ -203,17 +227,24 @@ def env_for(cfg: Config, root: str, step: Step, hroot: str) -> dict:
     zh, _ = paths(root)
     claude, codex = run_dirs(hroot)
     return agents.child_env(cfg.base_env, home=cfg.home, atticdb_home=zh, claude_dir=claude, codex_dir=codex,
+                            copilot_dir=harness_dir(hroot, "copilot"),
                             extra={SECURE_STORAGE_ENV: cfg.claude_dir, **step.extra_env},
                             keep_api_keys=cfg.keep_api_keys)
 
 
-def prepare_config_dirs(cfg: Config, hroot: str) -> None:
-    """Makes the run's config dirs and copies Codex's login and config into its own. Raises
-    HarnessError without the eval Codex login, and guard.Refused for an unsafe dir."""
+def prepare_config_dirs(cfg: Config, hroot: str, harnesses=agents.ALL_HARNESSES) -> None:
+    """Makes the run's config dirs, and copies Codex's login and config into its own when the run
+    uses codex. Raises HarnessError without the eval Codex login, and guard.Refused for an unsafe
+    dir, COPILOT_HOME included."""
     claude, codex = run_dirs(hroot)
-    for folder in (claude, codex):
+    copilot = harness_dir(hroot, "copilot")
+    # Checked before they exist, so a refused dir is never made, and again after, by file identity.
+    guard.check_config_dirs(claude, codex, cfg.home, copilot_dir=copilot)
+    for folder in (claude, codex, copilot):
         os.makedirs(folder, mode=0o700, exist_ok=True)
-    guard.check_config_dirs(claude, codex, cfg.home)
+    guard.check_config_dirs(claude, codex, cfg.home, copilot_dir=copilot)
+    if "codex" not in harnesses:
+        return
     for name in CODEX_COPIES:
         src = os.path.join(cfg.codex_dir, name)
         if not os.path.isfile(src):
@@ -257,7 +288,7 @@ def wiring_hits(hroot: str) -> list[str]:
     """The run's config files that mention atticdb. Codex's `[projects."<path>"]` trust headers
     are skipped, as a path is not wiring."""
     hits = []
-    for kind, folder in zip(("claude", "codex"), run_dirs(hroot)):
+    for kind, folder in zip(("claude", "codex", "copilot"), (*run_dirs(hroot), harness_dir(hroot, "copilot"))):
         for name in WIRING_FILES[kind]:
             text = _read(os.path.join(folder, name))
             lines = [ln for ln in text.splitlines()
@@ -294,7 +325,7 @@ def plan(cfg: HandoffConfig, case: Case, arm: str, writer: str, reader: str, roo
     """Every child of 1 run, by phase. A dry run prints these; a real run runs them."""
     _, repo = paths(root)
     z, git = cfg.atticdb, agents.git_env()
-    both = agents.HARNESSES
+    both = run_harnesses(writer, reader)
     fixture = []
     if arms.instruction_files(arm):
         fixture += [Step("fixture", ["git", "add", *arms.instruction_files(arm)], repo, agents.GIT_TIMEOUT, git),
@@ -410,13 +441,17 @@ def claude_project_slug(path: str) -> str:
     return re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(path))
 
 
-def native_memory_dir(hroot: str, harness: str, repo: str) -> str:
-    """The harness's own memory for `repo`, in the run's config dirs."""
+def native_memory_dir(hroot: str, harness: str, repo: str) -> str | None:
+    """The harness's own memory for `repo`, in the run's config dirs. None for Copilot CLI: its
+    memory is off in prompt mode unless --enable-memory, and `copilot memories` imports to a
+    service, not a local store. Its session-store.db is session history, and is scrubbed."""
     claude, codex = run_dirs(hroot)
     if harness == "claude-code":
         return os.path.join(claude, "projects", claude_project_slug(repo), "memory")
     if harness == "codex":
         return os.path.join(codex, "memories")
+    if harness == "copilot":
+        return None
     raise ValueError(f"unknown harness {harness!r}")
 
 
@@ -485,19 +520,59 @@ CODEX_LEGACY_OUTPUT = {"exec_command_end": ("aggregated_output", "formatted_outp
                        "mcp_tool_call_end": ("result",)}
 
 
+def _copilot_final(ev: dict) -> bool:
+    data = ev.get("data")
+    return ev.get("type") == "assistant.message" and isinstance(data, dict) and data.get("phase") == "final_answer"
+
+
+# Copilot CLI tools whose result echoes what the agent wrote.
+COPILOT_WRITE_TOOLS = frozenset({"edit", "create", "write", "str_replace_editor", "apply_patch"})
+
+
+def copilot_tool_outputs(events: list[dict]) -> list[str]:
+    """Copilot: the `result` of each `tool.execution_complete` (`content`, `detailedContent`,
+    `contents`), except for write tools, whose names come from the tool requests. The streamed
+    `tool.shell_output` and partial results repeat the complete one, so they are not read."""
+    names: dict[str, str] = {}
+    texts: list[str] = []
+    for ev in events:
+        data = ev.get("data") if isinstance(ev.get("data"), dict) else {}
+        kind = ev.get("type")
+        if kind == "assistant.message":
+            for req in data.get("toolRequests") or []:
+                if isinstance(req, dict) and isinstance(req.get("toolCallId"), str):
+                    names[req["toolCallId"]] = str(req.get("name"))
+        elif kind == "tool.execution_start" and isinstance(data.get("toolCallId"), str):
+            names[data["toolCallId"]] = str(data.get("toolName"))
+        elif kind == "tool.execution_complete":
+            if names.get(data.get("toolCallId")) in COPILOT_WRITE_TOOLS:
+                continue
+            result = data.get("result")
+            if isinstance(result, dict):
+                for key in ("content", "detailedContent", "contents"):
+                    texts += _strings(result.get(key))
+            elif isinstance(result, str):
+                texts.append(result)
+    return texts
+
+
 def tool_outputs(harness: str, stdout: bytes) -> list[str]:
     """The text the reader received from tools before its final reply.
 
     Claude: `tool_result` content, except for Write and Edit tools, plus a Read's
     `tool_use_result.file.content`. Write and Edit echoes (`content`, `newString`,
     `structuredPatch`) are left out. Codex: command output and MCP results. The commands the
-    agent typed are not read."""
+    agent typed are not read. Copilot: see `copilot_tool_outputs`. The agent's own messages,
+    the prompt and tool arguments are never read."""
     events = _events(stdout)
-    is_final = _claude_final if harness == "claude-code" else _codex_final
+    is_final = {"claude-code": _claude_final, "codex": _codex_final, "copilot": _copilot_final}[harness]
     finals = [i for i, ev in enumerate(events) if is_final(ev)]
     texts: list[str] = []
     tool_names: dict[str, str] = {}
-    for ev in events[:finals[-1] if finals else len(events)]:
+    events = events[:finals[-1] if finals else len(events)]
+    if harness == "copilot":
+        return copilot_tool_outputs(events)
+    for ev in events:
         if harness == "claude-code":
             if ev.get("type") == "assistant":
                 for block in _content(ev):
@@ -524,6 +599,48 @@ def tool_outputs(harness: str, stdout: bytes) -> list[str]:
     return texts
 
 
+# ---- Copilot CLI specifics ----
+
+def vscode_mcp_file(cfg: Config) -> str:
+    """VS Code's user `mcp.json`, where `atticdb connect copilot` looks: HOME-based on macOS, else
+    `$XDG_CONFIG_HOME` or `~/.config`. It mirrors `Harness::file` in crates/atticdb/src/connect.rs."""
+    if sys.platform == "darwin":
+        return os.path.join(cfg.home, "Library", "Application Support", "Code", "User", "mcp.json")
+    xdg = cfg.base_env.get("XDG_CONFIG_HOME", "")
+    base = xdg if os.path.isabs(xdg) else os.path.join(cfg.home, ".config")
+    return os.path.join(base, "Code", "User", "mcp.json")
+
+
+def copilot_hook_blocks(hroot: str) -> list[str]:
+    """The block of each sessionStart hook that ran and succeeded in the run's COPILOT_HOME, read from
+    `session-state/<session>/events.jsonl`: its `hook.end` events. '' for a hook that printed `{}`.
+    The JSON stream on stdout has no hook events, so this is where a run sees the hook fire."""
+    base = os.path.join(harness_dir(hroot, "copilot"), "session-state")
+    blocks = []
+    for name in sorted(os.listdir(base)) if os.path.isdir(base) else []:
+        path = os.path.join(base, name, "events.jsonl")
+        if not os.path.isfile(path):
+            continue
+        for ev in _events(_read(path).encode()):
+            data = ev.get("data")
+            if (ev.get("type") == "hook.end" and isinstance(data, dict) and data.get("hookType") == "sessionStart"
+                    and data.get("success") is True):
+                output = data.get("output")
+                text = output.get("additionalContext") if isinstance(output, dict) else None
+                blocks.append(text if isinstance(text, str) else "")
+    return blocks
+
+
+def copilot_hook_note(hroot: str, who: str, sessions: int, tokens) -> str:
+    """A note on whether Copilot ran AtticDB's sessionStart hook, and which tokens its block held."""
+    blocks = copilot_hook_blocks(hroot)
+    found = tokens_in("\n".join(blocks), tokens)
+    if not blocks:
+        return f"copilot {who}: sessionStart hook did not run (no hook.end in session-state)"
+    return (f"copilot {who}: sessionStart hook ran in {len(blocks)} of {sessions} sessions"
+            + (f", block has [{','.join(found)}]" if found else ", block has no evidence token"))
+
+
 # ---- 1 run ----
 
 def _message(value) -> str | None:
@@ -539,12 +656,19 @@ def _message(value) -> str | None:
 def stream_errors(harness: str, stdout: bytes) -> list[str]:
     """The errors an agent reported in its JSON stream, first 2, redacted and cut. Codex:
     `turn.failed`, `error`, error items and legacy error messages. Claude: a failed `result`,
-    and an `error` on an assistant message."""
+    and an `error` on an assistant message. Copilot: `error`, `session.error`, and a `result`
+    with a non-zero `exitCode`."""
     found = []
     for ev in _events(stdout):
         kind = ev.get("type")
         text = None
-        if harness == "codex":
+        if harness == "copilot":
+            if kind in ("error", "session.error"):
+                data = ev.get("data")
+                text = _message(data) or _message(ev) or kind
+            elif kind == "result" and isinstance(ev.get("exitCode"), int) and ev["exitCode"] != 0:
+                text = f"exitCode {ev['exitCode']}"
+        elif harness == "codex":
             if kind == "turn.failed":
                 text = _message(ev.get("error")) or "turn failed"
             elif kind == "error":
@@ -599,6 +723,9 @@ def _session(cfg: HandoffConfig, runner: Runner, root: str, hroot: str, step: St
     res.output_tokens = _add(res.output_tokens, out.output_tokens)
     if out.unparsed:
         res.reasons.append(f"{label} unparsed={out.unparsed}")
+    if out.premium_requests is not None:
+        res.premium_requests = (res.premium_requests or 0) + out.premium_requests
+        res.reasons.append(f"{label} premium_requests={out.premium_requests}")
     why = _unfinished(r, out, step, harness)
     if why:
         raise HarnessError(f"{label} {why}")
@@ -617,7 +744,7 @@ def _searches(cfg: Config, runner: Runner, root: str, hroot: str, steps: list[St
 def check_models(cfg: HandoffConfig, *harnesses: str) -> None:
     for h in harnesses:
         if not cfg.models.get(h):
-            raise ValueError(f"no model id for {h}. Pass --claude-model and --codex-model")
+            raise ValueError(f"no model id for {h}. Pass {arms.MODEL_FLAGS[h]}")
 
 
 def grader_timed_out(verdict) -> bool:
@@ -658,7 +785,7 @@ def run_handoff(cfg: HandoffConfig, runner: Runner, case: Case, arm: str, writer
             _required(cfg, runner, root, step, hroot)
 
         stage = "setup"
-        prepare_config_dirs(cfg, hroot)
+        prepare_config_dirs(cfg, hroot, run_harnesses(writer, reader))
         # Any AtticDB wiring left in the copied config goes first. Outside the atticdb arm, a
         # disconnect that fails may have left it in place, so the run stops.
         touched = True
@@ -677,25 +804,36 @@ def run_handoff(cfg: HandoffConfig, runner: Runner, case: Case, arm: str, writer
         dirty += file_hits(repo, case.evidence, "repo")
         dirty += file_hits(claude_run, case.evidence, "claude-dir")
         dirty += file_hits(codex_run, case.evidence, "codex-dir", skip_files=(CODEX_REQUIRED,))
+        dirty += file_hits(harness_dir(hroot, "copilot"), case.evidence, "copilot-dir")
         if dirty:
             raise HarnessError(f"the run did not start clean: {_where(dirty)}")
 
         stage = "setup"
+        if steps["setup"] and "copilot" in run_harnesses(writer, reader):
+            # `atticdb connect copilot` drops an atticdb entry it finds in VS Code's mcp.json, which
+            # sits under the real HOME. That is the user's own config, so the run stops first.
+            vscode = vscode_mcp_file(cfg)
+            if "atticdb" in _read(vscode).lower():
+                raise HarnessError(f"{vscode} has an atticdb entry, and setting up copilot would remove it. "
+                                   "Disconnect VS Code from atticdb before a copilot run")
         for step in steps["setup"]:
             _required(cfg, runner, root, step, hroot)
 
         if arms.has_writer(arm):
             stage = "writer"
             mem = native_memory_dir(hroot, writer, repo)
-            mem_before = guard.snapshot(mem)
+            mem_before = guard.snapshot(mem) if mem else {}
             for i, step in enumerate(steps["writer"], 1):
                 _session(cfg, runner, root, hroot, step, writer, res, f"writer {i}")
+            if writer == "copilot" and arms.uses_atticdb(arm):
+                res.reasons.append(copilot_hook_note(hroot, "writer", len(steps["writer"]), case.evidence))
 
             stage = "capture"
             found = _searches(cfg, runner, root, hroot, steps["capture"])
             found += file_hits(repo, case.evidence, "repo")
-            label = "claude-memory" if writer == "claude-code" else "codex-memory"
-            found += file_hits(mem, case.evidence, label, only=changed_files(mem_before, guard.snapshot(mem)))
+            if mem:
+                label = "claude-memory" if writer == "claude-code" else "codex-memory"
+                found += file_hits(mem, case.evidence, label, only=changed_files(mem_before, guard.snapshot(mem)))
             res.captured, res.captured_where = bool(found), _where(found)
             # The writer's transcripts and sessions hold its prompts. The reader gets the writer's
             # config dir in its env, so all but the login goes before the reader starts.
@@ -718,6 +856,8 @@ def run_handoff(cfg: HandoffConfig, runner: Runner, case: Case, arm: str, writer
         stage = "reader"
         (step,) = steps["reader"]
         r, out = _session(cfg, runner, root, hroot, step, reader, res, "reader")
+        if reader == "copilot" and arms.uses_atticdb(arm):
+            res.reasons.append(copilot_hook_note(hroot, "reader", 1, case.evidence))
         outputs = "\n".join(tool_outputs(reader, r.stdout))
         delivered += [("transcript", t) for t in tokens_in(outputs, case.evidence)]
         if case.id not in NO_DELIVERY:
@@ -767,6 +907,8 @@ def describe(cfg: HandoffConfig, case: Case, arm: str, writer: str, reader: str,
     """The dry-run lines of 1 run: each command, its cwd and timeout, and its env by name only."""
     zh, repo = paths(root)
     claude, codex = run_dirs(hroot)
+    copilot = harness_dir(hroot, "copilot")
+    used = run_harnesses(writer, reader)
     extra = ", ".join(arms.instruction_files(arm))
     lines = [f"  write the ledger fixture into {repo} and commit it" + (f", then write {extra}" if extra else "")]
     state = oracle_state(case, arm)
@@ -774,23 +916,33 @@ def describe(cfg: HandoffConfig, case: Case, arm: str, writer: str, reader: str,
         lines.append(f"  write the case's oracle_state ({', '.join(state)}) as the writer's work")
     for phase, steps in plan(cfg, case, arm, writer, reader, root).items():
         if phase == "disconnect":
-            lines.append(f"  [setup] make {claude} (empty) and {codex} (auth.json and config.toml copied from "
-                         f"{cfg.codex_dir})")
+            codex_note = (f"auth.json and config.toml copied from {cfg.codex_dir}" if "codex" in used
+                          else "empty, as codex is not in this run")
+            lines.append(f"  [setup] make {claude} (empty), {codex} ({codex_note}) and {copilot} "
+                         "(empty: Copilot logs in from the OS keychain)")
         if phase == "start":
             stop = "any failure stops the run" if not arms.uses_atticdb(arm) else "a failure is noted"
             lines.append(f"  [setup] the disconnects above: {stop}. Then any atticdb mention in "
-                         f"{', '.join(WIRING_FILES['claude'] + WIRING_FILES['codex'])} stops the run")
-            lines.append(f"  [start] scan {repo}, {claude} and {codex} for {', '.join(case.evidence)}; "
+                         f"{', '.join(WIRING_FILES['claude'] + WIRING_FILES['codex'] + WIRING_FILES['copilot'])} "
+                         "stops the run")
+            lines.append(f"  [start] scan {repo}, {claude}, {codex} and {copilot} for {', '.join(case.evidence)}; "
                          "any hit stops the run")
+        if phase == "setup" and steps and "copilot" in used:
+            lines.append("  [setup] first, an atticdb entry in VS Code's user mcp.json stops the run: connecting "
+                         "copilot would remove it")
         if phase == "capture" and steps:
-            lines.append(f"  [capture] also scan {repo} and the files {writer} memory changed during the run")
-            lines.append(f"  [capture] then delete all but {', '.join(LOGIN_FILES[writer])} in the {writer} dir")
+            memory = (f"the files {writer} memory changed during the run" if writer != "copilot"
+                      else "no copilot memory (off in prompt mode)")
+            lines.append(f"  [capture] also scan {repo} and {memory}")
+            keep = ", ".join(LOGIN_FILES[writer])
+            lines.append(f"  [capture] then delete {'all but ' + keep if keep else 'everything'} in the {writer} dir")
         for step in steps:
             env = f" + {', '.join(sorted(step.extra_env))}" if step.extra_env else ""
             stdin = " <stdin: hook JSON>" if step.stdin is not None else ""
             session = " (agent session)" if phase in ("writer", "reader") else ""
             lines.append(f"  [{phase}]{session} cd {step.cwd} && {shlex.join(step.argv)}{stdin}")
             lines.append(f"      timeout {step.timeout:g} s; env: base{env}")
-    lines.append(f"  grade with grade.grade, copy a refreshed codex auth.json back, delete {hroot}, stop the atticdb "
+    refresh = ", copy a refreshed codex auth.json back" if "codex" in used else ""
+    lines.append(f"  grade with grade.grade{refresh}, delete {hroot}, stop the atticdb "
                  f"server named in {zh}/data/LOCK, then delete {root}")
     return lines

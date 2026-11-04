@@ -99,3 +99,43 @@ def test_non_string_types_are_unparsed_not_raised():
     good = '{"type":"result","subtype":"success","is_error":false,"result":"hi","num_turns":1}'
     out = parse.parse_claude('{"type": ["x"]}\n' + good)
     assert out.final and out.reply == "hi" and out.unparsed == 1 and not out.parse_ok
+
+
+def test_copilot_events_fixture():
+    """Captured from a real `copilot -p ... --output-format json` 1.0.105 run, trimmed: the
+    streamed deltas cut to 1 each, reasoning and opaque ids dropped, paths made neutral."""
+    out = parse.parse_copilot(read("copilot-events.jsonl"))
+    # The atticdb call shows in the tool request and its execution, and counts once. bash is not AtticDB's.
+    assert [c.name for c in out.calls] == ["fact_set"]
+    assert out.calls[0].args == {"key": "repo/evalrepo/probe", "content": "probe ok"}
+    assert out.reply == "ZEBRA-4417\n\nSaved `repo/evalrepo/probe` as `probe ok`. `calc.py` defines `add`."
+    assert out.final and not out.is_error and out.parse_ok
+    assert (out.input_tokens, out.output_tokens, out.cache_read_tokens) == (353 + 15438 + 31043, 269, 31043)
+    assert out.turns == 3 and out.premium_requests == 1
+    assert (out.unparsed, out.unknown) == (0, 0)
+
+
+def test_copilot_other_servers_bad_lines_and_errors():
+    import json
+    lines = [
+        {"type": "assistant.message", "data": {"content": "", "toolRequests": [
+            {"toolCallId": "a", "name": "github-mcp-server-search", "mcpServerName": "github-mcp-server",
+             "mcpToolName": "search", "arguments": {}},
+            {"toolCallId": "b", "name": "atticdb-memory_search", "arguments": '{"query": "why"}'}]}},
+        {"type": "tool.execution_start", "data": {"toolCallId": "b", "toolName": "atticdb-memory_search",
+                                                  "mcpServerName": "atticdb", "mcpToolName": "memory_search"}},
+        {"type": "assistant.message", "data": {"content": "partial answer", "toolRequests": []}},
+        {"type": "assistant.message", "data": {"content": 3}},
+        {"type": "future.kind", "data": {}},
+        {"type": "session.error", "data": {"message": "rate limited"}},
+        {"type": "result", "exitCode": 1, "usage": {"premiumRequests": 0}},
+    ]
+    text = "\n".join(json.dumps(x) for x in lines) + "\nnot json\n"
+    out = parse.parse_copilot(text)
+    assert [c.name for c in out.calls] == ["memory_search"] and out.calls[0].args == {"query": "why"}
+    assert out.is_error and not out.final and out.reply == "partial answer"
+    assert (out.unparsed, out.unknown) == (2, 1) and out.premium_requests == 0
+    assert out.input_tokens is None and out.turns is None
+    # A non-zero exit alone is an error, too.
+    assert parse.parse_copilot('{"type":"result","exitCode":2}\n').is_error
+    assert parse.PARSERS["copilot"] is parse.parse_copilot

@@ -1,4 +1,4 @@
-"""Defensive parsers for the 2 agents' JSONL streams.
+"""Defensive parsers for the agents' JSONL streams: Claude Code, Codex and Copilot CLI.
 
 A line that is not a JSON object, an event whose `type` is not a string, or a known event
 whose fields have the wrong shape, counts as unparsed. An event of a type the parser doesn't
@@ -6,7 +6,8 @@ know counts as unknown. Neither stops the parse. `parse_ok` holds when the final
 found and no line was unparsed.
 
 Tool calls keep the bare tool name of the atticdb server: `mcp__atticdb__fact_set` in
-Claude Code and `{"server": "atticdb", "tool": "fact_set"}` in Codex both give `fact_set`.
+Claude Code, `{"server": "atticdb", "tool": "fact_set"}` in Codex, and `atticdb-fact_set` with
+`"mcpServerName": "atticdb", "mcpToolName": "fact_set"` in Copilot CLI all give `fact_set`.
 
 Token counts mean the same in both: `input_tokens` is every prompt token, cache reads and
 writes included, and `cache_read_tokens` is the part read from the cache.
@@ -40,6 +41,7 @@ class Outcome:
     is_error: bool = False  # the agent reported an error
     unparsed: int = 0
     unknown: int = 0
+    premium_requests: int | None = None  # Copilot CLI only: the `result` event's usage.premiumRequests
 
     @property
     def parse_ok(self) -> bool:
@@ -273,4 +275,129 @@ def parse_codex(stream: bytes | str) -> Outcome:
     return out
 
 
-PARSERS = {"claude-code": parse_claude, "codex": parse_codex}
+# Copilot CLI: `copilot -p ... --output-format json`, checked on 1.0.105. Each line is
+# `{"type", "data", "id", "timestamp", ...}`. The ones read here:
+# - `assistant.message`: `data.content`, `data.toolRequests` ({toolCallId, name, arguments,
+#   mcpServerName, mcpToolName}) and `data.phase`, which is "final_answer" on the final reply;
+# - `tool.execution_start` / `tool.execution_complete`: `data.toolCallId`, `data.toolName`,
+#   `data.mcpServerName`, `data.mcpToolName`, `data.arguments`, `data.success`, `data.result`;
+# - `assistant.turn_end`: 1 per model turn;
+# - `session.usage_checkpoint`: `data.accountingSnapshot.tokenDetails` with input, cache_read,
+#   cache_write and output token counts;
+# - `result`: the last line, with `exitCode` and `usage.premiumRequests`.
+# Every other event of a known namespace (session., assistant., model., tool., user., hook.,
+# subagent., skill.) is skipped. `error`, `session.error` and a non-zero `exitCode` are a
+# reported error. A bad --model prints only to stderr and exits 1, with no `result` line.
+COPILOT_ERRORS = frozenset({"error", "session.error"})
+COPILOT_NAMESPACES = ("session.", "assistant.", "model.", "tool.", "user.", "hook.", "subagent.", "skill.")
+COPILOT_PREFIX = f"{SERVER}-"
+
+
+def _copilot_call(data: dict) -> tuple[str | None, str | None] | None:
+    """(call id, bare atticdb tool name or None for another server's or a built-in tool), or None
+    when the fields have the wrong shape."""
+    name = data.get("name", data.get("toolName"))
+    if not isinstance(name, str):
+        return None
+    cid = data.get("toolCallId")
+    server, tool = data.get("mcpServerName"), data.get("mcpToolName")
+    if isinstance(server, str) and isinstance(tool, str):
+        return (cid if isinstance(cid, str) else None), (tool if server == SERVER else None)
+    # No MCP fields: a built-in tool, or an older build that only prefixed the name.
+    return (cid if isinstance(cid, str) else None), (name[len(COPILOT_PREFIX):] if name.startswith(COPILOT_PREFIX)
+                                                     else None)
+
+
+def parse_copilot(stream: bytes | str) -> Outcome:
+    out = Outcome()
+    calls: dict[str, Call] = {}  # by tool call id: a request and its execution count once
+    order: list[str] = []
+    anon = 0
+    turns = 0
+    last_text = ""
+    exit_code = None
+
+    def add_call(data: dict) -> bool:
+        nonlocal anon
+        got = _copilot_call(data)
+        if got is None:
+            return False
+        cid, tool = got
+        if tool is None:
+            return True
+        if cid is None:
+            anon += 1
+            cid = f"anon-{anon}"
+        if cid not in calls:
+            order.append(cid)
+            calls[cid] = Call(tool, _args(data.get("arguments")))
+        return True
+
+    for ev in _lines(stream):
+        if ev is None:
+            out.unparsed += 1
+            continue
+        kind = ev.get("type")
+        if not isinstance(kind, str):
+            out.unparsed += 1
+            continue
+        data = ev.get("data")
+        if kind == "result":
+            usage = ev.get("usage")
+            exit_code = ev.get("exitCode")
+            if isinstance(usage, dict):
+                out.premium_requests = _int(usage.get("premiumRequests"))
+            elif usage is not None:
+                out.unparsed += 1
+            continue
+        if kind in COPILOT_ERRORS:
+            out.is_error = True
+            continue
+        if not kind.startswith(COPILOT_NAMESPACES):
+            out.unknown += 1
+            continue
+        if data is not None and not isinstance(data, dict):
+            out.unparsed += 1
+            continue
+        data = data or {}
+        if kind == "assistant.message":
+            content, requests = data.get("content"), data.get("toolRequests", [])
+            if not isinstance(content, str) or not isinstance(requests, list):
+                out.unparsed += 1
+                continue
+            for req in requests:
+                if not isinstance(req, dict) or not add_call(req):
+                    out.unparsed += 1
+            if content.strip():
+                last_text = content
+            if data.get("phase") == "final_answer":
+                out.reply, out.final = content, True
+        elif kind == "tool.execution_start":
+            if not add_call(data):
+                out.unparsed += 1
+        elif kind == "assistant.turn_end":
+            turns += 1
+        elif kind == "session.usage_checkpoint":
+            snap = data.get("accountingSnapshot")
+            details = snap.get("tokenDetails") if isinstance(snap, dict) else None
+            if not isinstance(details, dict):
+                continue
+
+            def count(name: str) -> int | None:
+                part = details.get(name)
+                return _int(part.get("tokenCount")) if isinstance(part, dict) else None
+
+            read = count("cache_read")
+            out.input_tokens = _sum(count("input"), count("cache_write"), read)
+            out.output_tokens = count("output")
+            out.cache_read_tokens = read
+    if isinstance(exit_code, int) and exit_code != 0:
+        out.is_error = True
+    if not out.final:
+        out.reply = last_text
+    out.calls = [calls[cid] for cid in order]
+    out.turns = turns if turns else None
+    return out
+
+
+PARSERS = {"claude-code": parse_claude, "codex": parse_codex, "copilot": parse_copilot}

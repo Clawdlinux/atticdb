@@ -16,7 +16,7 @@ import pytest
 from research.handoff_eval import arms, cli, fixture, results, run
 from research.handoff_eval.cases import CASES
 from research.handoff_eval.run import Budget, HandoffConfig, run_handoff
-from research.setup_eval import agents
+from research.setup_eval import agents, guard
 from research.setup_eval.proc import Runner
 from research.setup_eval.scenarios import Verdict
 
@@ -24,7 +24,7 @@ from .helpers import ATTICDB, agent_calls, fake_home, stub_calls
 
 needs_atticdb = pytest.mark.skipif(not os.access(ATTICDB, os.X_OK),
                                    reason="build target/debug/atticdb or set ATTICDB_BIN")
-MODELS = {"claude-code": "claude-x", "codex": "codex-y"}
+MODELS = {"claude-code": "claude-x", "codex": "codex-y", "copilot": "copilot-z"}
 DIRECTIONS = [("claude-code", "codex"), ("codex", "claude-code")]
 
 
@@ -710,3 +710,227 @@ def test_summary_first_line_and_funnel():
     assert "| native | 0/1 | 0/1 | 0/1 | 2/2 | 1 |" in text
     assert "| oracle | n/a | 1/1 | 2/2 | 2/2 | 0 |" in text
     assert "Errored runs by stage: writer 1." in text
+
+
+# ---- Copilot CLI ----
+
+COPILOT_DIRECTIONS = [("claude-code", "copilot"), ("copilot", "claude-code")]
+
+
+@needs_atticdb
+def test_copilot_writer_captures_and_claude_reader_gets_delivery(env):
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], "atticdb", "copilot", "claude-code", 1)
+    assert not res.errored, res.reasons
+    assert res.captured is True and "atticdb:fact repo/evalrepo/decision-" in res.captured_where
+    assert res.delivered is True and res.delivered_where.startswith("hook[LEDG-7731,412]")
+    assert res.passed is True and res.sessions == 2
+    assert (res.writer_model, res.reader_model) == ("copilot-z", "claude-x")
+    # The writer ran AtticDB's sessionStart hook from its own COPILOT_HOME. The store was empty then.
+    assert "copilot writer: sessionStart hook ran in 1 of 1 sessions, block has no evidence token" in res.reasons
+    assert "writer 1 premium_requests=1" in res.reasons and res.premium_requests == 1
+    writer, reader = agent_calls(env["log"])
+    assert writer["prog"] == "copilot" and writer["argv"][:2] == ["-p", CASES["H1"].writer_prompts[0]]
+    assert writer["argv"][2:] == ["--output-format", "json", "--allow-all-tools", "--no-auto-update",
+                                  "--model", "copilot-z"]
+    assert {"mcp-config.json", "hooks", "instructions"} <= set(writer["copilot_home_files"])
+    # Only the run's own COPILOT_HOME reached a child, and no inherited COPILOT_* or GitHub token did.
+    for call in stub_calls(env["log"]):
+        assert call["copilot_env"] in ([], ["COPILOT_HOME"]), call["copilot_env"]
+    # Codex was not set up: the run's harnesses are its direction's 2.
+    assert not any(c["prog"] == "codex" for c in stub_calls(env["log"]))
+    assert_cleaned_up(env)
+
+
+@needs_atticdb
+def test_copilot_reader_gets_the_hook(env):
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], "atticdb", "claude-code", "copilot", 1)
+    assert not res.errored, res.reasons
+    assert res.captured is True and res.delivered is True and res.passed is True
+    assert res.delivered_where.startswith("hook[LEDG-7731,412]")
+    assert "copilot reader: sessionStart hook ran in 1 of 1 sessions, block has [LEDG-7731,412]" in res.reasons
+    assert_cleaned_up(env)
+
+
+@needs_atticdb
+def test_files_arm_copilot_reader_reads_handoff(env):
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], "files", "claude-code", "copilot", 1)
+    assert not res.errored, res.reasons
+    assert res.captured is True and res.captured_where == "repo:HANDOFF.md[LEDG-7731,412]"
+    assert res.delivered is True and res.delivered_where == "transcript[LEDG-7731,412]"
+    assert res.passed is True
+    # No atticdb hook ran in this arm.
+    assert not any("sessionStart hook" in r for r in res.reasons)
+    assert_cleaned_up(env)
+
+
+@needs_atticdb
+@pytest.mark.parametrize("arm", ["native", "files"])
+@pytest.mark.parametrize("writer,reader", COPILOT_DIRECTIONS)
+def test_copilot_reader_grep_finds_no_writer_transcript(env, monkeypatch, arm, writer, reader):
+    """A Copilot writer's session-store.db holds its prompts. It goes before the reader starts."""
+    monkeypatch.setenv("STUB_READER_GREP", "1")
+    monkeypatch.setenv("STUB_WRITER", "silent")
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], arm, writer, reader, 1)
+    assert not res.errored, res.reasons
+    assert res.captured is False and res.delivered is False
+    if writer == "copilot":
+        _, rd = agent_calls(env["log"])
+        assert rd["copilot_home_files"] == [], "the copilot writer's dir is empty once it is done"
+    monkeypatch.setattr(run, "scrub_harness_dir", lambda hroot, harness: [])
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], arm, writer, reader, 1)
+    assert res.delivered is True and res.delivered_where == "transcript[LEDG-7731,412]"
+
+
+@needs_atticdb
+def test_copilot_home_is_per_run_and_removed(env):
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], "native", "copilot", "claude-code", 1)
+    assert not res.errored, res.reasons
+    homes = {c["dirs"]["COPILOT_HOME"] for c in stub_calls(env["log"])}
+    (home,) = homes
+    assert home.startswith(env["tmp"] + "/") and home.endswith("/copilot")
+    assert not home.startswith(env["home"]), "never the user's ~/.copilot"
+    assert not os.path.exists(home) and not os.path.exists(os.path.dirname(home))
+    assert not os.path.exists(os.path.join(env["home"], ".copilot")), "the fake ~/.copilot is never made"
+    # The next run gets a new one.
+    run_handoff(make_cfg(env), Runner(), CASES["H1"], "native", "copilot", "claude-code", 1)
+    assert len({c["dirs"]["COPILOT_HOME"] for c in stub_calls(env["log"])}) == 2
+    assert_cleaned_up(env)
+
+
+def test_guard_refuses_users_copilot_home(tmp_path):
+    home = tmp_path / "home"
+    (home / ".copilot").mkdir(parents=True)
+    claude, codex = guard.eval_dirs(str(home))
+    for bad in (home / ".copilot", home / ".copilot" / "run", home / ".COPILOT"):
+        with pytest.raises(guard.Refused, match="COPILOT_HOME"):
+            guard.check_config_dirs(claude, codex, str(home), copilot_dir=str(bad))
+    link = tmp_path / "elsewhere"
+    link.symlink_to(home / ".copilot")
+    with pytest.raises(guard.Refused, match="COPILOT_HOME"):
+        guard.check_config_dirs(claude, codex, str(home), copilot_dir=str(link))
+    with pytest.raises(guard.Refused, match="must differ"):
+        guard.check_config_dirs(claude, codex, str(home), copilot_dir=codex)
+    guard.check_config_dirs(claude, codex, str(home), copilot_dir=str(tmp_path / "zhh-1" / "copilot"))
+
+
+@needs_atticdb
+def test_run_refuses_copilot_home_in_the_users_dir(env, monkeypatch):
+    user_copilot = os.path.join(env["home"], ".copilot")
+    real = run.harness_dir
+    monkeypatch.setattr(run, "harness_dir", lambda hroot, h: user_copilot if h == "copilot" else real(hroot, h))
+    with pytest.raises(guard.Refused, match="COPILOT_HOME .* ~/.copilot"):
+        run_handoff(make_cfg(env), Runner(), CASES["H1"], "native", "copilot", "claude-code", 1)
+    assert agent_calls(env["log"]) == [] and not os.path.exists(user_copilot)
+
+
+def test_child_env_sets_only_the_runs_copilot_home():
+    base = {"PATH": "/bin", "COPILOT_HOME": "/u/.copilot", "COPILOT_GITHUB_TOKEN": "t1", "COPILOT_MODEL": "m",
+            "COPILOT_ALLOW_ALL": "true", "GH_TOKEN": "t2", "GITHUB_TOKEN": "t3", "GH_HOST": "x.ghe.com"}
+    kw = dict(home="/h", atticdb_home="/r/zh", claude_dir="/e/claude", codex_dir="/e/codex")
+    env = agents.child_env(base, copilot_dir="/t/zhh-1/copilot", **kw)
+    assert {k for k in env if k.startswith(("COPILOT_", "GH_", "GITHUB_"))} == {"COPILOT_HOME"}
+    assert env["COPILOT_HOME"] == "/t/zhh-1/copilot"
+    # COPILOT_* never passes, even with --keep-api-keys; the GitHub vars do then.
+    kept = agents.child_env(base, copilot_dir="/t/zhh-1/copilot", keep_api_keys=True, **kw)
+    assert kept["GH_TOKEN"] == "t2" and "COPILOT_GITHUB_TOKEN" not in kept
+    # Without a copilot dir (setup_eval), no COPILOT_HOME at all.
+    assert "COPILOT_HOME" not in agents.child_env(base, **kw)
+    with pytest.raises(ValueError):
+        agents.child_env(base, copilot_dir="/t/c", extra={"COPILOT_HOME": "/u/.copilot"}, **kw)
+    with pytest.raises(ValueError):
+        agents.child_env(base, copilot_dir="relative/copilot", **kw)
+
+
+@needs_atticdb
+def test_vscode_atticdb_entry_stops_a_copilot_setup(env):
+    cfg = make_cfg(env)
+    path = run.vscode_mcp_file(cfg)
+    os.makedirs(os.path.dirname(path))
+    with open(path, "w") as f:
+        f.write('{"servers": {"atticdb": {"command": "/x/atticdb"}}}\n')
+    before = os.stat(path).st_mtime_ns
+    res = run_handoff(cfg, Runner(), CASES["H1"], "atticdb", "claude-code", "copilot", 1)
+    assert res.errored and res.error_stage == "setup" and res.sessions == 0
+    assert any("has an atticdb entry, and setting up copilot would remove it" in r for r in res.reasons)
+    assert os.stat(path).st_mtime_ns == before
+    # Other arms set nothing up, so they run.
+    res = run_handoff(cfg, Runner(), CASES["H1"], "files", "claude-code", "copilot", 1)
+    assert not res.errored, res.reasons
+    assert_cleaned_up(env)
+
+
+def test_copilot_directions_need_only_their_models(tmp_path, capsys, monkeypatch):
+    base = ["--cases", "H1", "--arms", "atticdb", "--directions", "claude-code:copilot", "--out", str(tmp_path / "r.csv")]
+    with pytest.raises(SystemExit) as e:
+        cli.parse(base + ["--dry-run", "--claude-model", "X", "--codex-model", "Y"])
+    assert e.value.code == 2 and "--copilot-model is required" in capsys.readouterr().err
+    a = cli.parse(base + ["--dry-run", "--claude-model", "X", "--copilot-model", "Z"])
+    assert a.models == {"claude-code": "X", "codex": "", "copilot": "Z"}
+    with pytest.raises(SystemExit):
+        cli.parse(base[:-4] + ["--directions", "copilot:copilot", "--copilot-model", "Z", "--dry-run"])
+    assert "the pilot is cross-harness only" in capsys.readouterr().err
+
+    env = fake_home(monkeypatch, tmp_path)
+    parent = tempfile.mkdtemp(prefix="zhe-t-", dir="/tmp")
+    monkeypatch.setattr(tempfile, "tempdir", parent)
+    try:
+        args = ["--cases", "H1,H2", "--arms", "native,files,atticdb,oracle", "--directions",
+                "claude-code:copilot,copilot:claude-code", "--claude-model", "X", "--copilot-model", "Z",
+                "--dry-run", "--out", str(tmp_path / "r.csv"), "--atticdb", "/nonexistent/atticdb"]
+        assert cli.main(args) == 0
+        text = capsys.readouterr().out
+        assert stub_calls(env["log"]) == [] and os.listdir(parent) == []
+    finally:
+        shutil.rmtree(parent, ignore_errors=True)
+    # 2 cases x 4 arms x 2 directions; H1 and H2 have 1 writer each, and the oracle none.
+    assert "Total: 28 agent sessions (12 writer, 16 reader) in 16 runs." in text
+    for absent in ("codex exec", "disconnect codex", "--harness codex", "Overrides for codex", "auth.json"):
+        assert absent not in text, absent
+    assert "Overrides for copilot: --allow-all-tools" in text
+    assert "copilot -p" in text and "--model Z" in text
+    assert "setup --yes --harness copilot" in text and "hook session-start" in text
+    assert "VS Code's user mcp.json stops the run" in text
+
+
+def test_copilot_tool_outputs_skip_writes_and_own_messages():
+    stream = [
+        {"type": "user.message", "data": {"content": "the prompt names FIN-88"}},
+        {"type": "assistant.message", "data": {"content": "I recall STOR-5150", "toolRequests": [
+            {"toolCallId": "c1", "name": "create", "arguments": {"path": "n.md", "file_text": "LEDG-7731"}}]}},
+        {"type": "tool.execution_start", "data": {"toolCallId": "c1", "toolName": "create",
+                                                  "arguments": {"file_text": "LEDG-7731"}}},
+        {"type": "tool.execution_complete", "data": {"toolCallId": "c1", "success": True,
+                                                     "result": {"content": "Created n.md: LEDG-7731"}}},
+        {"type": "tool.execution_start", "data": {"toolCallId": "c2", "toolName": "bash",
+                                                  "arguments": {"command": "grep bramble-ci"}}},
+        {"type": "tool.shell_output", "data": {"toolCallId": "c2", "text": "INC-2209 streamed"}},
+        {"type": "tool.execution_complete", "data": {"toolCallId": "c2", "success": True,
+                                                     "result": {"content": "INC-2209", "detailedContent": "INC-2209"}}},
+        {"type": "assistant.message", "data": {"content": "Done, see FIN-88.", "phase": "final_answer",
+                                               "toolRequests": []}},
+        {"type": "tool.execution_complete", "data": {"toolCallId": "c3", "result": {"content": "STOR-5150"}}},
+    ]
+    outputs = "\n".join(run.tool_outputs("copilot", "\n".join(map(json.dumps, stream)).encode()))
+    assert run.tokens_in(outputs, ("LEDG-7731", "FIN-88", "INC-2209", "STOR-5150", "bramble-ci")) == ["INC-2209"]
+
+
+def test_copilot_stream_errors():
+    assert run.stream_errors("copilot", b'{"type":"session.error","data":{"message":"quota exceeded"}}\n'
+                                        b'{"type":"result","exitCode":1,"usage":{"premiumRequests":0}}\n') == [
+        "quota exceeded", "exitCode 1"]
+    assert run.stream_errors("copilot", b'{"type":"result","exitCode":0}\n') == []
+
+
+@needs_atticdb
+def test_copilot_bad_model_is_errored(env, monkeypatch, tmp_path):
+    """A bad --model makes Copilot print to stderr and exit 1 with no result line."""
+    replay = tmp_path / "empty.jsonl"
+    replay.write_text('{"type":"session.mcp_server_tools_loaded","data":{"serverName":"atticdb","toolCount":8}}\n')
+    monkeypatch.setenv("STUB_REPLAY", str(replay))
+    monkeypatch.setenv("STUB_STDERR", 'Error: Model "nope" from --model flag is not available.')
+    monkeypatch.setenv("STUB_EXIT_AFTER", "1")
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], "native", "copilot", "claude-code", 1)
+    assert res.errored and res.error_stage == "writer"
+    assert ('error in writer: writer 1 exited 1: stderr: Error: Model "nope" from --model flag is not available.'
+            in res.reasons), res.reasons
+    assert_cleaned_up(env)

@@ -18,6 +18,8 @@ HANDOFF_RULE = ("Keep HANDOFF.md at the repo root. After each task, record decis
 # Written into the fixture for the files arm, and committed with it, so they are not part of any diff.
 INSTRUCTION_FILES = ("AGENTS.md", "CLAUDE.md")
 ORACLE_PREFIX = "Notes from the last session: "
+# The CLI flag that names each harness's model. Each is required only when a direction uses it.
+MODEL_FLAGS = {"claude-code": "--claude-model", "codex": "--codex-model", "copilot": "--copilot-model"}
 
 
 def check_arm(arm: str) -> None:
@@ -58,8 +60,8 @@ def planned_sessions(case: Case, arm: str) -> int:
 
 
 def session_argv(harness: str, prompt: str, model: str, arm: str) -> list[str]:
-    """`agents.agent_argv` with the model flag. Claude gets `--model <id>` appended. Codex gets
-    `-m <id>` just before the prompt, which `codex exec` takes as its last positional argument.
+    """`agents.agent_argv` with the model flag. Claude and Copilot get `--model <id>` appended. Codex
+    gets `-m <id>` just before the prompt, which `codex exec` takes as its last positional argument.
 
     Outside the atticdb arm, Codex loses the `-c mcp_servers.atticdb...approval_mode` override.
     With no atticdb server configured, that override alone makes a partial server table, and
@@ -67,7 +69,7 @@ def session_argv(harness: str, prompt: str, model: str, arm: str) -> list[str]:
     if not model:
         raise ValueError(f"no model id for {harness}")
     argv = agents.agent_argv(harness, prompt)
-    if harness == "claude-code":
+    if harness in ("claude-code", "copilot"):
         return argv + ["--model", model]
     if not uses_atticdb(arm):
         i = argv.index(agents.CODEX_APPROVE)

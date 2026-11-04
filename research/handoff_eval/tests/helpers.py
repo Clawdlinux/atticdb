@@ -1,4 +1,4 @@
-"""setup_eval's test home, with the handoff stub installed as `claude` and `codex`."""
+"""setup_eval's test home, with the handoff stub installed as `claude`, `codex` and `copilot`."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ FAKE_AUTH = '{"stub": "login"}\n'
 def install_stubs(bin_dir) -> None:
     with open(os.path.join(HERE, "stub_agent.py")) as f:
         body = f.read()
-    for name in ("claude", "codex"):
+    for name in ("claude", "codex", "copilot"):
         path = os.path.join(bin_dir, name)
         with open(path, "w") as f:
             f.write(f"#!{sys.executable}\n{body}")
