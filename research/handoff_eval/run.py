@@ -194,6 +194,22 @@ def harness_dir(hroot: str, harness: str) -> str:
     return os.path.join(hroot, HARNESS_DIRS[harness])
 
 
+def setup_home(hroot: str) -> str:
+    """The HOME the copilot setup and disconnect steps get: `<harness-root>/home`, empty. `atticdb
+    connect copilot` finds VS Code's user `mcp.json` through HOME (or XDG_CONFIG_HOME off macOS) and
+    may drop an atticdb entry there, so it must never see the real one."""
+    return os.path.join(hroot, "home")
+
+
+def setup_env(hroot: str, harness: str) -> dict:
+    """Extra env for `atticdb setup` and `disconnect` of `harness`: a per-run HOME and
+    XDG_CONFIG_HOME for copilot, nothing for the others."""
+    if harness != "copilot":
+        return {}
+    home = setup_home(hroot)
+    return {"HOME": home, "XDG_CONFIG_HOME": os.path.join(home, ".config")}
+
+
 def run_harnesses(writer: str, reader: str) -> tuple[str, ...]:
     """The harnesses a run disconnects, sets up and tears down: its direction's 2, in a fixed order."""
     return tuple(h for h in agents.ALL_HARNESSES if h in (writer, reader))
@@ -240,7 +256,7 @@ def prepare_config_dirs(cfg: Config, hroot: str, harnesses=agents.ALL_HARNESSES)
     copilot = harness_dir(hroot, "copilot")
     # Checked before they exist, so a refused dir is never made, and again after, by file identity.
     guard.check_config_dirs(claude, codex, cfg.home, copilot_dir=copilot)
-    for folder in (claude, codex, copilot):
+    for folder in (claude, codex, copilot, os.path.join(setup_home(hroot), ".config")):
         os.makedirs(folder, mode=0o700, exist_ok=True)
     guard.check_config_dirs(claude, codex, cfg.home, copilot_dir=copilot)
     if "codex" not in harnesses:
@@ -321,8 +337,10 @@ def write_files(repo: str, files: dict[str, str]) -> None:
             f.write(body)
 
 
-def plan(cfg: HandoffConfig, case: Case, arm: str, writer: str, reader: str, root: str) -> dict[str, list[Step]]:
-    """Every child of 1 run, by phase. A dry run prints these; a real run runs them."""
+def plan(cfg: HandoffConfig, case: Case, arm: str, writer: str, reader: str, root: str,
+         hroot: str = "<harness-root>") -> dict[str, list[Step]]:
+    """Every child of 1 run, by phase. A dry run prints these; a real run runs them. The copilot
+    setup, disconnect and teardown steps get `setup_env`: a HOME in `hroot`."""
     _, repo = paths(root)
     z, git = cfg.atticdb, agents.git_env()
     both = run_harnesses(writer, reader)
@@ -339,9 +357,11 @@ def plan(cfg: HandoffConfig, case: Case, arm: str, writer: str, reader: str, roo
     fixture.append(Step("fixture", ["git", "update-ref", BASE_REF, "HEAD"], repo, agents.GIT_TIMEOUT, git))
     return {
         "fixture": fixture,
-        "disconnect": [Step("disconnect", agents.disconnect_argv(z, h), repo, agents.SETUP_TIMEOUT) for h in both],
+        "disconnect": [Step("disconnect", agents.disconnect_argv(z, h), repo, agents.SETUP_TIMEOUT,
+                            setup_env(hroot, h)) for h in both],
         "start": [search_step(cfg, repo, "start", t) for t in case.evidence],
-        "setup": [Step("setup", agents.setup_argv(z, h), repo, agents.SETUP_TIMEOUT) for h in both]
+        "setup": [Step("setup", agents.setup_argv(z, h), repo, agents.SETUP_TIMEOUT, setup_env(hroot, h))
+                  for h in both]
         if arms.uses_atticdb(arm) else [],
         "writer": [Step("writer", arms.session_argv(writer, p, cfg.models.get(writer, ""), arm), repo,
                         cfg.agent_timeout) for p in case.writer_prompts] if arms.has_writer(arm) else [],
@@ -351,7 +371,8 @@ def plan(cfg: HandoffConfig, case: Case, arm: str, writer: str, reader: str, roo
         "reader": [Step("reader", arms.session_argv(reader, arms.reader_prompt(case, arm),
                                                     cfg.models.get(reader, ""), arm), repo, cfg.agent_timeout)],
         "grade": [Step("grade", ["git", "diff", BASE_REF], repo, agents.GIT_TIMEOUT, git)],
-        "teardown": [Step("teardown", agents.disconnect_argv(z, h), repo, agents.SETUP_TIMEOUT) for h in both],
+        "teardown": [Step("teardown", agents.disconnect_argv(z, h), repo, agents.SETUP_TIMEOUT,
+                          setup_env(hroot, h)) for h in both],
     }
 
 
@@ -631,6 +652,32 @@ def copilot_hook_blocks(hroot: str) -> list[str]:
     return blocks
 
 
+_SKILL = re.compile(r"<skill>\s*<name>(.*?)</name>.*?<location>(.*?)</location>", re.S)
+
+
+def copilot_skills(hroot: str) -> list[tuple[str, str]]:
+    """(name, location) of each skill offered to the model in the run's Copilot sessions, from the
+    `system.message` events in `COPILOT_HOME/session-state/*/events.jsonl`. Copilot sessions keep
+    the real HOME, so personal skills in `~/.copilot/skills` or `~/.agents/skills` could show here."""
+    base = os.path.join(harness_dir(hroot, "copilot"), "session-state")
+    found: list[tuple[str, str]] = []
+    for name in sorted(os.listdir(base)) if os.path.isdir(base) else []:
+        for ev in _events(_read(os.path.join(base, name, "events.jsonl")).encode()):
+            if ev.get("type") == "system.message":
+                found += [(n.strip(), loc.strip()) for n, loc in _SKILL.findall("\n".join(_strings(ev.get("data"))))]
+    return list(dict.fromkeys(found))
+
+
+def copilot_skill_note(hroot: str, who: str) -> str | None:
+    """A note naming any skill that is not builtin, or None. Builtin skills ship with the CLI, so
+    every Copilot session has them; any other skill would differ from the user's own setup."""
+    other = sorted({n for n, loc in copilot_skills(hroot) if loc != "builtin"})
+    if not other:
+        return None
+    shown = ", ".join(other[:5]) + (", ..." if len(other) > 5 else "")
+    return f"copilot {who}: {len(other)} non-builtin skills offered ({shown})"
+
+
 def copilot_hook_note(hroot: str, who: str, sessions: int, tokens) -> str:
     """A note on whether Copilot ran AtticDB's sessionStart hook, and which tokens its block held."""
     blocks = copilot_hook_blocks(hroot)
@@ -769,7 +816,7 @@ def run_handoff(cfg: HandoffConfig, runner: Runner, case: Case, arm: str, writer
         raise
     _, repo = paths(root)
     claude_run, codex_run = run_dirs(hroot)
-    steps = plan(cfg, case, arm, writer, reader, root)
+    steps = plan(cfg, case, arm, writer, reader, root, hroot)
     redact_paths = {root: "<root>", os.path.realpath(root): "<root>", hroot: "<harness-root>",
                     os.path.realpath(hroot): "<harness-root>", cfg.claude_dir: "<claude-dir>",
                     cfg.codex_dir: "<codex-dir>", cfg.atticdb: "<atticdb>", cfg.home: "~"}
@@ -825,8 +872,10 @@ def run_handoff(cfg: HandoffConfig, runner: Runner, case: Case, arm: str, writer
             mem_before = guard.snapshot(mem) if mem else {}
             for i, step in enumerate(steps["writer"], 1):
                 _session(cfg, runner, root, hroot, step, writer, res, f"writer {i}")
-            if writer == "copilot" and arms.uses_atticdb(arm):
-                res.reasons.append(copilot_hook_note(hroot, "writer", len(steps["writer"]), case.evidence))
+            if writer == "copilot":
+                if arms.uses_atticdb(arm):
+                    res.reasons.append(copilot_hook_note(hroot, "writer", len(steps["writer"]), case.evidence))
+                res.reasons += filter(None, [copilot_skill_note(hroot, "writer")])
 
             stage = "capture"
             found = _searches(cfg, runner, root, hroot, steps["capture"])
@@ -856,8 +905,10 @@ def run_handoff(cfg: HandoffConfig, runner: Runner, case: Case, arm: str, writer
         stage = "reader"
         (step,) = steps["reader"]
         r, out = _session(cfg, runner, root, hroot, step, reader, res, "reader")
-        if reader == "copilot" and arms.uses_atticdb(arm):
-            res.reasons.append(copilot_hook_note(hroot, "reader", 1, case.evidence))
+        if reader == "copilot":
+            if arms.uses_atticdb(arm):
+                res.reasons.append(copilot_hook_note(hroot, "reader", 1, case.evidence))
+            res.reasons += filter(None, [copilot_skill_note(hroot, "reader")])
         outputs = "\n".join(tool_outputs(reader, r.stdout))
         delivered += [("transcript", t) for t in tokens_in(outputs, case.evidence)]
         if case.id not in NO_DELIVERY:
@@ -914,7 +965,7 @@ def describe(cfg: HandoffConfig, case: Case, arm: str, writer: str, reader: str,
     state = oracle_state(case, arm)
     if state:
         lines.append(f"  write the case's oracle_state ({', '.join(state)}) as the writer's work")
-    for phase, steps in plan(cfg, case, arm, writer, reader, root).items():
+    for phase, steps in plan(cfg, case, arm, writer, reader, root, hroot).items():
         if phase == "disconnect":
             codex_note = (f"auth.json and config.toml copied from {cfg.codex_dir}" if "codex" in used
                           else "empty, as codex is not in this run")
@@ -928,8 +979,9 @@ def describe(cfg: HandoffConfig, case: Case, arm: str, writer: str, reader: str,
             lines.append(f"  [start] scan {repo}, {claude}, {codex} and {copilot} for {', '.join(case.evidence)}; "
                          "any hit stops the run")
         if phase == "setup" and steps and "copilot" in used:
-            lines.append("  [setup] first, an atticdb entry in VS Code's user mcp.json stops the run: connecting "
-                         "copilot would remove it")
+            lines.append("  [setup] first, an atticdb entry in the real VS Code user mcp.json stops the run, as a "
+                         f"backstop. Copilot's setup and disconnects run with HOME={setup_home(hroot)} and "
+                         f"XDG_CONFIG_HOME={setup_home(hroot)}/.config, so they only see a per-run VS Code mcp.json")
         if phase == "capture" and steps:
             memory = (f"the files {writer} memory changed during the run" if writer != "copilot"
                       else "no copilot memory (off in prompt mode)")

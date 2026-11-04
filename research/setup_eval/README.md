@@ -31,7 +31,8 @@ Then it seeds the store, and runs `atticdb disconnect <h>` and `atticdb setup --
 It names 1 harness at a time, so `connect vscode` and `connect copilot` never run.
 After the agent, it runs `atticdb disconnect <h>`, stops the AtticDB server the run started, and deletes the root.
 
-Every child gets the inherited env without `ATTICDB_*`, `GIT_*`, `CLAUDE_CONFIG_DIR` and `CODEX_HOME`, then the run's own values.
+Every child gets the inherited env without `ATTICDB_*`, `GIT_*`, `COPILOT_*` (`COPILOT_HOME` included), `CLAUDE_CONFIG_DIR` and `CODEX_HOME`, then the run's own values.
+`COPILOT_*` goes even with `--keep-api-keys`. setup_eval never runs Copilot, and this keeps an inherited `COPILOT_HOME`, token or provider switch from reaching any child.
 Dropping `GIT_*` keeps an inherited `GIT_DIR`, `GIT_WORK_TREE` or `GIT_INDEX_FILE` from pointing the fixture's git steps at a real repo.
 It also drops the credential and provider vars, so runs use the logins in the eval dirs and nothing else:
 

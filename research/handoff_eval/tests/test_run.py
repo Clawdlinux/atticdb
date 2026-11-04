@@ -889,7 +889,9 @@ def test_copilot_directions_need_only_their_models(tmp_path, capsys, monkeypatch
     assert "Overrides for copilot: --allow-all-tools" in text
     assert "copilot -p" in text and "--model Z" in text
     assert "setup --yes --harness copilot" in text and "hook session-start" in text
-    assert "VS Code's user mcp.json stops the run" in text
+    assert "an atticdb entry in the real VS Code user mcp.json stops the run" in text
+    assert "Copilot's setup and disconnects run with HOME=<harness-root>/home" in text
+    assert "setup --yes --harness copilot\n      timeout 120 s; env: base + HOME, XDG_CONFIG_HOME" in text
 
 
 def test_copilot_tool_outputs_skip_writes_and_own_messages():
@@ -933,4 +935,54 @@ def test_copilot_bad_model_is_errored(env, monkeypatch, tmp_path):
     assert res.errored and res.error_stage == "writer"
     assert ('error in writer: writer 1 exited 1: stderr: Error: Model "nope" from --model flag is not available.'
             in res.reasons), res.reasons
+    assert_cleaned_up(env)
+
+
+def test_copilot_setup_steps_use_a_per_run_home(tmp_path, monkeypatch):
+    """`atticdb connect copilot` finds VS Code's user mcp.json through HOME or XDG_CONFIG_HOME. The copilot
+    setup and disconnect steps get a per-run HOME, so the real file is out of reach. Agent sessions and
+    the other harnesses' steps keep the real HOME."""
+    env = fake_home(monkeypatch, tmp_path)
+    cfg = make_cfg(dict(env, tmp=str(tmp_path)))
+    root, hroot = str(tmp_path / "zse-1"), str(tmp_path / "zhh-1")
+    real_vscode = run.vscode_mcp_file(cfg)
+    steps = run.plan(cfg, CASES["H1"], "atticdb", "claude-code", "copilot", root, hroot)
+    copilot_steps = [s for phase in ("disconnect", "setup", "teardown") for s in steps[phase] if s.argv[-1] == "copilot"]
+    assert len(copilot_steps) == 3
+    for step in copilot_steps:
+        e = run.env_for(cfg, root, step, hroot)
+        assert e["HOME"] == os.path.join(hroot, "home") and e["XDG_CONFIG_HOME"] == os.path.join(hroot, "home", ".config")
+        # The paths atticdb's Harness::file would take, on macOS and elsewhere.
+        for vscode in (os.path.join(e["HOME"], "Library", "Application Support", "Code", "User", "mcp.json"),
+                       os.path.join(e["XDG_CONFIG_HOME"], "Code", "User", "mcp.json")):
+            assert vscode != real_vscode and vscode.startswith(hroot + os.sep) and not vscode.startswith(env["home"])
+        assert e["COPILOT_HOME"] == os.path.join(hroot, "copilot")
+    for step in [s for phase in ("disconnect", "setup", "writer", "reader") for s in steps[phase]
+                 if s.argv[-1] != "copilot"]:
+        assert run.env_for(cfg, root, step, hroot)["HOME"] == env["home"]
+
+
+@needs_atticdb
+def test_copilot_setup_leaves_the_real_vscode_file_alone(env):
+    cfg = make_cfg(env)
+    path = run.vscode_mcp_file(cfg)
+    os.makedirs(os.path.dirname(path))
+    with open(path, "w") as f:
+        f.write('{"servers": {"other": {"command": "x"}}}\n')
+    before = (os.stat(path).st_mtime_ns, open(path).read())
+    res = run_handoff(cfg, Runner(), CASES["H1"], "atticdb", "claude-code", "copilot", 1)
+    assert not res.errored, res.reasons
+    assert res.delivered is True and res.passed is True
+    assert (os.stat(path).st_mtime_ns, open(path).read()) == before
+    assert_cleaned_up(env)
+
+
+@needs_atticdb
+def test_copilot_skill_note(env, monkeypatch):
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], "files", "claude-code", "copilot", 1)
+    assert not res.errored and not any("skills offered" in r for r in res.reasons), res.reasons
+    monkeypatch.setenv("STUB_COPILOT_SKILL", "activitykit")
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], "files", "copilot", "claude-code", 1)
+    assert not res.errored, res.reasons
+    assert "copilot writer: 1 non-builtin skills offered (activitykit)" in res.reasons
     assert_cleaned_up(env)

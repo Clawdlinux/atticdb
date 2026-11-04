@@ -9,7 +9,7 @@ import sys
 from research.setup_eval.tests.helpers import ATTICDB, fake_home as _fake_home, stub_calls  # noqa: F401
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-STUB_VARS = ("STUB_WRITER", "STUB_NATIVE_MEMORY", "STUB_REFRESH_AUTH", "STUB_READER_GREP", "CLAUDE_SECURESTORAGE_CONFIG_DIR")
+STUB_VARS = ("STUB_WRITER", "STUB_NATIVE_MEMORY", "STUB_REFRESH_AUTH", "STUB_READER_GREP", "STUB_COPILOT_SKILL", "CLAUDE_SECURESTORAGE_CONFIG_DIR")
 FAKE_AUTH = '{"stub": "login"}\n'
 
 

@@ -127,6 +127,18 @@ def copilot_session_log(event):
         f.write(json.dumps(event) + "\n")
 
 
+def copilot_system_message():
+    """The system message Copilot logs at session start, with its skills block: the 2 builtin skills,
+    plus a personal one named by STUB_COPILOT_SKILL."""
+    skills = [("customize-cloud-agent", "builtin"), ("github-pr-media", "builtin")]
+    if os.environ.get("STUB_COPILOT_SKILL"):
+        skills.append((os.environ["STUB_COPILOT_SKILL"], "personal"))
+    block = "".join(f"<skill>\n  <name>{n}</name>\n  <description>d</description>\n  <location>{loc}</location>\n"
+                    "</skill>\n" for n, loc in skills)
+    copilot_session_log({"type": "system.message", "data": {
+        "content": f"You are Copilot.\n<skill>\n<available_skills>\n{block}</available_skills>\n</skill>\n"}})
+
+
 def copilot_hook_context():
     """Runs each sessionStart hook in $COPILOT_HOME/hooks/*.json as Copilot CLI does: its `bash` line
     with its `env`, and `{"cwd": ...}` on stdin. Returns the `additionalContext` it printed."""
@@ -333,6 +345,7 @@ def agent(prompt):
         server = read_json(os.path.join(os.environ["COPILOT_HOME"], "mcp-config.json"), {}).get(
             "mcpServers", {}).get("atticdb")
         context = copilot_hook_context()
+        copilot_system_message()
     else:
         server = codex_server()
         context = hook_context(os.path.join(os.environ["CODEX_HOME"], "hooks.json"))
