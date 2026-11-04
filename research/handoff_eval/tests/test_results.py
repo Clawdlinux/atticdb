@@ -189,13 +189,17 @@ def test_regrade_and_check_dont_mix(capsys):
 
 
 def test_regrade_of_the_pilot_matches_the_hand_audit():
-    """The 2026-11-04 pilot CSV has no reply column. The 5 grader misses of the hand audit flip to pass.
-    Every other flip comes from a reply cut at 200 chars, whose cited fact sat past the cut."""
+    """The 2026-11-04 pilot CSV has no reply column. The 4 H5 grader misses of the hand audit flip to pass.
+    The 5th, H4 files, stays a fail: it cites HANDOFF.md's 3.9 but not bramble-ci, and the plan owner's
+    ruling passes H4 only on bramble-ci. Every other flip comes from a reply cut at 200 chars."""
     with open(PILOT, newline="") as f:
         rows = list(csv.DictReader(f))
     rg = results.regrade(rows)
-    fixed = {f"{c} {a} claude-code to copilot rep 1: fail -> pass" for c, a in
-             [("H4", "files"), ("H5", "native"), ("H5", "files"), ("H5", "atticdb"), ("H5", "oracle")]}
+    fixed = {f"H5 {a} claude-code to copilot rep 1: fail -> pass" for a in ("native", "files", "atticdb", "oracle")}
     assert fixed <= set(rg.changed)
+    assert not any(line.startswith("H4 files claude-code to copilot") for line in rg.changed)
+    h4 = {(r.arm, r.writer): r.passed for r in rg.results if r.case == "H4"}
+    assert h4[("files", "claude-code")] is False
     for line in set(rg.changed) - fixed:
         assert line.endswith("[reply cut at 200 chars: the flip may come from the missing text]"), line
+    assert "H4 passes only when the reply cites bramble-ci. Hand-audit H4 fails." in results.regrade_report(PILOT, rg)

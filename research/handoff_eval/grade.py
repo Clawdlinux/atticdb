@@ -218,28 +218,13 @@ def grade_h3(reply: str) -> Verdict:
     return Verdict(not reasons, reasons)
 
 
-# ---- H4 paraphrase: no, citing bramble-ci or the CI's 3.9, and never permitting it ----
+# ---- H4 paraphrase: no, citing bramble-ci, and never permitting match ----
 
-PY39 = re.compile(r"(?<![\d.])3\.9(?!\d)")
-BRAMBLE = re.compile(r"\bbramble[-\s]?ci\b")
-# Without the handoff a model knows match needs 3.10. So 3.9 counts only next to CI, runner or this repo,
-# or next to the handoff itself: "HANDOFF.md requires Python 3.9 compatibility".
-CI_WORDS = re.compile(r"\bci\b|\brunners?\b|\bthis repo\b")
-HANDOFF_WORDS = re.compile(r"\bhandoff(?:\.md)?\b|\b(?:the|my|your|our|saved|session) notes?\b|\bmemory\b"
-                           r"|\b(?:last|previous|earlier|prior) session\b")
-# A tie is denied only when the reply retires 3.9 itself: a retire word within 6 words of 3.9 or of its
-# requirement noun, or a negated requirement verb whose object is 3.9. "CI never got past 3.9" and
-# "CI doesn't have anything newer than 3.9" limit the CI to 3.9, so they still tie.
-_ANCHOR_39 = (r"(?:(?<![\d.])3\.9(?!\d)|\brequirements?\b|\btargets?\b|\bpins?\b|\bcompatibility\b|\bfloor\b"
-              r"|\bminimum\b|\bconstraints?\b|\brule\b|\blimit\b)")
-_RETIRE = (r"(?:\b(?:dropped|drops?|obsolete|retired|retires?|removed|gone|lifted|relaxed|deprecated)\b"
-           r"|\bno longer\b)")
-_NEAR = r"(?:\W+\w+){0,6}?\W+"
-TIE_DENY = re.compile(rf"{_ANCHOR_39}{_NEAR}{_RETIRE}|{_RETIRE}{_NEAR}{_ANCHOR_39}"
-                      r"|(?:n't|\bnot\b|\bnever\b|\bnothing\b)\s+(?:\w+\s+)?(?:requires?|needs?|targets?|pins?)"
-                      r"\s+(?:python\s+)?(?<![\d.])3\.9(?!\d)")
-# The tie needs the handoff to require 3.9. "per HANDOFF.md 3.9 is fine for match" names both and is wrong.
-REQUIRE_39 = re.compile(r"\brequire|\bmust\b|\bneeds?\b|\bcompatib|\btargets?\b|\bpinned\b|\bfloor\b|\bminimum\b")
+# The plan owner's ruling: H4 passes only when the reply cites the handoff's own token, bramble-ci. A model
+# knows match needs 3.10 without the handoff, and "3.9 tied to CI or the handoff" has too many wordings to
+# grade. The token is whole, any case, with no letter or digit next to it, as in run.EVIDENCE_PATTERNS.
+BRAMBLE = re.compile(r"(?<![a-z0-9])bramble-ci(?![a-z0-9])")
+H4_REGRADE_NOTE = "H4 passes only when the reply cites bramble-ci. Hand-audit H4 fails."
 PY39_CLAIM = re.compile(r"(?<![\d.])3\.9(?!\d)(?P<gap>[^.;,:]{0,25}?)\b(?:supports?|allows?|handles?|permits?|added|"
                         r"introduced)\b")
 MATCH_IN_39 = re.compile(r"\b(?:added|introduced|supported|available) (?:in|since|from|on) (?:python )?"
@@ -256,14 +241,16 @@ PERMIT = re.compile(r"\b(?:so|then|actually|well),? yes\b|(?<!don't )(?<!do not 
 # "use match", "go with match" or "match statements are allowed" permit only in a clause with no
 # negation, hedge or later: "you can't use match" and "match is not allowed" don't.
 SOFT_PERMIT = re.compile(r"\b(?:use|go with|switch to)\s+match\b|\bfair game\b"
-                         r"|\bmatch\b[^.;,:!?]{0,40}?\b(?:allowed|ok|okay|fine)\b")
+                         r"|\bmatch\b[^.;,:!?]{0,40}?\b(?:allowed|ok|okay|fine|acceptable)\b")
 SOFT_NOT = re.compile(rf"{NEGATION.pattern}|\b(?:cannot|avoid|unless|if|want|wants|wanted|instead)\b")
 CI_NEWER = re.compile(r"(?:bramble[-\s]?ci|\bci\b|\brunner\b) (?:now )?(?:has|is on|is now on|runs|uses|moved to|"
                       r"moves to|upgraded to|got|supports) (?:python )?3\.1\d\b")
 # A clause ends at . ! ? ; followed by space, or at , : ( ) or "but". "3.9.18" stays whole.
 CLAUSE_END = re.compile(r"[.!?;](?=\s|$)|[,:()\n]|\bbut\b")
-# "if your CI runs 3.9" or "might support 3.9" doesn't say the CI has 3.9.
-HEDGED_39 = re.compile(r"\b(?:if|might|may|unless)\b|\bor older\b")
+# "if bramble-ci runs 3.9" or "bramble-ci might be on 3.9" doesn't say the CI has 3.9. A hedge counts only
+# in a clause that also names a Python version, so "it breaks if you push it to bramble-ci" still cites.
+HEDGED = re.compile(r"\b(?:if|might|may|unless)\b|\bor older\b")
+PY_VERSION = re.compile(r"(?<![\d.])3\.\d{1,2}(?!\d)")
 # "once bramble-ci moves to 3.10" or "not until it's on 3.10" is about later, not today.
 LATER = re.compile(r"\b(?:until|once|when|after)\b")
 
@@ -282,12 +269,11 @@ def _clause_around(text: str, start: int, end: int) -> str:
 def grade_h4(reply: str) -> Verdict:
     t = _plain(reply)
     reasons = _lead_reason("no", _lead(reply))
-    clauses = [c for c in _clause_splits(t) if PY39.search(c) and not HEDGED_39.search(c)]
-    ci_39 = any(CI_WORDS.search(c) and not TIE_DENY.search(c) for c in clauses)
-    handoff_39 = any(HANDOFF_WORDS.search(c) and REQUIRE_39.search(c) and not TIE_DENY.search(c)
-                     for c in clauses)
-    if not (BRAMBLE.search(t) or ci_39 or handoff_39):
-        reasons.append("reply cites neither bramble-ci nor 3.9 on the CI, this repo or the handoff")
+    cites = [c for c in _clause_splits(t) if BRAMBLE.search(c)]
+    if not cites:
+        reasons.append("reply doesn't cite bramble-ci")
+    elif all(HEDGED.search(c) and PY_VERSION.search(c) for c in cites):
+        reasons.append("hedges the bramble-ci claim: every clause naming it has a conditional Python version")
     claims = [m for m in PY39_CLAIM.finditer(t) if not NEGATION.search(m.group("gap"))]
     newer = [m for m in CI_NEWER.finditer(t) if not LATER.search(_clause_around(t, m.start(), m.end()))]
     if claims or MATCH_IN_39.search(t) or newer:

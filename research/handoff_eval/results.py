@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 
 from .arms import ARMS
 from .cases import CASES
-from .grade import grade
+from .grade import H4_REGRADE_NOTE, grade
 from .run import HandoffResult, all_in_one_place, parse_where
 
 FIRST_LINE = "Integration pilot. Not a statistical result."
@@ -291,6 +291,8 @@ def regrade_report(path: str, rg: Regrade) -> list[str]:
                      "or a wrong claim, so its verdict can differ from a grade of the whole reply.")
     lines.append(f"Code cases keep their stored verdict, as the repo they were graded on is gone: {code} rows.")
     lines.append(f"Errored rows stay errored: {sum(r.errored for r in rg.results)}.")
+    if any(r.case == "H4" for r in rg.results):
+        lines.append(H4_REGRADE_NOTE)
     if rg.bare_turn:
         lines.append(f"{rg.bare_turn} rows count as captured with reason only through `{BARE_TURN}`. This CSV "
                      "predates turns named by lsn, so tokens in 2 notes there count as 1 place.")

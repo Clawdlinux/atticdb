@@ -212,6 +212,7 @@ python3 -m research.handoff_eval --regrade research/handoff_eval/results/2026-11
 ```
 
 It grades the stored answer replies (H1, H3, H4, H5) again with the current graders, prints each verdict that changed, then the summary. It runs no agent and writes nothing.
+H4 passes only on a reply that starts with no and cites `bramble-ci` (whole token, any case), with no hedged version in the clause that names it and nothing that permits match. 3.9 tied to CI, the repo or HANDOFF.md without `bramble-ci` fails, so a re-grade prints "H4 passes only when the reply cites bramble-ci. Hand-audit H4 fails."
 Code cases (H2, H6) keep their stored verdict, as the repo they were graded on is gone. Errored rows stay errored. captured_all is worked out again from `captured_where`.
 A CSV without the `reply` column, such as the 2026-11-04 pilot, is graded on the `reply=` excerpt in the reasons. That excerpt is flattened and cut at 200 chars, so the output says those replies may be cut off, and marks each changed verdict that was graded on a cut reply.
 In such a CSV every store turn is the 1 place `atticdb:turn`, so 2 notes there count as 1 place. The output counts the rows this affects.

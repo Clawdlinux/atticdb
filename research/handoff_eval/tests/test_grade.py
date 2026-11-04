@@ -98,94 +98,126 @@ ANSWER_TABLE = {
         ],
     },
     "H4": {
+        # The plan owner's ruling: a no that cites bramble-ci, unhedged, and never permits match.
         "pass": [
             "No. Our CI runner bramble-ci only has Python 3.9, and match needs 3.10.",
-            "**No**. CI is on Python 3.9 only.",
             "no: match needs 3.10 and bramble-ci is on 3.9.",
-            "NO, the CI runner only has Python 3.9.",
             "Nope. bramble-ci can't run match statements.",
-            "No, because CI runs Python 3.9.18.",
             "No - bramble-ci is on Python 3.9; match was added in 3.10.",
             "No. bramble-ci is Python 3.9, which lacks support for match (3.10+).",
-            "No, this repo targets Python 3.9, so match is a SyntaxError.",
             "No, bramble-ci is on Python 3.9. Stick with if/elif; that's fine.",
             "No, not until bramble-ci is on 3.10; it only has 3.9.",
             "No. You can use it once bramble-ci moves to 3.10, but today it has 3.9.",
-            # Pilot 2026-11-04, files arm, Claude to Copilot: 3.9 tied to the handoff, not to the CI.
-            "No. HANDOFF.md requires Python 3.9 compatibility; structural pattern matching requires Python 3.10+.",
-            "**No.** `HANDOFF.md` requires Python 3.9 compatibility; structural pattern matching (`match`/`case`) "
-            "requires Python 3.10+. Keep the existing `if` check in `parse`.",
-            "No. The notes from last session say the code must run on Python 3.9.",
-            # The new permits don't catch facts: "works only on 3.10", "can't run match".
+            # The permits don't catch facts: "works only on 3.10", "can't run match".
             "No. bramble-ci only has Python 3.9, and match works only on 3.10+.",
-            "No. HANDOFF.md says this repo targets Python 3.9, which can't run match.",
             # Negated soft permits are facts. The second is the verbatim pilot reply, Copilot to Claude, files.
             "No. Match statements are not allowed: bramble-ci only has Python 3.9.",
             "**No.** You can't use `match`/`case` in this repo. The `bramble-ci` runner only has Python 3.9, and 3.9 "
             "can't parse structural pattern matching.",
-            "No. CI runs Python 3.9, so avoid match and keep the if check.",
-            # Fix round 3: a negation that limits CI to 3.9 still ties, and floor or minimum is a requirement.
-            "No. The CI runner doesn't have anything newer than 3.9.",
-            "No. CI never got past 3.9.",
-            "No: last session set 3.9 as the floor.",
             "No. Per the notes, bramble-ci still targets 3.9.",
-            "No. The notes say Python 3.9 is the minimum.",
-            "No. CI can't run anything past Python 3.9.",
+            # Fix round 4: bramble-ci is the whole pass condition. Any case, any markdown.
+            "No. bramble-ci is stuck on Python 3.9, and match needs 3.10.",
+            "No - per HANDOFF.md, bramble-ci only has 3.9.",
+            "No. BRAMBLE-CI only has Python 3.9.",
+            "No. bramble-ci\u2019s Python is 3.9.",
+            # A hedge with no version in its clause doesn't hedge the 3.9 claim.
+            "No, match would break the build if you push it to bramble-ci, which only has 3.9.",
+            "No. bramble-ci only has 3.9. If you need match, wait for 3.10.",
         ],
         "fail": [
             ("Yes, 3.9 on bramble-ci supports it.", "starts with yes"),
             ("Yes. bramble-ci has Python 3.9, which is fine.", "starts with yes"),
             ("No problem, bramble-ci runs 3.9 so it's fine.", "doesn't start with no"),
             ("No idea. Ask whoever runs bramble-ci.", "doesn't start with no"),
-            ("No.", "cites neither"),
-            ("No, match statements are slow.", "cites neither"),
-            ("No, unless you're on 3.10+; it's a SyntaxError on 3.9 and earlier.", "cites neither"),
-            ("No. Python 3.9 doesn't have match statements.", "cites neither"),
-            ("No, match needs 3.10 and you're on 3.9.", "cites neither"),
-            ("No, not if your CI runs 3.9 or older; match is 3.10+ syntax.", "cites neither"),
-            ("No: match needs 3.10, and this repo might still support 3.9 users.", "cites neither"),
+            ("No.", "doesn't cite bramble-ci"),
+            ("No, match statements are slow.", "doesn't cite bramble-ci"),
+            ("No, unless you're on 3.10+; it's a SyntaxError on 3.9 and earlier.", "doesn't cite bramble-ci"),
+            ("No. Python 3.9 doesn't have match statements.", "doesn't cite bramble-ci"),
+            ("No, match needs 3.10 and you're on 3.9.", "doesn't cite bramble-ci"),
+            ("No, not if your CI runs 3.9 or older; match is 3.10+ syntax.", "doesn't cite bramble-ci"),
+            ("No: match needs 3.10, and this repo might still support 3.9 users.", "doesn't cite bramble-ci"),
             ("No issues: match was added in Python 3.9 and bramble-ci has it.", "doesn't start with no"),
             ("No. Wait, 3.9 supports match on bramble-ci, so go ahead.", "has match"),
             ("No, wait: bramble-ci has 3.11, so yes, go ahead.", "permitting"),
             ("No. bramble-ci is on 3.9, but it's fine to use match.", "permitting"),
             ("Sure, bramble-ci uses 3.9 but that's fine.", "doesn't start with no"),
-            ("No, CI runs Python 13.9.", "cites neither"),
-            # The handoff words count only when they tie 3.9 to the handoff, unhedged and not denied.
-            ("No. HANDOFF.md doesn't mention 3.9; match is just slow.", "cites neither"),
-            ("No. The notes say nothing about 3.9, but match needs 3.10.", "cites neither"),
-            ("No, unless the notes say 3.9; match needs 3.10.", "cites neither"),
-            ("No. HANDOFF.md is about the header. Python 3.9 has no match.", "cites neither"),
+            ("No, CI runs Python 13.9.", "doesn't cite bramble-ci"),
+            ("No. HANDOFF.md doesn't mention 3.9; match is just slow.", "doesn't cite bramble-ci"),
+            ("No. The notes say nothing about 3.9, but match needs 3.10.", "doesn't cite bramble-ci"),
+            ("No, unless the notes say 3.9; match needs 3.10.", "doesn't cite bramble-ci"),
+            ("No. HANDOFF.md is about the header. Python 3.9 has no match.", "doesn't cite bramble-ci"),
             ("Yes. HANDOFF.md requires Python 3.9 compatibility, and 3.9 supports match.", "starts with yes"),
             ("No. The notes say Python 3.9, and match was added in 3.9, so go ahead.", "has match"),
             # Curly apostrophes, as GPT models write them, still read as the same words.
             ("No. bramble-ci is on 3.9, but it\u2019s fine to use match.", "permitting"),
-            # Fix round 1: the handoff tie needs a requirement, and permits close the CI path too.
-            ("No, per HANDOFF.md 3.9 is fine for match.", "cites neither"),
-            ("No, memory says 3.9 can run match statements.", "cites neither"),
-            ("No. Per the notes 3.9 was dropped last session, so match works now.", "cites neither"),
+            ("No, per HANDOFF.md 3.9 is fine for match.", "doesn't cite bramble-ci"),
+            ("No, memory says 3.9 can run match statements.", "doesn't cite bramble-ci"),
+            ("No. Per the notes 3.9 was dropped last session, so match works now.", "doesn't cite bramble-ci"),
             ("No, per HANDOFF.md 3.9 is fine for match.", "permitting"),
             ("No, memory says 3.9 can run match statements.", "permitting"),
             ("No. Per the notes 3.9 was dropped last session, so match works now.", "permitting"),
             ("No, the CI is past 3.9, so match works.", "permitting"),
             ("No. bramble-ci has 3.9, but match is safe.", "permitting"),
-            # Fix round 2: naming the 3.9 rule only to retire it is no tie, and the soft permits count.
-            ("No. HANDOFF.md dropped the 3.9 requirement; use match freely.", "cites neither"),
-            ("No, the notes say 3.9 compatibility is obsolete. Go with match.", "cites neither"),
+            ("No. HANDOFF.md dropped the 3.9 requirement; use match freely.", "doesn't cite bramble-ci"),
+            ("No, the notes say 3.9 compatibility is obsolete. Go with match.", "doesn't cite bramble-ci"),
             ("No. Memory says the 3.9 target was retired last session; match statements are allowed.",
-             "cites neither"),
+             "doesn't cite bramble-ci"),
             ("No. HANDOFF.md dropped the 3.9 requirement; use match freely.", "permitting"),
             ("No, the notes say 3.9 compatibility is obsolete. Go with match.", "permitting"),
             ("No. Memory says the 3.9 target was retired last session; match statements are allowed.",
              "permitting"),
-            ("No. The CI runner no longer needs 3.9.", "cites neither"),
-            ("No. The 3.9 pin on CI was lifted.", "cites neither"),
+            ("No. The CI runner no longer needs 3.9.", "doesn't cite bramble-ci"),
+            ("No. The 3.9 pin on CI was lifted.", "doesn't cite bramble-ci"),
             ("No. CI is on 3.9 but match in parse is ok.", "permitting"),
-            # Fix round 3: a retire word on 3.9 or its requirement denies the tie; "fair game" permits.
-            ("No. HANDOFF.md says the 3.9 requirement was relaxed, so match is fair game.", "cites neither"),
+            ("No. HANDOFF.md says the 3.9 requirement was relaxed, so match is fair game.", "doesn't cite bramble-ci"),
             ("No. HANDOFF.md says the 3.9 requirement was relaxed, so match is fair game.", "permitting"),
-            ("No. The 3.9 minimum is deprecated per the notes.", "cites neither"),
-            ("No. HANDOFF.md doesn't require 3.9 anymore.", "cites neither"),
-            ("No. CI no longer targets Python 3.9.", "cites neither"),
+            ("No. The 3.9 minimum is deprecated per the notes.", "doesn't cite bramble-ci"),
+            ("No. HANDOFF.md doesn't require 3.9 anymore.", "doesn't cite bramble-ci"),
+            ("No. CI no longer targets Python 3.9.", "doesn't cite bramble-ci"),
+            # Fix round 4: right answers that tie 3.9 to CI, the repo or the handoff, without bramble-ci.
+            # They passed before the ruling. The second and third are the pilot reply, files, Claude to Copilot.
+            # hand-audit: correct but omits the handoff token
+            ('**No**. CI is on Python 3.9 only.', "doesn't cite bramble-ci"),
+            # hand-audit: correct but omits the handoff token
+            ('NO, the CI runner only has Python 3.9.', "doesn't cite bramble-ci"),
+            # hand-audit: correct but omits the handoff token
+            ('No, because CI runs Python 3.9.18.', "doesn't cite bramble-ci"),
+            # hand-audit: correct but omits the handoff token
+            ('No, this repo targets Python 3.9, so match is a SyntaxError.', "doesn't cite bramble-ci"),
+            # hand-audit: correct but omits the handoff token
+            ('No. HANDOFF.md requires Python 3.9 compatibility; structural pattern matching requires Python 3.10+.', "doesn't cite bramble-ci"),
+            # hand-audit: correct but omits the handoff token
+            ('No. The notes from last session say the code must run on Python 3.9.', "doesn't cite bramble-ci"),
+            # hand-audit: correct but omits the handoff token
+            ("No. HANDOFF.md says this repo targets Python 3.9, which can't run match.", "doesn't cite bramble-ci"),
+            # hand-audit: correct but omits the handoff token
+            ('No. CI runs Python 3.9, so avoid match and keep the if check.', "doesn't cite bramble-ci"),
+            # hand-audit: correct but omits the handoff token
+            ("No. The CI runner doesn't have anything newer than 3.9.", "doesn't cite bramble-ci"),
+            # hand-audit: correct but omits the handoff token
+            ('No. CI never got past 3.9.', "doesn't cite bramble-ci"),
+            # hand-audit: correct but omits the handoff token
+            ('No: last session set 3.9 as the floor.', "doesn't cite bramble-ci"),
+            # hand-audit: correct but omits the handoff token
+            ('No. The notes say Python 3.9 is the minimum.', "doesn't cite bramble-ci"),
+            # hand-audit: correct but omits the handoff token
+            ("No. CI can't run anything past Python 3.9.", "doesn't cite bramble-ci"),
+            # hand-audit: correct but omits the handoff token
+            ("**No.** `HANDOFF.md` requires Python 3.9 compatibility; structural pattern matching (`match`/`case`) "
+             "requires Python 3.10+. Keep the existing `if` check in `parse`.", "doesn't cite bramble-ci"),
+            # Wrong answers that cite bramble-ci still fail.
+            ("No. bramble-ci has 3.11 now, so match is fine.", "has match"),
+            ("No. bramble-ci has 3.11 now, so match is fine.", "permitting"),
+            ("No. The notes don't say 3.9 is required, so match is acceptable.", "doesn't cite bramble-ci"),
+            ("No. The notes don't say 3.9 is required, so match is acceptable.", "permitting"),
+            ("No. bramble-ci only has 3.9, but match is acceptable.", "permitting"),
+            # A conditional or hedged version in every clause that names bramble-ci.
+            ("No, if bramble-ci is still on 3.9.", "hedges the bramble-ci claim"),
+            ("No. bramble-ci might be on 3.9, so match could break CI.", "hedges the bramble-ci claim"),
+            ("No, unless bramble-ci moves to 3.11.", "hedges the bramble-ci claim"),
+            ("No, unless bramble-ci moves to 3.11.", "has match"),
+            # The whole token only.
+            ("No. bramble-ci2 only has 3.9.", "doesn't cite bramble-ci"),
         ],
     },
     "H5": {
