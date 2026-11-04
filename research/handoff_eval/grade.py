@@ -229,6 +229,8 @@ HANDOFF_WORDS = re.compile(r"\bhandoff(?:\.md)?\b|\b(?:the|my|your|our|saved|ses
                            r"|\b(?:last|previous|earlier|prior) session\b")
 # "the notes don't mention 3.9" ties 3.9 to the handoff only to deny it.
 HANDOFF_DENY = re.compile(r"n't|\bnot\b|\bno\b|\bnever\b|\bnothing\b|\bnone\b|\bwithout\b")
+# The tie needs the handoff to require 3.9. "per HANDOFF.md 3.9 is fine for match" names both and is wrong.
+REQUIRE_39 = re.compile(r"\brequire|\bmust\b|\bneeds?\b|\bcompatib|\btargets?\b|\bpinned\b")
 PY39_CLAIM = re.compile(r"(?<![\d.])3\.9(?!\d)(?P<gap>[^.;,:]{0,25}?)\b(?:supports?|allows?|handles?|permits?|added|"
                         r"introduced)\b")
 MATCH_IN_39 = re.compile(r"\b(?:added|introduced|supported|available) (?:in|since|from|on) (?:python )?"
@@ -237,7 +239,11 @@ NEGATION = re.compile(r"n't|\bnot\b|\bno\b|\bnever\b|\bwithout\b|\blacks?\b|\bla
                       r"\bpredates?\b")
 PERMIT = re.compile(r"\b(?:so|then|actually|well),? yes\b|(?<!don't )(?<!do not )(?<!not )\bgo ahead\b"
                     r"|\b(?:it's|it is|that's|that is) (?:fine|ok|okay|allowed) to (?:use|go)\b"
-                    r"|\bmatch (?:is|would be) (?:fine|ok|okay|allowed)\b|\byou can use (?:it|match)\b")
+                    r"|\bmatch (?:is|would be) (?:fine|ok|okay|allowed)\b|\byou can use (?:it|match)\b"
+                    # "match works only on 3.10" is a fact, not a permit.
+                    r"|\bmatch (?:statements? )?works\b(?!\s+(?:only|on|in|from|with|since|starting)\b)"
+                    r"|\b(?:is|are) (?:fine|ok|okay|safe) for match\b|\bcan run match\b"
+                    r"|\b(?:match|it|that|this)(?: statements?| syntax)? is safe\b|\b(?:it's|that's) safe\b")
 CI_NEWER = re.compile(r"(?:bramble[-\s]?ci|\bci\b|\brunner\b) (?:now )?(?:has|is on|is now on|runs|uses|moved to|"
                       r"moves to|upgraded to|got|supports) (?:python )?3\.1\d\b")
 # A clause ends at . ! ? ; followed by space, or at , : ( ) or "but". "3.9.18" stays whole.
@@ -264,7 +270,8 @@ def grade_h4(reply: str) -> Verdict:
     reasons = _lead_reason("no", _lead(reply))
     clauses = [c for c in _clause_splits(t) if PY39.search(c) and not HEDGED_39.search(c)]
     ci_39 = any(CI_WORDS.search(c) for c in clauses)
-    handoff_39 = any(HANDOFF_WORDS.search(c) and not HANDOFF_DENY.search(c) for c in clauses)
+    handoff_39 = any(HANDOFF_WORDS.search(c) and REQUIRE_39.search(c) and not HANDOFF_DENY.search(c)
+                     for c in clauses)
     if not (BRAMBLE.search(t) or ci_39 or handoff_39):
         reasons.append("reply cites neither bramble-ci nor 3.9 on the CI, this repo or the handoff")
     claims = [m for m in PY39_CLAIM.finditer(t) if not NEGATION.search(m.group("gap"))]
@@ -300,11 +307,12 @@ _TEENS = "ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen
 _TENS = "twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety"
 # Every number word up to 99, then "a", "an" and "hundred".
 NUMWORD = rf"(?:(?:{_TENS})(?:[\s-](?:{_ONES}))?|{_TEENS}|{_ONES}|a|an|hundred)"
-UNIT = r"(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?|wks?|fortnights?|months?|mos?|quarters?|years?|yrs?)"
+UNIT = (r"(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?|wks?|fortnights?|months?|mos?|quarters?|qtrs?|"
+        r"years?|yrs?|decades?)")
 NUM_TIME = re.compile(rf"(?<![\w.])\d+(?:\.\d+)?\s*-?\s*(?:{UNIT}|[hdwy])\b|\b{NUMWORD}[\s-]+{UNIT}\b")
 PERIOD = re.compile(r"\b(?:hourly|daily|weekly|fortnightly|monthly|quarterly|yearly|annually|annual|indefinitely|"
                     r"forever|permanently|perpetually)\b"
-                    r"|\bend of (?:the |each |every )?(?:fiscal |calendar )?year\b"
+                    r"|\bend of (?:the |each |every )?(?:fiscal |calendar )?(?:year|quarter|month)\b"
                     r"|\b(?:each|every|per|once a|twice a) (?:fiscal |calendar )?(?:day|week|month|quarter|year)\b")
 
 

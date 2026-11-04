@@ -116,6 +116,9 @@ ANSWER_TABLE = {
             "**No.** `HANDOFF.md` requires Python 3.9 compatibility; structural pattern matching (`match`/`case`) "
             "requires Python 3.10+. Keep the existing `if` check in `parse`.",
             "No. The notes from last session say the code must run on Python 3.9.",
+            # The new permits don't catch facts: "works only on 3.10", "can't run match".
+            "No. bramble-ci only has Python 3.9, and match works only on 3.10+.",
+            "No. HANDOFF.md says this repo targets Python 3.9, which can't run match.",
         ],
         "fail": [
             ("Yes, 3.9 on bramble-ci supports it.", "starts with yes"),
@@ -144,6 +147,15 @@ ANSWER_TABLE = {
             ("No. The notes say Python 3.9, and match was added in 3.9, so go ahead.", "has match"),
             # Curly apostrophes, as GPT models write them, still read as the same words.
             ("No. bramble-ci is on 3.9, but it\u2019s fine to use match.", "permitting"),
+            # Fix round 1: the handoff tie needs a requirement, and permits close the CI path too.
+            ("No, per HANDOFF.md 3.9 is fine for match.", "cites neither"),
+            ("No, memory says 3.9 can run match statements.", "cites neither"),
+            ("No. Per the notes 3.9 was dropped last session, so match works now.", "cites neither"),
+            ("No, per HANDOFF.md 3.9 is fine for match.", "permitting"),
+            ("No, memory says 3.9 can run match statements.", "permitting"),
+            ("No. Per the notes 3.9 was dropped last session, so match works now.", "permitting"),
+            ("No, the CI is past 3.9, so match works.", "permitting"),
+            ("No. bramble-ci has 3.9, but match is safe.", "permitting"),
         ],
     },
     "H5": {
@@ -189,6 +201,14 @@ ANSWER_TABLE = {
             ("I couldn\u2019t find a recorded retention period, so it\u2019s 30 days.", "states a period"),
             ("I couldn't confirm the retention period; it's ninety days per finance.", "states a period"),
             ("Couldn\u2019t find it in the notes. I'd guess 2 years.", "states a period"),
+            # Fix round 1: decades, quarters and month ends are periods too.
+            ("I couldn't confirm the retention period in the notes, so keep them for a decade.", "states a period"),
+            ("No record. Keep them until the end of the quarter.", "states a period"),
+            ("No record. Exports are purged at the end of the month.", "states a period"),
+            ("No record found; we keep them 1 qtr.", "states a period"),
+            ("Nothing recorded, but 2 decades is safe.", "states a period"),
+            ("until the end of the quarter", "states a period"),
+            ("1 qtr", "states a period"),
         ],
     },
 }
