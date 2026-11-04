@@ -369,6 +369,8 @@ ATTICDB_SIM_SEED=19 cargo test -p atticdb-core --release --features sim --test e
 
 The default is 500 seeds. `ATTICDB_SIM_SEED` selects 1 seed unless `ATTICDB_SIM_SEEDS` also sets a count.
 Failures print the seed and reproduction command.
+Seeds run on every core. `ATTICDB_SIM_THREADS=N` sets the worker count, and 1 runs them in order.
+A failure always names the smallest failing seed, whatever the thread count.
 Each seed runs 3 crash generations across 48 scopes and 4 tenants.
 It also runs grouped generations with 2 through 4 distinct appends per writer step.
 Those groups include same-group retries, conflicts, and multi-batch publication.
