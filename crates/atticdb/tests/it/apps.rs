@@ -13,42 +13,63 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-/// The fake `claude`, in Python. `mcp add -s user` and `mcp remove -s user <name>` edit
-/// `.claude.json` in `CLAUDE_CONFIG_DIR`, else in the user's home, as Claude Code does.
-const FAKE_CLAUDE: &str = r#"import json, os, sys
-args = sys.argv[1:]
-home = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~")
-path = os.path.join(home, ".claude.json")
-try:
-    with open(path) as f:
-        root = json.load(f)
-except FileNotFoundError:
-    root = {}
-servers = root.setdefault("mcpServers", {})
-if args[:4] == ["mcp", "add", "-s", "user"]:
-    rest, env, words = args[4:], {}, []
-    while rest:
-        arg = rest.pop(0)
-        if arg == "--":
-            words += rest
-            break
-        if arg == "-e":
-            while rest and not rest[0].startswith("-"):
-                key, value = rest.pop(0).split("=", 1)
-                env[key] = value
-        else:
-            words.append(arg)
-    if len(words) < 2 or words[0] in servers:
-        sys.exit("bad mcp add: " + json.dumps(args))
-    servers[words[0]] = {"type": "stdio", "command": words[1], "args": words[2:], "env": env}
-elif args[:4] == ["mcp", "remove", "-s", "user"] and len(args) == 5:
-    if servers.pop(args[4], None) is None:
-        sys.exit("no server " + args[4])
-else:
-    sys.exit("unexpected args: " + json.dumps(args))
-with open(path, "w") as f:
-    json.dump(root, f, indent=2)
-"#;
+/// The name of [`fake_claude`] in this test binary, which the fake `claude` shim runs.
+const FAKE_CLAUDE: &str = "apps::fake_claude";
+
+/// The fake `claude`. It is not a test: [`Profile::fake_claude`]'s shim runs this test binary
+/// with only this function selected and the CLI's args after `--`. So it starts as fast as any
+/// compiled program. A Python stub took over setup's 10 s on a cold Windows runner (#172).
+/// `mcp add -s user` and `mcp remove -s user <name>` edit `.claude.json` in
+/// `CLAUDE_CONFIG_DIR`, else in the user's home, as Claude Code does. A failure panics, so the
+/// binary exits non-zero.
+#[test]
+#[ignore = "the fake claude CLI, run only by the apps tests' shim"]
+fn fake_claude() {
+    let args: Vec<String> = std::env::args().skip_while(|arg| arg != "--").skip(1).collect();
+    if args.is_empty() {
+        return; // Run by `--ignored`, not by the shim.
+    }
+    let user = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    let config = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|dir| !dir.is_empty());
+    let path =
+        PathBuf::from(config.or_else(|| std::env::var_os(user)).unwrap()).join(".claude.json");
+    let mut root = match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => json!({}),
+        Err(error) => panic!("{}: {error}", path.display()),
+    };
+    let servers = root.as_object_mut().unwrap().entry("mcpServers").or_insert_with(|| json!({}));
+    let servers = servers.as_object_mut().unwrap();
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    match args.as_slice() {
+        ["mcp", "add", "-s", "user", rest @ ..] => {
+            let (mut rest, mut env, mut words) = (rest.iter(), serde_json::Map::new(), vec![]);
+            while let Some(&arg) = rest.next() {
+                if arg == "--" {
+                    words.extend(rest.by_ref());
+                } else if arg == "-e" {
+                    while let Some(value) = rest.as_slice().first().filter(|v| !v.starts_with('-'))
+                    {
+                        let (key, value) = value.split_once('=').unwrap();
+                        env.insert(key.to_owned(), value.into());
+                        rest.next();
+                    }
+                } else {
+                    words.push(arg);
+                }
+            }
+            assert!(words.len() >= 2 && !servers.contains_key(words[0]), "bad mcp add: {args:?}");
+            let entry =
+                json!({"type": "stdio", "command": words[1], "args": words[2..], "env": env});
+            servers.insert(words[0].to_owned(), entry);
+        }
+        ["mcp", "remove", "-s", "user", name] => {
+            assert!(servers.remove(*name).is_some(), "no server {name}");
+        }
+        _ => panic!("unexpected args: {args:?}"),
+    }
+    std::fs::write(&path, serde_json::to_vec_pretty(&root).unwrap()).unwrap();
+}
 
 /// The rule the hooks must show.
 const RULE: &str = "- user/style: short sentences";
@@ -73,16 +94,18 @@ impl Profile {
         Self { root: root.to_owned(), bin, exe }
     }
 
-    /// Adds the fake `claude`, which runs [`FAKE_CLAUDE`] with Python.
+    /// Adds the fake `claude`: a shim that runs [`fake_claude`] in this test binary, which is
+    /// already built and on disk.
     fn fake_claude(&self) {
-        let python = python();
-        std::fs::write(self.bin.join("claude.py"), FAKE_CLAUDE).unwrap();
+        let exe = std::env::current_exe().unwrap();
+        let run = ["--exact", "--ignored", "--quiet", FAKE_CLAUDE, "--"];
         if cfg!(windows) {
             // As npm installs it: a `.cmd` shim.
-            let shim = format!("@\"{}\" \"%~dp0claude.py\" %*\r\n", python.display());
+            let shim = format!("@\"{}\" {} %*\r\n", exe.display(), run.join(" "));
             std::fs::write(self.bin.join("claude.cmd"), shim).unwrap();
         } else {
-            let script = format!("#!/bin/sh\nexec '{}' \"$0.py\" \"$@\"\n", python.display());
+            let exe = exe.to_str().unwrap().replace('\'', r"'\''");
+            let script = format!("#!/bin/sh\nexec '{exe}' {} \"$@\"\n", run.join(" "));
             let claude = self.bin.join("claude");
             std::fs::write(&claude, script).unwrap();
             #[cfg(unix)]
@@ -147,15 +170,6 @@ impl Profile {
 fn system32() -> PathBuf {
     let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
     PathBuf::from(root).join("System32")
-}
-
-/// Python on the test's `PATH`, not the Windows Store alias.
-fn python() -> PathBuf {
-    let name = if cfg!(windows) { "python.exe" } else { "python3" };
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    let dirs = std::env::split_paths(&path).filter(|dir| !dir.ends_with("WindowsApps"));
-    let found = dirs.map(|dir| dir.join(name)).find(|python| python.is_file());
-    found.unwrap_or_else(|| panic!("the fake claude needs {name} on PATH"))
 }
 
 /// The exit code, stdout and stderr of a finished command.
