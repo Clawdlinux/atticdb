@@ -599,9 +599,10 @@ const SETTINGS: &str = r#"{
 "#;
 
 /// `connect claude-code` adds the MCP entry through `claude mcp add`, and appends the
-/// SessionStart hook and the allow rules to `settings.json`, in its config dir. A rerun
-/// writes nothing. `disconnect` removes them, leaving a hand-kept file byte for byte as it
-/// was. `--notes ask` leaves out `memory_append`, and `--no-hook` the hook. A part that
+/// SessionStart and PostCompact hooks and the allow rules to `settings.json`, in its config
+/// dir. A rerun writes nothing. `disconnect` removes them, leaving a hand-kept file byte for
+/// byte as it was, but for an empty PostCompact array. `--notes ask` leaves out
+/// `memory_append`, and `--no-hook` the hooks. A part that
 /// can't be applied is skipped with what to add by hand, the others still apply, and the
 /// exit code is 1. A different entry is refused unless `--force`. `claude mcp get` never runs.
 #[test]
@@ -628,6 +629,8 @@ fn connect_claude_code_adds_its_parts() {
     let quoted = format!("'{}'", exe.replace('\'', r"'\''"));
     let command = format!("{quoted} hook session-start --harness claude-code");
     let group = json!({"hooks": [{"type": "command", "command": command, "timeout": 5}]});
+    let compact = format!("{quoted} hook post-compact --harness claude-code");
+    let compact = json!({"hooks": [{"type": "command", "command": compact, "timeout": 5}]});
     let reads =
         ["mcp__atticdb__memory_search", "mcp__atticdb__memory_recent", "mcp__atticdb__fact_get"];
     let reads = [&reads[..], &["mcp__atticdb__fact_list"]].concat();
@@ -695,18 +698,28 @@ fn connect_claude_code_adds_its_parts() {
         });
         let backup = backup.unwrap_or_default();
         assert_eq!(lines[1], format!("SessionStart hook: added ({shown}{backup})"), "{case}");
-        assert_eq!(lines[2], format!("allow rules: added ({shown}{backup})"), "{case}");
-        assert_eq!(lines[3..], [next], "{case}");
+        assert_eq!(lines[2], format!("PostCompact hook: added ({shown}{backup})"), "{case}");
+        assert_eq!(lines[3], format!("allow rules: added ({shown}{backup})"), "{case}");
+        assert_eq!(lines[4..], [next], "{case}");
         assert_eq!(calls()[start..], [add(None)], "{case}");
         assert_eq!(read(&state)["mcpServers"]["atticdb"], entry(None), "{case}");
         let mut wanted = original.clone();
         push(&mut wanted, ["hooks", "SessionStart"], std::slice::from_ref(&group));
+        push(&mut wanted, ["hooks", "PostCompact"], std::slice::from_ref(&compact));
         push(&mut wanted, ["permissions", "allow"], &strings(&[&reads[..], &[append]].concat()));
         assert_eq!(read(&settings), wanted, "{case}");
         let mode = std::fs::metadata(&settings).unwrap().mode() & 0o777;
         assert_eq!(mode, if kept.is_some() { 0o644 } else { 0o600 }, "{case}: mode");
         if kept.is_none() {
-            let pretty = serde_json::to_string_pretty(&wanted).unwrap() + "\n";
+            // serde_json sorts keys, but the file keeps them in the order they went in.
+            let sorted = serde_json::to_string_pretty(&wanted).unwrap() + "\n";
+            let (head, rest) = sorted.split_once("\n    \"PostCompact\": ").unwrap();
+            let (compact, rest) = rest.split_once(",\n    \"SessionStart\": ").unwrap();
+            let (start, tail) = rest.split_once("\n  },\n  \"permissions\"").unwrap();
+            let pretty = format!(
+                "{head}\n    \"SessionStart\": {start},\n    \"PostCompact\": {compact}\n  }},\n  \
+                 \"permissions\"{tail}"
+            );
             assert_eq!(std::fs::read_to_string(&settings).unwrap(), pretty, "{case}");
             // Under CLAUDE_CONFIG_DIR, the fake claude made the dir first.
             let dir_mode = std::fs::metadata(&config_dir).unwrap().mode() & 0o777;
@@ -718,7 +731,7 @@ fn connect_claude_code_adds_its_parts() {
         let (code, out) = connect(&[]);
         let unchanged = format!(
             "MCP entry: unchanged ({at})\nSessionStart hook: unchanged ({shown})\n\
-             allow rules: unchanged ({shown})\n{next}\n"
+             PostCompact hook: unchanged ({shown})\nallow rules: unchanged ({shown})\n{next}\n"
         );
         assert_eq!((code, out), (Some(0), unchanged), "{case}");
         assert_eq!(now(), before, "{case}: nothing written, no backup, no claude");
@@ -735,14 +748,22 @@ fn connect_claude_code_adds_its_parts() {
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines[0], format!("MCP entry: removed ({at})"), "{case}");
         assert!(lines[1].starts_with(&format!("SessionStart hook: removed ({shown}, backup: ")));
-        assert!(lines[2].starts_with(&format!("allow rules: removed ({shown}, backup: ")));
-        assert_eq!(lines.len(), 3, "{case}: {out}");
+        assert!(lines[2].starts_with(&format!("PostCompact hook: removed ({shown}, backup: ")));
+        assert!(lines[3].starts_with(&format!("allow rules: removed ({shown}, backup: ")));
+        assert_eq!(lines.len(), 4, "{case}: {out}");
         assert_eq!(calls().last(), Some(&remove), "{case}");
         assert_eq!(read(&state)["mcpServers"], json!({}), "{case}");
-        let emptied = json!({"hooks": {"SessionStart": []}, "permissions": {"allow": []}});
+        let emptied = json!({"hooks": {"SessionStart": [], "PostCompact": []},
+            "permissions": {"allow": []}});
+        // The hand-kept file had no PostCompact key, so an empty one stays, as for SessionStart.
+        let left = SETTINGS.replacen(
+            "    ]\n  },\n  \"statusLine\"",
+            "    ],\n    \"PostCompact\": []\n  },\n  \"statusLine\"",
+            1,
+        );
         let check = |when: &str| match kept {
-            Some(text) => {
-                assert_eq!(std::fs::read_to_string(&settings).unwrap(), text, "{case} {when}");
+            Some(_) => {
+                assert_eq!(std::fs::read_to_string(&settings).unwrap(), left, "{case} {when}");
             }
             None => assert_eq!(read(&settings), emptied, "{case} {when}"),
         };
@@ -751,7 +772,10 @@ fn connect_claude_code_adds_its_parts() {
         let (code, out) = connect(&["--no-hook", "--notes", "ask"]);
         assert_eq!(code, Some(0), "{case}: {out}");
         assert!(!out.contains("SessionStart hook"), "{case}: {out}");
+        assert!(!out.contains("PostCompact hook"), "{case}: {out}");
         let mut wanted = if kept.is_some() { original.clone() } else { emptied.clone() };
+        // Disconnect left an empty PostCompact array.
+        wanted["hooks"]["PostCompact"] = json!([]);
         push(&mut wanted, ["permissions", "allow"], &strings(&reads));
         assert_eq!(read(&settings), wanted, "{case}: --no-hook --notes ask");
         assert_eq!(disconnect().0, Some(0), "{case}");
@@ -954,14 +978,15 @@ fn connect_claude_code_adds_its_parts() {
     assert_eq!(code, Some(0), "{out}");
     let said = "\nSessionStart hook: found inside a group with other hooks, so not added again (";
     assert!(out.contains(said), "{out}");
-    assert_eq!(read(&settings)["hooks"], shared["hooks"], "no second group");
+    let start = |path: &Path| read(path)["hooks"]["SessionStart"].clone();
+    assert_eq!(start(&settings), shared["hooks"]["SessionStart"], "no second group");
     let (code, out) = run(&home, None, &bin, &[], &["disconnect", "claude-code"]);
     assert_eq!(code, Some(1), "{out}");
     let said =
         "\nSessionStart hook: found inside a group with other hooks; remove it by hand there (";
     assert!(out.starts_with("MCP entry: removed (") && out.contains(said), "{out}");
     assert!(out.contains("\nallow rules: removed ("), "{out}");
-    assert_eq!(read(&settings)["hooks"], shared["hooks"], "the group stays");
+    assert_eq!(start(&settings), shared["hooks"]["SessionStart"], "the group stays");
     // An older AtticDB handler there is skipped, with advice for that group.
     let mut older = shared.clone();
     older["hooks"]["SessionStart"][0]["hooks"][1]["command"] =
@@ -974,7 +999,7 @@ fn connect_claude_code_adds_its_parts() {
          inside that group by hand, to run: {command}\n"
     );
     assert!(out.contains(&said) && !out.contains("Add this group"), "{out}");
-    assert_eq!(read(&settings)["hooks"], older["hooks"], "nothing added");
+    assert_eq!(start(&settings), older["hooks"]["SessionStart"], "nothing added");
 
     // A binary path with a $, a backtick and a space. A symlink would not do: connect
     // writes the binary's real path. Connect then disconnect round-trip, and the hook command
@@ -994,6 +1019,8 @@ fn connect_claude_code_adds_its_parts() {
     let hook = &read(&settings)["hooks"]["SessionStart"][0]["hooks"][0]["command"];
     let path = hostile.to_str().unwrap();
     assert_eq!(*hook, format!("'{path}' hook session-start --harness claude-code"));
+    let compact = &read(&settings)["hooks"]["PostCompact"][0]["hooks"][0]["command"];
+    assert_eq!(*compact, format!("'{path}' hook post-compact --harness claude-code"));
     assert_eq!(read(&home.join(".claude.json"))["mcpServers"]["atticdb"]["command"], path);
     std::fs::write(home.join("stdin"), support::cwd(&home)).unwrap();
     let mut sh = support::command("sh");
@@ -1003,7 +1030,8 @@ fn connect_claude_code_adds_its_parts() {
     assert_eq!((status.code(), out.lines().next()), (Some(0), Some("{}")), "{out}");
     let (code, out) = run(&home, None, &bin, &[], &["disconnect", "claude-code"]);
     assert_eq!(code, Some(0), "{out}");
-    let emptied = json!({"hooks": {"SessionStart": []}, "permissions": {"allow": []}});
+    let emptied = json!({"hooks": {"SessionStart": [], "PostCompact": []},
+        "permissions": {"allow": []}});
     assert_eq!(read(&settings), emptied, "{out}");
     assert_eq!(read(&home.join(".claude.json"))["mcpServers"], json!({}));
 
@@ -1022,8 +1050,12 @@ fn connect_claude_code_adds_its_parts() {
     assert_eq!(state["mcpServers"]["atticdb"]["command"], versioned.to_str().unwrap());
     let (code, out) = run(&home, None, &bin, &[], &["disconnect", "claude-code"]);
     assert_eq!(code, Some(0), "{out}");
-    let removed =
-        ["MCP entry: removed (", "\nSessionStart hook: removed (", "\nallow rules: removed ("];
+    let removed = [
+        "MCP entry: removed (",
+        "\nSessionStart hook: removed (",
+        "\nPostCompact hook: removed (",
+        "\nallow rules: removed (",
+    ];
     assert!(removed.iter().all(|said| out.contains(said)), "{out}");
     assert_eq!(read(&home.join(".claude.json"))["mcpServers"], json!({}));
 
@@ -1082,6 +1114,115 @@ fn connect_claude_code_kills_a_slow_claude() {
     // The fake's own child would touch the marker at 12 s, unless its group was killed.
     std::thread::sleep(std::time::Duration::from_secs(14).saturating_sub(started.elapsed()));
     assert!(!marker.exists(), "a child of claude outlived the timeout");
+}
+
+/// A home for the PostCompact tests: a fake `claude` on `PATH` and an empty `HOME`.
+struct Compact {
+    dir: Dir,
+    exe: String,
+}
+
+impl Compact {
+    fn new() -> Self {
+        let dir = Dir::new();
+        support::fake_claude(&dir.0.join("bin"));
+        let exe = std::fs::canonicalize(env!("CARGO_BIN_EXE_atticdb")).unwrap();
+        Self { dir, exe: exe.to_str().unwrap().to_owned() }
+    }
+
+    /// Runs `atticdb` with `args`, and returns its exit code and stdout.
+    fn run(&self, args: &[&str]) -> (Option<i32>, String) {
+        let mut command = support::command(&self.exe);
+        command.args(args).current_dir(&self.dir.0).env("HOME", self.dir.0.join("h"));
+        command.env("PATH", self.dir.0.join("bin")).env_remove("ATTICDB_TOKEN");
+        let (status, out) =
+            Process::start(command.env_remove("CLAUDE_CONFIG_DIR").stdin(Stdio::null())).wait();
+        (status.code(), out)
+    }
+
+    fn settings(&self) -> std::path::PathBuf {
+        self.dir.0.join("h/.claude/settings.json")
+    }
+
+    /// The groups in `hooks.<event>` of `settings.json`.
+    fn groups(&self, event: &str) -> Vec<Value> {
+        let root: Value = serde_json::from_slice(&std::fs::read(self.settings()).unwrap()).unwrap();
+        root["hooks"][event].as_array().cloned().unwrap_or_default()
+    }
+
+    /// The PostCompact group AtticDB adds, with no matcher.
+    fn group(&self) -> Value {
+        let quoted = format!("'{}'", self.exe.replace('\'', r"'\''"));
+        let command = format!("{quoted} hook post-compact --harness claude-code");
+        json!({"hooks": [{"type": "command", "command": command, "timeout": 5}]})
+    }
+}
+
+/// `connect claude-code` adds 1 PostCompact group that runs `hook post-compact`.
+#[test]
+fn connect_adds_post_compact_hook() {
+    let it = Compact::new();
+    let (code, out) = it.run(&["connect", "claude-code"]);
+    assert_eq!(code, Some(0), "{out}");
+    let shown = it.settings().display().to_string();
+    assert!(out.contains(&format!("\nPostCompact hook: added ({shown})\n")), "{out}");
+    assert_eq!(it.groups("PostCompact"), [it.group()]);
+    assert_eq!(it.groups("SessionStart").len(), 1, "the SessionStart group too");
+}
+
+/// A rerun of connect adds no second PostCompact group, and says it is unchanged.
+#[test]
+fn connect_post_compact_is_idempotent() {
+    let it = Compact::new();
+    assert_eq!(it.run(&["connect", "claude-code"]).0, Some(0));
+    let before = std::fs::read(it.settings()).unwrap();
+    let (code, out) = it.run(&["connect", "claude-code"]);
+    assert_eq!(code, Some(0), "{out}");
+    let shown = it.settings().display().to_string();
+    assert!(out.contains(&format!("\nPostCompact hook: unchanged ({shown})\n")), "{out}");
+    assert_eq!(std::fs::read(it.settings()).unwrap(), before, "nothing written");
+    assert_eq!(it.groups("PostCompact"), [it.group()]);
+}
+
+/// A user's own PostCompact group survives connect and disconnect, and keeps its place.
+#[test]
+fn connect_keeps_user_post_compact_groups() {
+    let it = Compact::new();
+    let theirs = json!({"matcher": "manual", "hooks": [{"type": "command", "command": "say hi"}]});
+    let kept = json!({"hooks": {"PostCompact": [theirs]}});
+    std::fs::create_dir_all(it.settings().parent().unwrap()).unwrap();
+    std::fs::write(it.settings(), serde_json::to_string_pretty(&kept).unwrap()).unwrap();
+    assert_eq!(it.run(&["connect", "claude-code"]).0, Some(0));
+    assert_eq!(it.groups("PostCompact"), [theirs.clone(), it.group()]);
+    let (code, out) = it.run(&["disconnect", "claude-code"]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.contains("\nPostCompact hook: removed ("), "{out}");
+    assert_eq!(it.groups("PostCompact"), [theirs]);
+}
+
+/// Disconnect removes AtticDB's PostCompact group, and a rerun finds none.
+#[test]
+fn disconnect_removes_post_compact_hook() {
+    let it = Compact::new();
+    assert_eq!(it.run(&["connect", "claude-code"]).0, Some(0));
+    let (code, out) = it.run(&["disconnect", "claude-code"]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.contains("\nPostCompact hook: removed ("), "{out}");
+    assert_eq!(it.groups("PostCompact"), Vec::<Value>::new());
+    let (code, out) = it.run(&["disconnect", "claude-code"]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.contains("\nPostCompact hook: not found ("), "{out}");
+}
+
+/// `--no-hook` adds neither the SessionStart group nor the PostCompact one.
+#[test]
+fn connect_no_hook_skips_post_compact() {
+    let it = Compact::new();
+    let (code, out) = it.run(&["connect", "claude-code", "--no-hook"]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(!out.contains("PostCompact hook") && !out.contains("SessionStart hook"), "{out}");
+    assert_eq!(it.groups("PostCompact"), Vec::<Value>::new());
+    assert_eq!(it.groups("SessionStart"), Vec::<Value>::new());
 }
 
 /// A config.toml as people keep it: a few tables, `[features]`, another MCP server and a hook

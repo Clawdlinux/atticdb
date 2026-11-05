@@ -19,7 +19,8 @@ pub struct Flags {
     pub yes: bool,
     /// The apps to connect, from `--harness`.
     pub harnesses: Option<Vec<Harness>>,
-    /// `--no-hook`: no SessionStart hook for Claude Code and Codex.
+    /// `--no-hook`: no SessionStart hook for Claude Code and Codex, and no PostCompact hook
+    /// for Claude Code.
     pub no_hook: bool,
     /// Whether Claude Code and Codex save notes without asking, from `--notes`.
     pub notes: Option<Notes>,

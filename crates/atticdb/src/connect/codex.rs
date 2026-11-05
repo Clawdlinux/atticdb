@@ -15,8 +15,8 @@
 //! On Windows, Codex gets only the MCP entry, until its hooks there are checked (D92).
 
 use super::claude::{
-    add_hook, drop_hooks, edit_file, find_program, hook_args, hook_binaries, hook_command,
-    our_group, run, shell_line, split, Edit, Part,
+    add_hook, drop_hooks, edit_file, find_program, hook_binaries, hook_command, our_group, run,
+    shell_line, split, Edit, Event, Part,
 };
 use super::{
     absolute_env, add_or_update, binary, delete, moved_home, planned, read, write, Harness, Line,
@@ -124,9 +124,11 @@ pub(super) fn connect(hook: bool, notes: Notes, mode: Mode) -> Report {
         }
         let group = hook_group(&exe, home);
         let (tracked, hooks) = (Tracked::default(), hooks_file());
-        let add = |text: &str| track(text, add_hook(Harness::Codex, text, &group), &tracked);
-        let by_hand = format!("Add this group to hooks.SessionStart by hand: {group}");
-        let parts = [Part { name: "SessionStart hook", by_hand, edit: &add }];
+        let add = |text: &str| {
+            track(text, add_hook(Harness::Codex, Event::SessionStart, text, &group), &tracked)
+        };
+        let (name, by_hand) = (Event::SessionStart.part(), Event::SessionStart.add_by_hand(&group));
+        let parts = [Part { name, by_hand, edit: &add }];
         // 1 part, so 1 line.
         let hook_lines = edit_file(hooks.clone(), NO_HOOKS, &parts, mode);
         hook_state = hook_lines.first().map(|line| line.state);
@@ -165,7 +167,7 @@ pub(super) fn binaries() -> Vec<(PathBuf, String)> {
         }
     }
     if let Ok(hooks) = hooks_file() {
-        found.extend(hook_binaries(Harness::Codex, &hooks));
+        found.extend(hook_binaries(Harness::Codex, Event::SessionStart, &hooks));
     }
     found
 }
@@ -196,12 +198,11 @@ pub(super) fn disconnect() -> u8 {
     };
     let config = dir.join("config.toml");
     let (tracked, hooks) = (Tracked::default(), hooks_file());
-    let drop = |text: &str| track(text, drop_hooks(Harness::Codex, text), &tracked);
-    let by_hand = format!(
-        "Remove the groups that run atticdb{} from hooks.SessionStart by hand",
-        hook_args(Harness::Codex)
-    );
-    let parts = [Part { name: "SessionStart hook", by_hand, edit: &drop }];
+    let drop =
+        |text: &str| track(text, drop_hooks(Harness::Codex, Event::SessionStart, text), &tracked);
+    let (name, by_hand) =
+        (Event::SessionStart.part(), Event::SessionStart.drop_by_hand(Harness::Codex));
+    let parts = [Part { name, by_hand, edit: &drop }];
     let mut lines = vec![drop_block(&config).unwrap_or_else(|line| line)];
     lines.extend(edit_file(hooks.clone(), NO_HOOKS, &parts, Mode::Apply));
     lines.extend(guide::remove(&dir));
@@ -220,7 +221,7 @@ fn track(text: &str, edit: Edit, tracked: &Tracked) -> Edit {
         let root: Value = serde_json::from_str(text).unwrap_or_default();
         let groups = root["hooks"]["SessionStart"].as_array().map(Vec::as_slice);
         let groups = groups.unwrap_or_default();
-        let ours = |group: &Value| our_group(Harness::Codex, group);
+        let ours = |group: &Value| our_group(Harness::Codex, Event::SessionStart, group);
         let first = groups.iter().position(ours);
         let moved = first.is_some_and(|first| !groups[first..].iter().all(ours));
         tracked.set(Some((done.text.clone(), moved)));
@@ -239,7 +240,7 @@ fn saved(path: &Result<PathBuf, String>, tracked: &Tracked) -> Option<bool> {
 
 /// The SessionStart group AtticDB adds. It has no matcher, so it also runs after compaction.
 fn hook_group(exe: &str, home: Option<&str>) -> Value {
-    let command = hook_command(Harness::Codex, exe, home);
+    let command = hook_command(Harness::Codex, Event::SessionStart, exe, home);
     json!({"hooks": [{"type": "command", "command": command, "timeout": 5,
         "statusMessage": "Loading AtticDB memory", "additionalContextLimit": CONTEXT_LIMIT}]})
 }
