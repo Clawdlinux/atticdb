@@ -99,7 +99,7 @@ fn add_or_update(existed: bool) -> State {
 pub struct Options {
     /// Replace an entry that differs. Codex never edits a server AtticDB didn't write.
     pub force: bool,
-    /// Add the SessionStart hook.
+    /// Add the SessionStart hook, and for Claude Code the PostCompact hook too.
     pub hook: bool,
     /// Whether notes are saved without asking.
     pub notes: Notes,
@@ -119,6 +119,8 @@ pub struct Report {
     /// What the SessionStart hook part did: for Claude Code and Codex when it was asked for,
     /// and the shared sessionStart hook for VS Code and Copilot CLI.
     pub hook: Option<State>,
+    /// What the PostCompact hook part did: for Claude Code when the hooks were asked for.
+    pub post_compact: Option<State>,
     /// Whether the harness's config turns hooks off, so its hook never runs. Codex only.
     pub hooks_off: bool,
 }
@@ -332,8 +334,9 @@ pub fn detect(harness: Harness) -> bool {
 /// builds don't read Copilot CLI's config, so `connect vscode --force` writes `mcp.json`
 /// anyway.
 ///
-/// Claude Code: adds its MCP entry, and unless `hook` is false its SessionStart hook, and
-/// its allow rules for `notes`. An entry that differs is replaced only with `force`.
+/// Claude Code: adds its MCP entry, and unless `hook` is false its SessionStart and
+/// PostCompact hooks, and its allow rules for `notes`. An entry that differs is replaced only
+/// with `force`.
 ///
 /// Codex: adds its MCP entry and tool approvals for `notes`, as a block at the end of its
 /// `config.toml`, unless `hook` is false its SessionStart hook, and its guide, a block in the

@@ -1,4 +1,6 @@
-use crate::support::{atticdb, chmod, cwd, data_dir, hook, seed, slow_store, Dir, Holders, Via};
+use crate::support::{
+    atticdb, chmod, cwd, data_dir, hook, locked, seed, slow_store, Dir, Holders, Output, Via,
+};
 use serde_json::{json, Value};
 use std::os::unix::fs::DirBuilderExt;
 use std::path::Path;
@@ -327,4 +329,193 @@ fn session_start_prints_nothing_on_errors() {
         assert!(range.contains(&(elapsed.as_millis() as u64)), "{case}: {elapsed:?}");
         assert!(err.contains(says) && err.contains(stop) == (says == stop), "{case}: {err}");
     }
+}
+
+/// Runs `atticdb hook post-compact` with `args` after it, and `stdin`.
+fn post_compact(home: &Path, args: &[&str], stdin: &Value) -> Output {
+    let args = [&["hook", "post-compact"], args].concat();
+    atticdb(home, home, &args, &[], stdin.to_string().as_bytes(), 0)
+}
+
+/// The PostCompact input for a chat in `dir`, with `fields` added.
+fn compact(dir: &Path, fields: Value) -> Value {
+    let mut input = json!({"cwd": dir, "trigger": "manual", "session_id": "s1",
+        "transcript_path": "/tmp/t/s1.jsonl", "compact_summary": "a summary"});
+    for (name, value) in fields.as_object().unwrap() {
+        input[name] = value.clone();
+    }
+    input
+}
+
+/// Claude Code's turns in `session`, oldest first.
+fn notes(home: &Path, session: &str) -> Vec<Value> {
+    let args = ["recent", "--agent", "claude-code", "--session", session, "--n", "10"];
+    let (code, out, err) = atticdb(home, home, &args, &[], b"", 0);
+    assert_eq!(code, Some(0), "{err}");
+    let out: Value = serde_json::from_str(&out).unwrap();
+    out["turns"].as_array().unwrap().clone()
+}
+
+/// Starts `home`'s server, as any shell verb does, so a test that isn't about a cold start
+/// doesn't race the server's start.
+fn running(home: &Path) {
+    assert!(notes(home, "warm-up").is_empty());
+}
+
+/// Runs the hook as Claude Code's group does. It must exit 0 and print nothing.
+fn saved(home: &Path, stdin: &Value) {
+    let started = Instant::now();
+    let (code, out, err) = post_compact(home, &["--harness", "claude-code"], stdin);
+    let took = started.elapsed();
+    assert_eq!((code, out.as_str()), (Some(0), ""), "{err}");
+    // A failed save still exits 0, so its stderr line is the only sign.
+    assert!(!err.contains("hook post-compact:"), "after {took:?}: {err}");
+}
+
+/// The summary is saved as 1 Claude Code note in the repo's session, with a pointer to the
+/// full transcript when there is one.
+#[test]
+fn post_compact_saves_the_summary_as_a_note() {
+    let dir = Dir::new();
+    let home = dir.0.join("h");
+    std::fs::create_dir_all(home.join("myrepo")).unwrap();
+    std::fs::create_dir_all(home.join("other")).unwrap();
+    let _holders = Holders(vec![data_dir(&home)]);
+    running(&home);
+    let summary = "We chose struct over JSON for LEDG-7731.";
+    saved(&home, &compact(&home.join("myrepo"), json!({"compact_summary": summary})));
+    let turns = notes(&home, "myrepo");
+    assert_eq!(turns.len(), 1, "{turns:?}");
+    let content =
+        format!("Compaction summary (manual): {summary}\nFull transcript: /tmp/t/s1.jsonl");
+    assert_eq!(turns[0]["content"], content.as_str());
+    assert_eq!(turns[0]["role"], "assistant");
+    let meta = json!({"kind": "compact-summary", "trigger": "manual", "harness_session": "s1",
+        "transcript": "/tmp/t/s1.jsonl"});
+    assert_eq!(turns[0]["meta"], meta);
+
+    // No transcript_path: no transcript line, and a null pointer.
+    let mut input = compact(&home.join("other"), json!({"compact_summary": summary}));
+    input.as_object_mut().unwrap().remove("transcript_path");
+    saved(&home, &input);
+    let turns = notes(&home, "other");
+    assert_eq!(turns.len(), 1, "{turns:?}");
+    assert_eq!(turns[0]["content"], format!("Compaction summary (manual): {summary}").as_str());
+    assert_eq!(turns[0]["meta"]["transcript"], Value::Null);
+    assert_eq!(turns[0]["meta"]["harness_session"], "s1");
+}
+
+/// A token in the summary is stored as a placeholder.
+#[test]
+fn post_compact_redacts_secrets() {
+    let dir = Dir::new();
+    let home = dir.0.join("h");
+    std::fs::create_dir_all(home.join("myrepo")).unwrap();
+    let _holders = Holders(vec![data_dir(&home)]);
+    running(&home);
+    let token = format!("ghp_{}", "x1".repeat(18));
+    let summary = format!("Pushed with {token} to main.");
+    saved(&home, &compact(&home.join("myrepo"), json!({"compact_summary": summary})));
+    let turns = notes(&home, "myrepo");
+    let content = turns[0]["content"].as_str().unwrap();
+    assert!(content.contains("[secret:github-token]") && !content.contains(&token), "{content}");
+}
+
+/// Bad input or a wrong harness writes nothing, prints nothing on stdout, says why on
+/// stderr and exits 0.
+#[test]
+fn post_compact_skips_bad_input() {
+    let dir = Dir::new();
+    let home = dir.0.join("h");
+    let repo = home.join("myrepo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let _holders = Holders(vec![data_dir(&home)]);
+    let claude: &[&str] = &["--harness", "claude-code"];
+    let mut no_summary = compact(&repo, json!({}));
+    no_summary.as_object_mut().unwrap().remove("compact_summary");
+    let rows = [
+        ("no compact_summary", claude, no_summary),
+        ("blank summary", claude, compact(&repo, json!({"compact_summary": "   "}))),
+        ("relative cwd", claude, compact(&repo, json!({"cwd": "rel/path"}))),
+        ("not JSON", claude, json!("not json")),
+        ("codex", &["--harness", "codex"][..], compact(&repo, json!({}))),
+        ("no --harness", &[][..], compact(&repo, json!({}))),
+    ];
+    for (case, args, stdin) in rows {
+        // `json!("not json")` would send a JSON string, so that row sends the bare text.
+        let (code, out, err) = match stdin.as_str() {
+            Some(text) => {
+                let args = [&["hook", "post-compact"], args].concat();
+                atticdb(&home, &home, &args, &[], text.as_bytes(), 0)
+            }
+            None => post_compact(&home, args, &stdin),
+        };
+        assert_eq!((code, out.as_str()), (Some(0), ""), "{case}: {err}");
+        assert!(err.starts_with("atticdb: hook post-compact: "), "{case}: {err}");
+        assert_eq!(err.lines().count(), 1, "{case}: {err}");
+    }
+    for session in ["myrepo", "path"] {
+        assert_eq!(notes(&home, session), Vec::<Value>::new(), "{session}");
+    }
+}
+
+/// A summary over 16,000 characters is cut to 16,000 and marked.
+#[test]
+fn post_compact_cuts_long_summaries() {
+    let dir = Dir::new();
+    let home = dir.0.join("h");
+    std::fs::create_dir_all(home.join("myrepo")).unwrap();
+    let _holders = Holders(vec![data_dir(&home)]);
+    running(&home);
+    let summary = "a".repeat(20_000);
+    saved(&home, &compact(&home.join("myrepo"), json!({"compact_summary": summary})));
+    let turns = notes(&home, "myrepo");
+    let content = format!(
+        "Compaction summary (manual): {} (cut)\nFull transcript: /tmp/t/s1.jsonl",
+        "a".repeat(16_000)
+    );
+    assert_eq!(turns[0]["content"], content.as_str());
+}
+
+/// With no server running, the hook starts one and saves the note.
+#[test]
+fn post_compact_starts_the_server() {
+    let dir = Dir::new();
+    let home = dir.0.join("h");
+    std::fs::create_dir_all(home.join("myrepo")).unwrap();
+    let _holders = Holders(vec![data_dir(&home)]);
+    assert!(!locked(&data_dir(&home)));
+    saved(&home, &compact(&home.join("myrepo"), json!({})));
+    assert!(locked(&data_dir(&home)));
+    assert_eq!(notes(&home, "myrepo").len(), 1);
+}
+
+/// With stdin open after part of a value, the hook stops at 4 s, with nothing on stdout.
+#[test]
+fn post_compact_stops_at_4_s() {
+    let dir = Dir::new();
+    let home = dir.0.join("h");
+    std::fs::create_dir_all(&home).unwrap();
+    let started = Instant::now();
+    let args = ["hook", "post-compact", "--harness", "claude-code"];
+    let (code, out, err) = atticdb(&home, &home, &args, &[], br#"{"cwd": "/tm"#, 0);
+    let elapsed = started.elapsed().as_millis() as u64;
+    assert_eq!((code, out.as_str()), (Some(0), ""), "{err}");
+    assert!((3_900..5_000).contains(&elapsed), "{elapsed} ms");
+    assert_eq!(err, "atticdb: hook post-compact: stopped at 4 s\n");
+}
+
+/// The next chat's session-start block shows the note.
+#[test]
+fn session_start_shows_the_compact_note() {
+    let dir = Dir::new();
+    let home = dir.0.join("h");
+    let repo = home.join("myrepo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let _holders = Holders(vec![data_dir(&home)]);
+    running(&home);
+    saved(&home, &compact(&repo, json!({})));
+    let out: Value = serde_json::from_str(&hook(&home, &cwd(&repo), 0, &[]).0).unwrap();
+    let block = out["additionalContext"].as_str().unwrap();
+    assert!(block.contains("\n- Compaction summary (manual): a summary "), "{block}");
 }

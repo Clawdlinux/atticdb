@@ -167,7 +167,7 @@ pub fn forget_command(verb: &str, mut flags: HashMap<String, String>) -> u8 {
     0
 }
 
-/// Reads from the per-user home for code in this crate, such as the session-start hook.
+/// Reads from and appends to the per-user home for code in this crate, such as the hooks.
 pub(crate) struct HomeReader {
     client: Client,
     deadline: Instant,
@@ -175,7 +175,7 @@ pub(crate) struct HomeReader {
 
 impl HomeReader {
     /// Resolves the home `lookup` finds as `atticdb mcp` with no connection flags does,
-    /// quietly ignoring `ATTICDB_TOKEN`. All reads together, connects and server starts
+    /// quietly ignoring `ATTICDB_TOKEN`. All calls together, connects and server starts
     /// included, end by `deadline`.
     pub(crate) fn in_home(
         session: &str,
@@ -190,6 +190,16 @@ impl HomeReader {
     /// Runs the read tool `tool` as `agent`. Returns its `structuredContent`, or its error.
     /// With under 2 s left it sends nothing and fails at once.
     pub(crate) fn read(&mut self, agent: &str, tool: &str, args: &Value) -> Result<Value, String> {
+        self.run(agent, tool, args)
+    }
+
+    /// Appends 1 turn as `agent` by `memory_append`, which hides secrets first. Returns its
+    /// `structuredContent`, or its error. The deadline is [`Self::read`]'s.
+    pub(crate) fn append(&mut self, agent: &str, args: &Value) -> Result<Value, String> {
+        self.run(agent, "memory_append", args)
+    }
+
+    fn run(&mut self, agent: &str, tool: &str, args: &Value) -> Result<Value, String> {
         self.client.agent = agent.to_owned();
         // `retry` and every exchange in it end at now + `retry_deadline`.
         self.client.retry_deadline = self.deadline.saturating_duration_since(Instant::now());

@@ -19,7 +19,8 @@ pub struct Flags {
     pub yes: bool,
     /// The apps to connect, from `--harness`.
     pub harnesses: Option<Vec<Harness>>,
-    /// `--no-hook`: no SessionStart hook for Claude Code and Codex.
+    /// `--no-hook`: no SessionStart hook for Claude Code and Codex, and no PostCompact hook
+    /// for Claude Code.
     pub no_hook: bool,
     /// Whether Claude Code and Codex save notes without asking, from `--notes`.
     pub notes: Option<Notes>,
@@ -36,7 +37,7 @@ Then it connects them, checks each one, and says what to do next.
 
   --yes             take every default, and don't ask Apply?
   --harness <list>  connect these apps, a comma list of copilot, vscode, claude-code and codex
-  --no-hook         don't load memory at the start of each chat in Claude Code and Codex
+  --no-hook         no chat-start memory in Claude Code and Codex, and no saved compaction summaries
   --notes ask|auto  ask before saving notes in Claude Code and Codex, or don't (the default)
   --dry-run         print the plan, and write nothing
 
@@ -248,11 +249,16 @@ fn choose(
     // Only Claude Code and Codex take these 2. VS Code and Copilot CLI always get the hook.
     let own = harnesses.iter().any(|h| matches!(h, Harness::ClaudeCode | Harness::Codex));
     let hint = "Answer y or n.";
+    // Claude Code's PostCompact hook saves summaries, which can hold file contents and
+    // secrets. So the question names it when Claude Code is chosen.
+    let prompt = if harnesses.contains(&Harness::ClaudeCode) {
+        "Load memory at chat start, and save Claude Code's compaction summaries? [Y/n] "
+    } else {
+        "Load memory at the start of each chat? [Y/n] "
+    };
     let hook = match flags.no_hook {
         true => false,
-        false if ask && own => {
-            asker.ask("Load memory at the start of each chat? [Y/n] ", true, yes_no, hint)?
-        }
+        false if ask && own => asker.ask(prompt, true, yes_no, hint)?,
         false => true,
     };
     let notes = match flags.notes {

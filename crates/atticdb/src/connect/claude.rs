@@ -3,7 +3,8 @@
 //! - The MCP entry. Claude keeps it in `.claude.json` and rewrites that file itself, so AtticDB
 //!   only reads it, and changes the entry through `claude mcp add` and `claude mcp remove`.
 //!   It never runs `claude mcp get`, which starts the server to check it.
-//! - The SessionStart hook, a group in `hooks.SessionStart` of `settings.json`.
+//! - The hooks: a group in `hooks.SessionStart` of `settings.json`, and one in
+//!   `hooks.PostCompact`.
 //! - The allow rules in `permissions.allow` of `settings.json`: the read tools, and
 //!   `memory_append` unless notes ask. Never `fact_set`, so saving a rule always asks.
 //!
@@ -31,6 +32,75 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
+/// A hook event AtticDB adds a group under. Codex gets only [`Event::SessionStart`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Event {
+    /// A session starts, including after compaction. Its hook loads memory.
+    SessionStart,
+    /// Claude Code compacted a chat. Its hook saves the summary as a note.
+    PostCompact,
+}
+
+impl Event {
+    /// Its key under `hooks`.
+    fn name(self) -> &'static str {
+        match self {
+            Self::SessionStart => "SessionStart",
+            Self::PostCompact => "PostCompact",
+        }
+    }
+
+    /// The `atticdb hook` subcommand its group runs.
+    fn subcommand(self) -> &'static str {
+        match self {
+            Self::SessionStart => "session-start",
+            Self::PostCompact => "post-compact",
+        }
+    }
+
+    /// Its part's name in the printed lines.
+    pub(super) fn part(self) -> &'static str {
+        match self {
+            Self::SessionStart => "SessionStart hook",
+            Self::PostCompact => "PostCompact hook",
+        }
+    }
+
+    /// Where its groups go in `settings.json`, and in Codex's `hooks.json`.
+    fn path(self) -> [&'static str; 2] {
+        ["hooks", self.name()]
+    }
+
+    /// Whether its array stays as `[]` when disconnect empties it. SessionStart's always has.
+    /// Most files had no PostCompact key before AtticDB added one, so disconnect removes it.
+    fn keeps_empty(self) -> bool {
+        self == Self::SessionStart
+    }
+
+    /// What adding its hook does, said after the plan's `add` line. It tells the user that
+    /// the PostCompact hook saves summaries, which can hold file contents and secrets.
+    fn adds(self) -> Option<&'static str> {
+        match self {
+            Self::SessionStart => None,
+            Self::PostCompact => Some("saves compaction summaries"),
+        }
+    }
+
+    /// What to do by hand to add `group`.
+    pub(super) fn add_by_hand(self, group: &Value) -> String {
+        format!("Add this group to hooks.{} by hand: {group}", self.name())
+    }
+
+    /// What to do by hand to remove `harness`'s groups.
+    pub(super) fn drop_by_hand(self, harness: Harness) -> String {
+        format!(
+            "Remove the groups that run atticdb{} from hooks.{} by hand",
+            hook_args(harness, self),
+            self.name()
+        )
+    }
+}
+
 /// Whether Claude Code or Codex asks before AtticDB saves a note.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Notes {
@@ -49,8 +119,8 @@ const READS: [&str; 4] = [
 ];
 /// The rule that saves notes without asking.
 const APPEND: &str = "mcp__atticdb__memory_append";
-/// Where the hook groups go in `settings.json`, and in Codex's `hooks.json`.
-const HOOKS: [&str; 2] = ["hooks", "SessionStart"];
+/// The events Claude Code's hook groups go under, in the order their lines print.
+const EVENTS: [Event; 2] = [Event::SessionStart, Event::PostCompact];
 /// Where the allow rules go.
 const ALLOW: [&str; 2] = ["permissions", "allow"];
 /// The `claude` args that remove AtticDB's entry.
@@ -132,26 +202,32 @@ pub(super) fn connect(force: bool, hook: bool, notes: Notes, mode: Mode) -> Repo
             ),
         ),
     };
-    let group = hook_group(&exe, home);
-    let add_group = |text: &str| add_hook(Harness::ClaudeCode, text, &group);
+    let groups = EVENTS.map(|event| (event, hook_group(event, &exe, home)));
+    let add_groups = groups
+        .each_ref()
+        .map(|(event, group)| move |text: &str| add_hook(Harness::ClaudeCode, *event, text, group));
     let add_allow = |text: &str| add_rules(text, notes);
     let mut parts = Vec::new();
     if hook {
-        let by_hand = format!("Add this group to hooks.SessionStart by hand: {group}");
-        parts.push(Part { name: "SessionStart hook", by_hand, edit: &add_group });
+        for ((event, group), add_group) in groups.iter().zip(&add_groups) {
+            let by_hand = event.add_by_hand(group);
+            parts.push(Part { name: event.part(), by_hand, edit: add_group, adds: event.adds() });
+        }
     }
     let by_hand = format!("Add these to permissions.allow by hand: {}", json!(rules(notes)));
-    parts.push(Part { name: "allow rules", by_hand, edit: &add_allow });
+    parts.push(Part { name: "allow rules", by_hand, edit: &add_allow, adds: None });
     let settings = edit_file(settings_file(), "{\n}\n", &parts, mode);
-    // The hook is the first part, when it was asked for.
+    // The SessionStart hook is the first part and PostCompact the second, when the hooks were
+    // asked for.
     let hook_state = settings.first().filter(|_| hook).map(|line| line.state);
+    let post_compact = settings.get(1).filter(|_| hook).map(|line| line.state);
     let mut lines = vec![entry];
     lines.extend(settings);
     let next = match mode {
         Mode::Apply => vec!["Start a new Claude Code session to load atticdb.".into()],
         Mode::Plan => Vec::new(),
     };
-    Report { lines, warnings, next, hook: hook_state, ..Report::default() }
+    Report { lines, warnings, next, hook: hook_state, post_compact, ..Report::default() }
 }
 
 /// Removes the MCP entry when it is what AtticDB writes, every hook group that runs AtticDB's
@@ -171,22 +247,24 @@ pub(super) fn disconnect() -> u8 {
     };
     let mut every = READS.to_vec();
     every.push(APPEND);
-    let drop_group = |text: &str| drop_hooks(Harness::ClaudeCode, text);
-    let parts = [
-        Part {
-            name: "SessionStart hook",
-            by_hand: format!(
-                "Remove the groups that run atticdb{} from hooks.SessionStart by hand",
-                hook_args(Harness::ClaudeCode)
-            ),
-            edit: &drop_group,
-        },
-        Part {
-            name: "allow rules",
-            by_hand: format!("Remove these from permissions.allow by hand: {}", json!(every)),
-            edit: &drop_rules,
-        },
-    ];
+    let drop_groups =
+        EVENTS.map(|event| move |text: &str| drop_hooks(Harness::ClaudeCode, event, text));
+    let mut parts: Vec<Part<'_>> = EVENTS
+        .iter()
+        .zip(&drop_groups)
+        .map(|(event, edit)| Part {
+            name: event.part(),
+            by_hand: event.drop_by_hand(Harness::ClaudeCode),
+            edit,
+            adds: None,
+        })
+        .collect();
+    parts.push(Part {
+        name: "allow rules",
+        by_hand: format!("Remove these from permissions.allow by hand: {}", json!(every)),
+        edit: &drop_rules,
+        adds: None,
+    });
     let mut lines = vec![drop_entry(&state)];
     lines.extend(edit_file(settings_file(), "{\n}\n", &parts, Mode::Apply));
     Report { lines, ..Report::default() }.print()
@@ -599,40 +677,46 @@ fn and_then(first: &str, second: &str) -> String {
     }
 }
 
-/// What `harness`'s hook command passes the binary.
-pub(super) fn hook_args(harness: Harness) -> String {
-    format!(" hook session-start --harness {}", harness.name())
+/// What `harness`'s hook command for `event` passes the binary.
+pub(super) fn hook_args(harness: Harness, event: Event) -> String {
+    format!(" hook {} --harness {}", event.subcommand(), harness.name())
 }
 
-/// The args of `harness`'s hook in exec form, which Claude Code runs with no shell. The home
-/// goes in `--home`, as Claude's command hooks have no env field.
+/// The args of `harness`'s hook for `event` in exec form, which Claude Code runs with no
+/// shell. The home goes in `--home`, as Claude's command hooks have no env field.
 #[cfg(windows)]
-fn exec_args(harness: Harness, home: Option<&str>) -> Value {
-    let mut args = vec!["hook", "session-start", "--harness", harness.name()];
+fn exec_args(harness: Harness, event: Event, home: Option<&str>) -> Value {
+    let mut args = vec!["hook", event.subcommand(), "--harness", harness.name()];
     args.extend(home.map(|home| ["--home", home]).into_iter().flatten());
     json!(args)
 }
 
-/// `harness`'s hook command: the quoted binary, after `ATTICDB_HOME='<home>' ` when `home`
-/// is set. Claude's and Codex's command hooks have no env field, so the home goes in the
-/// command.
-pub(super) fn hook_command(harness: Harness, exe: &str, home: Option<&str>) -> String {
+/// `harness`'s hook command for `event`: the quoted binary, after `ATTICDB_HOME='<home>' `
+/// when `home` is set. Claude's and Codex's command hooks have no env field, so the home goes
+/// in the command.
+pub(super) fn hook_command(
+    harness: Harness,
+    event: Event,
+    exe: &str,
+    home: Option<&str>,
+) -> String {
     let prefix = home.map(|home| format!("{HOME_ENV}={} ", quote(home))).unwrap_or_default();
-    format!("{prefix}{}{}", quote(exe), hook_args(harness))
+    format!("{prefix}{}{}", quote(exe), hook_args(harness, event))
 }
 
-/// The SessionStart group AtticDB adds. It has no matcher, so it also runs after compaction.
+/// The group AtticDB adds for `event`. It has no matcher. So the SessionStart one also runs
+/// after compaction, and the PostCompact one after both manual and auto compaction.
 #[cfg(not(windows))]
-fn hook_group(exe: &str, home: Option<&str>) -> Value {
-    let command = hook_command(Harness::ClaudeCode, exe, home);
+fn hook_group(event: Event, exe: &str, home: Option<&str>) -> Value {
+    let command = hook_command(Harness::ClaudeCode, event, exe, home);
     json!({"hooks": [{"type": "command", "command": command, "timeout": 5}]})
 }
 
 /// See the other system's version. On Windows the hook is in exec form: Claude Code starts
 /// the binary with `args`, and no shell. So no quoting can go wrong.
 #[cfg(windows)]
-fn hook_group(exe: &str, home: Option<&str>) -> Value {
-    let args = exec_args(Harness::ClaudeCode, home);
+fn hook_group(event: Event, exe: &str, home: Option<&str>) -> Value {
+    let args = exec_args(Harness::ClaudeCode, event, home);
     json!({"hooks": [{"type": "command", "command": exe, "args": args, "timeout": 5}]})
 }
 
@@ -655,28 +739,28 @@ fn unquote(text: &str) -> Option<(String, &str)> {
     }
 }
 
-/// The binary that `handler` runs when it is a hook handler AtticDB writes for `harness`, by
-/// [`command_exe`]. On Windows, Claude Code's is in exec form, by [`exec_exe`].
-fn handler_exe(harness: Harness, handler: &Value) -> Option<String> {
+/// The binary that `handler` runs when it is a hook handler AtticDB writes for `harness` and
+/// `event`, by [`command_exe`]. On Windows, Claude Code's is in exec form, by [`exec_exe`].
+fn handler_exe(harness: Harness, event: Event, handler: &Value) -> Option<String> {
     let command = handler["command"].as_str().filter(|_| handler["type"] == "command")?;
     #[cfg(windows)]
     if harness == Harness::ClaudeCode {
-        return exec_exe(handler, command);
+        return exec_exe(event, handler, command);
     }
-    command_exe(harness, command)
+    command_exe(harness, event, command)
 }
 
-/// The binary `command` names when `handler` is Claude Code's hook in exec form, as AtticDB
-/// writes it, for any absolute binary path and any home.
+/// The binary `command` names when `handler` is Claude Code's hook for `event` in exec form,
+/// as AtticDB writes it, for any absolute binary path and any home.
 #[cfg(windows)]
-fn exec_exe(handler: &Value, command: &str) -> Option<String> {
+fn exec_exe(event: Event, handler: &Value, command: &str) -> Option<String> {
     let args = handler["args"].as_array()?;
     let home = match args.as_slice() {
         [.., flag, home] if flag == "--home" => Some(home.as_str()?),
         _ => None,
     };
-    let ours =
-        Path::new(command).is_absolute() && handler["args"] == exec_args(Harness::ClaudeCode, home);
+    let ours = Path::new(command).is_absolute()
+        && handler["args"] == exec_args(Harness::ClaudeCode, event, home);
     ours.then(|| command.to_owned())
 }
 
@@ -698,10 +782,10 @@ fn handler_text(handler: &Value) -> String {
     }
 }
 
-/// The binary path in `command` when it is a hook command AtticDB writes for `harness`, for
-/// any absolute binary path and any home. The binary's file name doesn't count, as an install
-/// may name it `atticdb-0.1.0`.
-fn command_exe(harness: Harness, command: &str) -> Option<String> {
+/// The binary path in `command` when it is a hook command AtticDB writes for `harness` and
+/// `event`, for any absolute binary path and any home. The binary's file name doesn't count,
+/// as an install may name it `atticdb-0.1.0`.
+fn command_exe(harness: Harness, event: Event, command: &str) -> Option<String> {
     let (home, rest) = match command.strip_prefix(&format!("{HOME_ENV}=")) {
         Some(rest) => {
             let (home, rest) = unquote(rest)?;
@@ -711,24 +795,25 @@ fn command_exe(harness: Harness, command: &str) -> Option<String> {
     };
     let (exe, rest) = unquote(rest)?;
     // Writing the command again for that binary and home must give the same text.
-    let again = hook_command(harness, &exe, home.as_deref());
-    let args = hook_args(harness);
+    let again = hook_command(harness, event, &exe, home.as_deref());
+    let args = hook_args(harness, event);
     (Path::new(&exe).is_absolute() && rest == args && again == command).then_some(exe)
 }
 
-/// The binaries that `harness`'s AtticDB hook commands run in the strict JSON hooks file at
-/// `path`, each with `path`. A missing or unreadable file names none.
-pub(super) fn hook_binaries(harness: Harness, path: &Path) -> Vec<(PathBuf, String)> {
+/// The binaries that `harness`'s AtticDB hook commands for `event` run in the strict JSON
+/// hooks file at `path`, each with `path`. A missing or unreadable file names none.
+pub(super) fn hook_binaries(harness: Harness, event: Event, path: &Path) -> Vec<(PathBuf, String)> {
     let Ok(Some((bytes, _))) = read(path) else { return Vec::new() };
     let root: Value = serde_json::from_slice(&bytes).unwrap_or_default();
-    let groups = root["hooks"]["SessionStart"].as_array().cloned().unwrap_or_default();
+    let groups = root["hooks"][event.name()].as_array().cloned().unwrap_or_default();
     let handlers =
         groups.iter().flat_map(|group| group["hooks"].as_array().cloned().unwrap_or_default());
-    let exe = |handler: Value| handler_exe(harness, &handler);
+    let exe = |handler: Value| handler_exe(harness, event, &handler);
     handlers.filter_map(exe).map(|exe| (path.to_owned(), exe)).collect()
 }
 
-/// The AtticDB binaries that Claude Code's MCP entry and hook run, for [`super::binaries`].
+/// The AtticDB binaries that Claude Code's MCP entry and hooks run, for [`super::binaries`].
+/// A hook binary shows once, though both events' groups may run it.
 pub(super) fn binaries() -> Vec<(PathBuf, String)> {
     let mut found = Vec::new();
     if let Ok(state) = state_file() {
@@ -736,15 +821,21 @@ pub(super) fn binaries() -> Vec<(PathBuf, String)> {
         found.extend(exe.map(|exe| (state, exe)));
     }
     if let Ok(settings) = settings_file() {
-        found.extend(hook_binaries(Harness::ClaudeCode, &settings));
+        let start = found.len();
+        found.extend(hook_binaries(Harness::ClaudeCode, Event::SessionStart, &settings));
+        for binary in hook_binaries(Harness::ClaudeCode, Event::PostCompact, &settings) {
+            if !found[start..].contains(&binary) {
+                found.push(binary);
+            }
+        }
     }
     found
 }
 
-/// Whether `group` is a SessionStart group whose every handler runs `harness`'s AtticDB hook.
-pub(super) fn our_group(harness: Harness, group: &Value) -> bool {
+/// Whether `group` is an `event` group whose every handler runs `harness`'s AtticDB hook.
+pub(super) fn our_group(harness: Harness, event: Event, group: &Value) -> bool {
     let handlers = group["hooks"].as_array().map(Vec::as_slice).unwrap_or_default();
-    let ours = |handler: &Value| handler_exe(harness, handler).is_some();
+    let ours = |handler: &Value| handler_exe(harness, event, handler).is_some();
     !handlers.is_empty() && handlers.iter().all(ours)
 }
 
@@ -792,26 +883,27 @@ fn done(text: String, state: State, said: &str) -> Edit {
     Ok(Done { text, said: said.into(), state, by_hand: false })
 }
 
-/// `harness`'s AtticDB hook handlers in SessionStart groups that also run other hooks, by
+/// `harness`'s AtticDB hook handlers in `event` groups that also run other hooks, by
 /// [`handler_key`]. `text` must be strict JSON.
-fn mixed(harness: Harness, text: &str) -> Vec<Value> {
+fn mixed(harness: Harness, event: Event, text: &str) -> Vec<Value> {
     let root: Value = serde_json::from_str(text).unwrap_or_default();
-    let groups = root["hooks"]["SessionStart"].as_array().cloned().unwrap_or_default();
-    let handlers = groups.iter().filter(|group| !our_group(harness, group));
+    let groups = root["hooks"][event.name()].as_array().cloned().unwrap_or_default();
+    let handlers = groups.iter().filter(|group| !our_group(harness, event, group));
     let handlers =
         handlers.flat_map(|group| group["hooks"].as_array().cloned().unwrap_or_default());
-    let ours = |handler: Value| handler_exe(harness, &handler).map(|_| handler_key(&handler));
+    let ours =
+        |handler: Value| handler_exe(harness, event, &handler).map(|_| handler_key(&handler));
     handlers.filter_map(ours).collect()
 }
 
-/// `text` with `group` in `hooks.SessionStart`, and without AtticDB's other groups. When
+/// `text` with `group` in `hooks.<event>`, and without AtticDB's other groups there. When
 /// AtticDB's handler already sits in a group with other hooks, no group is added. An older
 /// one there is refused, as it can't be updated without touching the other hooks.
-pub(super) fn add_hook(harness: Harness, text: &str, group: &Value) -> Edit {
-    let stale = |old: &Value| our_group(harness, old) && old != group;
-    let (text, stale) = jsonedit::remove(text, &HOOKS, stale)?;
+pub(super) fn add_hook(harness: Harness, event: Event, text: &str, group: &Value) -> Edit {
+    let stale = |old: &Value| our_group(harness, event, old) && old != group;
+    let (text, stale) = jsonedit::remove(text, &event.path(), stale)?;
     let handler = &group["hooks"][0];
-    let mixed = mixed(harness, &text);
+    let mixed = mixed(harness, event, &text);
     if mixed.iter().any(|other| *other != handler_key(handler)) {
         return Err(Refused {
             why: "an older atticdb hook is inside a group with other hooks".into(),
@@ -822,7 +914,7 @@ pub(super) fn add_hook(harness: Harness, text: &str, group: &Value) -> Edit {
         });
     }
     let root: Value = serde_json::from_str(&text).unwrap_or_default();
-    let groups = root["hooks"]["SessionStart"].as_array();
+    let groups = root["hooks"][event.name()].as_array();
     let state = if stale == 0 { State::Unchanged } else { State::Updated };
     if groups.is_some_and(|groups| groups.contains(group)) {
         return done(text, state, if stale == 0 { "unchanged" } else { "updated" });
@@ -830,7 +922,7 @@ pub(super) fn add_hook(harness: Harness, text: &str, group: &Value) -> Edit {
     if !mixed.is_empty() {
         return done(text, state, "found inside a group with other hooks, so not added again");
     }
-    let text = jsonedit::append(&text, &HOOKS, group)?;
+    let text = jsonedit::append(&text, &event.path(), group)?;
     let state = if stale == 0 { State::Added } else { State::Updated };
     done(text, state, if stale == 0 { "added" } else { "updated" })
 }
@@ -855,12 +947,16 @@ fn add_rules(text: &str, notes: Notes) -> Edit {
     done(text, state, said)
 }
 
-/// `text` without the SessionStart groups that run `harness`'s AtticDB hook. An AtticDB handler
-/// in a group with other hooks stays, and is left to do by hand.
-pub(super) fn drop_hooks(harness: Harness, text: &str) -> Edit {
-    let ours = |group: &Value| our_group(harness, group);
-    let (text, removed) = jsonedit::remove(text, &HOOKS, ours)?;
-    let by_hand = !mixed(harness, &text).is_empty();
+/// `text` without the `event` groups that run `harness`'s AtticDB hook. An AtticDB handler
+/// in a group with other hooks stays, and is left to do by hand. An array this empties goes
+/// unless the event [keeps it](Event::keeps_empty), and so does a `hooks` that is then empty.
+pub(super) fn drop_hooks(harness: Harness, event: Event, text: &str) -> Edit {
+    let ours = |group: &Value| our_group(harness, event, group);
+    let (mut text, removed) = jsonedit::remove(text, &event.path(), ours)?;
+    if removed > 0 && !event.keeps_empty() {
+        text = drop_emptied(&text, event)?;
+    }
+    let by_hand = !mixed(harness, event, &text).is_empty();
     let said = match (removed, by_hand) {
         (0, false) => "not found",
         (_, false) => "removed",
@@ -872,6 +968,25 @@ pub(super) fn drop_hooks(harness: Harness, text: &str) -> Edit {
     };
     let state = if removed == 0 { State::Unchanged } else { State::Removed };
     Ok(Done { text, said: said.into(), state, by_hand })
+}
+
+/// `text` without `hooks.<event>` when that array is empty, then without `hooks` when that
+/// object is empty. `text` must be strict JSON.
+fn drop_emptied(text: &str, event: Event) -> Result<String, Refused> {
+    let empty = |root: &Value, path: &[&str]| {
+        let node = path.iter().fold(root, |node, key| &node[*key]);
+        node.as_array().is_some_and(Vec::is_empty) || node.as_object().is_some_and(|o| o.is_empty())
+    };
+    let root: Value = serde_json::from_str(text).unwrap_or_default();
+    if !empty(&root, &event.path()) {
+        return Ok(text.to_owned());
+    }
+    let (text, _) = jsonedit::remove_key(text, &["hooks"], event.name())?;
+    let root: Value = serde_json::from_str(&text).unwrap_or_default();
+    if !empty(&root, &["hooks"]) {
+        return Ok(text);
+    }
+    Ok(jsonedit::remove_key(&text, &[], "hooks")?.0)
 }
 
 /// `text` without AtticDB's allow rules.
@@ -893,6 +1008,8 @@ pub(super) struct Part<'a> {
     pub(super) by_hand: String,
     /// The edit that applies it.
     pub(super) edit: &'a dyn Fn(&str) -> Edit,
+    /// What adding it does, said in brackets after a plan's `add` line. Never in a report.
+    pub(super) adds: Option<&'static str>,
 }
 
 /// Claude's `settings.json`, in its config dir.
@@ -960,7 +1077,13 @@ pub(super) fn edit_file(
     }
     type Outcome = Result<(String, State, bool, bool), (State, String, Option<String>)>;
     let line = |(part, done): (&Part<'_>, Outcome)| match done {
-        Ok((_, state, false, _)) if mode == Mode::Plan => planned(&path, part.name, state),
+        Ok((_, state, false, _)) if mode == Mode::Plan => {
+            let mut line = planned(&path, part.name, state);
+            if let (State::Added, Some(adds)) = (state, part.adds) {
+                line.text += &format!(" ({adds})");
+            }
+            line
+        }
         Ok((said, state, by_hand, changed)) => {
             let line = match (&backup, changed) {
                 (Some(saved), true) => {
@@ -1014,24 +1137,56 @@ mod find_tests {
         assert_eq!(line, wanted);
     }
 
-    /// On Windows Claude Code's hook is in exec form, with the home in `--home`. AtticDB finds
-    /// its own, and no other.
+    /// On Windows Claude Code's hooks are in exec form, with the home in `--home`. AtticDB finds
+    /// its own for each event, and no other.
     #[cfg(windows)]
     #[test]
     fn the_exec_form_hook_reads_back_its_binary() {
-        use super::{handler_exe, hook_group, our_group, Harness};
+        use super::{handler_exe, hook_group, our_group, Event, Harness};
         let exe = r"C:\Users\me\it's & $x\atticdb.exe";
-        for home in [None, Some(r"C:\Users\me\h o m e")] {
-            let group = hook_group(exe, home);
-            let handler = &group["hooks"][0];
-            assert_eq!(handler_exe(Harness::ClaudeCode, handler).as_deref(), Some(exe));
-            assert!(our_group(Harness::ClaudeCode, &group));
-            let mut other = handler.clone();
-            other["args"][1] = "x".into();
-            assert_eq!(handler_exe(Harness::ClaudeCode, &other), None);
-            let mut relative = handler.clone();
-            relative["command"] = "atticdb.exe".into();
-            assert_eq!(handler_exe(Harness::ClaudeCode, &relative), None);
+        let events =
+            [(Event::SessionStart, Event::PostCompact), (Event::PostCompact, Event::SessionStart)];
+        for (event, other_event) in events {
+            for home in [None, Some(r"C:\Users\me\h o m e")] {
+                let group = hook_group(event, exe, home);
+                let handler = &group["hooks"][0];
+                assert_eq!(handler_exe(Harness::ClaudeCode, event, handler).as_deref(), Some(exe));
+                assert!(our_group(Harness::ClaudeCode, event, &group));
+                assert!(!our_group(Harness::ClaudeCode, other_event, &group));
+                let mut other = handler.clone();
+                other["args"][1] = "x".into();
+                assert_eq!(handler_exe(Harness::ClaudeCode, event, &other), None);
+                let mut relative = handler.clone();
+                relative["command"] = "atticdb.exe".into();
+                assert_eq!(handler_exe(Harness::ClaudeCode, event, &relative), None);
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod hook_tests {
+    use super::{command_exe, hook_command, Event, Harness};
+
+    /// The PostCompact command runs `hook post-compact`, with the home prefix when one is set.
+    /// It reads back as AtticDB's for PostCompact only. The SessionStart command stays as it was.
+    #[test]
+    fn post_compact_command_runs_hook_post_compact() {
+        let exe = if cfg!(windows) { r"C:\it's\atticdb.exe" } else { "/opt/it's/atticdb" };
+        let quoted = format!("'{}'", exe.replace('\'', r"'\''"));
+        if !cfg!(windows) {
+            assert_eq!(quoted, r"'/opt/it'\''s/atticdb'");
+        }
+        let bare = hook_command(Harness::ClaudeCode, Event::PostCompact, exe, None);
+        assert_eq!(bare, format!("{quoted} hook post-compact --harness claude-code"));
+        let homed = hook_command(Harness::ClaudeCode, Event::PostCompact, exe, Some("/h o"));
+        assert_eq!(homed, format!("ATTICDB_HOME='/h o' {bare}"));
+        for command in [&bare, &homed] {
+            let read = |event| command_exe(Harness::ClaudeCode, event, command);
+            assert_eq!(read(Event::PostCompact).as_deref(), Some(exe), "{command}");
+            assert_eq!(read(Event::SessionStart), None, "{command}");
+        }
+        let start = hook_command(Harness::ClaudeCode, Event::SessionStart, exe, None);
+        assert_eq!(start, format!("{quoted} hook session-start --harness claude-code"));
     }
 }

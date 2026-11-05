@@ -138,6 +138,7 @@ fn setup_plans_then_connects_every_app_it_finds() {
          instructions in {c}, so VS Code gets those too.\n\
          Claude Code:\n  {h}/.claude.json: add the MCP entry\n  \
          {h}/.claude/settings.json: add the SessionStart hook\n  \
+         {h}/.claude/settings.json: add the PostCompact hook (saves compaction summaries)\n  \
          {h}/.claude/settings.json: add the allow rules\n\
          Codex:\n  {h}/.codex/config.toml: add the MCP entry\n  \
          {h}/.codex/hooks.json: add the SessionStart hook\n  \
@@ -180,6 +181,7 @@ fn setup_plans_then_connects_every_app_it_finds() {
     let allow = read(&settings)["permissions"]["allow"].clone();
     assert!(allow.as_array().unwrap().contains(&json!("mcp__atticdb__memory_append")));
     assert_eq!(read(&settings)["hooks"]["SessionStart"].as_array().unwrap().len(), 1);
+    assert_eq!(read(&settings)["hooks"]["PostCompact"].as_array().unwrap().len(), 1);
     let block = std::fs::read_to_string(&config).unwrap();
     assert!(block.contains("[mcp_servers.atticdb.tools.memory_append]"), "{block}");
     assert_eq!(read(&hooks)["hooks"]["SessionStart"].as_array().unwrap().len(), 1);
@@ -196,7 +198,7 @@ fn setup_plans_then_connects_every_app_it_finds() {
     let (code, out, err) = run(&["--yes"]);
     assert_eq!(code, Some(0), "{out}{err}");
     let plan = out.split("Applying:\n").next().unwrap();
-    assert_eq!(plan.lines().filter(|line| line.ends_with(" unchanged")).count(), 9, "{out}");
+    assert_eq!(plan.lines().filter(|line| line.ends_with(" unchanged")).count(), 10, "{out}");
     for line in out.lines() {
         let changed = [": add the ", ": update the ", "added", "updated", "connected atticdb to"];
         let changed = [&changed[..], &["removed", "skipped,", "backup"]].concat();
@@ -207,15 +209,16 @@ fn setup_plans_then_connects_every_app_it_finds() {
     assert_eq!((files.map(|file| std::fs::read(file).unwrap()), tree(&copilot)), before);
     assert_eq!(calls(&claude_log).len(), 1, "claude ran only for the first add");
 
-    // A comment makes settings.json more than strict JSON, so its 2 parts are skipped.
+    // A comment makes settings.json more than strict JSON, so its 3 parts are skipped.
     let commented = "{\n  // mine\n}\n";
     std::fs::write(&settings, commented).unwrap();
     let (code, out, err) = run(&["--yes", "--harness", "claude-code"]);
     assert_eq!(code, Some(1), "{out}{err}");
     assert!(out.contains("\n  SessionStart hook: skipped, "), "{out}");
     assert!(out.contains("\n0 connected, 1 with skipped parts.\n"), "{out}");
-    let failed = "\n  Claude Code: 2 failed\n    not in place: SessionStart hook: skipped, ";
+    let failed = "\n  Claude Code: 3 failed\n    not in place: SessionStart hook: skipped, ";
     assert!(out.contains(failed), "{out}");
+    assert!(out.contains("\n    not in place: PostCompact hook: skipped, "), "{out}");
     assert!(out.contains("\n    not in place: allow rules: skipped, "), "{out}");
     assert_eq!(std::fs::read_to_string(&settings).unwrap(), commented);
 
@@ -459,8 +462,8 @@ fn setup_asks_and_stops_without_answers() {
             assert_eq!(tree(&home), before, "{case}: nothing written");
             continue;
         }
-        let asked = "Which apps? [copilot,vscode,claude-code,codex] Load memory at the start of \
-                     each chat? [Y/n] Save notes without asking? (Claude Code and Codex. Saving \
+        let asked = "Which apps? [copilot,vscode,claude-code,codex] Load memory at chat start, \
+                     and save Claude Code's compaction summaries? [Y/n] Save notes without asking? (Claude Code and Codex. Saving \
                      a rule always asks.) [Y/n] Plan:\nClaude Code:\n";
         assert!(out.starts_with(asked), "{case}: {out}");
         assert!(out.contains("Apply? [y/N] Applying:\n"), "{case}: {out}");
@@ -611,8 +614,9 @@ fn doctor_checks_an_install_and_writes_nothing() {
         format!("  binary: stale, {}\n{}", fix("vscode"), gone(&vscode)),
         format!("    {hook} runs /bin/sh, not this atticdb, {}\n", exe.display()),
         // The hook would change, so it isn't taken as left out.
-        format!("Claude Code:\n  parts: 1 would change, {}\n", fix("claude-code")),
+        format!("Claude Code:\n  parts: 2 would change, {}\n", fix("claude-code")),
         format!("    {}: update the SessionStart hook\n", settings.display()),
+        format!("    {}: update the PostCompact hook\n", settings.display()),
         format!("  binary: stale, {}\n{}", fix("claude-code"), gone(&settings)),
         format!("Codex:\n  parts: 1 would change, {}\n", fix("codex")),
         format!("    {}: update the MCP entry\n", toml.display()),
@@ -634,6 +638,21 @@ fn doctor_checks_an_install_and_writes_nothing() {
     };
     let both = ["--harness", "copilot,bogus"];
     let stale_apps = ["--harness", "codex,vscode,claude-code"];
+    // Only the PostCompact group runs a binary that is gone.
+    let stale_compact = [
+        format!("Claude Code:\n  parts: 1 would change, {}\n", fix("claude-code")),
+        format!("    {}: update the PostCompact hook\n", settings.display()),
+        format!("  binary: stale, {}\n{}  hook: ok\n", fix("claude-code"), gone(&settings)),
+    ];
+    // No SessionStart group, and a PostCompact group that runs a binary that is gone. The
+    // stale group shows, so the missing SessionStart one isn't taken as left out.
+    let no_start = [
+        format!("Claude Code:\n  parts: 2 would change, {}\n", fix("claude-code")),
+        format!("    {}: add the SessionStart hook\n", settings.display()),
+        format!("    {}: update the PostCompact hook\n", settings.display()),
+        format!("  binary: stale, {}\n{}", fix("claude-code"), gone(&settings)),
+    ];
+    let claude_only = ["--harness", "claude-code"];
     let (codex, copilot) = (["--harness", "codex"], ["--harness", "copilot"]);
     let get_failed = "\n  codex mcp get atticdb: codex mcp get atticdb --json failed";
     let not_verified = "\n  hook: ok\n  codex mcp get atticdb: not verified: codex not found\n";
@@ -658,7 +677,7 @@ fn doctor_checks_an_install_and_writes_nothing() {
         entry.display()
     );
     let vscode_only = ["--harness", "vscode"];
-    let rows: [DoctorRow<'_>; 20] = [
+    let rows: [DoctorRow<'_>; 22] = [
         ("not set up", &bare, None, &no_apps, &[], 1, unset(&typed_exe())),
         ("not set up, atticdb on PATH", &bare, None, &found, &[], 1, unset("atticdb")),
         (
@@ -676,6 +695,16 @@ fn doctor_checks_an_install_and_writes_nothing() {
         ("healthy", &home, None, &path, &[], 0, healthy),
         ("part would change", &home, None, &path, &[], 1, guide),
         ("stale binary", &home, None, &path, &stale_apps, 1, stale.concat()),
+        ("stale PostCompact hook", &home, None, &path, &claude_only, 1, stale_compact.concat()),
+        (
+            "stale PostCompact, no SessionStart",
+            &home,
+            None,
+            &path,
+            &claude_only,
+            1,
+            no_start.concat(),
+        ),
         ("home 0755", &home, None, &path, &[], 1, mode),
         ("unknown harness", &home, None, &path, &both, 2, "usage:".into()),
         ("synced folder", &bare, moved, &no_apps, &[], 0, moved_ok),
@@ -717,6 +746,22 @@ fn doctor_checks_an_install_and_writes_nothing() {
                     let text = std::fs::read_to_string(file).unwrap();
                     std::fs::write(file, text.replace(exe, other)).unwrap();
                 }
+            }
+            "stale PostCompact, no SessionStart" => {
+                let mut root = read(&settings);
+                root["hooks"].as_object_mut().unwrap().remove("SessionStart");
+                let ours = format!("'{}' hook post-compact", exe.display());
+                let text = root.to_string();
+                assert!(text.contains(&ours), "{text}");
+                let old = text.replace(&ours, &format!("'{OLD}' hook post-compact"));
+                std::fs::write(&settings, old).unwrap();
+            }
+            "stale PostCompact hook" => {
+                let text = std::fs::read_to_string(&settings).unwrap();
+                let ours = format!("'{}' hook post-compact", exe.display());
+                assert!(text.contains(&ours), "{text}");
+                let old = text.replace(&ours, &format!("'{OLD}' hook post-compact"));
+                std::fs::write(&settings, old).unwrap();
             }
             // Valid for AtticDB's scanner, but not TOML, so only codex finds it.
             "codex bad toml" => {
