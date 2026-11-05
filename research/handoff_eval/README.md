@@ -75,6 +75,7 @@ After each run: `atticdb disconnect` for both of the run's harnesses, delete `<h
 | files | AGENTS.md and CLAUDE.md in the fixture say: "Keep HANDOFF.md at the repo root. After each task, record decisions, their reasons, rejected approaches and constraints. Read it before you start." Nothing is pre-filled. The writer has to keep the file. |
 | atticdb | `atticdb setup --yes --harness <h>` for both of the run's harnesses before the writer. Both are disconnected after the reader. |
 | oracle | No writer session. The reader prompt starts with "Notes from the last session: " and the case's gold note. A case whose writer changes code has an `oracle_state` in cases.py. Its files go over the fixture and are committed as "writer work" before the reader, so the repo matches the note. Only H1 and H5 have one: `pack_header` packs with `struct.pack`. |
+| blank | No writer session and no notes. The reader gets the plain reader prompt. It is a control: its pass rate is the chance floor, and it flags leaks. `leaked` is 1 when an evidence token is in the reader's reply or tool outputs. Other arms leave `leaked` empty. Runs only when named in `--arms`. |
 
 In the files arm, AGENTS.md and CLAUDE.md are committed with the fixture. So they are not part of any diff.
 
@@ -136,7 +137,7 @@ An errored run is kept in the CSV. It's never a pass or a fail, and the batch go
 
 ## Cost
 
-A run is its writer sessions plus 1 reader. The oracle has no writer.
+A run is its writer sessions plus 1 reader. The oracle and blank arms have no writer.
 The pilot matrix is 6 cases, 4 arms, 2 directions and 1 rep: 48 runs and 90 agent sessions. 42 are writers and 48 are readers.
 That holds for Claude and Codex, and for Claude and Copilot. Each Copilot session costs premium requests. A checked session on `gpt-5.6-terra` made 3 model calls and cost 1. Other models have other multipliers.
 Each session has a 300 s timeout by default (`--agent-timeout`).
@@ -183,7 +184,7 @@ Then it runs both again from a run's own config dirs. For Copilot it only runs `
 | Flag | Default | Meaning |
 |---|---|---|
 | `--cases` | all 6 | a comma list of H1 to H6 |
-| `--arms` | all 4 | a comma list of native, files, atticdb, oracle |
+| `--arms` | native, files, atticdb, oracle | a comma list of native, files, atticdb, oracle, blank |
 | `--directions` | `claude-code:codex,codex:claude-code` | a comma list of `writer:reader` with claude-code, codex or copilot. Same-harness directions are refused, as the pilot is cross-harness only |
 | `--reps` | 1 | runs per case, arm and direction |
 | `--claude-model`, `--codex-model`, `--copilot-model` | none | each is required only when the directions use its harness |
@@ -197,12 +198,13 @@ Exit codes: 0 when every run finished, 1 when a run errored or the budget stoppe
 
 ## Results
 
-The CSV has 1 row per run: case, arm, writer, reader, rep, the 3 stages and where each was found, captured_all, errored and its stage, sessions, tokens in and out, wall time, both model ids, the reasons and the reply.
+The CSV has 1 row per run: case, arm, writer, reader, rep, the 3 stages and where each was found, captured_all, leaked, errored and its stage, sessions, tokens in and out, wall time, both model ids, the reasons and the reply.
 Reasons hold the grader's reasons and a redacted excerpt of the reply, cut at 200 chars. `reply` holds the reader's whole final reply, redacted the same way: token shapes and the run's paths are replaced. No column holds an env value.
 A batch refuses an `--out` CSV whose header differs from this version's, such as one from before `captured_all` and `reply`.
 
 The summary's first line is "Integration pilot. Not a statistical result."
 Then pass rates by arm and case, a stage funnel per arm with the oracle ceiling, captured with reason per arm, and pass rates by direction.
+With blank rows, a "Control (blank arm)" section gives the blank pass rate and how many runs leaked.
 Rates count runs that did not error. Errored runs are counted apart.
 
 ### Re-grade

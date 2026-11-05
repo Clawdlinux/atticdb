@@ -321,6 +321,85 @@ def test_oracle_repo_holds_the_writer_work(env, monkeypatch, cid, writer_work):
     assert_cleaned_up(env)
 
 
+def claude_stream(reply: str, tool_result: str = "") -> str:
+    """A claude reader's stream: 1 Bash call with `tool_result` when given, then `reply`."""
+    events = [{"type": "system", "subtype": "init", "session_id": "s1", "tools": []}]
+    if tool_result:
+        events += [{"type": "assistant", "message": {"role": "assistant", "content": [
+                       {"type": "tool_use", "id": "toolu_0", "name": "Bash", "input": {"command": "grep -r x ."}}]}},
+                   {"type": "user", "message": {"role": "user", "content": [
+                       {"type": "tool_result", "tool_use_id": "toolu_0",
+                        "content": [{"type": "text", "text": tool_result}]}]}}]
+    events += [{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": reply}]}},
+               {"type": "result", "subtype": "success", "is_error": False, "num_turns": 2, "result": reply}]
+    return "".join(json.dumps(ev) + "\n" for ev in events)
+
+
+def test_blank_plan_has_reader_only(env):
+    cfg = make_cfg(env, models=dict(MODELS))
+    steps = run.plan(cfg, CASES["H1"], "blank", "claude-code", "copilot", "/tmp/zhe-root")
+    assert steps["setup"] == [] and steps["writer"] == [] and steps["capture"] == [] and steps["hook"] == []
+    (reader,) = steps["reader"]
+    assert reader.argv == arms.session_argv("copilot", CASES["H1"].reader_prompt, MODELS["copilot"], "blank")
+    assert arms.reader_prompt(CASES["H1"], "blank") == CASES["H1"].reader_prompt
+    assert arms.has_writer("blank") is False and arms.ARMS[-1] == "blank"
+    assert arms.planned_sessions(CASES["H3"], "blank") == 1
+
+
+@needs_atticdb
+def test_blank_leak_flags_token_in_reply(env, monkeypatch, tmp_path):
+    replay = tmp_path / "reply.jsonl"
+    replay.write_text(claude_stream("LEDG-7731"))
+    monkeypatch.setenv("STUB_REPLAY", str(replay))
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], "blank", "codex", "claude-code", 1)
+    assert not res.errored, res.reasons
+    assert res.leaked is True and res.sessions == 1 and res.captured is None
+    assert results.row("2026-11-05", res)["leaked"] == "1"
+    (call,) = agent_calls(env["log"])
+    assert call["prog"] == "claude" and call["argv"][1] == CASES["H1"].reader_prompt
+    assert_cleaned_up(env)
+
+    # The stub reader with nothing to read replies without a token.
+    monkeypatch.delenv("STUB_REPLAY")
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], "blank", "codex", "claude-code", 1)
+    assert not res.errored, res.reasons
+    assert res.leaked is False and res.delivered is False and res.passed is False
+    assert results.row("2026-11-05", res)["leaked"] == "0"
+
+    # Only the blank arm measures a leak.
+    for arm in ("native", "oracle"):
+        res = run_handoff(make_cfg(env), Runner(), CASES["H1"], arm, "codex", "claude-code", 1)
+        assert not res.errored, res.reasons
+        assert res.leaked is None and results.row("2026-11-05", res)["leaked"] == ""
+    assert_cleaned_up(env)
+
+
+@needs_atticdb
+@pytest.mark.parametrize("cid", ["H1", "H5"])
+def test_blank_leak_flags_delivery(env, monkeypatch, tmp_path, cid):
+    """A token in the reader's tool output is a leak, even when the reply doesn't cite it. H5 has no
+    delivery stage, but its blank reader's transcript is still read for a leak."""
+    replay = tmp_path / "reply.jsonl"
+    replay.write_text(claude_stream("I have no record of that.", tool_result="see ticket LEDG-7731"))
+    monkeypatch.setenv("STUB_REPLAY", str(replay))
+    res = run_handoff(make_cfg(env), Runner(), CASES[cid], "blank", "codex", "claude-code", 1)
+    assert not res.errored, res.reasons
+    assert res.leaked is True
+    if cid == "H1":
+        assert res.delivered is True and res.delivered_where == "transcript[LEDG-7731]"
+    else:
+        assert res.delivered is None and res.delivered_where == ""
+    assert_cleaned_up(env)
+
+
+def test_default_arms_unchanged():
+    a = cli.parse(["--cases", "H1", "--claude-model", "X", "--codex-model", "Y", "--dry-run"])
+    assert a.arms == ["native", "files", "atticdb", "oracle"] == list(arms.DEFAULT_ARMS)
+    a = cli.parse(["--cases", "H1", "--arms", "blank,native", "--claude-model", "X", "--codex-model", "Y", "--dry-run"])
+    assert a.arms == ["blank", "native"]
+    assert a.writer_sessions == 2 and a.reader_sessions == 4
+
+
 CODEX_FAILED = ('{"type":"thread.started","thread_id":"t1"}\n{"type":"turn.started"}\n'
                 '{"type":"turn.failed","error":{"message":"usage limit"}}\n')
 CLAUDE_FAILED = ('{"type":"system","subtype":"init","session_id":"s1","tools":[]}\n'

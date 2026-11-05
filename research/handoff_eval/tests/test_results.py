@@ -98,6 +98,29 @@ def test_summary_has_captured_with_reason():
     assert "| atticdb | 2/2 | 1/2 |" in text
     assert "| native | 0/1 | 0/1 |" in text
     assert "| oracle | n/a | n/a |" in text
+    assert "Control (blank arm)" not in text
+
+
+def test_from_row_without_leaked_column():
+    # As a CSV gives it back: every cell a string.
+    row = {k: str(v) for k, v in results.row("2026-11-04", res(captured=True, passed=True)).items()}
+    del row["leaked"]
+    assert results.from_row(row).leaked is None
+    for value, want in (("1", True), ("0", False), ("", None)):
+        assert results.from_row({**row, "leaked": value}).leaked is want
+    assert results.COLUMNS[results.COLUMNS.index("delivered_where") + 1] == "leaked"
+
+
+def test_summary_has_control_section():
+    done = [res(arm="blank", passed=False, leaked=False),
+            res(arm="blank", case="H2", passed=True, leaked=True),
+            res(arm="blank", case="H3", passed=False, leaked=False),
+            res(arm="blank", case="H4", errored=True, error_stage="reader"),
+            res(arm="atticdb", captured=True, captured_all=True, passed=True)]
+    text = "\n".join(results.summary(done))
+    assert "## Control (blank arm)" in text
+    assert "Pass rate: 1/3." in text
+    assert "Leaked: 1 of 3." in text
 
 
 # ---- --regrade ----

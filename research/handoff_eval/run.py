@@ -150,6 +150,8 @@ class HandoffResult:
     captured_all: bool | None = None
     delivered: bool | None = None
     delivered_where: str = ""
+    # Blank arm only: an evidence token in the reader's reply or tool outputs. None for other arms.
+    leaked: bool | None = None
     passed: bool | None = None
     check_timed_out: bool = False  # a code check of the grader timed out
     errored: bool = False
@@ -954,6 +956,9 @@ def run_handoff(cfg: HandoffConfig, runner: Runner, case: Case, arm: str, writer
         delivered += [("transcript", t) for t in tokens_in(outputs, case.evidence)]
         if case.id not in NO_DELIVERY:
             res.delivered, res.delivered_where = bool(delivered), _where(delivered)
+        if arm == "blank":
+            # Read even for H5: the blank reader has no source, so any token at all is a leak.
+            res.leaked = bool(tokens_in(out.reply, case.evidence)) or bool(delivered)
 
         stage = "grade"
         (diff_step,) = steps["grade"]

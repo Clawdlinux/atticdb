@@ -1,9 +1,11 @@
-"""The 4 arms, and the agent commands each one starts.
+"""The 5 arms, and the agent commands each one starts.
 
 - native: repo files only.
 - files: AGENTS.md and CLAUDE.md in the fixture ask the agent to keep HANDOFF.md. Nothing is pre-filled.
 - atticdb: `atticdb setup --yes --harness <h>` for both harnesses before the writer, disconnect after.
 - oracle: no writer session. The reader prompt starts with the case's gold note.
+- blank: no writer session and no notes. A control: its pass rate is the chance floor, and any
+  evidence token the reader sees or says is a leak.
 """
 
 from __future__ import annotations
@@ -11,7 +13,9 @@ from __future__ import annotations
 from ..setup_eval import agents
 from .cases import Case
 
-ARMS = ("native", "files", "atticdb", "oracle")
+ARMS = ("native", "files", "atticdb", "oracle", "blank")
+# What a batch runs without --arms. The blank control runs only when asked for.
+DEFAULT_ARMS = ("native", "files", "atticdb", "oracle")
 
 HANDOFF_RULE = ("Keep HANDOFF.md at the repo root. After each task, record decisions, their reasons, rejected "
                 "approaches and constraints. Read it before you start.")
@@ -29,7 +33,7 @@ def check_arm(arm: str) -> None:
 
 def has_writer(arm: str) -> bool:
     check_arm(arm)
-    return arm != "oracle"
+    return arm not in ("oracle", "blank")
 
 
 def uses_atticdb(arm: str) -> bool:

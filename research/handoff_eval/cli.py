@@ -102,7 +102,8 @@ def parse(argv) -> argparse.Namespace:
                    help="grade the answer replies stored in a results CSV again with the current graders, and "
                         "print the summary. Runs no agent and writes nothing")
     p.add_argument("--cases", type=case_list, default=list(CASES), help="comma list of " + ",".join(CASES))
-    p.add_argument("--arms", type=arm_list, default=list(arms.ARMS), help="comma list of " + ",".join(arms.ARMS))
+    p.add_argument("--arms", type=arm_list, default=list(arms.DEFAULT_ARMS),
+                   help="comma list of " + ",".join(arms.ARMS) + ". Default " + ",".join(arms.DEFAULT_ARMS))
     p.add_argument("--directions", type=direction_list, default=direction_list(DEFAULT_DIRECTIONS),
                    help=f"comma list of writer:reader. Default {DEFAULT_DIRECTIONS}")
     p.add_argument("--reps", type=setup_cli.positive, default=1, help="runs per case, arm and direction")
