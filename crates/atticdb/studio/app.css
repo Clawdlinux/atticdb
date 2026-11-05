@@ -57,7 +57,9 @@ button, input { font: inherit; color: inherit; }
 code, .fig { font-family: var(--fig); font-size: var(--fs-fig); }
 :focus-visible { outline: 2px solid var(--text); outline-offset: 2px; border-radius: 2px; }
 .icon { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
-.mark { width: 20px; height: 20px; flex: none; fill: none; stroke: var(--text); stroke-width: 1.8; stroke-linecap: round; }
+.mark { width: 20px; height: 20px; flex: none; }
+.mark-roof { fill: var(--text); }
+.mark-box { fill: var(--hue); }
 .muted, .zero { color: var(--muted); }
 
 /* ---------- shell: the sidebar sits on the page ground, no top bar on desktop ---------- */
