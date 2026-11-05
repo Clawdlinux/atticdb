@@ -1,11 +1,13 @@
 import Link from "next/link";
 import { DOCS_URL, siteHref } from "@/lib/site";
+import SiteMark from "./SiteMark";
 import styles from "./SiteNav.module.css";
 
 export default function SiteNav() {
   return (
     <header className={`container ${styles.header}`}>
       <Link className={styles.wordmark} href={siteHref("/")} aria-label="AtticDB home">
+        <SiteMark />
         AtticDB
       </Link>
       <nav className={styles.links} aria-label="Main navigation">

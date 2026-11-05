@@ -6,6 +6,9 @@
 }
 
 .wordmark {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3em;
   margin-right: auto;
   font-family: var(--font-display), Impact, sans-serif;
   font-size: var(--step-lead);
