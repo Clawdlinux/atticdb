@@ -37,7 +37,7 @@ Then it connects them, checks each one, and says what to do next.
 
   --yes             take every default, and don't ask Apply?
   --harness <list>  connect these apps, a comma list of copilot, vscode, claude-code and codex
-  --no-hook         no chat-start memory, and no saved compaction summaries in Claude Code
+  --no-hook         no chat-start memory in Claude Code and Codex, and no saved compaction summaries
   --notes ask|auto  ask before saving notes in Claude Code and Codex, or don't (the default)
   --dry-run         print the plan, and write nothing
 

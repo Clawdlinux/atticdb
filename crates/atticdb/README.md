@@ -129,7 +129,7 @@ If `hooks = false` turns Codex's hooks off, it says memory won't load at chat st
 
 Flags replace the questions. `--harness <list>` takes a comma list of app names.
 The names are `copilot`, `vscode`, `claude-code` and `codex`.
-`--no-hook` drops the hook, and Claude Code's PostCompact hook too. So it means no chat-start memory, and no saved compaction summaries in Claude Code. `--notes ask|auto` picks how notes are saved.
+`--no-hook` drops the hook, and Claude Code's PostCompact hook too. So Claude Code and Codex get no chat-start memory, and Claude Code saves no compaction summaries. VS Code and Copilot CLI keep their hook. `--notes ask|auto` picks how notes are saved.
 `--yes` takes every default and doesn't ask `Apply?`.
 Without a terminal on stdin, it needs `--yes` or `--dry-run`. Else it exits 2.
 The end of stdin exits 2. So do 3 answers it can't read.
