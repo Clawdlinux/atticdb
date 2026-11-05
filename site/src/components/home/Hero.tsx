@@ -31,6 +31,11 @@ const DISKS: { value: Disk; label: string }[] = [
 ];
 const WRITERS: Writers[] = [1, 4, 16];
 
+export const HUB_SRC = "/demo/attic-hub.svg";
+export const HUB_STILL = `${HUB_SRC}#still`;
+export const HUB_ALT =
+  "Claude Code saves the rule Use pnpm, not npm to AtticDB on your machine, and new chats in Codex, Copilot and VS Code start with it.";
+
 const numbers = new Intl.NumberFormat("en-US");
 
 function line(i: number): CSSProperties {
@@ -254,20 +259,37 @@ function HeroBody({ afterHonest }: HeroProps) {
             </span>
           </span>
         </h1>
-        <p className={styles.lead}>{SUB}</p>
-      </div>
-
-      <div className={styles.actions}>
-        <InstallSwitch />
-        <motion.a
-          className={styles.waitlist}
-          href={WAITLIST_URL}
-          whileHover={HOVER}
-          whileTap={TAP}
-          transition={PRESS}
-        >
-          Join the cloud waitlist
-        </motion.a>
+        <div className={styles.copy}>
+          <p className={styles.lead}>{SUB}</p>
+          <div className={styles.actions}>
+            <InstallSwitch />
+            <motion.a
+              className={styles.waitlist}
+              href={WAITLIST_URL}
+              whileHover={HOVER}
+              whileTap={TAP}
+              transition={PRESS}
+            >
+              Join the cloud waitlist
+            </motion.a>
+          </div>
+        </div>
+        <picture className={styles.hub} data-ui="hub">
+          <source
+            media="(prefers-reduced-motion: reduce)"
+            srcSet={HUB_STILL}
+            width={680}
+            height={420}
+          />
+          <img
+            className={styles.hubImg}
+            src={HUB_SRC}
+            alt={HUB_ALT}
+            width={680}
+            height={420}
+            decoding="async"
+          />
+        </picture>
       </div>
 
       <p className={styles.honest} data-ui="honest">
