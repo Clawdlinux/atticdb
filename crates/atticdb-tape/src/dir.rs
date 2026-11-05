@@ -244,6 +244,8 @@ impl std::fmt::Debug for DataDir {
 
 impl DataDir {
     /// Takes the lock before reading or initializing metadata. Real directories must already exist.
+    /// Only the sims and tests open a directory this way. The writer uses `open_versioned`.
+    #[cfg(any(test, feature = "sim"))]
     pub fn open(
         io: Arc<dyn Io>,
         path: impl AsRef<Path>,
