@@ -116,7 +116,8 @@ pub fn post_compact(harness: Option<&str>, home: Option<&str>) -> u8 {
 
 /// Starts a thread that ends the process at [`HARD_STOP`] after `start`, saying so on
 /// stderr. With `print`, it prints `{}` first, unless a line was printed. Without the
-/// thread, the 3 s budget still bounds the calls, but not stdin.
+/// thread, the calls' deadline still bounds them, but not stdin: 3 s for `session-start`,
+/// 5 s for `post-compact`, the timeout Claude Code gives the hook.
 fn hard_stop(start: Instant, event: &'static str, print: bool) {
     let _ = std::thread::Builder::new().spawn(move || {
         std::thread::sleep(HARD_STOP.saturating_sub(start.elapsed()));
