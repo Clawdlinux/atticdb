@@ -26,7 +26,7 @@ const USAGE: &str = "usage:
   atticdb connect <vscode|copilot> [--force] [--dry-run]
   atticdb connect <claude-code|codex> [--force] [--no-hook] [--notes ask|auto] [--dry-run]
   atticdb disconnect <vscode|copilot|claude-code|codex>
-  atticdb hook session-start [--harness <name>] [--home <dir>]
+  atticdb hook <session-start|post-compact> [--harness <name>] [--home <dir>]
   atticdb studio [--url unix:///path|http://127.0.0.1:<port>] [--data-dir <dir>] [--config <path>]
                 [--tenant <name>] [--token-file <path>] [--no-open] [--allow-forget]
   atticdb append <connect> --content <text> [--role user|assistant|tool]
@@ -71,7 +71,7 @@ const USAGE: &str = "usage:
   doctor checks the install and writes nothing. See atticdb doctor --help.";
 
 /// Commands that use the home. A relative `ATTICDB_HOME` fails them with exit 2, so none falls
-/// back to the default home. The hook prints `{}` for it, as for any error.
+/// back to the default home. The hooks exit 0 for it, as for any error.
 const HOME_COMMANDS: [&str; 13] = [
     "mcp", "connect", "setup", "doctor", "studio", "append", "recent", "search", "fact", "tree",
     "file", "forget", "export",
@@ -198,13 +198,15 @@ fn main() -> ExitCode {
     }))
 }
 
-/// `atticdb hook session-start [--harness <name>] [--home <dir>]`. A hook must not fail, so a
-/// flag with no value passes an empty one, which prints `{}`.
+/// `atticdb hook <session-start|post-compact> [--harness <name>] [--home <dir>]`. A hook must
+/// not fail, so a flag with no value passes an empty one, which the hook reports.
 fn hook(args: &[String]) -> Option<u8> {
     let (event, rest) = args.split_first()?;
-    if event != "session-start" {
-        return None;
-    }
+    let run: fn(Option<&str>, Option<&str>) -> u8 = match event.as_str() {
+        "session-start" => atticdb::hook::session_start,
+        "post-compact" => atticdb::hook::post_compact,
+        _ => return None,
+    };
     let (mut harness, mut home) = (None, None);
     let mut rest = rest.iter();
     while let Some(flag) = rest.next() {
@@ -218,7 +220,7 @@ fn hook(args: &[String]) -> Option<u8> {
         }
         *value = Some(rest.next().cloned().unwrap_or_default());
     }
-    Some(atticdb::hook::session_start(harness.as_deref(), home.as_deref()))
+    Some(run(harness.as_deref(), home.as_deref()))
 }
 
 /// Parses `--name value` pairs and bare switches, each at most once. `None` is a usage error.

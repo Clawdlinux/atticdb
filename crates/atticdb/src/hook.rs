@@ -2,10 +2,14 @@
 //! prints a small block of the user's rules, this repo's facts and its recent notes, which
 //! the harness adds to the chat. The block's text depends only on the repo name and memory,
 //! so the prompt prefix stays the same.
+//!
+//! `atticdb hook post-compact`: Claude Code's PostCompact hook. It saves the compaction
+//! summary as a Claude Code note in the repo's session, with a pointer to the transcript.
 
 use crate::client::{HomeReader, DEFAULT_AGENT};
 use crate::connect::Harness;
 use crate::home::Lookup;
+use crate::redact::{Counts, Redactor};
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::path::Path;
@@ -17,7 +21,8 @@ const MAX_INPUT: u64 = 1 << 20;
 /// Time from the hook's start for its reads, so stdin and setup use it up too. A read needs
 /// 2 s left to start, so the first one has at most 1 s to connect or start the server.
 const BUDGET: Duration = Duration::from_secs(3);
-/// Past this, whatever blocks, the hook prints `{}` and exits, under Copilot's 5 s timeout.
+/// Past this, whatever blocks, the hook exits, under Copilot's 5 s timeout. `session-start`
+/// prints `{}` first.
 pub(crate) const HARD_STOP: Duration = Duration::from_secs(4);
 /// Set once a line is printed, so exactly one ever is.
 static PRINTED: Mutex<bool> = Mutex::new(false);
@@ -27,6 +32,8 @@ const MAX_CONTENT: usize = 300;
 /// Longest block, in characters.
 pub(crate) const MAX_BLOCK: usize = 6_000;
 const MORE: &str = "(more in atticdb)";
+/// Most characters of a compaction summary kept in its note.
+const MAX_SUMMARY: usize = 16_000;
 
 /// Reads the hook's JSON on stdin and prints the block in the shape `harness` reads, or `{}`
 /// when there is nothing to show, on any error, or 4 s after the start. Errors go to stderr.
@@ -55,21 +62,9 @@ pub fn session_start(harness: Option<&str>, home: Option<&str>) -> u8 {
             return 0;
         }
     };
-    // Without the thread, the 3 s budget still bounds the reads, but not stdin.
-    let _ = std::thread::Builder::new().spawn(move || {
-        std::thread::sleep(HARD_STOP.saturating_sub(start.elapsed()));
-        if print_once(&json!({})) {
-            let _ = writeln!(std::io::stderr(), "atticdb: hook session-start: stopped at 4 s");
-        }
-        std::process::exit(0);
-    });
-    let lookup = match home.map(Path::new) {
-        None => Ok(Lookup::ENV),
-        Some(dir) if dir.is_absolute() => Ok(Lookup::home(dir.to_owned())),
-        Some(_) => Err("--home must be an absolute path".to_owned()),
-    };
+    hard_stop(start, "session-start", true);
     let stdin = std::io::stdin().lock().take(MAX_INPUT);
-    let output = match lookup.and_then(|lookup| block(stdin, start + BUDGET, &lookup)) {
+    let output = match lookup(home).and_then(|lookup| block(stdin, start + BUDGET, &lookup)) {
         Ok(Some(block)) if specific => json!({"hookSpecificOutput":
             {"hookEventName": "SessionStart", "additionalContext": block}}),
         Ok(Some(block)) => json!({"additionalContext": block}),
@@ -81,6 +76,104 @@ pub fn session_start(harness: Option<&str>, home: Option<&str>) -> u8 {
     };
     let _ = print_once(&output);
     0
+}
+
+/// Reads Claude Code's PostCompact JSON on stdin. Saves its `compact_summary` as a
+/// `claude-code` note in the session of the `cwd`'s repo. The note reads
+/// `Compaction summary (<trigger>): <summary>`, plus `\nFull transcript: <path>` for an
+/// absolute `transcript_path`. Its meta holds `kind`, `trigger`, `harness_session` and
+/// `transcript`. The summary is trimmed, then cut to [`MAX_SUMMARY`] characters plus ` (cut)`.
+/// The write goes through `memory_append`, which hides secrets. Accepts `--harness claude-code`
+/// only. `home` is read as in [`session_start`]. Prints nothing on stdout. A wrong harness, bad
+/// input or any error writes nothing and says why on stderr. At 4 s it stops, as session-start
+/// does. Returns exit code 0.
+pub fn post_compact(harness: Option<&str>, home: Option<&str>) -> u8 {
+    let start = Instant::now();
+    let fail = |why: &str| {
+        let _ = writeln!(std::io::stderr(), "atticdb: hook post-compact: {why}");
+    };
+    let why = match harness {
+        Some("claude-code") => None,
+        None => Some("needs --harness claude-code".to_owned()),
+        Some("") => Some("--harness needs a name. Use claude-code".to_owned()),
+        Some(name) => Some(format!("unknown --harness {name:?}. Use claude-code")),
+    };
+    if let Some(why) = why {
+        fail(&why);
+        return 0;
+    }
+    hard_stop(start, "post-compact", false);
+    let stdin = std::io::stdin().lock().take(MAX_INPUT);
+    if let Err(error) = lookup(home).and_then(|lookup| save(stdin, start + BUDGET, &lookup)) {
+        fail(&error);
+    }
+    0
+}
+
+/// Starts a thread that ends the process at [`HARD_STOP`] after `start`, saying so on
+/// stderr. With `print`, it prints `{}` first, unless a line was printed. Without the
+/// thread, the 3 s budget still bounds the calls, but not stdin.
+fn hard_stop(start: Instant, event: &'static str, print: bool) {
+    let _ = std::thread::Builder::new().spawn(move || {
+        std::thread::sleep(HARD_STOP.saturating_sub(start.elapsed()));
+        if !print || print_once(&json!({})) {
+            let _ = writeln!(std::io::stderr(), "atticdb: hook {event}: stopped at 4 s");
+        }
+        std::process::exit(0);
+    });
+}
+
+/// The home to use: `home` from `--home`, which must be absolute, else `ATTICDB_HOME`'s.
+fn lookup(home: Option<&str>) -> Result<Lookup, String> {
+    match home.map(Path::new) {
+        None => Ok(Lookup::ENV),
+        Some(dir) if dir.is_absolute() => Ok(Lookup::home(dir.to_owned())),
+        Some(_) => Err("--home must be an absolute path".to_owned()),
+    }
+}
+
+/// The first JSON value on `input`. Parsing stops at its end, so stdin left open after it
+/// cannot hang the hook. A bare number or `true` waits for more, until the 4 s stop.
+fn first_value(input: impl Read) -> Result<Value, String> {
+    let first = serde_json::Deserializer::from_reader(input).into_iter::<Value>().next();
+    let input = first.ok_or("stdin is empty")?;
+    input.map_err(|error| format!("stdin is not JSON of at most 1 MiB: {error}"))
+}
+
+/// Saves the compaction summary in `input` to the home `lookup` finds, by `deadline`.
+fn save(input: impl Read, deadline: Instant, lookup: &Lookup) -> Result<(), String> {
+    let input = first_value(input)?;
+    let cwd = input["cwd"].as_str().ok_or("stdin has no cwd string")?;
+    let summary = input["compact_summary"].as_str().map(str::trim);
+    let summary = summary.filter(|summary| !summary.is_empty());
+    let summary = summary.ok_or("stdin has no compact_summary text")?;
+    let repo = repo(Path::new(cwd))?;
+    let (content, meta) = compact_note(&input, summary);
+    let mut home = HomeReader::in_home(&repo, deadline, lookup)?;
+    let args = json!({"content": content, "role": "assistant", "meta": meta});
+    home.append(Harness::ClaudeCode.agent(), &args).map(drop)
+}
+
+/// The content and meta of the note for `summary` and the PostCompact `input`.
+fn compact_note(input: &Value, summary: &str) -> (String, Value) {
+    let trigger = input["trigger"].as_str().filter(|trigger| !trigger.is_empty());
+    let trigger = trigger.unwrap_or("unknown");
+    let transcript = input["transcript_path"].as_str();
+    let transcript = transcript.filter(|path| Path::new(path).is_absolute());
+    // Hidden before the cut too, so a cut can't leave part of a secret the write's own
+    // redaction no longer sees.
+    let summary = Redactor::from_env().text(summary, &mut Counts::new());
+    let summary = match summary.char_indices().nth(MAX_SUMMARY) {
+        Some((at, _)) => format!("{} (cut)", &summary[..at]),
+        None => summary,
+    };
+    let mut content = format!("Compaction summary ({trigger}): {summary}");
+    if let Some(path) = transcript {
+        content += &format!("\nFull transcript: {path}");
+    }
+    let meta = json!({"kind": "compact-summary", "trigger": trigger,
+        "harness_session": input["session_id"].as_str(), "transcript": transcript});
+    (content, meta)
 }
 
 /// Prints `output` unless a line was printed, and says whether it did. Holds the gate while
@@ -99,11 +192,7 @@ fn print_once(output: &Value) -> bool {
 /// The block for the `cwd` in `input`, or `None` when memory has nothing for it. Reads the
 /// home `lookup` finds, and end by `deadline`.
 fn block(input: impl Read, deadline: Instant, lookup: &Lookup) -> Result<Option<String>, String> {
-    // Parsing stops at the end of the first object, so stdin left open after it cannot hang
-    // the hook. A bare number or `true` waits for more, until the 4 s stop.
-    let first = serde_json::Deserializer::from_reader(input).into_iter::<Value>().next();
-    let input = first.ok_or("stdin is empty")?;
-    let input = input.map_err(|error| format!("stdin is not JSON of at most 1 MiB: {error}"))?;
+    let input = first_value(input)?;
     let cwd = input["cwd"].as_str().ok_or("stdin has no cwd string")?;
     block_in(&repo(Path::new(cwd))?, deadline, lookup)
 }
@@ -290,6 +379,20 @@ mod tests {
         };
         let turns: Vec<Value> = (first..).zip(times).map(turn).collect();
         json!({"turns": turns, "truncated": truncated})
+    }
+
+    #[test]
+    fn compact_note_cuts_at_a_char_boundary_and_fills_defaults() {
+        let summary = "é".repeat(16_001);
+        let input = json!({"transcript_path": "relative/t.jsonl"});
+        let (content, meta) = super::compact_note(&input, &summary);
+        let expected = format!("Compaction summary (unknown): {} (cut)", "é".repeat(16_000));
+        assert_eq!(content, expected);
+        let meta_expected = json!({"kind": "compact-summary", "trigger": "unknown",
+            "harness_session": null, "transcript": null});
+        assert_eq!(meta, meta_expected);
+        let (content, _) = super::compact_note(&json!({"trigger": "auto"}), &"é".repeat(16_000));
+        assert_eq!(content, format!("Compaction summary (auto): {}", "é".repeat(16_000)));
     }
 
     #[test]
