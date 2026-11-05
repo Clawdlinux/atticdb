@@ -59,7 +59,8 @@ code, .fig { font-family: var(--fig); font-size: var(--fs-fig); }
 .icon { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .mark { width: 20px; height: 20px; flex: none; }
 .mark-roof { fill: var(--text); }
-.mark-box { fill: var(--hue); }
+/* The brand box colour from atticdb.com, darkened to read on the light studio ground. Not the data hue. */
+.mark-box { fill: #6B8A0A; }
 .muted, .zero { color: var(--muted); }
 
 /* ---------- shell: the sidebar sits on the page ground, no top bar on desktop ---------- */
