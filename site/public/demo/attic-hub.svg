@@ -1,0 +1,163 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 420" width="680" height="420" role="img" aria-labelledby="hub-title hub-desc">
+  <title id="hub-title">AtticDB local memory hub across Claude Code, Codex, Copilot and VS Code</title>
+  <desc id="hub-desc">Claude Code saves the rule "Use pnpm, not npm." to AtticDB on your machine. When a new chat starts in Codex, Copilot or VS Code, AtticDB loads that rule into the chat automatically.</desc>
+  <style>
+    .sans { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+    .ink { fill: #EDE6D8; }
+    .muted { fill: #A89C8C; }
+    .accent { fill: #C8F03C; }
+    .rail { stroke: #3A302A; stroke-width: 1.5; stroke-linecap: round; }
+    .grid-line { stroke: #221B17; stroke-width: 1; }
+    .card { fill: #221B17; stroke: #3A302A; stroke-width: 1.25; }
+    .card-active { fill: #221B17; stroke: #EDE6D8; stroke-width: 1.4; }
+    .a { animation-duration: 7.2s; animation-iteration-count: infinite; animation-fill-mode: both; }
+    .w-line {
+      stroke: #C8F03C;
+      stroke-width: 2.4;
+      stroke-linecap: round;
+      stroke-dasharray: 180;
+      animation-name: pulse-in;
+    }
+    .f-line {
+      stroke: #C8F03C;
+      stroke-width: 2.2;
+      stroke-linecap: round;
+      stroke-dasharray: 190;
+      animation-name: pulse-out;
+    }
+    .lid { animation-name: lid-lift; }
+    .box { animation-name: box-glow; }
+    .saved-pill { animation-name: pill-pulse; }
+    .rx { animation-name: card-receive; }
+
+    @keyframes pulse-in {
+      0%, 6% { stroke-dashoffset: 180; opacity: 0; }
+      10% { opacity: 1; }
+      28%, 88% { stroke-dashoffset: 0; opacity: 1; }
+      95%, 100% { stroke-dashoffset: 0; opacity: 0; }
+    }
+    @keyframes lid-lift {
+      0%, 22% { transform: translateY(0); }
+      29%, 37% { transform: translateY(-8px); }
+      45%, 100% { transform: translateY(0); }
+    }
+    @keyframes box-glow {
+      0%, 24% { fill: #6B8A0A; transform: translateY(4px); }
+      31%, 88% { fill: #C8F03C; transform: translateY(0); }
+      95%, 100% { fill: #6B8A0A; transform: translateY(4px); }
+    }
+    @keyframes pill-pulse {
+      0%, 26% { opacity: 0.45; }
+      33%, 88% { opacity: 1; }
+      95%, 100% { opacity: 0.45; }
+    }
+    @keyframes pulse-out {
+      0%, 40% { stroke-dashoffset: 190; opacity: 0; }
+      44% { opacity: 1; }
+      62%, 88% { stroke-dashoffset: 0; opacity: 1; }
+      95%, 100% { stroke-dashoffset: 0; opacity: 0; }
+    }
+    @keyframes card-receive {
+      0%, 54% { opacity: 0.32; }
+      62%, 88% { opacity: 1; }
+      95%, 100% { opacity: 0.32; }
+    }
+
+    /* Reduced motion, or the #still fragment: no animation, so the finished frame shows. */
+    @media (prefers-reduced-motion: reduce) { .a { animation: none; } }
+    #still:target ~ * .a, #still:target ~ .a { animation: none; }
+  </style>
+  <g id="still"/>
+  <rect width="680" height="420" rx="6" fill="#16110E"/>
+
+  <!-- Isometric architectural floor diamond -->
+  <g class="grid-line">
+    <path d="M100 205 L340 75 L580 205 L340 335 Z" fill="none"/>
+    <path d="M180 162 L420 292 M260 118 L500 248"/>
+    <path d="M500 162 L260 292 M420 118 L180 248"/>
+  </g>
+
+  <!-- Base tracks between the 4 coding agents and the central AtticDB store -->
+  <path class="rail" d="M222 118 L286 172"/>
+  <path class="rail" d="M458 118 L394 172"/>
+  <path class="rail" d="M222 296 L286 232"/>
+  <path class="rail" d="M458 296 L394 232"/>
+
+  <!-- Animated write track: Claude Code -> AtticDB -->
+  <path class="a w-line" d="M222 118 L286 172"/>
+
+  <!-- Animated read tracks: AtticDB -> Codex, Copilot, VS Code -->
+  <path class="a f-line" d="M394 172 L458 118"/>
+  <path class="a f-line" d="M286 232 L222 296"/>
+  <path class="a f-line" d="M394 232 L458 296"/>
+
+  <!-- Top-Left: Claude Code · Chat 1 (saves the rule) -->
+  <g transform="translate(18, 42)">
+    <rect class="card-active" x="0" y="0" width="204" height="88" rx="5"/>
+    <circle cx="16" cy="18" r="4" fill="#C8F03C"/>
+    <text x="28" y="22" font-size="12.5" font-weight="600" class="sans ink">Claude Code · Chat 1</text>
+    <line x1="1" y1="33" x2="203" y2="33" stroke="#3A302A"/>
+    <text x="14" y="53" font-size="12" class="mono muted">fact set repo/shop/rule</text>
+    <text x="14" y="73" font-size="13" font-weight="600" class="mono accent">"Use pnpm, not npm."</text>
+  </g>
+
+  <!-- Top-Right: Codex · New chat -->
+  <g transform="translate(458, 42)">
+    <rect class="card" x="0" y="0" width="204" height="88" rx="5"/>
+    <g class="a rx">
+      <circle cx="16" cy="18" r="4" fill="#C8F03C"/>
+      <text x="28" y="22" font-size="12.5" font-weight="600" class="sans ink">Codex · New chat</text>
+      <line x1="1" y1="33" x2="203" y2="33" stroke="#3A302A"/>
+      <text x="14" y="53" font-size="12" class="sans muted">Loaded at chat start:</text>
+      <text x="14" y="73" font-size="13" font-weight="600" class="mono accent">✓ Use pnpm, not npm.</text>
+    </g>
+  </g>
+
+  <!-- Bottom-Left: Copilot · New chat -->
+  <g transform="translate(18, 282)">
+    <rect class="card" x="0" y="0" width="204" height="88" rx="5"/>
+    <g class="a rx">
+      <circle cx="16" cy="18" r="4" fill="#C8F03C"/>
+      <text x="28" y="22" font-size="12.5" font-weight="600" class="sans ink">Copilot · New chat</text>
+      <line x1="1" y1="33" x2="203" y2="33" stroke="#3A302A"/>
+      <text x="14" y="53" font-size="12" class="sans muted">Loaded at chat start:</text>
+      <text x="14" y="73" font-size="13" font-weight="600" class="mono accent">✓ Use pnpm, not npm.</text>
+    </g>
+  </g>
+
+  <!-- Bottom-Right: VS Code · New chat -->
+  <g transform="translate(458, 282)">
+    <rect class="card" x="0" y="0" width="204" height="88" rx="5"/>
+    <g class="a rx">
+      <circle cx="16" cy="18" r="4" fill="#C8F03C"/>
+      <text x="28" y="22" font-size="12.5" font-weight="600" class="sans ink">VS Code · New chat</text>
+      <line x1="1" y1="33" x2="203" y2="33" stroke="#3A302A"/>
+      <text x="14" y="53" font-size="12" class="sans muted">Loaded at chat start:</text>
+      <text x="14" y="73" font-size="13" font-weight="600" class="mono accent">✓ Use pnpm, not npm.</text>
+    </g>
+  </g>
+
+  <!-- Center: AtticDB Roof + Box Store on Local Machine -->
+  <g transform="translate(258, 122)">
+    <!-- Isometric plinth -->
+    <polygon points="82,138 158,98 82,58 6,98" fill="#221B17" stroke="#A89C8C" stroke-width="1.4"/>
+    <polyline points="6,98 6,112 82,152 158,112 158,98" fill="#16110E" stroke="#A89C8C" stroke-width="1.4"/>
+    <line x1="82" y1="138" x2="82" y2="152" stroke="#A89C8C" stroke-width="1.4"/>
+
+    <!-- Stored Box inside the Attic -->
+    <rect class="a box" x="54" y="56" width="56" height="44" rx="5" fill="#C8F03C"/>
+
+    <!-- AtticDB Roof Mark above the Box -->
+    <g class="a lid">
+      <path d="M82 2 L138 48 L124 62 L82 28 L40 62 L26 48 Z" fill="#EDE6D8"/>
+    </g>
+
+    <!-- Local store badge -->
+    <g class="a saved-pill">
+      <rect x="6" y="172" width="152" height="26" rx="4" fill="#221B17" stroke="#3A302A"/>
+      <circle cx="20" cy="185" r="3.5" fill="#C8F03C"/>
+      <text x="30" y="189" font-size="11.5" class="mono ink">Saved on your machine</text>
+    </g>
+  </g>
+</svg>

@@ -16,18 +16,62 @@
 
 .stage {
   position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: center;
+  gap: 1.5rem;
+}
+
+.copy {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 1.25rem;
+  min-width: 0;
+}
+
+.hub {
+  display: block;
+  min-width: 0;
+}
+
+.hubImg {
+  display: block;
+  width: 100%;
+  max-width: 680px;
+  height: auto;
+  margin-inline: auto;
+  border: 1px solid var(--surface);
+  border-radius: 6px;
 }
 
 .title {
   max-width: 22ch;
+  margin-inline: auto;
   font-size: clamp(2rem, 1rem + 3.4vw, 4.25rem);
   line-height: 0.95;
   letter-spacing: -0.01em;
   text-wrap: balance;
+}
+
+@media (min-width: 64rem) {
+  .stage {
+    grid-template-columns: minmax(0, 5.5fr) minmax(0, 6.5fr);
+    column-gap: 2.5rem;
+    row-gap: 1.75rem;
+    text-align: left;
+  }
+
+  .title {
+    grid-column: 1 / -1;
+    max-width: none;
+    font-size: clamp(2.5rem, 3.9vw, 3.65rem);
+    text-align: center;
+  }
+
+  .copy {
+    align-items: flex-start;
+  }
 }
 
 .line {
@@ -444,7 +488,13 @@
   justify-self: center;
 }
 
-@media (min-width: 48rem) {
+@media (min-width: 64rem) {
+  .lead {
+    margin-inline: 0;
+  }
+}
+
+@media (min-width: 48rem) and (max-width: 63.99rem) {
   .actions {
     grid-template-columns: auto auto;
     justify-content: center;
@@ -463,6 +513,17 @@
   .actions .waitlist {
     grid-column: 2;
     grid-row: 2;
+    justify-self: start;
+  }
+}
+
+@media (min-width: 64rem) {
+  .actions {
+    width: 100%;
+    margin-top: 0.25rem;
+  }
+
+  .actions .waitlist {
     justify-self: start;
   }
 }
@@ -513,6 +574,7 @@
 
   :global(.js) .lead,
   :global(.js) .actions,
+  :global(.js) .hub,
   :global(.js) .honest,
   :global(.js) .proof,
   :global(.js) .strip,
