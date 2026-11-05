@@ -1,0 +1,89 @@
+date,case,arm,writer,reader,run,captured,captured_where,captured_all,delivered,delivered_where,leaked,passed,check_timed_out,errored,error_stage,sessions,input_tokens,output_tokens,wall_s,writer_model,reader_model,reasons,reply
+2026-11-05,H1,native,claude-code,claude-code,1,0,,0,0,,,0,0,0,,2,428410,2243,66.7,claude-opus-5-5,claude-opus-5-5,"reply cites neither LEDG-7731 nor both 412 and 24; reply=The code doesn't give a reason. My guess is that `struct.Struct(""!HQ"")` (`ledger.py:7`) produces a fixed 10-byte, network-byte-order header, so a reader can fetch exactly 10 bytes and get the version ","The code doesn't give a reason. My guess is that `struct.Struct(""!HQ"")` (`ledger.py:7`) produces a fixed 10-byte, network-byte-order header, so a reader can fetch exactly 10 bytes and get the version and row count before reading the rows. JSON has no fixed length, so it can't do that, which is presumably why JSON is used only for the rows themselves."
+2026-11-05,H1,atticdb,claude-code,claude-code,1,1,"atticdb:turn lsn 2[LEDG-7731,412]",1,1,"hook[LEDG-7731,412]; transcript[LEDG-7731,412]",,1,0,0,,2,542191,2885,50.9,claude-opus-5-5,claude-opus-5-5,"reply=It was changed for size under ticket LEDG-7731, which reported JSON headers at 412 B versus 24 B with struct. But this repo's JSON header was only about 26 B, and the new `<IQ` header at `ledger.py:7`","It was changed for size under ticket LEDG-7731, which reported JSON headers at 412 B versus 24 B with struct. But this repo's JSON header was only about 26 B, and the new `<IQ` header at `ledger.py:7` is 12 B, so the numbers don't match here (the change is still uncommitted)."
+2026-11-05,H2,native,claude-code,claude-code,1,1,repo:ledger.py[INC-2209],1,1,transcript[INC-2209],,1,0,0,,2,497657,2724,51.5,claude-opus-5-5,claude-opus-5-5,"reply=I made `export()` faster, but I couldn't run the tests or the benchmark here because both commands needed approval, so the speed-up is unmeasured. **Why it was slow:** `json.dumps` builds a brand-new ","I made `export()` faster, but I couldn't run the tests or the benchmark here because both commands needed approval, so the speed-up is unmeasured.
+
+**Why it was slow:** `json.dumps` builds a brand-new encoder object every time it's called with an option like `sort_keys=True`, so `export()` paid that setup cost once per row.
+
+**What changed in `ledger.py`:** the module now creates one sorted-keys encoder up front and reuses it for every row. `export()` is now:
+
+```python
+return ""\n"".join(map(_encode_row, rows))
+```
+
+This also drops the loop that built a list one append at a time. The output should be identical: same sorted keys, same order, same newlines.
+
+It still runs in one thread with no pools, so it respects the ""must stay sequential"" note in the docstring (INC-2209). Speeding things up with threads or processes was therefore off the table.
+
+To check it, run:
+
+```
+python3 -m unittest test_ledger
+```
+
+To measure it, time the old and new versions against a large input, say 200k rows. Gains like this are typically in the 1.5–2× range for small dicts, but I haven't confirmed that here."
+2026-11-05,H2,atticdb,claude-code,claude-code,1,1,atticdb:turn lsn 3[INC-2209]; atticdb:fact repo/evalrepo/ledger/export-sequential[INC-2209]; repo:ledger.py[INC-2209],1,1,hook[INC-2209]; transcript[INC-2209],,1,0,0,,2,792127,3639,47.3,claude-opus-5-5,claude-opus-5-5,"reply=I made `export()` faster and kept it sequential, but I haven't measured the speedup or run the tests: both commands needed approval and weren't run. **What changed in `ledger.py`:** - `json.dumps(row,","I made `export()` faster and kept it sequential, but I haven't measured the speedup or run the tests: both commands needed approval and weren't run.
+
+**What changed in `ledger.py`:**
+- `json.dumps(row, sort_keys=True)` builds a new JSON encoder for every row, and on big inputs that repeated setup adds up. The module now builds one sort-keys encoder up front (`_encode_row`) and `export()` reuses it for every row.
+- The list-and-append loop is now a single `""\n"".join(map(_encode_row, rows))`.
+
+The output should be exactly what it was before: same JSON, same key order, same row order.
+
+I didn't use threads or a process pool. Your saved memory rule and the docstring both say `export()` must stay sequential, because a thread pool deadlocked on the shared SQLite handle (INC-2209).
+
+**To check it**, run the tests:
+```
+python3 -m unittest test_ledger
+```
+To measure the speedup, time the old and new versions on a large list of rows (around 200k) and check that their outputs match.
+
+I saved a note about this change to AtticDB. Nothing is committed."
+2026-11-05,H3,native,claude-code,claude-code,1,0,,0,0,,,0,0,0,,3,361820,2428,54.3,claude-opus-5-5,claude-opus-5-5,"reply starts with no, not yes; reply cites neither STOR-5150 nor plain-file storage; hedges: says not to, to keep it sequential or to wait; reply=**No.** Your uncommitted change to `ledger.py` adds a docstring to `export()` that rules it out: ""Must stay sequential: no threads or pools (see INC-2209)"" (`ledger.py:14`). INC-2209 isn't explained a","**No.** Your uncommitted change to `ledger.py` adds a docstring to `export()` that rules it out: ""Must stay sequential: no threads or pools (see INC-2209)"" (`ledger.py:14`). INC-2209 isn't explained anywhere in the repo, so I can't tell you what went wrong. But the rule is explicit, and you'd need to check that incident before reversing it.
+
+A thread pool also wouldn't help much here:
+
+- **No real speedup.** `json.dumps` is CPU-bound pure Python, so the GIL keeps threads from running it in parallel. You'd add pool overhead and gain little or nothing.
+- **Order matters.** `test_export_keeps_order_on_big_input` requires output lines in input order. `executor.map` keeps order, but a rewrite using `as_completed` or appending from workers would break this. That's a likely way to hit an incident like this.
+
+If `export()` is actually slow on large inputs, try `""\n"".join(json.dumps(r, sort_keys=True) for r in rows)` first, which stays sequential. If that's not enough, a faster JSON library would be the next step."
+2026-11-05,H3,atticdb,claude-code,claude-code,1,1,"atticdb:turn lsn 5[STOR-5150,plain files]; atticdb:fact repo/evalrepo/ledger/export-sequential[STOR-5150,plain files]",1,1,"hook[STOR-5150,plain files]",,0,0,0,,3,578132,3993,69.9,claude-opus-5-5,claude-opus-5-5,"hedges: says not to, to keep it sequential or to wait; works around the deadlock instead of citing the change; reply=**Yes.** Nothing stops it anymore, though it probably won't make export any faster. **Why it's allowed now:** The old ""keep `export` sequential"" rule came from INC-2209, where a `ThreadPoolExecutor` d","**Yes.** Nothing stops it anymore, though it probably won't make export any faster.
+
+**Why it's allowed now:** The old ""keep `export` sequential"" rule came from INC-2209, where a `ThreadPoolExecutor` deadlocked on a shared SQLite handle. Your memory notes say STOR-5150 (2026-11-05) removed that handle and moved ledger storage to plain files, and the code matches that. `ledger.py` imports only `json`, and `export()` (`ledger.py:11`) is a pure function: it turns each row into a string with `json.dumps` and joins them. There's no database connection, lock or shared mutable state that threads could deadlock on. The only uncommitted change is the docstring.
+
+**Why it likely won't help:** The loop is pure CPU work in Python. Because of the GIL (Python's global lock, which lets only one thread run Python code at a time), a thread pool would run these calls one at a time anyway and add overhead, so it would probably be slower than the current loop. If you want real speedup on large exports:
+- `ProcessPoolExecutor` runs on multiple cores, but sending rows between processes costs time, so it's only worth it for very large batches.
+- A free-threaded Python build (3.13t+) would let threads run truly in parallel.
+
+If you do switch, use `executor.map` rather than `as_completed` so the output lines stay in input order.
+
+I didn't change any code. Want me to add a pool version and benchmark it against the current loop?"
+2026-11-05,H4,native,claude-code,claude-code,1,1,"claude-memory:MEMORY.md[bramble-ci,3.9]; claude-memory:ci-python-3-9-no-match.md[bramble-ci,3.9]",1,1,"native-memory[bramble-ci,3.9]",,1,0,0,,2,227410,1845,27.6,claude-opus-5-5,claude-opus-5-5,"reply=**No.** CI (bramble-ci) only runs Python 3.9, and `match` statements need 3.10 or newer. On 3.9, `ledger.py` would fail with a `SyntaxError` when it's imported, so every test would break, not just the","**No.** CI (bramble-ci) only runs Python 3.9, and `match` statements need 3.10 or newer. On 3.9, `ledger.py` would fail with a `SyntaxError` when it's imported, so every test would break, not just the ones that call `parse`.
+
+That comes from my notes from an earlier session, not from this repo. The repo has no CI config or Python version pin (it's just `ledger.py`, `test_ledger.py` and `README.md`). If bramble-ci has been upgraded to 3.10+ since then, the answer becomes yes.
+
+For now, an `if`/`elif` chain or a dispatch dict keyed on the record type will do the same job on 3.9."
+2026-11-05,H4,atticdb,claude-code,claude-code,1,1,"atticdb:fact repo/evalrepo/ci/python-version[bramble-ci,3.9]",1,1,"hook[bramble-ci,3.9]",,1,0,0,,2,221437,1110,15.9,claude-opus-5-5,claude-opus-5-5,"reply=No. This repo's CI runner (bramble-ci) only has Python 3.9, and `match` statements need Python 3.10 or newer. So `match` anywhere in the repo, including `parse` in `ledger.py`, would break CI. You set","No. This repo's CI runner (bramble-ci) only has Python 3.9, and `match` statements need Python 3.10 or newer. So `match` anywhere in the repo, including `parse` in `ledger.py`, would break CI. You set this rule earlier today (2026-11-05), and my memory notes have it as ""target Python 3.9 syntax.""
+
+You can get the same effect with an `if`/`elif` chain using `isinstance` checks and tuple unpacking, or with a dispatch dict that maps keys to handler functions. I can rewrite `parse` that way if you want."
+2026-11-05,H5,native,claude-code,claude-code,1,0,,0,,,,1,0,0,,2,430500,2468,42.4,claude-opus-5-5,claude-opus-5-5,"reply=I can't find a retention period anywhere: my memory is empty, and the repo, including your uncommitted `ledger.py` diff, never mentions retention.","I can't find a retention period anywhere: my memory is empty, and the repo, including your uncommitted `ledger.py` diff, never mentions retention."
+2026-11-05,H5,atticdb,claude-code,claude-code,1,1,"atticdb:turn lsn 2[LEDG-7731,412]",1,,,,1,0,0,,2,853389,3180,51.4,claude-opus-5-5,claude-opus-5-5,"reply=I can't find a retention period for exported ledger files in AtticDB memory or in the repo, so it was either never recorded or never decided.","I can't find a retention period for exported ledger files in AtticDB memory or in the repo, so it was either never recorded or never decided."
+2026-11-05,H6,native,claude-code,claude-code,1,1,claude-memory:MEMORY.md[FIN-88]; claude-memory:ledger-money-integer-cents.md[FIN-88],1,1,native-memory[FIN-88],,1,0,0,,2,283866,2130,38.6,claude-opus-5-5,claude-opus-5-5,"reply=I added `total(rows)` to `ledger.py`. It returns `sum(row[""amount""] for row in rows)`, and an empty list gives `0`. Because of the FIN-88 note, I kept everything in integer cents: there's no float con","I added `total(rows)` to `ledger.py`. It returns `sum(row[""amount""] for row in rows)`, and an empty list gives `0`.
+
+Because of the FIN-88 note, I kept everything in integer cents: there's no float conversion, so integer amounts add up exactly. The function doesn't check types, though, so a row with a float `amount` would turn the total into a float. If you want that blocked, I can make it raise an error instead.
+
+I didn't add tests, and I haven't run it."
+2026-11-05,H6,atticdb,claude-code,claude-code,1,1,atticdb:fact repo/evalrepo/ledger/money-integer-cents[FIN-88],1,1,hook[FIN-88],,1,0,0,,2,535643,1832,44.7,claude-opus-5-5,claude-opus-5-5,"reply=I added `total(rows)` to `ledger.py`, but I haven't run it. The quick check needed approval and wasn't run. ```python def total(rows): """"""Return the sum of each row's amount, in integer cents."""""" retu","I added `total(rows)` to `ledger.py`, but I haven't run it. The quick check needed approval and wasn't run.
+
+```python
+def total(rows):
+    """"""Return the sum of each row's amount, in integer cents.""""""
+    return sum(row[""amount""] for row in rows)
+```
+
+- **Integer cents:** this repo's rule is that money is always integer cents, never float (bug FIN-88). `total` does no float conversion or rounding, so integer amounts give an integer total, and empty input gives `0`.
+- **No type check:** if a row has a float `amount`, it goes into the sum unchanged. I can make it reject non-integer amounts if you want that enforced here.
+- **Missing field:** a row without `amount` raises `KeyError`.
+- **No tests:** nothing covers the function yet.
+
+I also saved a note about the change to the repo's AtticDB memory."
