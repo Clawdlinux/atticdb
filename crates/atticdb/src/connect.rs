@@ -119,6 +119,8 @@ pub struct Report {
     /// What the SessionStart hook part did: for Claude Code and Codex when it was asked for,
     /// and the shared sessionStart hook for VS Code and Copilot CLI.
     pub hook: Option<State>,
+    /// What the PostCompact hook part did: for Claude Code when the hooks were asked for.
+    pub post_compact: Option<State>,
     /// Whether the harness's config turns hooks off, so its hook never runs. Codex only.
     pub hooks_off: bool,
 }

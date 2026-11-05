@@ -166,6 +166,7 @@ Each check prints 1 line: `ok`, or the problem and what to do. They run in this 
   - **parts:** a plan, as in `atticdb setup --dry-run`, must find every part in place. Else it lists each part that would change.
     A missing Claude Code or Codex hook counts as left out on purpose, as with `--no-hook`. So do the rules `--notes ask` leaves out.
     For Claude Code, that needs both hooks missing. A SessionStart hook without the PostCompact one lists `add the PostCompact hook`.
+    A PostCompact hook that would change still shows when the SessionStart one is missing.
   - **binary:** it fails when an entry or hook runs another AtticDB binary, or one that no longer exists. That happens after an upgrade or a move.
     A link to this binary counts as this binary.
   - **hook:** when the hook is in place, it must print JSON within 5 s.
@@ -572,7 +573,9 @@ A PostCompact group is found the same way, with `hook post-compact --harness cla
 `disconnect` removes every part it finds, including one you added by hand.
 AtticDB's handler inside a group with other hooks is left alone. `connect` adds no second group then, and `disconnect` says to remove it by hand there, which counts as skipped.
 An older AtticDB handler in such a group is skipped by `connect`, which says to update that handler by hand.
-A `SessionStart` or `PostCompact` array that ends up empty stays as `[]`.
+A `SessionStart` array that ends up empty stays as `[]`.
+A `PostCompact` array that `disconnect` empties is removed, and so is a `hooks` that is then empty. So a file with a `SessionStart` array and no `PostCompact` key gets back its bytes.
+A `PostCompact` array that was already empty stays, as `disconnect` removed nothing from it.
 A change keeps a backup, as above. A rerun with nothing to change writes nothing.
 
 Each part prints 1 line: `added`, `unchanged`, `updated` or `removed`, with the backup's path after a write.

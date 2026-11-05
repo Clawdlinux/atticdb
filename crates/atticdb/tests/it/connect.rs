@@ -601,9 +601,8 @@ const SETTINGS: &str = r#"{
 /// `connect claude-code` adds the MCP entry through `claude mcp add`, and appends the
 /// SessionStart and PostCompact hooks and the allow rules to `settings.json`, in its config
 /// dir. A rerun writes nothing. `disconnect` removes them, leaving a hand-kept file byte for
-/// byte as it was, but for an empty PostCompact array. `--notes ask` leaves out
-/// `memory_append`, and `--no-hook` the hooks. A part that
-/// can't be applied is skipped with what to add by hand, the others still apply, and the
+/// byte as it was. `--notes ask` leaves out `memory_append`, and `--no-hook` the hooks. A part
+/// that can't be applied is skipped with what to add by hand, the others still apply, and the
 /// exit code is 1. A different entry is refused unless `--force`. `claude mcp get` never runs.
 #[test]
 fn connect_claude_code_adds_its_parts() {
@@ -753,17 +752,11 @@ fn connect_claude_code_adds_its_parts() {
         assert_eq!(lines.len(), 4, "{case}: {out}");
         assert_eq!(calls().last(), Some(&remove), "{case}");
         assert_eq!(read(&state)["mcpServers"], json!({}), "{case}");
-        let emptied = json!({"hooks": {"SessionStart": [], "PostCompact": []},
-            "permissions": {"allow": []}});
-        // The hand-kept file had no PostCompact key, so an empty one stays, as for SessionStart.
-        let left = SETTINGS.replacen(
-            "    ]\n  },\n  \"statusLine\"",
-            "    ],\n    \"PostCompact\": []\n  },\n  \"statusLine\"",
-            1,
-        );
+        // An emptied SessionStart array stays, but disconnect drops the PostCompact key it emptied.
+        let emptied = json!({"hooks": {"SessionStart": []}, "permissions": {"allow": []}});
         let check = |when: &str| match kept {
-            Some(_) => {
-                assert_eq!(std::fs::read_to_string(&settings).unwrap(), left, "{case} {when}");
+            Some(text) => {
+                assert_eq!(std::fs::read_to_string(&settings).unwrap(), text, "{case} {when}");
             }
             None => assert_eq!(read(&settings), emptied, "{case} {when}"),
         };
@@ -774,8 +767,6 @@ fn connect_claude_code_adds_its_parts() {
         assert!(!out.contains("SessionStart hook"), "{case}: {out}");
         assert!(!out.contains("PostCompact hook"), "{case}: {out}");
         let mut wanted = if kept.is_some() { original.clone() } else { emptied.clone() };
-        // Disconnect left an empty PostCompact array.
-        wanted["hooks"]["PostCompact"] = json!([]);
         push(&mut wanted, ["permissions", "allow"], &strings(&reads));
         assert_eq!(read(&settings), wanted, "{case}: --no-hook --notes ask");
         assert_eq!(disconnect().0, Some(0), "{case}");
@@ -1030,8 +1021,7 @@ fn connect_claude_code_adds_its_parts() {
     assert_eq!((status.code(), out.lines().next()), (Some(0), Some("{}")), "{out}");
     let (code, out) = run(&home, None, &bin, &[], &["disconnect", "claude-code"]);
     assert_eq!(code, Some(0), "{out}");
-    let emptied = json!({"hooks": {"SessionStart": [], "PostCompact": []},
-        "permissions": {"allow": []}});
+    let emptied = json!({"hooks": {"SessionStart": []}, "permissions": {"allow": []}});
     assert_eq!(read(&settings), emptied, "{out}");
     assert_eq!(read(&home.join(".claude.json"))["mcpServers"], json!({}));
 
@@ -1208,10 +1198,38 @@ fn disconnect_removes_post_compact_hook() {
     let (code, out) = it.run(&["disconnect", "claude-code"]);
     assert_eq!(code, Some(0), "{out}");
     assert!(out.contains("\nPostCompact hook: removed ("), "{out}");
-    assert_eq!(it.groups("PostCompact"), Vec::<Value>::new());
+    let read = || serde_json::from_slice::<Value>(&std::fs::read(it.settings()).unwrap()).unwrap();
+    // The SessionStart array stays as `[]`, as it always has. The emptied PostCompact key goes.
+    assert_eq!(read()["hooks"], json!({"SessionStart": []}));
     let (code, out) = it.run(&["disconnect", "claude-code"]);
     assert_eq!(code, Some(0), "{out}");
     assert!(out.contains("\nPostCompact hook: not found ("), "{out}");
+}
+
+/// When removing the emptied PostCompact key leaves `hooks` empty, `hooks` goes too. A user's
+/// own empty PostCompact array, which disconnect removed nothing from, stays.
+#[test]
+fn disconnect_drops_the_hooks_it_emptied() {
+    let it = Compact::new();
+    std::fs::create_dir_all(it.settings().parent().unwrap()).unwrap();
+    std::fs::write(it.settings(), "{\n  \"model\": \"opus\"\n}\n").unwrap();
+    assert_eq!(it.run(&["connect", "claude-code"]).0, Some(0));
+    let read = || serde_json::from_slice::<Value>(&std::fs::read(it.settings()).unwrap()).unwrap();
+    // The SessionStart group removed by hand, so PostCompact is all that is left in `hooks`.
+    let mut root = read();
+    root["hooks"].as_object_mut().unwrap().remove("SessionStart");
+    std::fs::write(it.settings(), serde_json::to_string_pretty(&root).unwrap()).unwrap();
+    let (code, out) = it.run(&["disconnect", "claude-code"]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.contains("\nPostCompact hook: removed ("), "{out}");
+    assert_eq!(read(), json!({"model": "opus", "permissions": {"allow": []}}));
+
+    let theirs = "{\n  \"hooks\": {\n    \"PostCompact\": []\n  }\n}\n";
+    std::fs::write(it.settings(), theirs).unwrap();
+    let (code, out) = it.run(&["disconnect", "claude-code"]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.contains("\nPostCompact hook: not found ("), "{out}");
+    assert_eq!(std::fs::read_to_string(it.settings()).unwrap(), theirs);
 }
 
 /// `--no-hook` adds neither the SessionStart group nor the PostCompact one.

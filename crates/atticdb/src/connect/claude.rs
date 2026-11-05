@@ -71,6 +71,12 @@ impl Event {
         ["hooks", self.name()]
     }
 
+    /// Whether its array stays as `[]` when disconnect empties it. SessionStart's always has.
+    /// Most files had no PostCompact key before AtticDB added one, so disconnect removes it.
+    fn keeps_empty(self) -> bool {
+        self == Self::SessionStart
+    }
+
     /// What to do by hand to add `group`.
     pub(super) fn add_by_hand(self, group: &Value) -> String {
         format!("Add this group to hooks.{} by hand: {group}", self.name())
@@ -202,15 +208,17 @@ pub(super) fn connect(force: bool, hook: bool, notes: Notes, mode: Mode) -> Repo
     let by_hand = format!("Add these to permissions.allow by hand: {}", json!(rules(notes)));
     parts.push(Part { name: "allow rules", by_hand, edit: &add_allow });
     let settings = edit_file(settings_file(), "{\n}\n", &parts, mode);
-    // The SessionStart hook is the first part, when the hooks were asked for.
+    // The SessionStart hook is the first part and PostCompact the second, when the hooks were
+    // asked for.
     let hook_state = settings.first().filter(|_| hook).map(|line| line.state);
+    let post_compact = settings.get(1).filter(|_| hook).map(|line| line.state);
     let mut lines = vec![entry];
     lines.extend(settings);
     let next = match mode {
         Mode::Apply => vec!["Start a new Claude Code session to load atticdb.".into()],
         Mode::Plan => Vec::new(),
     };
-    Report { lines, warnings, next, hook: hook_state, ..Report::default() }
+    Report { lines, warnings, next, hook: hook_state, post_compact, ..Report::default() }
 }
 
 /// Removes the MCP entry when it is what AtticDB writes, every hook group that runs AtticDB's
@@ -929,10 +937,14 @@ fn add_rules(text: &str, notes: Notes) -> Edit {
 }
 
 /// `text` without the `event` groups that run `harness`'s AtticDB hook. An AtticDB handler
-/// in a group with other hooks stays, and is left to do by hand.
+/// in a group with other hooks stays, and is left to do by hand. An array this empties goes
+/// unless the event [keeps it](Event::keeps_empty), and so does a `hooks` that is then empty.
 pub(super) fn drop_hooks(harness: Harness, event: Event, text: &str) -> Edit {
     let ours = |group: &Value| our_group(harness, event, group);
-    let (text, removed) = jsonedit::remove(text, &event.path(), ours)?;
+    let (mut text, removed) = jsonedit::remove(text, &event.path(), ours)?;
+    if removed > 0 && !event.keeps_empty() {
+        text = drop_emptied(&text, event)?;
+    }
     let by_hand = !mixed(harness, event, &text).is_empty();
     let said = match (removed, by_hand) {
         (0, false) => "not found",
@@ -945,6 +957,25 @@ pub(super) fn drop_hooks(harness: Harness, event: Event, text: &str) -> Edit {
     };
     let state = if removed == 0 { State::Unchanged } else { State::Removed };
     Ok(Done { text, said: said.into(), state, by_hand })
+}
+
+/// `text` without `hooks.<event>` when that array is empty, then without `hooks` when that
+/// object is empty. `text` must be strict JSON.
+fn drop_emptied(text: &str, event: Event) -> Result<String, Refused> {
+    let empty = |root: &Value, path: &[&str]| {
+        let node = path.iter().fold(root, |node, key| &node[*key]);
+        node.as_array().is_some_and(Vec::is_empty) || node.as_object().is_some_and(|o| o.is_empty())
+    };
+    let root: Value = serde_json::from_str(text).unwrap_or_default();
+    if !empty(&root, &event.path()) {
+        return Ok(text.to_owned());
+    }
+    let (text, _) = jsonedit::remove_key(text, &["hooks"], event.name())?;
+    let root: Value = serde_json::from_str(&text).unwrap_or_default();
+    if !empty(&root, &["hooks"]) {
+        return Ok(text);
+    }
+    Ok(jsonedit::remove_key(&text, &[], "hooks")?.0)
 }
 
 /// `text` without AtticDB's allow rules.

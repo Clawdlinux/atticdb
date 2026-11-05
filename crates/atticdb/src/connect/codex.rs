@@ -145,7 +145,7 @@ pub(super) fn connect(hook: bool, notes: Notes, mode: Mode) -> Report {
         lines.push(guide);
         warnings.extend(too_big);
     }
-    Report { lines, warnings, next, stopped: None, hook: hook_state, hooks_off: off }
+    Report { lines, warnings, next, hook: hook_state, hooks_off: off, ..Report::default() }
 }
 
 /// The AtticDB binaries that Codex's MCP entry and hook run, for [`super::binaries`]. The

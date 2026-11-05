@@ -644,6 +644,14 @@ fn doctor_checks_an_install_and_writes_nothing() {
         format!("    {}: update the PostCompact hook\n", settings.display()),
         format!("  binary: stale, {}\n{}  hook: ok\n", fix("claude-code"), gone(&settings)),
     ];
+    // No SessionStart group, and a PostCompact group that runs a binary that is gone. The
+    // stale group shows, so the missing SessionStart one isn't taken as left out.
+    let no_start = [
+        format!("Claude Code:\n  parts: 2 would change, {}\n", fix("claude-code")),
+        format!("    {}: add the SessionStart hook\n", settings.display()),
+        format!("    {}: update the PostCompact hook\n", settings.display()),
+        format!("  binary: stale, {}\n{}", fix("claude-code"), gone(&settings)),
+    ];
     let claude_only = ["--harness", "claude-code"];
     let (codex, copilot) = (["--harness", "codex"], ["--harness", "copilot"]);
     let get_failed = "\n  codex mcp get atticdb: codex mcp get atticdb --json failed";
@@ -669,7 +677,7 @@ fn doctor_checks_an_install_and_writes_nothing() {
         entry.display()
     );
     let vscode_only = ["--harness", "vscode"];
-    let rows: [DoctorRow<'_>; 21] = [
+    let rows: [DoctorRow<'_>; 22] = [
         ("not set up", &bare, None, &no_apps, &[], 1, unset(&typed_exe())),
         ("not set up, atticdb on PATH", &bare, None, &found, &[], 1, unset("atticdb")),
         (
@@ -688,6 +696,15 @@ fn doctor_checks_an_install_and_writes_nothing() {
         ("part would change", &home, None, &path, &[], 1, guide),
         ("stale binary", &home, None, &path, &stale_apps, 1, stale.concat()),
         ("stale PostCompact hook", &home, None, &path, &claude_only, 1, stale_compact.concat()),
+        (
+            "stale PostCompact, no SessionStart",
+            &home,
+            None,
+            &path,
+            &claude_only,
+            1,
+            no_start.concat(),
+        ),
         ("home 0755", &home, None, &path, &[], 1, mode),
         ("unknown harness", &home, None, &path, &both, 2, "usage:".into()),
         ("synced folder", &bare, moved, &no_apps, &[], 0, moved_ok),
@@ -729,6 +746,15 @@ fn doctor_checks_an_install_and_writes_nothing() {
                     let text = std::fs::read_to_string(file).unwrap();
                     std::fs::write(file, text.replace(exe, other)).unwrap();
                 }
+            }
+            "stale PostCompact, no SessionStart" => {
+                let mut root = read(&settings);
+                root["hooks"].as_object_mut().unwrap().remove("SessionStart");
+                let ours = format!("'{}' hook post-compact", exe.display());
+                let text = root.to_string();
+                assert!(text.contains(&ours), "{text}");
+                let old = text.replace(&ours, &format!("'{OLD}' hook post-compact"));
+                std::fs::write(&settings, old).unwrap();
             }
             "stale PostCompact hook" => {
                 let text = std::fs::read_to_string(&settings).unwrap();

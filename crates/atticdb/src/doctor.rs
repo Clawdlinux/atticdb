@@ -205,8 +205,8 @@ const HOOKS_OFF: &str = "Codex's hooks are off, so memory won't load at chat sta
                          on in [features] in config.toml: remove hooks = false, or set hooks = true";
 
 /// The plan for `harness`. For Claude Code and Codex, the first of [`CHOSEN`] that changes
-/// nothing, else the defaults' plan. A hook counts as left out on purpose only when it is
-/// missing, so a hook that would change is never hidden.
+/// nothing, else the defaults' plan. The hooks count as left out on purpose only when all of
+/// them are missing, so a hook that would change is never hidden.
 fn plan(harness: Harness) -> Report {
     let in_place = |report: &Report| {
         report.stopped.is_none() && report.lines.iter().all(|line| line.state.in_place())
@@ -215,7 +215,9 @@ fn plan(harness: Harness) -> Report {
     if in_place(&first) || !matches!(harness, Harness::ClaudeCode | Harness::Codex) {
         return first;
     }
-    let hookless = first.hook == Some(connect::State::Added);
+    // Claude Code's PostCompact hook must be missing too, so a stale one still shows.
+    let added = connect::State::Added;
+    let hookless = first.hook == Some(added) && first.post_compact.is_none_or(|hook| hook == added);
     for options in CHOSEN[1..].iter().filter(|options| options.hook || hookless) {
         let report = connect::connect(harness, *options, Mode::Plan);
         if in_place(&report) {
