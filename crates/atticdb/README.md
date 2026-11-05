@@ -126,7 +126,7 @@ If `hooks = false` turns Codex's hooks off, it says memory won't load at chat st
 
 Flags replace the questions. `--harness <list>` takes a comma list of app names.
 The names are `copilot`, `vscode`, `claude-code` and `codex`.
-`--no-hook` drops the hook. `--notes ask|auto` picks how notes are saved.
+`--no-hook` drops the hook, and Claude Code's PostCompact hook too. `--notes ask|auto` picks how notes are saved.
 `--yes` takes every default and doesn't ask `Apply?`.
 Without a terminal on stdin, it needs `--yes` or `--dry-run`. Else it exits 2.
 The end of stdin exits 2. So do 3 answers it can't read.
@@ -165,9 +165,11 @@ Each check prints 1 line: `ok`, or the problem and what to do. They run in this 
 - **Each app:** the apps it finds, or those in `--harness`. An app that isn't found prints `not found`. That is not a failure.
   - **parts:** a plan, as in `atticdb setup --dry-run`, must find every part in place. Else it lists each part that would change.
     A missing Claude Code or Codex hook counts as left out on purpose, as with `--no-hook`. So do the rules `--notes ask` leaves out.
+    For Claude Code, that needs both hooks missing. A SessionStart hook without the PostCompact one lists `add the PostCompact hook`.
   - **binary:** it fails when an entry or hook runs another AtticDB binary, or one that no longer exists. That happens after an upgrade or a move.
     A link to this binary counts as this binary.
   - **hook:** when the hook is in place, it must print JSON within 5 s.
+    Doctor never runs the PostCompact hook, as that would save a note.
     If `hooks = false` in `[features]` turns Codex's hooks off, it warns instead.
   - **codex mcp get atticdb:** for Codex, `codex mcp get atticdb --json` must show the entry. It only reads config, and its output is never shown.
     Codex parses all of `config.toml`, so this also catches TOML that isn't valid. Without `codex` on `PATH`, it says it can't check.
@@ -526,7 +528,8 @@ Disconnecting both harnesses removes it, unless you edited it.
 
 ### Claude Code
 
-`atticdb connect claude-code [--force] [--no-hook] [--notes ask|auto] [--dry-run]` creates the home, then adds 3 parts.
+`atticdb connect claude-code [--force] [--no-hook] [--notes ask|auto] [--dry-run]` creates the home, then adds 4 parts.
+`--no-hook` leaves out both hooks.
 `atticdb disconnect claude-code` removes them.
 `--no-hook` and `--notes` work only for `claude-code` and `codex`. `--notes` defaults to `auto`.
 The config dir is `$CLAUDE_CONFIG_DIR` when set, else `~/.claude`.
@@ -535,7 +538,8 @@ A relative `CLAUDE_CONFIG_DIR` fails both verbs with exit 2 before any change. `
 | Part | Where | What |
 |---|---|---|
 | MCP entry | the user MCP servers in `.claude.json` | `claude mcp add -s user atticdb -- <binary> mcp --agent claude-code` |
-| Hook | `hooks.SessionStart` in `<config dir>/settings.json` | `{"hooks": [{"type": "command", "command": "'<binary>' hook session-start --harness claude-code", "timeout": 5}]}` |
+| SessionStart hook | `hooks.SessionStart` in `<config dir>/settings.json` | `{"hooks": [{"type": "command", "command": "'<binary>' hook session-start --harness claude-code", "timeout": 5}]}` |
+| PostCompact hook | `hooks.PostCompact` in `<config dir>/settings.json` | `{"hooks": [{"type": "command", "command": "'<binary>' hook post-compact --harness claude-code", "timeout": 5}]}` |
 | Allow rules | `permissions.allow` in `<config dir>/settings.json` | `mcp__atticdb__memory_search`, `mcp__atticdb__memory_recent`, `mcp__atticdb__fact_get`, `mcp__atticdb__fact_list`, and `mcp__atticdb__memory_append` unless `--notes ask` |
 
 `.claude.json` is in `$CLAUDE_CONFIG_DIR` when set, else in `~`.
@@ -554,8 +558,8 @@ Any other `atticdb` entry, such as one with connection flags, is refused, and no
 The binary's file name doesn't matter, so a binary named `atticdb-0.1.0` counts too.
 Without `claude` on `PATH`, the part is skipped and the command to run is printed.
 
-The hook group has no matcher, so it also runs after compaction.
-Under `ATTICDB_HOME`, the entry passes `-e ATTICDB_HOME=<path>`, after the name, since `-e` takes a list: `claude mcp add -s user atticdb -e ATTICDB_HOME=<path> -- <binary> mcp --agent claude-code`. Claude's command hooks have no env field, so the hook command starts with `ATTICDB_HOME='<path>' `.
+The hook groups have no matcher. So the SessionStart group also runs after compaction, and the PostCompact group after manual and auto compaction.
+Under `ATTICDB_HOME`, the entry passes `-e ATTICDB_HOME=<path>`, after the name, since `-e` takes a list: `claude mcp add -s user atticdb -e ATTICDB_HOME=<path> -- <binary> mcp --agent claude-code`. Claude's command hooks have no env field, so each hook command starts with `ATTICDB_HOME='<path>' `.
 On Windows the hook runs in exec form, with `--home <path>` in place of the prefix. See [Windows](#windows).
 The hook doesn't share a file with VS Code or Copilot CLI, so its home may differ from theirs. `connect` then warns that memory splits between the homes.
 The allow rules never include `fact_set`, so saving a rule always asks. `--notes ask` also removes a `memory_append` rule.
@@ -564,10 +568,11 @@ Claude Code reads the MCP server's instructions, so `CLAUDE.md` isn't touched.
 `settings.json` is edited as text, so only the added or removed bytes change. Key order, spacing and other entries stay.
 A missing file is created at mode 0600, and a missing config dir at 0700.
 Each part is found by its content: a group whose every handler runs an absolute binary path with `hook session-start --harness claude-code`, and the exact allow rules.
+A PostCompact group is found the same way, with `hook post-compact --harness claude-code`.
 `disconnect` removes every part it finds, including one you added by hand.
 AtticDB's handler inside a group with other hooks is left alone. `connect` adds no second group then, and `disconnect` says to remove it by hand there, which counts as skipped.
 An older AtticDB handler in such a group is skipped by `connect`, which says to update that handler by hand.
-A `SessionStart` array that ends up empty stays as `[]`.
+A `SessionStart` or `PostCompact` array that ends up empty stays as `[]`.
 A change keeps a backup, as above. A rerun with nothing to change writes nothing.
 
 Each part prints 1 line: `added`, `unchanged`, `updated` or `removed`, with the backup's path after a write.
@@ -702,6 +707,20 @@ Each content is cut to 300 characters, and its newlines become spaces.
 Past 6,000 characters the block stops at a whole line and ends with `(more in atticdb)`.
 The block depends only on the repo and memory, so the prompt prefix stays the same until memory changes.
 It is a snapshot. The model can call `memory_search` or `fact_list` for more.
+
+## `atticdb hook post-compact`
+
+`atticdb hook post-compact --harness claude-code [--home <dir>]` is Claude Code's PostCompact hook. It saves the compaction summary as a note, plus a pointer to the full transcript.
+A summary keeps the next plan, but drops earlier reasons and rejected paths. The transcript keeps them, so the note names it.
+It reads stdin as `session-start` does, and uses `cwd`, `compact_summary`, `trigger`, `transcript_path` and `session_id`.
+The note is a `claude-code` note in session `<repo>`, the repo from `cwd`. So the next session-start block can show it.
+It reads `Compaction summary (<trigger>): <summary>`, with `unknown` for a missing `trigger`.
+The summary is trimmed, then cut to 16,000 characters, with ` (cut)` added when cut.
+An absolute `transcript_path` adds a last line, `Full transcript: <path>`. The transcript is not copied, so the line dangles once Claude Code deletes it.
+Its meta is `{"kind": "compact-summary", "trigger", "harness_session": <session_id>, "transcript": <path>}`, with `null` for what is missing.
+It saves through `memory_append`, so secrets are hidden first, as in [Secrets](#secrets). That is best effort.
+Any other `--harness`, or none, saves nothing. So does stdin that isn't JSON, a missing or blank summary, or a missing or relative `cwd`.
+It prints nothing on stdout, and errors go to stderr. It has the same 3 s budget and 4 s stop, and always exits 0.
 
 ## `atticdb export`
 
@@ -864,6 +883,8 @@ Claude Code's hook needs Claude Code 2.1.139 or later, which added exec form. Cl
 ```json
 {"hooks": [{"type": "command", "command": "<binary>", "args": ["hook", "session-start", "--harness", "claude-code"], "timeout": 5}]}
 ```
+
+The PostCompact group is the same, with `"post-compact"` in place of `"session-start"`.
 
 Under `ATTICDB_HOME`, `args` ends with `"--home", "<path>"`. The MCP entry passes `-e ATTICDB_HOME=<path>`, as on Unix.
 
