@@ -8,7 +8,7 @@ import { HOME_FAQ } from "@/content/faq";
 import NotFound from "@/app/not-found";
 import { AGENT_PROMPT, INSTALL_CMD } from "@/lib/site";
 import { DEMO_ALT } from "./Demo";
-import { HUB_ALT, HUB_SRC, HUB_STILL } from "./Hero";
+import { HERO_AGENTS } from "./HeroStage";
 import Numbers, { homeFigures } from "./Numbers";
 
 beforeAll(() => {
@@ -204,29 +204,15 @@ describe("home demo", () => {
 });
 
 describe("home first screen", () => {
-  it("shows the animated local hub in the hero with a still frame for reduced motion", () => {
+  it("shows the interactive Framer Motion memory stage in the hero and switches agents", () => {
     const { container } = render(<Home />);
-    const hub = container.querySelector('[data-ui="hub"]') as HTMLElement;
-    expect(hub).not.toBeNull();
-    const img = within(hub).getByRole("img", { name: HUB_ALT });
-    expect(img).toHaveAttribute("src", HUB_SRC);
-    const source = hub.querySelector("source")!;
-    expect(source).toHaveAttribute("media", "(prefers-reduced-motion: reduce)");
-    expect(source).toHaveAttribute("srcset", HUB_STILL);
-
-    const svg = readFileSync("public/demo/attic-hub.svg", "utf8");
-    expect(Buffer.byteLength(svg)).toBeLessThan(20 * 1024);
-    expect(svg).toMatch(/<title[^>]*>[^<]+<\/title>/);
-    expect(svg).toMatch(/<desc[^>]*>[^<]+<\/desc>/);
-    expect(svg).toContain("animation-iteration-count: infinite");
-    expect(svg).toMatch(/@media \(prefers-reduced-motion: reduce\) \{ \.a \{ animation: none; \} \}/);
-    expect(svg).toContain("#still:target ~ * .a, #still:target ~ .a { animation: none; }");
-    expect(svg).toContain('id="still"');
-    expect(svg).not.toMatch(/<script/i);
-    expect(svg).not.toContain("\u2014");
-    for (const agent of ["Claude Code", "Codex", "Copilot", "VS Code"]) {
-      expect(svg).toContain(agent);
+    const stage = container.querySelector('[data-ui="hero-stage"]') as HTMLElement;
+    expect(stage).not.toBeNull();
+    const agents = within(stage).getByRole("group", { name: "Coding agent" });
+    for (const a of HERO_AGENTS) {
+      expect(within(agents).getByRole("radio", { name: a.name })).toBeInTheDocument();
     }
+    expect(within(stage).getByText("New chat in Claude Code")).toBeInTheDocument();
   });
 
   it("has no benchmark jargon before the demo: the chip and the plug band come after it", () => {
