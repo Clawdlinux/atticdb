@@ -1,0 +1,50 @@
+.mark {
+  width: 1.1em;
+  height: 1.1em;
+  flex: none;
+  overflow: visible;
+}
+
+.roof {
+  fill: var(--ink);
+  animation: roof-settle var(--t-rise) var(--ease-out) 140ms both;
+  transition: transform var(--t-hover) var(--ease-out);
+}
+
+.box {
+  fill: var(--accent);
+  animation: box-rise var(--t-rise) var(--ease-out) both;
+}
+
+/* The lid lifts while the link is hovered or focused. */
+a:hover > .mark .roof,
+a:focus-visible > .mark .roof {
+  transform: translateY(-6px);
+}
+
+@keyframes box-rise {
+  from {
+    opacity: 0;
+    transform: translateY(18px);
+  }
+}
+
+@keyframes roof-settle {
+  from {
+    opacity: 0;
+    transform: translateY(-14px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .roof,
+  .box {
+    animation: none;
+    transition: none;
+  }
+
+  a:hover > .mark .roof,
+  a:focus-visible > .mark .roof {
+    transform: none;
+  }
+}
