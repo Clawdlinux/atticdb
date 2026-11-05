@@ -19,6 +19,9 @@ After the capture scan, the writer harness's dir loses everything but its login 
 reader's env names it and its transcripts hold the writer's prompts. For Copilot that is
 everything, session-store.db included: it is session history, not memory a reader loads.
 
+In a same-harness run, writer and reader share that dir. It also keeps the writer's native memory
+for the repo, unless the arm turns memory off. Then the dir is set up again for the reader.
+
 A run uses the 2 harnesses of its direction. Only those are disconnected, set up and torn down.
 
 Before any agent starts, the run checks that no harness config it will use mentions atticdb
@@ -34,7 +37,8 @@ Stages, each None when not measured or not applicable:
   that is the decision's ticket and its reason, 412 bytes, saved together.
 - delivered: before the reader's final reply, an evidence token was in its context: the
   SessionStart hook block for the reader harness (atticdb arm), a tool result or file read in the
-  reader's transcript, or the reader prompt (oracle arm only). None for H5.
+  reader's transcript, or the reader prompt (oracle arm only). In a same-harness run, also the
+  kept native memory. None for H5.
 - passed: `grade.grade` on the reader's final reply and the repo it leaves.
 
 Tokens match through `EVIDENCE_PATTERNS`, never as bare substrings.
@@ -228,20 +232,37 @@ def run_harnesses(writer: str, reader: str) -> tuple[str, ...]:
 LOGIN_FILES = {"claude-code": (".credentials.json",), "codex": ("auth.json",), "copilot": ()}
 
 
-def scrub_harness_dir(hroot: str, harness: str) -> list[str]:
+def scrub_harness_dir(hroot: str, harness: str, keep: str | None = None) -> list[str]:
     """Deletes everything in `harness`'s run dir but its login files: transcripts, sessions,
-    history, memory and config. Returns the top-level names it deleted."""
+    history, memory and config. `keep`, a path in that dir, stays too, with its parent dirs. Other
+    files in those parents still go. A `keep` that doesn't exist, or is a link, keeps nothing.
+    Returns the paths it deleted, relative to the dir."""
     folder = harness_dir(hroot, harness)
+    rel_keep = None
+    if keep is not None and os.path.exists(keep) and not os.path.islink(keep):
+        rel_keep = os.path.relpath(os.path.normpath(keep), os.path.normpath(folder))
+        if not os.path.isabs(keep) or rel_keep == os.curdir or rel_keep.split(os.sep)[0] == os.pardir:
+            raise ValueError(f"keep {keep!r} is not a path inside {folder}")
     gone = []
-    for name in sorted(os.listdir(folder)) if os.path.isdir(folder) else []:
-        if name in LOGIN_FILES[harness]:
-            continue
-        path = os.path.join(folder, name)
-        if os.path.isdir(path) and not os.path.islink(path):
-            shutil.rmtree(path)
-        else:
-            os.remove(path)
-        gone.append(name)
+
+    def clear(sub: str) -> None:
+        for name in sorted(os.listdir(os.path.join(folder, sub))):
+            rel = os.path.join(sub, name) if sub else name
+            path = os.path.join(folder, rel)
+            if (not sub and name in LOGIN_FILES[harness]) or rel == rel_keep:
+                continue
+            real_dir = os.path.isdir(path) and not os.path.islink(path)
+            if real_dir and rel_keep is not None and rel_keep.startswith(rel + os.sep):
+                clear(rel)
+                continue
+            if real_dir:
+                shutil.rmtree(path)
+            else:
+                os.remove(path)
+            gone.append(rel)
+
+    if os.path.isdir(folder):
+        clear("")
     return gone
 
 
@@ -912,6 +933,7 @@ def run_handoff(cfg: HandoffConfig, runner: Runner, case: Case, arm: str, writer
         for step in steps["setup"]:
             _required(cfg, runner, root, step, hroot)
 
+        delivered: list[tuple[str, str]] = []
         if arms.has_writer(arm):
             stage = "writer"
             mem = native_memory_dir(hroot, writer, repo)
@@ -936,13 +958,27 @@ def run_handoff(cfg: HandoffConfig, runner: Runner, case: Case, arm: str, writer
             res.captured, res.captured_where = bool(found), _where(found)
             res.captured_all = all_in_one_place(found, case.evidence)
             # The writer's transcripts and sessions hold its prompts. The reader gets the writer's
-            # config dir in its env, so all but the login goes before the reader starts.
+            # config dir in its env, so all but the login goes before the reader starts. A reader in
+            # the writer's harness keeps the writer's native memory, as its next session would. With
+            # memory off, any memory there ignored the switch, so none is kept.
+            keep = mem if writer == reader and not arms.native_memory_off(arm) else None
             try:
-                scrub_harness_dir(hroot, writer)
+                scrub_harness_dir(hroot, writer, keep=keep)
             except OSError as e:
                 raise HarnessError(f"could not clear the {writer} dir before the reader: {e}") from e
+            if writer == reader:
+                if keep:
+                    delivered += [("native-memory", t) for _, t in file_hits(keep, case.evidence, "")]
+                # The reader shares the writer's dir, so the scrub took its config and AtticDB wiring
+                # too. A login Codex refreshed goes to the eval dir first, then the dir is set up again.
+                stage = "setup"
+                note = sync_codex_auth(cfg, hroot)
+                if note:
+                    res.reasons.append(note)
+                prepare_config_dirs(cfg, hroot, (reader,))
+                for step in steps["setup"]:
+                    _required(cfg, runner, root, step, hroot)
 
-        delivered: list[tuple[str, str]] = []
         if arms.uses_atticdb(arm):
             stage = "hook"
             (hook,) = steps["hook"]
@@ -1042,7 +1078,12 @@ def describe(cfg: HandoffConfig, case: Case, arm: str, writer: str, reader: str,
                       else "no copilot memory (off in prompt mode)")
             lines.append(f"  [capture] also scan {repo} and {memory}")
             keep = ", ".join(LOGIN_FILES[writer])
+            if writer == reader and native_memory_dir(hroot, writer, repo) and not arms.native_memory_off(arm):
+                keep = " and ".join(filter(None, [keep, f"the {writer} native memory for this repo"]))
             lines.append(f"  [capture] then delete {'all but ' + keep if keep else 'everything'} in the {writer} dir")
+            if writer == reader:
+                lines.append(f"  [capture] then set the {writer} dir up again for the reader: the copies and "
+                             "setup steps above")
         for step in steps:
             env = f" + {', '.join(sorted(step.extra_env))}" if step.extra_env else ""
             stdin = " <stdin: hook JSON>" if step.stdin is not None else ""

@@ -1,4 +1,4 @@
-"""Run the cross-harness handoff eval, plan it, or check the eval logins.
+"""Run the handoff eval, plan it, or check the eval logins.
 
     python3 -m research.handoff_eval --check
     python3 -m research.handoff_eval --regrade research/handoff_eval/results/<date>.csv
@@ -35,7 +35,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(os.path.dirname(HERE))
 DEFAULT_DIRECTIONS = "claude-code:codex,codex:claude-code"
 MODEL_FLAGS = arms.MODEL_FLAGS
-CROSS = "claude-code:codex, codex:claude-code, claude-code:copilot or copilot:claude-code"
+CROSS = ("claude-code:codex, codex:claude-code, claude-code:copilot, copilot:claude-code, or same-harness "
+         "claude-code:claude-code, codex:codex or copilot:copilot")
 
 
 def _list(text: str, allowed, what: str) -> list[str]:
@@ -63,10 +64,7 @@ def direction_list(text: str) -> list[tuple[str, str]]:
         writer, sep, reader = part.strip().partition(":")
         if not sep or writer not in agents.ALL_HARNESSES or reader not in agents.ALL_HARNESSES:
             raise argparse.ArgumentTypeError(f"bad direction {part.strip()!r}; use writer:reader with "
-                                             f"{', '.join(agents.ALL_HARNESSES)}")
-        if writer == reader:
-            raise argparse.ArgumentTypeError(f"same-harness direction {part.strip()!r} is not supported: the pilot "
-                                             f"is cross-harness only. Use {CROSS}")
+                                             f"{', '.join(agents.ALL_HARNESSES)}, such as {CROSS}")
         if (writer, reader) not in out:
             out.append((writer, reader))
     return out
@@ -105,7 +103,7 @@ def parse(argv) -> argparse.Namespace:
     p.add_argument("--arms", type=arm_list, default=list(arms.DEFAULT_ARMS),
                    help="comma list of " + ",".join(arms.ARMS) + ". Default " + ",".join(arms.DEFAULT_ARMS))
     p.add_argument("--directions", type=direction_list, default=direction_list(DEFAULT_DIRECTIONS),
-                   help=f"comma list of writer:reader. Default {DEFAULT_DIRECTIONS}")
+                   help=f"comma list of writer:reader: {CROSS}. Default {DEFAULT_DIRECTIONS}")
     p.add_argument("--reps", type=setup_cli.positive, default=1, help="runs per case, arm and direction")
     p.add_argument("--claude-model", default="", help="the model id passed to claude as --model. Required when a "
                    "direction uses claude-code")

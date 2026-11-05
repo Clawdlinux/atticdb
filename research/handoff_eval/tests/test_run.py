@@ -3,6 +3,7 @@ or set ATTICDB_BIN. Tests that start no child run without it. The real claude an
 
 from __future__ import annotations
 
+import argparse
 import csv
 import json
 import os
@@ -207,7 +208,7 @@ def test_reader_grep_finds_no_writer_transcript(env, monkeypatch, arm, writer, r
     assert res.captured is False and res.delivered is False and res.delivered_where == ""
     assert_cleaned_up(env)
     # Control: without the clean-up, the same grep finds the writer's prompt in its transcript.
-    monkeypatch.setattr(run, "scrub_harness_dir", lambda hroot, harness: [])
+    monkeypatch.setattr(run, "scrub_harness_dir", lambda hroot, harness, keep=None: [])
     res = run_handoff(make_cfg(env), Runner(), CASES["H1"], arm, writer, reader, 1)
     assert res.delivered is True and res.delivered_where == "transcript[LEDG-7731,412]"
 
@@ -659,11 +660,20 @@ def test_model_flags_are_required(tmp_path, capsys):
         with pytest.raises(SystemExit) as e:
             cli.parse(base + flags)
         assert e.value.code == 2 and f"{missing} is required" in capsys.readouterr().err
-    # The pilot is cross-harness only.
-    for same in ("codex:codex", "claude-code:claude-code"):
-        with pytest.raises(SystemExit) as e:
-            cli.parse(base + ["--directions", same, "--claude-model", "X", "--codex-model", "Y"])
-        assert e.value.code == 2 and "the pilot is cross-harness only" in capsys.readouterr().err
+
+
+def test_same_harness_direction_accepted(tmp_path):
+    assert cli.direction_list("claude-code:claude-code,copilot:copilot") == [
+        ("claude-code", "claude-code"), ("copilot", "copilot")]
+    assert cli.direction_list("codex:codex") == [("codex", "codex")]
+    for bad in ("claude:claude", "codex", "codex:gpt", "copilot:"):
+        with pytest.raises(argparse.ArgumentTypeError, match="bad direction"):
+            cli.direction_list(bad)
+    # A same-harness direction needs only its own model.
+    a = cli.parse(["--cases", "H1", "--directions", "codex:codex", "--codex-model", "Y", "--dry-run",
+                   "--out", str(tmp_path / "r.csv")])
+    assert a.directions == [("codex", "codex")]
+    assert "claude-code:claude-code" in cli.CROSS and "copilot:copilot" in cli.CROSS
 
 
 def test_session_argv_adds_the_model_flag():
@@ -938,7 +948,7 @@ def test_copilot_reader_grep_finds_no_writer_transcript(env, monkeypatch, arm, w
     if writer == "copilot":
         _, rd = agent_calls(env["log"])
         assert rd["copilot_home_files"] == [], "the copilot writer's dir is empty once it is done"
-    monkeypatch.setattr(run, "scrub_harness_dir", lambda hroot, harness: [])
+    monkeypatch.setattr(run, "scrub_harness_dir", lambda hroot, harness, keep=None: [])
     res = run_handoff(make_cfg(env), Runner(), CASES["H1"], arm, writer, reader, 1)
     assert res.delivered is True and res.delivered_where == "transcript[LEDG-7731,412]"
 
@@ -1028,9 +1038,8 @@ def test_copilot_directions_need_only_their_models(tmp_path, capsys, monkeypatch
     assert e.value.code == 2 and "--copilot-model is required" in capsys.readouterr().err
     a = cli.parse(base + ["--dry-run", "--claude-model", "X", "--copilot-model", "Z"])
     assert a.models == {"claude-code": "X", "codex": "", "copilot": "Z"}
-    with pytest.raises(SystemExit):
-        cli.parse(base[:-4] + ["--directions", "copilot:copilot", "--copilot-model", "Z", "--dry-run"])
-    assert "the pilot is cross-harness only" in capsys.readouterr().err
+    a = cli.parse(base[:-4] + ["--directions", "copilot:copilot", "--copilot-model", "Z", "--dry-run"])
+    assert a.directions == [("copilot", "copilot")] and a.models["copilot"] == "Z"
 
     env = fake_home(monkeypatch, tmp_path)
     parent = tempfile.mkdtemp(prefix="zhe-t-", dir="/tmp")
@@ -1200,3 +1209,188 @@ def test_batch_refuses_a_csv_with_old_columns(env, tmp_path, capsys):
     assert "has other columns than this version writes" in capsys.readouterr().err
     assert stub_calls(env["log"]) == [] and out.read_text() == before
     assert not (tmp_path / "old.md").exists()
+
+
+# ---- same-harness directions ----
+
+SAME = [("claude-code", "claude-code"), ("codex", "codex"), ("copilot", "copilot")]
+
+
+def tree(folder: str) -> list[str]:
+    """Every file under `folder`, as sorted relative paths."""
+    return sorted(os.path.relpath(os.path.join(d, n), folder) for d, _, names in os.walk(folder) for n in names)
+
+
+def record_scrub(monkeypatch) -> list[dict]:
+    """Wraps the scrub. Each call records its keep path, what it deleted and the files left. A Claude
+    dir gets a login file first, as a real one may have."""
+    seen = []
+    real = run.scrub_harness_dir
+
+    def scrub(hroot, harness, keep=None):
+        folder = run.harness_dir(hroot, harness)
+        if harness == "claude-code":
+            with open(os.path.join(folder, ".credentials.json"), "w") as f:
+                f.write("{}\n")
+        gone = real(hroot, harness, keep=keep)
+        seen.append({"folder": folder, "keep": keep, "gone": gone, "left": tree(folder)})
+        return gone
+
+    monkeypatch.setattr(run, "scrub_harness_dir", scrub)
+    return seen
+
+
+def test_scrub_keeps_a_path_and_its_parents(tmp_path):
+    hroot = str(tmp_path)
+    folder = run.harness_dir(hroot, "claude-code")
+    mem = os.path.join(folder, "projects", "-r-evalrepo", "memory")
+
+    def fill():
+        for rel in (".credentials.json", "settings.json", "history.jsonl", "projects/-r-evalrepo/s1.jsonl",
+                    "projects/-r-evalrepo/memory/MEMORY.md", "projects/-r-other/s2.jsonl"):
+            path = os.path.join(folder, rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                f.write("x\n")
+
+    fill()
+    gone = run.scrub_harness_dir(hroot, "claude-code", keep=mem)
+    assert tree(folder) == [".credentials.json", "projects/-r-evalrepo/memory/MEMORY.md"]
+    assert gone == ["history.jsonl", "projects/-r-evalrepo/s1.jsonl", "projects/-r-other", "settings.json"]
+    # No keep, or a keep that doesn't exist, deletes as before: all but the login.
+    for keep in (None, os.path.join(folder, "projects", "-r-none", "memory")):
+        fill()
+        assert run.scrub_harness_dir(hroot, "claude-code", keep=keep) == ["history.jsonl", "projects",
+                                                                           "settings.json"]
+        assert tree(folder) == [".credentials.json"]
+    # A keep outside the harness dir, or the dir itself, is refused before anything goes.
+    fill()
+    for bad in (str(tmp_path), folder, os.path.join(run.harness_dir(hroot, "codex"))):
+        os.makedirs(bad, exist_ok=True)
+        with pytest.raises(ValueError, match="keep"):
+            run.scrub_harness_dir(hroot, "claude-code", keep=bad)
+    assert "settings.json" in tree(folder)
+
+
+@needs_atticdb
+@pytest.mark.parametrize("harness,label,name,login,transcript", [
+    ("claude-code", "claude-memory", "MEMORY.md", ".credentials.json", "projects/{slug}/s1.jsonl"),
+    ("codex", "codex-memory", "stub.md", "auth.json", "sessions")])
+def test_same_harness_keeps_native_memory_only(env, monkeypatch, harness, label, name, login, transcript):
+    """The reader keeps the writer's native memory for the repo. Transcripts and the rest still go."""
+    with open(os.path.join(env["codex_dir"], "config.toml"), "w") as f:
+        f.write('model_reasoning_effort = "low"\n')
+    monkeypatch.setenv("STUB_NATIVE_MEMORY", "1")
+    seen = record_scrub(monkeypatch)
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], "native", harness, harness, 1)
+    assert not res.errored, res.reasons
+    (call,) = seen
+    repo = agent_calls(env["log"])[0]["cwd"]
+    assert call["keep"] == run.native_memory_dir(os.path.dirname(call["folder"]), harness, repo)
+    mem = os.path.relpath(call["keep"], call["folder"])
+    slug = mem.split(os.sep)[1] if harness == "claude-code" else ""
+    assert call["left"] == [login, os.path.join(mem, name)]
+    assert transcript.format(slug=slug) in call["gone"]
+    assert res.captured_where == f"{label}:{name}[LEDG-7731,412]"
+    assert ("native-memory", "LEDG-7731") in run.parse_where(res.delivered_where)
+    assert res.delivered is True and res.delivered_where == "native-memory[LEDG-7731,412]"
+    writer, reader = agent_calls(env["log"])
+    assert writer["dirs"] == reader["dirs"]
+    if harness == "codex":
+        # The reader gets its config back, but not the writer's sessions.
+        assert reader["codex_home_files"] == ["auth.json", "config.toml", "memories"]
+    assert_cleaned_up(env)
+
+
+@needs_atticdb
+def test_cross_harness_scrub_unchanged(env, monkeypatch):
+    monkeypatch.setenv("STUB_NATIVE_MEMORY", "1")
+    seen = record_scrub(monkeypatch)
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], "native", "claude-code", "copilot", 1)
+    assert not res.errored, res.reasons
+    (call,) = seen
+    assert call["keep"] is None and call["left"] == [".credentials.json"] and "projects" in call["gone"]
+    assert res.captured is True and res.delivered is False and res.delivered_where == ""
+    assert_cleaned_up(env)
+
+
+@needs_atticdb
+def test_same_harness_copilot_keeps_nothing(env, monkeypatch):
+    monkeypatch.setenv("STUB_NATIVE_MEMORY", "1")
+    seen = record_scrub(monkeypatch)
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], "native", "copilot", "copilot", 1)
+    assert not res.errored, res.reasons
+    (call,) = seen
+    assert call["keep"] is None and call["left"] == [] and "session-store.db" in call["gone"]
+    _, rd = agent_calls(env["log"])
+    assert rd["copilot_home_files"] == [], "COPILOT_HOME is empty before the reader"
+    assert res.delivered is False and res.delivered_where == ""
+    assert_cleaned_up(env)
+
+
+@needs_atticdb
+def test_atticdb_only_same_harness_keeps_nothing_in_memory(env, monkeypatch):
+    """With memory off, the writer leaves no memory dir, so nothing is kept. The stub ignores the
+    switch, so here it is told to write no memory. The reader still gets its AtticDB setup back."""
+    seen = record_scrub(monkeypatch)
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], "atticdb-only", "claude-code", "claude-code", 1)
+    assert not res.errored, res.reasons
+    (call,) = seen
+    assert call["keep"] is None and call["left"] == [".credentials.json"]
+    assert res.delivered_where == "hook[LEDG-7731,412]" and res.passed is True
+    assert_cleaned_up(env)
+
+    # A harness that ignores the switch writes memory anyway. The run flags it, and keeps none of it.
+    monkeypatch.setenv("STUB_NATIVE_MEMORY", "1")
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], "atticdb-only", "claude-code", "claude-code", 1)
+    assert not res.errored, res.reasons
+    assert "native memory written with memory off" in res.reasons
+    assert seen[-1]["keep"] is None and seen[-1]["left"] == [".credentials.json"]
+    assert "native-memory" not in res.delivered_where
+    assert_cleaned_up(env)
+
+
+@needs_atticdb
+@pytest.mark.parametrize("harness", [w for w, _ in SAME])
+def test_same_harness_reader_gets_its_setup_back(env, harness):
+    """Writer and reader share 1 config dir, so the scrub takes the AtticDB wiring too. It is set up
+    again before the reader, whose own hook then gives it the fact."""
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], "atticdb", harness, harness, 1)
+    assert not res.errored, res.reasons
+    assert res.captured is True and res.delivered_where == "hook[LEDG-7731,412]"
+    assert res.passed is True, res.reasons
+    assert_cleaned_up(env)
+
+
+@needs_atticdb
+@pytest.mark.parametrize("writer,reader", SAME)
+def test_same_harness_reader_grep_finds_no_writer_transcript(env, monkeypatch, writer, reader):
+    monkeypatch.setenv("STUB_READER_GREP", "1")
+    monkeypatch.setenv("STUB_WRITER", "silent")
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], "native", writer, reader, 1)
+    assert not res.errored, res.reasons
+    assert res.captured is False and res.delivered is False and res.delivered_where == ""
+    assert_cleaned_up(env)
+
+
+@needs_atticdb
+def test_same_harness_codex_keeps_a_refreshed_login(env, monkeypatch):
+    """The reader's dir is set up again from the eval dir. A login the writer refreshed goes there first."""
+    monkeypatch.setenv("STUB_REFRESH_AUTH", "v2")
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], "native", "codex", "codex", 1)
+    assert not res.errored, res.reasons
+    assert res.reasons.count("codex refreshed its login; the eval dir's auth.json was updated") == 1
+    with open(os.path.join(env["codex_dir"], "auth.json")) as f:
+        assert json.load(f) == {"refreshed": "v2"}
+
+
+def test_same_harness_dry_run(env):
+    text = "\n".join(run.describe(make_cfg(env), CASES["H1"], "atticdb", "claude-code", "claude-code"))
+    assert ("[capture] then delete all but .credentials.json and the claude-code native memory for this repo "
+            "in the claude-code dir") in text
+    assert "[capture] then set the claude-code dir up again for the reader" in text
+    text = "\n".join(run.describe(make_cfg(env), CASES["H1"], "native", "copilot", "copilot"))
+    assert "[capture] then delete everything in the copilot dir" in text
+    text = "\n".join(run.describe(make_cfg(env), CASES["H1"], "native", "claude-code", "codex"))
+    assert "[capture] then delete all but .credentials.json in the claude-code dir" in text
+    assert "set the claude-code dir up again" not in text
