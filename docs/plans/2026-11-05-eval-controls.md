@@ -46,17 +46,17 @@ Same-harness directions (`claude-code:claude-code`, `copilot:copilot`) keep the 
 - Produces: `arms.ARMS` ends with `"blank"`; `arms.DEFAULT_ARMS = ("native", "files", "atticdb", "oracle")`; `arms.has_writer("blank") is False`; `arms.reader_prompt(case, "blank") == case.reader_prompt`.
 - Produces: `HandoffResult.leaked: bool | None = None`, set only for `blank`. CSV column `leaked` after `delivered_where`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   - `test_blank_plan_has_reader_only`: `plan(cfg, CASES["H1"], "blank", "claude-code", "copilot", root)` has empty `setup`, `writer`, `capture` and `hook`, and 1 `reader` step whose prompt equals `CASES["H1"].reader_prompt`.
   - `test_blank_leak_flags_token_in_reply`: a stub reader that replies "LEDG-7731" in a blank run gives `leaked is True`. A reply without tokens gives `leaked is False`. Any non-blank arm gives `leaked is None`.
   - `test_blank_leak_flags_delivery`: a blank run whose reader transcript holds a token gives `leaked is True`, even when the reply doesn't cite it.
   - `test_from_row_without_leaked_column`: `results.from_row` on a dict with no `leaked` key returns `leaked is None`.
   - `test_default_arms_unchanged`: `cli` parsed with no `--arms` gives `["native", "files", "atticdb", "oracle"]`.
   - `test_summary_has_control_section`: `results.summary` on blank rows prints a "Control (blank arm)" section with pass rate and "Leaked: N of M".
-- [ ] **Step 2: Run the tests, expect failures** (the arm doesn't exist yet).
-- [ ] **Step 3: Implement.** `leaked = bool(tokens_in(reply, case.evidence)) or bool(delivered)` for `blank`. The CLI default uses `DEFAULT_ARMS`; `--arms` accepts all of `ARMS`. `results.row`, `from_row` and the header get `leaked`. The summary adds the control section only when blank rows exist. The README's arm list adds `blank`, with 1 line on why: chance floor and leak detector.
-- [ ] **Step 4: Run the full test command, expect all pass.**
-- [ ] **Step 5: Commit** `research(handoff-eval): blank control arm and leaked flag`.
+- [x] **Step 2: Run the tests, expect failures** (the arm doesn't exist yet).
+- [x] **Step 3: Implement.** `leaked = bool(tokens_in(reply, case.evidence)) or bool(delivered)` for `blank`. The CLI default uses `DEFAULT_ARMS`; `--arms` accepts all of `ARMS`. `results.row`, `from_row` and the header get `leaked`. The summary adds the control section only when blank rows exist. The README's arm list adds `blank`, with 1 line on why: chance floor and leak detector.
+- [x] **Step 4: Run the full test command, expect all pass.**
+- [x] **Step 5: Commit** `research(handoff-eval): blank control arm and leaked flag`.
 
 ### Task 2: `atticdb-only` arm, with harness memory off
 
@@ -68,16 +68,16 @@ Same-harness directions (`claude-code:claude-code`, `copilot:copilot`) keep the 
 - Consumes: `arms.ARMS` and `DEFAULT_ARMS` from Task 1.
 - Produces: `"atticdb-only"` in `ARMS`, before `"blank"`. `arms.uses_atticdb(arm)` is True for `atticdb` and `atticdb-only`. `arms.native_memory_off(arm) -> bool`, True only for `atticdb-only`. `arms.session_env(harness: str, arm: str) -> dict[str, str]`, which returns `{"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"}` for claude-code in `atticdb-only` and `{}` otherwise. `arms.session_argv` adds `--disable memories` for codex in `atticdb-only`, right before `-m <model>`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   - `test_atticdb_only_env_on_every_session`: in `plan(...)` for `atticdb-only` with claude-code as writer and reader, every `writer` and `reader` step has `extra_env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"`. For `atticdb`, none has it.
   - `test_atticdb_only_codex_argv`: `session_argv("codex", "p", "m", "atticdb-only")` ends with `["--disable", "memories", "-m", "m", "p"]` and keeps the AtticDB approval override.
   - `test_copilot_never_enables_memory`: for every arm, `"--enable-memory" not in session_argv("copilot", "p", "m", arm)`.
   - `test_atticdb_only_sets_up_atticdb`: the `atticdb-only` plan has setup, hook and teardown steps, the same as `atticdb`.
   - `test_atticdb_only_flags_native_memory_write`: when a stub writer still writes the token into the Claude memory dir, the result's reasons include "native memory written with memory off".
-- [ ] **Step 2: Run the tests, expect failures.**
-- [ ] **Step 3: Implement.** `plan()` passes `arms.session_env(...)` as `extra_env` on writer and reader steps. `run_handoff` appends the reason when `native_memory_off(arm)` and the capture scan finds a `claude-memory` or `codex-memory` hit. Replace `arm == "atticdb"` checks with `uses_atticdb(arm)` wherever they mean "AtticDB is wired". The README adds the arm and the 3 switches.
-- [ ] **Step 4: Run the full test command, expect all pass.**
-- [ ] **Step 5: Commit** `research(handoff-eval): atticdb-only arm with harness memory off`.
+- [x] **Step 2: Run the tests, expect failures.**
+- [x] **Step 3: Implement.** `plan()` passes `arms.session_env(...)` as `extra_env` on writer and reader steps. `run_handoff` appends the reason when `native_memory_off(arm)` and the capture scan finds a `claude-memory` or `codex-memory` hit. Replace `arm == "atticdb"` checks with `uses_atticdb(arm)` wherever they mean "AtticDB is wired". The README adds the arm and the 3 switches.
+- [x] **Step 4: Run the full test command, expect all pass.**
+- [x] **Step 5: Commit** `research(handoff-eval): atticdb-only arm with harness memory off`.
 
 ### Task 3: same-harness directions
 
@@ -89,30 +89,30 @@ Same-harness directions (`claude-code:claude-code`, `copilot:copilot`) keep the 
 - Consumes: `native_memory_dir(hroot, harness, repo)` (run.py) and the arms from Tasks 1 and 2.
 - Produces: `cli.direction_list("claude-code:claude-code")` returns `[("claude-code", "claude-code")]`. `run.scrub_harness_dir(hroot: str, harness: str, keep: str | None = None) -> list[str]`, where `keep` is an absolute path inside the harness dir that survives with its parents. In `run_handoff`, delivery gains `("native-memory", token)` for tokens found in the kept memory dir before the reader starts.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   - `test_same_harness_direction_accepted`: `direction_list("claude-code:claude-code,copilot:copilot")` returns both pairs. A bad harness name still raises.
   - `test_same_harness_keeps_native_memory_only`: a claude-code to claude-code run where the stub writer writes `projects/<slug>/memory/MEMORY.md` with "LEDG-7731" and a transcript `projects/<slug>/s.jsonl`. After the scrub, MEMORY.md exists and s.jsonl doesn't. Delivery includes `native-memory[LEDG-7731]`.
   - `test_cross_harness_scrub_unchanged`: claude-code to copilot still deletes the whole writer dir but the login file.
   - `test_same_harness_copilot_keeps_nothing`: copilot to copilot leaves COPILOT_HOME empty before the reader.
   - `test_atticdb_only_same_harness_keeps_nothing_in_memory`: with memory off, nothing is kept, because the memory dir doesn't exist.
-- [ ] **Step 2: Run the tests, expect failures.**
-- [ ] **Step 3: Implement.** Drop the same-harness refusal in `direction_list`, and update `CROSS` and the help text to list same-harness pairs. In `run_handoff`, when `writer == reader`, call `scrub_harness_dir(hroot, writer, keep=native_memory_dir(hroot, writer, repo))`. For Copilot, `native_memory_dir` is None, so nothing is kept. Record the native-memory delivery before the reader session. The README explains same-harness runs and that Copilot's native memory stays off on purpose.
-- [ ] **Step 4: Run the full test command, expect all pass.**
-- [ ] **Step 5: Commit** `research(handoff-eval): same-harness directions keep native memory`.
+- [x] **Step 2: Run the tests, expect failures.**
+- [x] **Step 3: Implement.** Drop the same-harness refusal in `direction_list`, and update `CROSS` and the help text to list same-harness pairs. In `run_handoff`, when `writer == reader`, call `scrub_harness_dir(hroot, writer, keep=native_memory_dir(hroot, writer, repo))`. For Copilot, `native_memory_dir` is None, so nothing is kept. Record the native-memory delivery before the reader session. The README explains same-harness runs and that Copilot's native memory stays off on purpose.
+- [x] **Step 4: Run the full test command, expect all pass.**
+- [x] **Step 5: Commit** `research(handoff-eval): same-harness directions keep native memory`.
 
 ### Task 4: controlled run and audited results (controller, not a subagent)
 
-- [ ] Build atticdb from main. Batch 1, Copilot-heavy first, because Claude's session limit is shared with Claude Desktop:
+- [x] Build atticdb from main. Batch 1, Copilot-heavy first, because Claude's session limit is shared with Claude Desktop:
   - `--arms blank --cases H1,H2,H3,H4,H5,H6 --directions claude-code:copilot,copilot:claude-code --reps 1` (12 reader sessions).
   - `--arms native,atticdb,atticdb-only --directions copilot:copilot --reps 1` (18 runs).
-- [ ] Batch 2, after a Claude probe: `--arms native,atticdb,atticdb-only --directions claude-code:claude-code --reps 1` (18 runs), then `--arms atticdb-only --directions claude-code:copilot,copilot:claude-code --reps 1` (12 runs).
-- [ ] Stop rule: if any `blank` row has `leaked` True, stop. Report it, and plan per-run token rotation before citing any number.
-- [ ] Hand-audit every row, pass and fail, from the full `reply` column. Write `research/handoff_eval/results/2026-11-05-controls.md`:
+- [x] Batch 2, after a Claude probe: `--arms native,atticdb,atticdb-only --directions claude-code:claude-code --reps 1` (18 runs), then `--arms atticdb-only --directions claude-code:copilot,copilot:claude-code --reps 1` (12 runs).
+- [x] Stop rule: if any `blank` row has `leaked` True, stop. Report it, and plan per-run token rotation before citing any number.
+- [x] Hand-audit every row, pass and fail, from the full `reply` column. Write `research/handoff_eval/results/2026-11-05-controls.md`:
   - chance floor per case (blank)
   - AtticDB with vs without native memory (atticdb vs atticdb-only)
   - same-harness native vs atticdb
   - caveats: 1 rep, Copilot native memory off on purpose, Codex out
-- [ ] Commit the results and CSVs, then open the PR.
+- [x] Commit the results and CSVs, then open the PR.
 
 ## What this plan does not do
 
