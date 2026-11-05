@@ -356,6 +356,12 @@ fn notes(home: &Path, session: &str) -> Vec<Value> {
     out["turns"].as_array().unwrap().clone()
 }
 
+/// Starts `home`'s server, as any shell verb does, so a test that isn't about a cold start
+/// doesn't race the server's start.
+fn running(home: &Path) {
+    assert!(notes(home, "warm-up").is_empty());
+}
+
 /// Runs the hook as Claude Code's group does. It must exit 0 and print nothing.
 fn saved(home: &Path, stdin: &Value) {
     let started = Instant::now();
@@ -375,6 +381,7 @@ fn post_compact_saves_the_summary_as_a_note() {
     std::fs::create_dir_all(home.join("myrepo")).unwrap();
     std::fs::create_dir_all(home.join("other")).unwrap();
     let _holders = Holders(vec![data_dir(&home)]);
+    running(&home);
     let summary = "We chose struct over JSON for LEDG-7731.";
     saved(&home, &compact(&home.join("myrepo"), json!({"compact_summary": summary})));
     let turns = notes(&home, "myrepo");
@@ -405,6 +412,7 @@ fn post_compact_redacts_secrets() {
     let home = dir.0.join("h");
     std::fs::create_dir_all(home.join("myrepo")).unwrap();
     let _holders = Holders(vec![data_dir(&home)]);
+    running(&home);
     let token = format!("ghp_{}", "x1".repeat(18));
     let summary = format!("Pushed with {token} to main.");
     saved(&home, &compact(&home.join("myrepo"), json!({"compact_summary": summary})));
@@ -458,6 +466,7 @@ fn post_compact_cuts_long_summaries() {
     let home = dir.0.join("h");
     std::fs::create_dir_all(home.join("myrepo")).unwrap();
     let _holders = Holders(vec![data_dir(&home)]);
+    running(&home);
     let summary = "a".repeat(20_000);
     saved(&home, &compact(&home.join("myrepo"), json!({"compact_summary": summary})));
     let turns = notes(&home, "myrepo");
@@ -504,6 +513,7 @@ fn session_start_shows_the_compact_note() {
     let repo = home.join("myrepo");
     std::fs::create_dir_all(&repo).unwrap();
     let _holders = Holders(vec![data_dir(&home)]);
+    running(&home);
     saved(&home, &compact(&repo, json!({})));
     let out: Value = serde_json::from_str(&hook(&home, &cwd(&repo), 0, &[]).0).unwrap();
     let block = out["additionalContext"].as_str().unwrap();
