@@ -77,6 +77,15 @@ impl Event {
         self == Self::SessionStart
     }
 
+    /// What adding its hook does, said after the plan's `add` line. It tells the user that
+    /// the PostCompact hook saves summaries, which can hold file contents and secrets.
+    fn adds(self) -> Option<&'static str> {
+        match self {
+            Self::SessionStart => None,
+            Self::PostCompact => Some("saves compaction summaries"),
+        }
+    }
+
     /// What to do by hand to add `group`.
     pub(super) fn add_by_hand(self, group: &Value) -> String {
         format!("Add this group to hooks.{} by hand: {group}", self.name())
@@ -202,11 +211,11 @@ pub(super) fn connect(force: bool, hook: bool, notes: Notes, mode: Mode) -> Repo
     if hook {
         for ((event, group), add_group) in groups.iter().zip(&add_groups) {
             let by_hand = event.add_by_hand(group);
-            parts.push(Part { name: event.part(), by_hand, edit: add_group });
+            parts.push(Part { name: event.part(), by_hand, edit: add_group, adds: event.adds() });
         }
     }
     let by_hand = format!("Add these to permissions.allow by hand: {}", json!(rules(notes)));
-    parts.push(Part { name: "allow rules", by_hand, edit: &add_allow });
+    parts.push(Part { name: "allow rules", by_hand, edit: &add_allow, adds: None });
     let settings = edit_file(settings_file(), "{\n}\n", &parts, mode);
     // The SessionStart hook is the first part and PostCompact the second, when the hooks were
     // asked for.
@@ -247,12 +256,14 @@ pub(super) fn disconnect() -> u8 {
             name: event.part(),
             by_hand: event.drop_by_hand(Harness::ClaudeCode),
             edit,
+            adds: None,
         })
         .collect();
     parts.push(Part {
         name: "allow rules",
         by_hand: format!("Remove these from permissions.allow by hand: {}", json!(every)),
         edit: &drop_rules,
+        adds: None,
     });
     let mut lines = vec![drop_entry(&state)];
     lines.extend(edit_file(settings_file(), "{\n}\n", &parts, Mode::Apply));
@@ -997,6 +1008,8 @@ pub(super) struct Part<'a> {
     pub(super) by_hand: String,
     /// The edit that applies it.
     pub(super) edit: &'a dyn Fn(&str) -> Edit,
+    /// What adding it does, said in brackets after a plan's `add` line. Never in a report.
+    pub(super) adds: Option<&'static str>,
 }
 
 /// Claude's `settings.json`, in its config dir.
@@ -1064,7 +1077,13 @@ pub(super) fn edit_file(
     }
     type Outcome = Result<(String, State, bool, bool), (State, String, Option<String>)>;
     let line = |(part, done): (&Part<'_>, Outcome)| match done {
-        Ok((_, state, false, _)) if mode == Mode::Plan => planned(&path, part.name, state),
+        Ok((_, state, false, _)) if mode == Mode::Plan => {
+            let mut line = planned(&path, part.name, state);
+            if let (State::Added, Some(adds)) = (state, part.adds) {
+                line.text += &format!(" ({adds})");
+            }
+            line
+        }
         Ok((said, state, by_hand, changed)) => {
             let line = match (&backup, changed) {
                 (Some(saved), true) => {

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** When Claude Code compacts a chat, save its summary to AtticDB as a note, so the next session or another agent can find it.
+**Goal:** When Claude Code compacts a chat, save its summary to AtticDB as a note. Then the next session or another agent can find it.
 
 **Architecture:** A new hook command, `atticdb hook post-compact`, reads Claude Code's `PostCompact` JSON from stdin. It appends 1 turn to the home store through the same client `memory_append` uses, so redaction applies. `atticdb connect claude-code` installs a `PostCompact` group next to the `SessionStart` group. Disconnect and doctor treat both the same way.
 
@@ -26,7 +26,7 @@
 ## Review Focus
 
 1. A summary holding a token: the stored note has the `[secret:...]` placeholder, never the token. Test: `post_compact_redacts_secrets` (Task 1).
-2. Missing or bad input never writes and never prints to stdout: no summary, a blank summary, a relative cwd, non-JSON, an unknown harness. Test: `post_compact_skips_bad_input` (Task 1).
+2. Missing or bad input never writes and never prints to stdout. That covers no summary, a blank summary, a relative cwd, non-JSON and an unknown harness. Test: `post_compact_skips_bad_input` (Task 1).
 3. No server running: the hook starts one, as session-start does, or gives up by 4 s. Test: `post_compact_starts_the_server` (Task 1).
 4. A user's own PostCompact groups survive connect and disconnect. Test: `connect_keeps_user_post_compact_groups` (Task 2).
 5. A rerun of connect adds no second PostCompact group. Test: `connect_post_compact_is_idempotent` (Task 2).
@@ -84,7 +84,7 @@
   - `connect_no_hook_skips_post_compact`: `--no-hook` adds neither group.
   - A unit test checks the PostCompact command string, with and without a home.
 - [ ] **Step 2: Run** `cargo test --locked -p atticdb --test it connect`. Expect the new tests to fail.
-- [ ] **Step 3: Implement.** Generalize the SessionStart group code over the event and its hook args, and don't copy it. `hook_args`, `hook_command`, `exec_args`, `hook_group`, `our_group`, `mixed`, `hook_binaries` and the add and remove edits all take the event. Keep every SessionStart report string and behavior byte for byte.
+- [ ] **Step 3: Implement.** Generalize the SessionStart group code over the event and its hook args. Don't copy it. These take the event: `hook_args`, `hook_command`, `exec_args`, `hook_group`, `our_group`, `mixed` and `hook_binaries`. So do the add and remove edits. Keep every SessionStart report string and behavior byte for byte.
 - [ ] **Step 4: Run** `cargo test --locked -p atticdb`. Expect all to pass. Then run the Global Constraints verify list.
 - [ ] **Step 5: Update the docs and add D103.** D103 records:
   - the PostCompact capture, on by default with the hook

@@ -4,7 +4,7 @@ Status: accepted direction, 2026-11-05. Owner picked design A over local-first s
 
 ## Problem
 
-Agents on 1 machine already share 1 store. Every harness reads every agent's notes at chat start. A team or a cloud agent can't reach that store, because clients connect only over a unix socket or `127.0.0.1`. We want 1 model that works on a laptop today and hosted later, without a second product.
+Agents on 1 machine already share 1 store. Every harness reads every agent's notes at chat start. A team or a cloud agent can't reach that store. Clients connect only over a unix socket or `127.0.0.1`. We want 1 model that works on a laptop today and hosted later, without a second product.
 
 ## Design
 

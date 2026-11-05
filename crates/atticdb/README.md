@@ -102,6 +102,8 @@ The dir alone doesn't count, as connecting VS Code writes there too.
 It asks which apps to connect. Empty answers take the defaults in brackets.
 For Claude Code and Codex, it also asks 2 things.
 Should memory load at the start of each chat? Should notes be saved without asking?
+With Claude Code chosen, the first question also asks to save Claude Code's compaction summaries.
+A yes also adds the PostCompact hook, which saves each compaction summary. A summary can quote file contents, and redaction is best effort.
 Saving a rule always asks.
 VS Code and Copilot CLI always get the hook. They ask before every write until you allow the tool.
 VS Code's Copilot chat reads the hook and instructions in `~/.copilot`. So VS Code gets those too, and the plan says so.
@@ -109,6 +111,7 @@ AtticDB keeps an instructions file you wrote. It counts as in place.
 That is 1 that mentions AtticDB, or has AtticDB's file name without its marker line.
 
 The plan has 1 line per file and part, such as `~/.claude/settings.json: add the SessionStart hook`.
+The PostCompact line says what it does: `add the PostCompact hook (saves compaction summaries)`.
 It comes from the code that writes, run in a mode that writes nothing.
 That mode runs no `claude` or `codex` command that changes anything.
 It checks an existing home as Apply would, so a home Apply refuses shows in the plan.
@@ -126,7 +129,7 @@ If `hooks = false` turns Codex's hooks off, it says memory won't load at chat st
 
 Flags replace the questions. `--harness <list>` takes a comma list of app names.
 The names are `copilot`, `vscode`, `claude-code` and `codex`.
-`--no-hook` drops the hook, and Claude Code's PostCompact hook too. `--notes ask|auto` picks how notes are saved.
+`--no-hook` drops the hook, and Claude Code's PostCompact hook too. So it means no chat-start memory, and no saved compaction summaries in Claude Code. `--notes ask|auto` picks how notes are saved.
 `--yes` takes every default and doesn't ask `Apply?`.
 Without a terminal on stdin, it needs `--yes` or `--dry-run`. Else it exits 2.
 The end of stdin exits 2. So do 3 answers it can't read.
@@ -165,7 +168,7 @@ Each check prints 1 line: `ok`, or the problem and what to do. They run in this 
 - **Each app:** the apps it finds, or those in `--harness`. An app that isn't found prints `not found`. That is not a failure.
   - **parts:** a plan, as in `atticdb setup --dry-run`, must find every part in place. Else it lists each part that would change.
     A missing Claude Code or Codex hook counts as left out on purpose, as with `--no-hook`. So do the rules `--notes ask` leaves out.
-    For Claude Code, that needs both hooks missing. A SessionStart hook without the PostCompact one lists `add the PostCompact hook`.
+    For Claude Code, that needs both hooks missing. A SessionStart hook without the PostCompact one lists `add the PostCompact hook (saves compaction summaries)`.
     A PostCompact hook that would change still shows when the SessionStart one is missing.
   - **binary:** it fails when an entry or hook runs another AtticDB binary, or one that no longer exists. That happens after an upgrade or a move.
     A link to this binary counts as this binary.

@@ -138,7 +138,7 @@ fn setup_plans_then_connects_every_app_it_finds() {
          instructions in {c}, so VS Code gets those too.\n\
          Claude Code:\n  {h}/.claude.json: add the MCP entry\n  \
          {h}/.claude/settings.json: add the SessionStart hook\n  \
-         {h}/.claude/settings.json: add the PostCompact hook\n  \
+         {h}/.claude/settings.json: add the PostCompact hook (saves compaction summaries)\n  \
          {h}/.claude/settings.json: add the allow rules\n\
          Codex:\n  {h}/.codex/config.toml: add the MCP entry\n  \
          {h}/.codex/hooks.json: add the SessionStart hook\n  \
@@ -462,8 +462,8 @@ fn setup_asks_and_stops_without_answers() {
             assert_eq!(tree(&home), before, "{case}: nothing written");
             continue;
         }
-        let asked = "Which apps? [copilot,vscode,claude-code,codex] Load memory at the start of \
-                     each chat? [Y/n] Save notes without asking? (Claude Code and Codex. Saving \
+        let asked = "Which apps? [copilot,vscode,claude-code,codex] Load memory at chat start, \
+                     and save Claude Code's compaction summaries? [Y/n] Save notes without asking? (Claude Code and Codex. Saving \
                      a rule always asks.) [Y/n] Plan:\nClaude Code:\n";
         assert!(out.starts_with(asked), "{case}: {out}");
         assert!(out.contains("Apply? [y/N] Applying:\n"), "{case}: {out}");

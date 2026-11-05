@@ -128,7 +128,7 @@ pub(super) fn connect(hook: bool, notes: Notes, mode: Mode) -> Report {
             track(text, add_hook(Harness::Codex, Event::SessionStart, text, &group), &tracked)
         };
         let (name, by_hand) = (Event::SessionStart.part(), Event::SessionStart.add_by_hand(&group));
-        let parts = [Part { name, by_hand, edit: &add }];
+        let parts = [Part { name, by_hand, edit: &add, adds: None }];
         // 1 part, so 1 line.
         let hook_lines = edit_file(hooks.clone(), NO_HOOKS, &parts, mode);
         hook_state = hook_lines.first().map(|line| line.state);
@@ -202,7 +202,7 @@ pub(super) fn disconnect() -> u8 {
         |text: &str| track(text, drop_hooks(Harness::Codex, Event::SessionStart, text), &tracked);
     let (name, by_hand) =
         (Event::SessionStart.part(), Event::SessionStart.drop_by_hand(Harness::Codex));
-    let parts = [Part { name, by_hand, edit: &drop }];
+    let parts = [Part { name, by_hand, edit: &drop, adds: None }];
     let mut lines = vec![drop_block(&config).unwrap_or_else(|line| line)];
     lines.extend(edit_file(hooks.clone(), NO_HOOKS, &parts, Mode::Apply));
     lines.extend(guide::remove(&dir));
