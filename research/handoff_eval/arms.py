@@ -4,8 +4,8 @@
 - files: AGENTS.md and CLAUDE.md in the fixture ask the agent to keep HANDOFF.md. Nothing is pre-filled.
 - atticdb: `atticdb setup --yes --harness <h>` for both harnesses before the writer, disconnect after.
 - oracle: no writer session. The reader prompt starts with the case's gold note.
-- blank: no writer session and no notes. A control: its pass rate is the chance floor, and any
-  evidence token the reader sees or says is a leak.
+- blank: no writer session and no notes. It's a control. Its pass rate is the chance floor.
+  Any evidence token the reader sees or says is a leak.
 """
 
 from __future__ import annotations
