@@ -76,7 +76,7 @@ After each run: `atticdb disconnect` for both of the run's harnesses, delete `<h
 | atticdb | `atticdb setup --yes --harness <h>` for both of the run's harnesses before the writer. Both are disconnected after the reader. |
 | oracle | No writer session. The reader prompt starts with "Notes from the last session: " and the case's gold note. A case whose writer changes code has an `oracle_state` in cases.py. Its files go over the fixture and are committed as "writer work" before the reader, so the repo matches the note. Only H1 and H5 have one: `pack_header` packs with `struct.pack`. |
 | atticdb-only | The atticdb arm with each harness's own memory switched off. It separates AtticDB's effect from the harness's memory. Writer and reader get the switch. If the writer still writes native memory, the run adds "native memory written with memory off" to its reasons. Runs only when named in `--arms`. |
-| blank | No writer session and no notes. The reader gets the plain reader prompt. It is a control: its pass rate is the chance floor, and it flags leaks. `leaked` is 1 when an evidence token is in the reader's reply or tool outputs. Other arms leave `leaked` empty. Runs only when named in `--arms`. |
+| blank | No writer session and no notes. The reader gets the plain reader prompt. It is a control: its pass rate is the chance floor, and it flags leaks. `leaked` is 1 when an unguessable evidence token is in the reader's reply or tool outputs: `LEDG-7731`, `INC-2209`, `STOR-5150`, `bramble-ci` or `FIN-88`. A reader that knows nothing can still say "Python 3.9", "412 bytes" or "plain files", so those never count as a leak. Other arms leave `leaked` empty. Runs only when named in `--arms`. |
 
 In the files arm, AGENTS.md and CLAUDE.md are committed with the fixture. So they are not part of any diff.
 
@@ -108,8 +108,11 @@ These are the home case for a harness's own memory. The reader is the writer har
 - Claude keeps `<CLAUDE_CONFIG_DIR>/projects/<slug>/memory/`. Codex keeps `<CODEX_HOME>/memories/`.
 - Copilot keeps nothing, so `copilot:copilot` has no native memory to measure. Its memory stays off on purpose: `--enable-memory` would store eval facts in the owner's real account.
 - The atticdb-only arm keeps no memory. Its writer runs with memory off, so any memory there ignored the switch. The run flags that already.
-- The scrub takes the reader's config too, as it is the same dir. So the dir is set up again before the reader. Codex gets its `auth.json` and `config.toml` copied in again, and the atticdb arms run `atticdb setup` again. A login Codex refreshed in the writer goes to the eval dir first.
-- **delivered** gains `native-memory`: an evidence token in a file of the kept memory dir. The harness can load that memory into the reader's context at start.
+- The scrub takes the reader's config too, as it is the same dir. So the dir is set up again before the reader. Codex gets its `auth.json` and `config.toml` copied in again. A login Codex refreshed in the writer goes to the eval dir first.
+- The first pass's defences run again on the new dir: the disconnect, then the atticdb wiring check. Outside the atticdb and atticdb-only arms, a failed disconnect errors the run at `setup`. Wiring left in place always does. Then those 2 arms run `atticdb setup` again.
+- **delivered** gains a place for what the reader loads from the kept memory at start:
+  - Claude: `native-memory`. Claude loads only `MEMORY.md` at start, up to its first 200 lines or 25 KB, whichever comes first. So only that part counts. Topic files load only when Claude reads them, and the transcript scan sees that.
+  - Codex: `native-memory-unverified`. What Codex loads from `memories/` is not checked yet, so every file counts, under its own label.
 
 ## Stages
 
@@ -144,7 +147,7 @@ The oracle has no capture.
 - `hook`: the block that the reader's hook command prints just before the reader starts: `atticdb hook session-start --harness <reader>`, or for Copilot `atticdb hook session-start`. atticdb and atticdb-only arms only.
 - `transcript`: a tool result or file read in the reader's raw stream, before its final assistant message. Claude: `tool_result` content, and a Read's `tool_use_result.file.content`. Write and Edit results are left out, as they echo what the reader wrote. Codex: command output and MCP results. The commands the agent typed don't count. Copilot: the `result` of each `tool.execution_complete`, except for `edit`, `create`, `write`, `str_replace_editor` and `apply_patch`. The streamed `tool.shell_output` and partial results repeat it, so they're not read. The reader's own messages, the prompt and tool arguments never count.
 - `prompt`: the oracle's reader prompt.
-- `native-memory`: a file of the writer's native memory, kept for the reader. Same-harness runs only.
+- `native-memory`: the head of Claude's kept `MEMORY.md` that it loads at start. `native-memory-unverified`: any file of Codex's kept `memories/`. Same-harness runs only.
 
 H5 has no delivery stage. Its evidence is H1's tokens, which are unrelated history there.
 

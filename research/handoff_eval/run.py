@@ -25,9 +25,9 @@ for the repo, unless the arm turns memory off. Then the dir is set up again for 
 A run uses the 2 harnesses of its direction. Only those are disconnected, set up and torn down.
 
 Before any agent starts, the run checks that no harness config it will use mentions atticdb
-(outside the setup the atticdb arm does itself), and that the store, the repo and both config dirs
-hold none of the case's evidence. After the run it disconnects both harnesses, stops the AtticDB
-server the run started, and deletes both temp dirs.
+(outside the setup the atticdb and atticdb-only arms do themselves), and that the store, the repo
+and both config dirs hold none of the case's evidence. After the run it disconnects both harnesses,
+stops the AtticDB server the run started, and deletes both temp dirs.
 
 Stages, each None when not measured or not applicable:
 
@@ -36,9 +36,9 @@ Stages, each None when not measured or not applicable:
   captured_all: every evidence token sits in 1 of those places, such as 1 note or 1 file. For H1
   that is the decision's ticket and its reason, 412 bytes, saved together.
 - delivered: before the reader's final reply, an evidence token was in its context: the
-  SessionStart hook block for the reader harness (atticdb arm), a tool result or file read in the
-  reader's transcript, or the reader prompt (oracle arm only). In a same-harness run, also the
-  kept native memory. None for H5.
+  SessionStart hook block for the reader harness (atticdb and atticdb-only arms), a tool result or
+  file read in the reader's transcript, or the reader prompt (oracle arm only). In a same-harness
+  run, also the loaded part of the kept native memory. None for H5.
 - passed: `grade.grade` on the reader's final reply and the repo it leaves.
 
 Tokens match through `EVIDENCE_PATTERNS`, never as bare substrings.
@@ -109,6 +109,11 @@ def has_token(text: str, token: str) -> bool:
 
 def tokens_in(text: str, tokens) -> list[str]:
     return [t for t in tokens if has_token(text, t)]
+
+
+# The tokens a reader can't guess: ticket ids and the runner's name. "Python 3.9", "412 bytes" and
+# "plain files" can come from a reader that knows nothing, so they never make a leak.
+LEAK_TOKENS = ("LEDG-7731", "INC-2209", "STOR-5150", "bramble-ci", "FIN-88")
 
 
 # ---- budget, config and result ----
@@ -536,6 +541,32 @@ def native_memory_dir(hroot: str, harness: str, repo: str) -> str | None:
     raise ValueError(f"unknown harness {harness!r}")
 
 
+# What Claude Code loads from its memory dir at session start: MEMORY.md, up to its first 200 lines
+# or 25 KB, whichever comes first (code.claude.com/docs/en/memory). Topic files load only when read.
+CLAUDE_MEMORY_FILE, CLAUDE_MEMORY_LINES, CLAUDE_MEMORY_BYTES = "MEMORY.md", 200, 25 * 1024
+
+
+def memory_delivery(harness: str, keep: str, tokens) -> list[tuple[str, str]]:
+    """The tokens a same-harness reader gets from the kept native memory at start. Claude: the loaded
+    head of MEMORY.md. Codex: every file, as what it loads is not checked, so the place is
+    `native-memory-unverified`. Copilot keeps no memory."""
+    if harness == "claude-code":
+        path = os.path.join(keep, CLAUDE_MEMORY_FILE)
+        if os.path.islink(path):
+            return []
+        try:
+            with open(path, "rb") as f:
+                head = f.read(CLAUDE_MEMORY_BYTES).decode("utf-8", "replace")
+        except OSError:
+            return []
+        text = "".join(head.splitlines(keepends=True)[:CLAUDE_MEMORY_LINES])
+        return [("native-memory", t) for t in tokens_in(text, tokens)]
+    if harness == "codex":
+        found = [t for _, t in file_hits(keep, tokens, "")]
+        return [("native-memory-unverified", t) for t in tokens if t in found]
+    return []
+
+
 def changed_files(before: dict, after: dict) -> set[str]:
     """Files added or changed in size or mtime between 2 `guard.snapshot`s."""
     return {p for p in guard.compare(before, after) if p in after}
@@ -869,6 +900,22 @@ def grader_timed_out(verdict) -> bool:
     return any("timed out" in why for why in verdict.reasons)
 
 
+def _disconnect_and_check(cfg: Config, runner: Runner, root: str, hroot: str, steps: dict, arm: str,
+                          res: HandoffResult, when: str) -> None:
+    """Disconnects the run's harnesses from AtticDB, then checks no config mentions atticdb. Outside
+    the arms that wire AtticDB, a failed disconnect may have left wiring in place, so the run stops.
+    Wiring that is still there always stops it."""
+    for step in steps["disconnect"]:
+        r = _exec(cfg, runner, root, step, hroot)
+        if r.code != 0:
+            if not arms.uses_atticdb(arm):
+                raise HarnessError(f"pre-disconnect {step.argv[-1]} exited {_code(r)}")
+            res.reasons.append(f"pre-disconnect {step.argv[-1]} exited {_code(r)}")
+    wired = wiring_hits(hroot)
+    if wired:
+        raise HarnessError(f"harness config mentions atticdb {when}: {', '.join(wired)}")
+
+
 def run_handoff(cfg: HandoffConfig, runner: Runner, case: Case, arm: str, writer: str, reader: str,
                 index: int) -> HandoffResult:
     arms.check_arm(arm)
@@ -900,18 +947,9 @@ def run_handoff(cfg: HandoffConfig, runner: Runner, case: Case, arm: str, writer
 
         stage = "setup"
         prepare_config_dirs(cfg, hroot, run_harnesses(writer, reader))
-        # Any AtticDB wiring left in the copied config goes first. Outside the arms that wire AtticDB,
-        # a disconnect that fails may have left it in place, so the run stops.
+        # Any AtticDB wiring left in the copied config goes first.
         touched = True
-        for step in steps["disconnect"]:
-            r = _exec(cfg, runner, root, step, hroot)
-            if r.code != 0:
-                if not arms.uses_atticdb(arm):
-                    raise HarnessError(f"pre-disconnect {step.argv[-1]} exited {_code(r)}")
-                res.reasons.append(f"pre-disconnect {step.argv[-1]} exited {_code(r)}")
-        wired = wiring_hits(hroot)
-        if wired:
-            raise HarnessError(f"harness config mentions atticdb before the run: {', '.join(wired)}")
+        _disconnect_and_check(cfg, runner, root, hroot, steps, arm, res, "before the run")
 
         stage = "start"
         dirty = _searches(cfg, runner, root, hroot, steps["start"])
@@ -968,14 +1006,16 @@ def run_handoff(cfg: HandoffConfig, runner: Runner, case: Case, arm: str, writer
                 raise HarnessError(f"could not clear the {writer} dir before the reader: {e}") from e
             if writer == reader:
                 if keep:
-                    delivered += [("native-memory", t) for _, t in file_hits(keep, case.evidence, "")]
+                    delivered += memory_delivery(writer, keep, case.evidence)
                 # The reader shares the writer's dir, so the scrub took its config and AtticDB wiring
-                # too. A login Codex refreshed goes to the eval dir first, then the dir is set up again.
+                # too. A login Codex refreshed goes to the eval dir first. Then the dir is made again.
+                # The first pass's disconnect and wiring check run again. Arms that wire AtticDB set up again.
                 stage = "setup"
                 note = sync_codex_auth(cfg, hroot)
                 if note:
                     res.reasons.append(note)
                 prepare_config_dirs(cfg, hroot, (reader,))
+                _disconnect_and_check(cfg, runner, root, hroot, steps, arm, res, "before the reader")
                 for step in steps["setup"]:
                     _required(cfg, runner, root, step, hroot)
 
@@ -1001,8 +1041,9 @@ def run_handoff(cfg: HandoffConfig, runner: Runner, case: Case, arm: str, writer
         if case.id not in NO_DELIVERY:
             res.delivered, res.delivered_where = bool(delivered), _where(delivered)
         if arm == "blank":
-            # Read even for H5: the blank reader has no source, so any token at all is a leak.
-            res.leaked = bool(tokens_in(out.reply, case.evidence)) or bool(delivered)
+            # Read even for H5: the blank reader has no source, so any unguessable token is a leak.
+            secret = [t for t in case.evidence if t in LEAK_TOKENS]
+            res.leaked = bool(tokens_in(out.reply, secret)) or any(t in secret for _, t in delivered)
 
         stage = "grade"
         (diff_step,) = steps["grade"]
@@ -1082,8 +1123,8 @@ def describe(cfg: HandoffConfig, case: Case, arm: str, writer: str, reader: str,
                 keep = " and ".join(filter(None, [keep, f"the {writer} native memory for this repo"]))
             lines.append(f"  [capture] then delete {'all but ' + keep if keep else 'everything'} in the {writer} dir")
             if writer == reader:
-                lines.append(f"  [capture] then set the {writer} dir up again for the reader: the copies and "
-                             "setup steps above")
+                lines.append(f"  [capture] then set the {writer} dir up again for the reader: the copies, "
+                             "disconnects, atticdb check and setup steps above")
         for step in steps:
             env = f" + {', '.join(sorted(step.extra_env))}" if step.extra_env else ""
             stdin = " <stdin: hook JSON>" if step.stdin is not None else ""
