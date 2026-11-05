@@ -392,6 +392,68 @@ def test_blank_leak_flags_delivery(env, monkeypatch, tmp_path, cid):
     assert_cleaned_up(env)
 
 
+def test_atticdb_only_env_on_every_session(env):
+    cfg = make_cfg(env, models=dict(MODELS))
+    steps = run.plan(cfg, CASES["H3"], "atticdb-only", "claude-code", "claude-code", "/tmp/zhe-root")
+    sessions = steps["writer"] + steps["reader"]
+    assert len(sessions) == 3
+    for step in sessions:
+        assert step.extra_env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
+    steps = run.plan(cfg, CASES["H3"], "atticdb", "claude-code", "claude-code", "/tmp/zhe-root")
+    for step in steps["writer"] + steps["reader"]:
+        assert "CLAUDE_CODE_DISABLE_AUTO_MEMORY" not in step.extra_env
+    assert arms.session_env("codex", "atticdb-only") == {} and arms.session_env("copilot", "atticdb-only") == {}
+    assert arms.native_memory_off("atticdb-only") is True
+    assert not any(arms.native_memory_off(a) for a in arms.ARMS if a != "atticdb-only")
+    assert arms.ARMS[-2:] == ("atticdb-only", "blank")
+    assert "atticdb-only" not in arms.DEFAULT_ARMS
+
+
+def test_atticdb_only_codex_argv():
+    argv = arms.session_argv("codex", "p", "m", "atticdb-only")
+    assert argv[-5:] == ["--disable", "memories", "-m", "m", "p"]
+    assert agents.CODEX_APPROVE in argv
+    assert "--disable" not in arms.session_argv("codex", "p", "m", "atticdb")
+    claude = arms.session_argv("claude-code", "p", "m", "atticdb-only")
+    assert claude == arms.session_argv("claude-code", "p", "m", "atticdb")
+
+
+def test_copilot_never_enables_memory():
+    for arm in arms.ARMS:
+        assert "--enable-memory" not in arms.session_argv("copilot", "p", "m", arm)
+
+
+def test_atticdb_only_sets_up_atticdb(env):
+    cfg = make_cfg(env, models=dict(MODELS))
+    assert arms.uses_atticdb("atticdb-only") is True and arms.has_writer("atticdb-only") is True
+    only = run.plan(cfg, CASES["H1"], "atticdb-only", "claude-code", "codex", "/tmp/zhe-root")
+    full = run.plan(cfg, CASES["H1"], "atticdb", "claude-code", "codex", "/tmp/zhe-root")
+    for phase in ("setup", "hook", "teardown"):
+        assert only[phase] and only[phase] == full[phase], phase
+
+
+@needs_atticdb
+def test_atticdb_only_flags_native_memory_write(env, monkeypatch):
+    """The stub ignores CLAUDE_CODE_DISABLE_AUTO_MEMORY, like a harness that ignores the switch."""
+    monkeypatch.setenv("STUB_NATIVE_MEMORY", "1")
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], "atticdb-only", "claude-code", "codex", 1)
+    assert not res.errored, res.reasons
+    assert "claude-memory:MEMORY.md[LEDG-7731,412]" in res.captured_where
+    assert "native memory written with memory off" in res.reasons
+    assert_cleaned_up(env)
+
+    # Without a memory write, no flag. The atticdb arm never sets it.
+    monkeypatch.delenv("STUB_NATIVE_MEMORY")
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], "atticdb-only", "claude-code", "codex", 1)
+    assert not res.errored, res.reasons
+    assert res.captured is True and "native memory written with memory off" not in res.reasons
+    monkeypatch.setenv("STUB_NATIVE_MEMORY", "1")
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], "atticdb", "claude-code", "codex", 1)
+    assert not res.errored, res.reasons
+    assert "native memory written with memory off" not in res.reasons
+    assert_cleaned_up(env)
+
+
 def test_default_arms_unchanged():
     a = cli.parse(["--cases", "H1", "--claude-model", "X", "--codex-model", "Y", "--dry-run"])
     assert a.arms == ["native", "files", "atticdb", "oracle"] == list(arms.DEFAULT_ARMS)

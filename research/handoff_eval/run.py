@@ -372,12 +372,14 @@ def plan(cfg: HandoffConfig, case: Case, arm: str, writer: str, reader: str, roo
                   for h in both]
         if arms.uses_atticdb(arm) else [],
         "writer": [Step("writer", arms.session_argv(writer, p, cfg.models.get(writer, ""), arm), repo,
-                        cfg.agent_timeout) for p in case.writer_prompts] if arms.has_writer(arm) else [],
+                        cfg.agent_timeout, arms.session_env(writer, arm)) for p in case.writer_prompts]
+        if arms.has_writer(arm) else [],
         "capture": [search_step(cfg, repo, "capture", t) for t in case.evidence] if arms.has_writer(arm) else [],
         "hook": [Step("hook", agents.hook_argv(z, reader), repo, agents.HOOK_TIMEOUT, stdin=hook_input(repo))]
         if arms.uses_atticdb(arm) else [],
         "reader": [Step("reader", arms.session_argv(reader, arms.reader_prompt(case, arm),
-                                                    cfg.models.get(reader, ""), arm), repo, cfg.agent_timeout)],
+                                                    cfg.models.get(reader, ""), arm), repo, cfg.agent_timeout,
+                        arms.session_env(reader, arm))],
         "grade": [Step("grade", ["git", "diff", BASE_REF], repo, agents.GIT_TIMEOUT, git)],
         "teardown": [Step("teardown", agents.disconnect_argv(z, h), repo, agents.SETUP_TIMEOUT,
                           setup_env(hroot, h)) for h in both],
@@ -924,7 +926,11 @@ def run_handoff(cfg: HandoffConfig, runner: Runner, case: Case, arm: str, writer
             found += file_hits(repo, case.evidence, "repo")
             if mem:
                 label = "claude-memory" if writer == "claude-code" else "codex-memory"
-                found += file_hits(mem, case.evidence, label, only=changed_files(mem_before, guard.snapshot(mem)))
+                mem_found = file_hits(mem, case.evidence, label, only=changed_files(mem_before, guard.snapshot(mem)))
+                found += mem_found
+                # The switch was ignored, so this run does not separate AtticDB from native memory.
+                if mem_found and arms.native_memory_off(arm):
+                    res.reasons.append("native memory written with memory off")
             res.captured, res.captured_where = bool(found), _where(found)
             res.captured_all = all_in_one_place(found, case.evidence)
             # The writer's transcripts and sessions hold its prompts. The reader gets the writer's
