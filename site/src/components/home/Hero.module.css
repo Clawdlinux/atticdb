@@ -35,16 +35,6 @@
   min-width: 0;
 }
 
-.hubImg {
-  display: block;
-  width: 100%;
-  max-width: 680px;
-  height: auto;
-  margin-inline: auto;
-  border: 1px solid var(--surface);
-  border-radius: 6px;
-}
-
 .title {
   max-width: 22ch;
   margin-inline: auto;

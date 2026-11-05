@@ -19,6 +19,7 @@ import { HEADLINE, HONEST, SUB, TRUST } from "@/content/hero";
 import { HOVER, PRESS, SPRING, SWAP, SWAP_RISE, TAP } from "@/lib/motion";
 import { WAITLIST_URL } from "@/lib/site";
 import AckChip, { formatAck } from "./AckChip";
+import HeroStage from "./HeroStage";
 import { PlugResult, PowerChip } from "./PlugDemo";
 import type { TapeHandle } from "./TapeCanvas";
 import { POSTER_SRC, POSTER_VIEWS } from "./tape-poster";
@@ -30,11 +31,6 @@ const DISKS: { value: Disk; label: string }[] = [
   { value: "premium-v2", label: "Premium SSD v2" },
 ];
 const WRITERS: Writers[] = [1, 4, 16];
-
-export const HUB_SRC = "/demo/attic-hub.svg";
-export const HUB_STILL = `${HUB_SRC}#still`;
-export const HUB_ALT =
-  "Claude Code saves the rule Use pnpm, not npm to AtticDB on your machine, and new chats in Codex, Copilot and VS Code start with it.";
 
 const numbers = new Intl.NumberFormat("en-US");
 
@@ -274,22 +270,9 @@ function HeroBody({ afterHonest }: HeroProps) {
             </motion.a>
           </div>
         </div>
-        <picture className={styles.hub} data-ui="hub">
-          <source
-            media="(prefers-reduced-motion: reduce)"
-            srcSet={HUB_STILL}
-            width={680}
-            height={420}
-          />
-          <img
-            className={styles.hubImg}
-            src={HUB_SRC}
-            alt={HUB_ALT}
-            width={680}
-            height={420}
-            decoding="async"
-          />
-        </picture>
+        <div className={styles.hub}>
+          <HeroStage />
+        </div>
       </div>
 
       <p className={styles.honest} data-ui="honest">
