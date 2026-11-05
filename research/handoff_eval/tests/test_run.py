@@ -418,6 +418,24 @@ def test_atticdb_only_codex_argv():
     assert claude == arms.session_argv("claude-code", "p", "m", "atticdb")
 
 
+def test_inherited_memory_switch_is_dropped(env):
+    """A CLAUDE_CODE_DISABLE_AUTO_MEMORY from the owner's shell would make atticdb and atticdb-only
+    the same. Only the arm sets it."""
+    cfg = make_cfg(env)
+    cfg.base_env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
+    root, hroot = "/tmp/zhe-root", "/tmp/zhh-root"
+    for arm in ("native", "atticdb"):
+        steps = run.plan(cfg, CASES["H1"], arm, "codex", "claude-code", root, hroot)
+        for phase in ("disconnect", "setup", "writer", "hook", "reader", "teardown"):
+            for step in steps[phase]:
+                assert "CLAUDE_CODE_DISABLE_AUTO_MEMORY" not in run.env_for(cfg, root, step, hroot), (arm, phase)
+    steps = run.plan(cfg, CASES["H1"], "atticdb-only", "codex", "claude-code", root, hroot)
+    (reader,) = steps["reader"]
+    assert run.env_for(cfg, root, reader, hroot)["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
+    (writer,) = steps["writer"]
+    assert "CLAUDE_CODE_DISABLE_AUTO_MEMORY" not in run.env_for(cfg, root, writer, hroot)
+
+
 def test_copilot_never_enables_memory():
     for arm in arms.ARMS:
         assert "--enable-memory" not in arms.session_argv("copilot", "p", "m", arm)

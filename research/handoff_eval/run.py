@@ -247,10 +247,12 @@ def scrub_harness_dir(hroot: str, harness: str) -> list[str]:
 
 def env_for(cfg: Config, root: str, step: Step, hroot: str) -> dict:
     """setup_eval's child env, with the run's own config dirs, and Claude's login looked up under
-    the eval Claude dir. An inherited CLAUDE_SECURESTORAGE_CONFIG_DIR is always replaced."""
+    the eval Claude dir. An inherited CLAUDE_SECURESTORAGE_CONFIG_DIR is always replaced. An
+    inherited memory switch is dropped, so only the arm, through `step.extra_env`, sets it."""
     zh, _ = paths(root)
     claude, codex = run_dirs(hroot)
-    return agents.child_env(cfg.base_env, home=cfg.home, atticdb_home=zh, claude_dir=claude, codex_dir=codex,
+    base = {k: v for k, v in cfg.base_env.items() if k not in arms.CLAUDE_MEMORY_OFF_ENV}
+    return agents.child_env(base, home=cfg.home, atticdb_home=zh, claude_dir=claude, codex_dir=codex,
                             copilot_dir=harness_dir(hroot, "copilot"),
                             extra={SECURE_STORAGE_ENV: cfg.claude_dir, **step.extra_env},
                             keep_api_keys=cfg.keep_api_keys)
@@ -877,8 +879,8 @@ def run_handoff(cfg: HandoffConfig, runner: Runner, case: Case, arm: str, writer
 
         stage = "setup"
         prepare_config_dirs(cfg, hroot, run_harnesses(writer, reader))
-        # Any AtticDB wiring left in the copied config goes first. Outside the atticdb arm, a
-        # disconnect that fails may have left it in place, so the run stops.
+        # Any AtticDB wiring left in the copied config goes first. Outside the arms that wire AtticDB,
+        # a disconnect that fails may have left it in place, so the run stops.
         touched = True
         for step in steps["disconnect"]:
             r = _exec(cfg, runner, root, step, hroot)
