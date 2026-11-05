@@ -19,7 +19,7 @@ from .run import HandoffResult, all_in_one_place, parse_where
 FIRST_LINE = "Integration pilot. Not a statistical result."
 
 COLUMNS = ["date", "case", "arm", "writer", "reader", "run", "captured", "captured_where", "captured_all",
-           "delivered", "delivered_where", "passed", "check_timed_out", "errored", "error_stage", "sessions",
+           "delivered", "delivered_where", "leaked", "passed", "check_timed_out", "errored", "error_stage", "sessions",
            "input_tokens", "output_tokens", "wall_s", "writer_model", "reader_model", "reasons", "reply"]
 
 
@@ -45,6 +45,7 @@ def row(date: str, res: HandoffResult) -> dict:
         "captured_all": flag(res.captured_all),
         "delivered": flag(res.delivered),
         "delivered_where": res.delivered_where,
+        "leaked": flag(res.leaked),
         "passed": flag(res.passed),
         "check_timed_out": int(res.check_timed_out),
         "errored": int(res.errored),
@@ -149,6 +150,13 @@ def summary(results: list[HandoffResult]) -> list[str]:
             cells = [_rate([r for r in results if r.arm == arm and (r.writer, r.reader) == d], "passed")
                      for d in directions]
             lines.append(f"| {arm} | " + " | ".join(cells) + " |")
+    blank = [r for r in results if r.arm == "blank"]
+    if blank:
+        known = [r for r in blank if not r.errored and r.leaked is not None]
+        lines += ["", "## Control (blank arm)", "",
+                  "The blank arm has no writer and no notes. Its pass rate is the chance floor. "
+                  "A leak is an evidence token in the reader's reply or tool outputs.", "",
+                  f"Pass rate: {_rate(blank, 'passed')}.", f"Leaked: {sum(r.leaked for r in known)} of {len(known)}."]
     stages = defaultdict(int)
     for r in results:
         if r.errored:
@@ -205,7 +213,8 @@ def from_row(r: dict) -> HandoffResult:
         r["case"], r["arm"], r["writer"], r["reader"], _int(r["run"]) or 0,
         captured=_bool(r["captured"]), captured_where=r.get("captured_where") or "",
         captured_all=_bool(r.get("captured_all", "")), delivered=_bool(r["delivered"]),
-        delivered_where=r.get("delivered_where") or "", passed=_bool(r["passed"]),
+        delivered_where=r.get("delivered_where") or "", leaked=_bool(r.get("leaked", "")),
+        passed=_bool(r["passed"]),
         check_timed_out=bool(_bool(r.get("check_timed_out", ""))), errored=bool(_bool(r["errored"])),
         error_stage=r.get("error_stage") or "", reasons=[r["reasons"]] if r["reasons"] else [],
         sessions=_int(r.get("sessions", "")) or 0, input_tokens=_int(r.get("input_tokens", "")),

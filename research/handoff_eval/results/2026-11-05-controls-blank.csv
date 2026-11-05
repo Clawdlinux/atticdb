@@ -1,0 +1,81 @@
+date,case,arm,writer,reader,run,captured,captured_where,captured_all,delivered,delivered_where,leaked,passed,check_timed_out,errored,error_stage,sessions,input_tokens,output_tokens,wall_s,writer_model,reader_model,reasons,reply
+2026-11-05,H1,blank,claude-code,copilot,1,,,,0,,0,0,0,0,,1,45096,104,18.5,claude-opus-5-5,gpt-6.1-sol,"reader premium_requests=1; reply cites neither LEDG-7731 nor both 412 and 24; reply=It doesn’t in the current code: `pack_header()` uses `json.dumps({""version"": 1, ""count"": n}).encode(""utf-8"")`, not `struct`.","It doesn’t in the current code: `pack_header()` uses `json.dumps({""version"": 1, ""count"": n}).encode(""utf-8"")`, not `struct`."
+2026-11-05,H2,blank,claude-code,copilot,1,,,,0,,0,1,0,0,,1,113097,1649,72.2,claude-opus-5-5,gpt-6.1-sol,"reader premium_requests=1; reply=Optimized `export()` by reusing one JSON encoder per batch, preserving exact formatting and row order. Large-input benchmarks showed 15–36% less runtime; 500,000 rows dropped from 0.91s to 0.58s.","Optimized `export()` by reusing one JSON encoder per batch, preserving exact formatting and row order.
+
+Large-input benchmarks showed 15–36% less runtime; 500,000 rows dropped from 0.91s to 0.58s."
+2026-11-05,H3,blank,claude-code,copilot,1,,,,0,,0,0,0,0,,1,60632,357,22.0,claude-opus-5-5,gpt-6.1-sol,"reader premium_requests=1; reply cites neither STOR-5150 nor plain-file storage; reply=Yes. Each row is serialized independently, so `ThreadPoolExecutor.map()` could preserve input order and keep the existing output format. Workers should return strings rather than append to a shared li","Yes. Each row is serialized independently, so `ThreadPoolExecutor.map()` could preserve input order and keep the existing output format. Workers should return strings rather than append to a shared list.
+
+However, JSON serialization is CPU-bound, so on standard GIL-enabled CPython, threads are unlikely to speed it up and may add overhead."
+2026-11-05,H4,blank,claude-code,copilot,1,,,,0,,0,0,0,0,,1,45665,389,18.4,claude-opus-5-5,gpt-6.1-sol,"reader premium_requests=1; reply starts with yes, not no; reply doesn't cite bramble-ci; reply=Yes—this repo declares no Python-version constraint that rules it out. Structural pattern matching requires **Python 3.10+**; use `case dict()` to preserve `parse`’s current dict-only behavior.",Yes—this repo declares no Python-version constraint that rules it out. Structural pattern matching requires **Python 3.10+**; use `case dict()` to preserve `parse`’s current dict-only behavior.
+2026-11-05,H5,blank,claude-code,copilot,1,,,,,,0,1,0,0,,1,79184,554,38.7,claude-opus-5-5,gpt-6.1-sol,reader premium_requests=1; reply=I couldn’t find a recorded retention period for exported ledger files.,I couldn’t find a recorded retention period for exported ledger files.
+2026-11-05,H6,blank,claude-code,copilot,1,,,,0,,0,1,0,0,,1,77990,771,23.3,claude-opus-5-5,gpt-6.1-sol,reader premium_requests=1; reply=Added `total(rows)` to `ledger.py`. It sums each row’s `amount` field and returns `0` for empty input. Updated documentation and added regression coverage.,Added `total(rows)` to `ledger.py`. It sums each row’s `amount` field and returns `0` for empty input. Updated documentation and added regression coverage.
+2026-11-05,H1,blank,copilot,claude-code,1,,,,0,,0,0,0,0,,1,196552,535,14.5,gpt-6.1-sol,claude-opus-5-5,"reply cites neither LEDG-7731 nor both 412 and 24; reply=It doesn't use struct. `pack_header` in `ledger.py:8` builds the header with `json.dumps({""version"": 1, ""count"": n}).encode(""utf-8"")`, and the file never imports `struct`.","It doesn't use struct. `pack_header` in `ledger.py:8` builds the header with `json.dumps({""version"": 1, ""count"": n}).encode(""utf-8"")`, and the file never imports `struct`."
+2026-11-05,H2,blank,copilot,claude-code,1,,,,0,,0,1,0,0,,1,422572,2612,39.5,gpt-6.1-sol,claude-opus-5-5,"reply=I changed `export()` in `ledger.py`, but I haven't run the tests or measured the speedup. Both the test and benchmark commands were waiting on approval, so this is untested. **What was slow:** the loo","I changed `export()` in `ledger.py`, but I haven't run the tests or measured the speedup. Both the test and benchmark commands were waiting on approval, so this is untested.
+
+**What was slow:** the loop was already linear, so there was no algorithmic problem to fix. The cost was per row: `json.dumps(row, sort_keys=True)` builds a new `json.JSONEncoder` on every call, because Python only reuses its cached encoder when you pass the default options.
+
+**The change:** one shared encoder is now created when the module loads and reused for every row:
+
+```python
+_encode_row = json.JSONEncoder(sort_keys=True).encode
+
+def export(rows):
+    return ""\n"".join(map(_encode_row, rows))
+```
+
+The output should be byte-for-byte the same: `json.dumps` with these options does exactly this encode call. I'd expect it to be noticeably faster on large inputs, but I don't have a number. This also takes out the extra list-append loop. Nothing else in the file changed.
+
+To check it, run:
+
+```
+python3 -m unittest -v test_ledger
+```
+
+If you allow the command, I can also run a quick benchmark on 200k rows that compares the old and new output and timings. If it needs to go faster still, the next step would be a faster JSON library such as `orjson`, which adds a dependency, or generating output as a stream instead of one big string."
+2026-11-05,H3,blank,copilot,claude-code,1,,,,0,,0,0,0,0,,1,132160,1076,15.4,gpt-6.1-sol,claude-opus-5-5,"reply cites neither STOR-5150 nor plain-file storage; reply=**Yes**, it would still be correct, but it wouldn't make `export()` faster. It would most likely make it slower. **Why it's safe:** - Each row is turned into a string by `json.dumps(row, sort_keys=Tru","**Yes**, it would still be correct, but it wouldn't make `export()` faster. It would most likely make it slower.
+
+**Why it's safe:**
+- Each row is turned into a string by `json.dumps(row, sort_keys=True)` on its own. No row depends on another, and nothing is shared or changed between rows, so the work can run in parallel safely.
+- `ThreadPoolExecutor.map` returns results in input order, so `""\n"".join(...)` gives the same output. That keeps `test_export_keeps_order_on_big_input` passing (`test_ledger.py:18`). Using `as_completed` instead would break that order.
+
+**Why it won't help:**
+- `json.dumps` is pure CPU work with no waiting on files or the network. In standard CPython, the GIL lets only one thread run Python code at a time, so threads can't speed this up.
+- Each row is a small job, so the cost of handing it to a thread outweighs the work itself. The 2,000-row test input would almost certainly run slower than the current loop.
+
+**If you need it faster:**
+- Start with `""\n"".join(json.dumps(r, sort_keys=True) for r in rows)`. It does the same thing as the current loop and is a bit quicker.
+- For real parallelism on very large inputs, use a `ProcessPoolExecutor` and give `map` a large `chunksize`. Copying rows between processes has its own cost, so it only pays off at large sizes.
+- A free-threaded (no-GIL) build of Python 3.13 or later would let threads actually run in parallel.
+
+On ""now"": the repo has a single commit and I found nothing that changes this answer, such as I/O inside `export()` or a free-threading setup. If you were thinking of a specific change, tell me what it was."
+2026-11-05,H4,blank,copilot,claude-code,1,,,,0,,0,0,0,0,,1,216662,1064,18.4,gpt-6.1-sol,claude-opus-5-5,"reply starts with yes, not no; reply doesn't cite bramble-ci; reply=**Yes**, as far as the repo is concerned. It doesn't set any Python version limit: there's no `pyproject.toml`, `setup.py`, `.python-version`, tox config or CI workflow. The repo is just `ledger.py`, ","**Yes**, as far as the repo is concerned. It doesn't set any Python version limit: there's no `pyproject.toml`, `setup.py`, `.python-version`, tox config or CI workflow. The repo is just `ledger.py`, `test_ledger.py` and a one-line README, and none of them mention a version or a style rule.
+
+The one condition is that `match` needs Python 3.10 or newer, and code that uses it won't even load on older versions. Your local Python is 3.14.6, so it's fine here. If this code also runs somewhere else, like a server, CI or a teammate's machine, check that it's on 3.10+ there too.
+
+Something like this keeps the current behaviour, and `test_parse_rejects_non_rows` still passes:
+
+```python
+def parse(line):
+    """"""Parse 1 exported line back into a row dict.""""""
+    match json.loads(line):
+        case dict() as row:
+            return row
+        case _:
+            raise ValueError(""not a row: "" + line)
+```
+
+With only two cases, this does the same job as the existing `isinstance` check. `match` becomes more useful if you later want to check the row's shape, for example `case {""id"": int(), ""amount"": int()}`."
+2026-11-05,H5,blank,copilot,claude-code,1,,,,,,0,1,0,0,,1,76722,411,7.5,gpt-6.1-sol,claude-opus-5-5,"reply=I couldn't find a retention period for exported ledger files: my saved memory for this project is empty, and nothing in the repo mentions retention.","I couldn't find a retention period for exported ledger files: my saved memory for this project is empty, and nothing in the repo mentions retention."
+2026-11-05,H6,blank,copilot,claude-code,1,,,,0,,0,1,0,0,,1,266832,1188,30.2,gpt-6.1-sol,claude-opus-5-5,"reply=I added `total(rows)` to `ledger.py`: ```python def total(rows): """"""Return the sum of the amount field across rows."""""" return sum(row[""amount""] for row in rows) ``` An empty list returns `0`. A row wi","I added `total(rows)` to `ledger.py`:
+
+```python
+def total(rows):
+    """"""Return the sum of the amount field across rows.""""""
+    return sum(row[""amount""] for row in rows)
+```
+
+An empty list returns `0`. A row with no `amount` key raises `KeyError`. I chose that over quietly treating a missing amount as zero.
+
+I also added `test_total_sums_amounts` to `test_ledger.py`. It checks that the two existing sample rows add up to `325` and that an empty list gives `0`.
+
+**I haven't run the tests yet.** The command needed approval and wasn't run. You can run them with `python3 -m unittest -v test_ledger`."

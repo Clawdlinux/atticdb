@@ -19,7 +19,7 @@ This package reuses setup_eval's guard, env, process runner and cleanup. It does
   - `CODEX_HOME` is `<harness-root>/codex`. It gets copies of the eval dir's `auth.json` and `config.toml`, nothing else. So Codex sessions, memories and history never carry over. Without `auth.json` the run errors at `setup` with the login hint.
   - `CLAUDE_CONFIG_DIR` is `<harness-root>/claude`, and starts empty.
   - `COPILOT_HOME` is `<harness-root>/copilot`, and starts empty. See "Copilot CLI" below.
-- The reader's env still names the writer harness's dir, and its transcripts and sessions hold the writer's prompts. So after the capture scan, that dir loses everything but its login file: `.credentials.json` for Claude, `auth.json` for Codex, nothing for Copilot.
+- The reader's env still names the writer harness's dir, and its transcripts and sessions hold the writer's prompts. So after the capture scan, that dir loses everything but its login file: `.credentials.json` for Claude, `auth.json` for Codex, nothing for Copilot. A same-harness run also keeps the writer's native memory there. See "Same-harness directions".
 - Every child gets setup_eval's env: no inherited `ATTICDB_*`, `GIT_*`, `COPILOT_*`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME` or credential vars, then the run's own `COPILOT_HOME`. `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN` and `GH_HOST` are dropped too, unless `--keep-api-keys`. No GitHub token is ever set. A child whose `ATTICDB_HOME` is not under its run root is refused.
 - A run touches only its direction's 2 harnesses. A Claude and Copilot run never sets up or disconnects Codex, and needs no Codex login.
 - Before and after a batch, the real AtticDB home, the top level of `~/.claude*`, `~/.codex` and `~/.copilot`, and VS Code's user `mcp.json` are compared by stat only. A change prints a warning.
@@ -47,11 +47,11 @@ Checked on Copilot CLI 1.0.105.
 - A session is `copilot -p <prompt> --output-format json --allow-all-tools --no-auto-update --model <id>`. stdout is JSONL. `parse.parse_copilot` reads it.
 - **The hook needs no `COPILOT_ALLOW_ALL`.** `atticdb setup --yes --harness copilot` writes `mcp-config.json`, `hooks/atticdb.json` and `instructions/atticdb.instructions.md` in `COPILOT_HOME`. In a real `-p` run with `COPILOT_ALLOW_ALL` unset, the user-level sessionStart hook ran: `session-state/<id>/events.jsonl` had `hook.start` and `hook.end` with `"success": true` and the AtticDB block, and the model quoted a fact from that block without a tool call. So the eval doesn't set it. Its value `true` would also trust the repo and load the repo's own hooks. All inherited `COPILOT_*` vars are dropped.
 - The hook command is the one `atticdb connect copilot` writes: `'<atticdb>' hook session-start`, with no `--harness`. It prints `{"additionalContext": ...}`.
-- Copilot's JSON stream has no hook events. So after each Copilot session in the atticdb arm, the run reads the `hook.end` events in `COPILOT_HOME/session-state/` and adds a note to the reasons, such as `copilot reader: sessionStart hook ran in 1 of 1 sessions, block has [LEDG-7731,412]`.
-- `atticdb connect copilot` drops an atticdb entry it finds in VS Code's user `mcp.json`, which it finds through `HOME` (`~/Library/Application Support/Code/User/mcp.json` on macOS) or `XDG_CONFIG_HOME` elsewhere. So every copilot `atticdb setup` and `atticdb disconnect` step runs with `HOME=<harness-root>/home` and `XDG_CONFIG_HOME=<harness-root>/home/.config`, a new empty dir per run. It only ever sees a per-run `mcp.json`. 2 backstops stay: in the atticdb arm, a run that sets up Copilot errors at `setup` if the real file mentions atticdb, and the batch compares the real file by stat.
+- Copilot's JSON stream has no hook events. So after each Copilot session in the atticdb and atticdb-only arms, the run reads the `hook.end` events in `COPILOT_HOME/session-state/` and adds a note to the reasons, such as `copilot reader: sessionStart hook ran in 1 of 1 sessions, block has [LEDG-7731,412]`.
+- `atticdb connect copilot` drops an atticdb entry it finds in VS Code's user `mcp.json`, which it finds through `HOME` (`~/Library/Application Support/Code/User/mcp.json` on macOS) or `XDG_CONFIG_HOME` elsewhere. So every copilot `atticdb setup` and `atticdb disconnect` step runs with `HOME=<harness-root>/home` and `XDG_CONFIG_HOME=<harness-root>/home/.config`, a new empty dir per run. It only ever sees a per-run `mcp.json`. 2 backstops stay: in the atticdb and atticdb-only arms, a run that sets up Copilot errors at `setup` if the real file mentions atticdb, and the batch compares the real file by stat.
 - **Copilot agent sessions keep the real `HOME`.** The plan was a per-run `HOME` for them too, so that personal skills in `~/.agents/skills` or `~/.copilot/skills` can't load. But Copilot's keychain login doesn't work with another `HOME`. With `HOME=<empty dir>` and `XDG_CONFIG_HOME` under it, `copilot -p` exits 1 with "Error: No authentication information found", with or without `GH_CONFIG_DIR` pointing at the real gh config. With the real `HOME` and gh's config hidden, it logs in, so the login is Copilot's own keychain item, which it reaches only through the real `HOME`. That leaves a possible confound between arms: personal skills. Checked in a discovery session on 1.0.105 with the real `HOME` (this machine has 103 dirs in `~/.agents/skills`): the system message's `<available_skills>` held only the 2 builtin skills, `customize-cloud-agent` and `github-pr-media`. `copilot skill list` shows the same 2. So no personal skill loaded. Every run still reads the skills each Copilot session was offered from `COPILOT_HOME/session-state/*/events.jsonl`, and any non-builtin one adds a note such as `copilot reader: 1 non-builtin skills offered (<name>)`. A run with that note is confounded.
 - Copilot loads AGENTS.md and CLAUDE.md from the repo, as `copilot instruction list` shows, so the files arm works unchanged.
-- **Native memory.** Copilot's memory is off in prompt mode unless `--enable-memory`, and `copilot memories` imports to a service, not a local store. So capture scans no Copilot memory dir. `session-store.db` holds the writer's session history. It's not memory a reader loads, so it's deleted with the rest of the writer's dir before the reader, like the other writer transcripts.
+- **Native memory.** Copilot's memory is off in prompt mode unless `--enable-memory`, and `copilot memories` imports to a service, not a local store. So capture scans no Copilot memory dir. It stays off on purpose: `--enable-memory` would store eval facts in the owner's real account. `session-store.db` holds the writer's session history. It's not memory a reader loads, so it's deleted with the rest of the writer's dir before the reader, like the other writer transcripts.
 - Each session's `premiumRequests` goes in the reasons, such as `writer 1 premium_requests=1`.
 - `--check` only runs `copilot --version` from a run's own `COPILOT_HOME`. It does not check the Copilot login: Copilot CLI has no login status command. A logged-out keychain shows as an errored writer or reader, with "No authentication information found" in the reasons.
 
@@ -59,7 +59,7 @@ Checked on Copilot CLI 1.0.105.
 
 Each run starts clean, and checks that it did:
 
-1. Both of the run's harnesses are disconnected from AtticDB. Outside the atticdb arm, a failed disconnect errors the run at `setup`.
+1. Both of the run's harnesses are disconnected from AtticDB. Outside the atticdb and atticdb-only arms, a failed disconnect errors the run at `setup`.
 2. No config the run will use may mention atticdb: `settings.json` and `.claude.json` in the Claude dir, `config.toml`, `hooks.json` and `AGENTS.md` in the Codex dir, `mcp-config.json`, `settings.json`, `config.json`, `hooks/atticdb.json` and `instructions/atticdb.instructions.md` in the Copilot dir. Codex's `[projects."<path>"]` trust headers are skipped. A hit errors the run at `setup`.
 3. The store is searched for each evidence token. The repo and the run's 3 config dirs are scanned too, except `auth.json`. A hit errors the run at `start`.
 
@@ -75,6 +75,8 @@ After each run: `atticdb disconnect` for both of the run's harnesses, delete `<h
 | files | AGENTS.md and CLAUDE.md in the fixture say: "Keep HANDOFF.md at the repo root. After each task, record decisions, their reasons, rejected approaches and constraints. Read it before you start." Nothing is pre-filled. The writer has to keep the file. |
 | atticdb | `atticdb setup --yes --harness <h>` for both of the run's harnesses before the writer. Both are disconnected after the reader. |
 | oracle | No writer session. The reader prompt starts with "Notes from the last session: " and the case's gold note. A case whose writer changes code has an `oracle_state` in cases.py. Its files go over the fixture and are committed as "writer work" before the reader, so the repo matches the note. Only H1 and H5 have one: `pack_header` packs with `struct.pack`. |
+| atticdb-only | The atticdb arm with each harness's own memory switched off. It separates AtticDB's effect from the harness's memory. Writer and reader get the switch. If the writer still writes native memory, the run adds "native memory written with memory off" to its reasons. Runs only when named in `--arms`. |
+| blank | No writer session and no notes. The reader gets the plain reader prompt. It is a control: its pass rate is the chance floor, and it flags leaks. `leaked` is 1 when an unguessable evidence token is in the reader's reply or tool outputs: `LEDG-7731`, `INC-2209`, `STOR-5150`, `bramble-ci` or `FIN-88`. A reader that knows nothing can still say "Python 3.9", "412 bytes" or "plain files", so those never count as a leak. Other arms leave `leaked` empty. Runs only when named in `--arms`. |
 
 In the files arm, AGENTS.md and CLAUDE.md are committed with the fixture. So they are not part of any diff.
 
@@ -85,9 +87,32 @@ The commands come from `setup_eval.agents.agent_argv`, with the model flag added
 - `copilot`: `--model <id>`, last.
 - `codex exec`: `-m <id>`, just before the prompt. The prompt stays the last argument.
 
-Outside the atticdb arm, Codex runs without the `-c mcp_servers.atticdb.tools.fact_set.approval_mode=...` override.
+Outside the atticdb and atticdb-only arms, Codex runs without the `-c mcp_servers.atticdb.tools.fact_set.approval_mode=...` override.
 With no atticdb server configured, that override alone makes a partial server table.
 Codex 0.147 then refuses to load its config: "invalid transport in `mcp_servers.atticdb`".
+
+The atticdb-only arm switches off each harness's own memory, in every writer and reader session.
+The switches were checked on 2026-11-05:
+
+- Claude Code: the env var `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`.
+- Codex 0.147: `--disable memories`, just before `-m <id>`.
+- Copilot: nothing. Its memory is off in prompt mode unless `--enable-memory`. No arm passes that flag.
+
+## Same-harness directions
+
+`--directions` also takes `claude-code:claude-code`, `codex:codex` and `copilot:copilot`.
+These are the home case for a harness's own memory. The reader is the writer harness's next session.
+
+- Writer and reader share 1 config dir. After the capture scan, it keeps the login file and the writer's native memory for the repo. Transcripts, sessions and history still go, as in a cross-harness run.
+- The memory dir and its parent dirs stay. Other files in those parents go, such as Claude's `projects/<slug>/*.jsonl` transcripts.
+- Claude keeps `<CLAUDE_CONFIG_DIR>/projects/<slug>/memory/`. Codex keeps `<CODEX_HOME>/memories/`.
+- Copilot keeps nothing, so `copilot:copilot` has no native memory to measure. Its memory stays off on purpose: `--enable-memory` would store eval facts in the owner's real account.
+- The atticdb-only arm keeps no memory. Its writer runs with memory off, so any memory there ignored the switch. The run flags that already.
+- The scrub takes the reader's config too, as it is the same dir. So the dir is set up again before the reader. Codex gets its `auth.json` and `config.toml` copied in again. A login Codex refreshed in the writer goes to the eval dir first.
+- The first pass's defences run again on the new dir: the disconnect, then the atticdb wiring check. Outside the atticdb and atticdb-only arms, a failed disconnect errors the run at `setup`. Wiring left in place always does. Then those 2 arms run `atticdb setup` again.
+- **delivered** gains a place for what the reader loads from the kept memory at start:
+  - Claude: `native-memory`. Claude loads only `MEMORY.md` at start, up to its first 200 lines or 25 KB, whichever comes first. So only that part counts. Topic files load only when Claude reads them, and the transcript scan sees that.
+  - Codex: `native-memory-unverified`. What Codex loads from `memories/` is not checked yet, so every file counts, under its own label.
 
 ## Stages
 
@@ -119,9 +144,10 @@ The oracle has no capture.
 
 **delivered**, before the reader's final reply. True when a token was in its context:
 
-- `hook`: the block that the reader's hook command prints just before the reader starts: `atticdb hook session-start --harness <reader>`, or for Copilot `atticdb hook session-start`. atticdb arm only.
+- `hook`: the block that the reader's hook command prints just before the reader starts: `atticdb hook session-start --harness <reader>`, or for Copilot `atticdb hook session-start`. atticdb and atticdb-only arms only.
 - `transcript`: a tool result or file read in the reader's raw stream, before its final assistant message. Claude: `tool_result` content, and a Read's `tool_use_result.file.content`. Write and Edit results are left out, as they echo what the reader wrote. Codex: command output and MCP results. The commands the agent typed don't count. Copilot: the `result` of each `tool.execution_complete`, except for `edit`, `create`, `write`, `str_replace_editor` and `apply_patch`. The streamed `tool.shell_output` and partial results repeat it, so they're not read. The reader's own messages, the prompt and tool arguments never count.
 - `prompt`: the oracle's reader prompt.
+- `native-memory`: the head of Claude's kept `MEMORY.md` that it loads at start. `native-memory-unverified`: any file of Codex's kept `memories/`. Same-harness runs only.
 
 H5 has no delivery stage. Its evidence is H1's tokens, which are unrelated history there.
 
@@ -136,7 +162,7 @@ An errored run is kept in the CSV. It's never a pass or a fail, and the batch go
 
 ## Cost
 
-A run is its writer sessions plus 1 reader. The oracle has no writer.
+A run is its writer sessions plus 1 reader. The oracle and blank arms have no writer.
 The pilot matrix is 6 cases, 4 arms, 2 directions and 1 rep: 48 runs and 90 agent sessions. 42 are writers and 48 are readers.
 That holds for Claude and Codex, and for Claude and Copilot. Each Copilot session costs premium requests. A checked session on `gpt-5.6-terra` made 3 model calls and cost 1. Other models have other multipliers.
 Each session has a 300 s timeout by default (`--agent-timeout`).
@@ -183,8 +209,8 @@ Then it runs both again from a run's own config dirs. For Copilot it only runs `
 | Flag | Default | Meaning |
 |---|---|---|
 | `--cases` | all 6 | a comma list of H1 to H6 |
-| `--arms` | all 4 | a comma list of native, files, atticdb, oracle |
-| `--directions` | `claude-code:codex,codex:claude-code` | a comma list of `writer:reader` with claude-code, codex or copilot. Same-harness directions are refused, as the pilot is cross-harness only |
+| `--arms` | native, files, atticdb, oracle | a comma list of native, files, atticdb, oracle, atticdb-only, blank |
+| `--directions` | `claude-code:codex,codex:claude-code` | a comma list of `writer:reader` with claude-code, codex or copilot. Same-harness directions such as `codex:codex` work too. See "Same-harness directions" |
 | `--reps` | 1 | runs per case, arm and direction |
 | `--claude-model`, `--codex-model`, `--copilot-model` | none | each is required only when the directions use its harness |
 | `--max-sessions` | none | required for a real run |
@@ -197,12 +223,13 @@ Exit codes: 0 when every run finished, 1 when a run errored or the budget stoppe
 
 ## Results
 
-The CSV has 1 row per run: case, arm, writer, reader, rep, the 3 stages and where each was found, captured_all, errored and its stage, sessions, tokens in and out, wall time, both model ids, the reasons and the reply.
+The CSV has 1 row per run: case, arm, writer, reader, rep, the 3 stages and where each was found, captured_all, leaked, errored and its stage, sessions, tokens in and out, wall time, both model ids, the reasons and the reply.
 Reasons hold the grader's reasons and a redacted excerpt of the reply, cut at 200 chars. `reply` holds the reader's whole final reply, redacted the same way: token shapes and the run's paths are replaced. No column holds an env value.
 A batch refuses an `--out` CSV whose header differs from this version's, such as one from before `captured_all` and `reply`.
 
 The summary's first line is "Integration pilot. Not a statistical result."
 Then pass rates by arm and case, a stage funnel per arm with the oracle ceiling, captured with reason per arm, and pass rates by direction.
+With blank rows, a "Control (blank arm)" section gives the blank pass rate and how many runs leaked.
 Rates count runs that did not error. Errored runs are counted apart.
 
 ### Re-grade

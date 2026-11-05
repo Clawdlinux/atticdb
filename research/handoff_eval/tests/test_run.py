@@ -3,6 +3,7 @@ or set ATTICDB_BIN. Tests that start no child run without it. The real claude an
 
 from __future__ import annotations
 
+import argparse
 import csv
 import json
 import os
@@ -207,7 +208,7 @@ def test_reader_grep_finds_no_writer_transcript(env, monkeypatch, arm, writer, r
     assert res.captured is False and res.delivered is False and res.delivered_where == ""
     assert_cleaned_up(env)
     # Control: without the clean-up, the same grep finds the writer's prompt in its transcript.
-    monkeypatch.setattr(run, "scrub_harness_dir", lambda hroot, harness: [])
+    monkeypatch.setattr(run, "scrub_harness_dir", lambda hroot, harness, keep=None: [])
     res = run_handoff(make_cfg(env), Runner(), CASES["H1"], arm, writer, reader, 1)
     assert res.delivered is True and res.delivered_where == "transcript[LEDG-7731,412]"
 
@@ -319,6 +320,186 @@ def test_oracle_repo_holds_the_writer_work(env, monkeypatch, cid, writer_work):
     # Other arms never get it: their writer does the work.
     assert run.oracle_state(CASES["H1"], "native") == {}
     assert_cleaned_up(env)
+
+
+def claude_stream(reply: str, tool_result: str = "") -> str:
+    """A claude reader's stream: 1 Bash call with `tool_result` when given, then `reply`."""
+    events = [{"type": "system", "subtype": "init", "session_id": "s1", "tools": []}]
+    if tool_result:
+        events += [{"type": "assistant", "message": {"role": "assistant", "content": [
+                       {"type": "tool_use", "id": "toolu_0", "name": "Bash", "input": {"command": "grep -r x ."}}]}},
+                   {"type": "user", "message": {"role": "user", "content": [
+                       {"type": "tool_result", "tool_use_id": "toolu_0",
+                        "content": [{"type": "text", "text": tool_result}]}]}}]
+    events += [{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": reply}]}},
+               {"type": "result", "subtype": "success", "is_error": False, "num_turns": 2, "result": reply}]
+    return "".join(json.dumps(ev) + "\n" for ev in events)
+
+
+def test_blank_plan_has_reader_only(env):
+    cfg = make_cfg(env, models=dict(MODELS))
+    steps = run.plan(cfg, CASES["H1"], "blank", "claude-code", "copilot", "/tmp/zhe-root")
+    assert steps["setup"] == [] and steps["writer"] == [] and steps["capture"] == [] and steps["hook"] == []
+    (reader,) = steps["reader"]
+    assert reader.argv == arms.session_argv("copilot", CASES["H1"].reader_prompt, MODELS["copilot"], "blank")
+    assert arms.reader_prompt(CASES["H1"], "blank") == CASES["H1"].reader_prompt
+    assert arms.has_writer("blank") is False and arms.ARMS[-1] == "blank"
+    assert arms.planned_sessions(CASES["H3"], "blank") == 1
+
+
+@needs_atticdb
+def test_blank_leak_flags_token_in_reply(env, monkeypatch, tmp_path):
+    replay = tmp_path / "reply.jsonl"
+    replay.write_text(claude_stream("LEDG-7731"))
+    monkeypatch.setenv("STUB_REPLAY", str(replay))
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], "blank", "codex", "claude-code", 1)
+    assert not res.errored, res.reasons
+    assert res.leaked is True and res.sessions == 1 and res.captured is None
+    assert results.row("2026-11-05", res)["leaked"] == "1"
+    (call,) = agent_calls(env["log"])
+    assert call["prog"] == "claude" and call["argv"][1] == CASES["H1"].reader_prompt
+    assert_cleaned_up(env)
+
+    # The stub reader with nothing to read replies without a token.
+    monkeypatch.delenv("STUB_REPLAY")
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], "blank", "codex", "claude-code", 1)
+    assert not res.errored, res.reasons
+    assert res.leaked is False and res.delivered is False and res.passed is False
+    assert results.row("2026-11-05", res)["leaked"] == "0"
+
+    # Only the blank arm measures a leak.
+    for arm in ("native", "oracle"):
+        res = run_handoff(make_cfg(env), Runner(), CASES["H1"], arm, "codex", "claude-code", 1)
+        assert not res.errored, res.reasons
+        assert res.leaked is None and results.row("2026-11-05", res)["leaked"] == ""
+    assert_cleaned_up(env)
+
+
+@needs_atticdb
+@pytest.mark.parametrize("cid,reply,tool_result,want", [
+    ("H4", "No, match needs Python 3.10 and would break on Python 3.9.", "", False),
+    ("H4", "The runner is bramble-ci.", "", True),
+    ("H1", "The header was 412 bytes.", "", False),
+    ("H1", "I have no record of that.", "header: 412 bytes", False)])
+def test_blank_leak_needs_an_unguessable_token(env, monkeypatch, tmp_path, cid, reply, tool_result, want):
+    """A reader that knows nothing can still say "Python 3.9" or "412 bytes". Only tokens no one can
+    guess, the ticket ids and the runner name, count as a leak."""
+    assert run.LEAK_TOKENS == ("LEDG-7731", "INC-2209", "STOR-5150", "bramble-ci", "FIN-88")
+    replay = tmp_path / "reply.jsonl"
+    replay.write_text(claude_stream(reply, tool_result=tool_result))
+    monkeypatch.setenv("STUB_REPLAY", str(replay))
+    res = run_handoff(make_cfg(env), Runner(), CASES[cid], "blank", "codex", "claude-code", 1)
+    assert not res.errored, res.reasons
+    assert res.leaked is want
+    if tool_result:
+        assert res.delivered_where == "transcript[412]", "delivery still counts every token"
+    assert_cleaned_up(env)
+
+
+@needs_atticdb
+@pytest.mark.parametrize("cid", ["H1", "H5"])
+def test_blank_leak_flags_delivery(env, monkeypatch, tmp_path, cid):
+    """A token in the reader's tool output is a leak, even when the reply doesn't cite it. H5 has no
+    delivery stage, but its blank reader's transcript is still read for a leak."""
+    replay = tmp_path / "reply.jsonl"
+    replay.write_text(claude_stream("I have no record of that.", tool_result="see ticket LEDG-7731"))
+    monkeypatch.setenv("STUB_REPLAY", str(replay))
+    res = run_handoff(make_cfg(env), Runner(), CASES[cid], "blank", "codex", "claude-code", 1)
+    assert not res.errored, res.reasons
+    assert res.leaked is True
+    if cid == "H1":
+        assert res.delivered is True and res.delivered_where == "transcript[LEDG-7731]"
+    else:
+        assert res.delivered is None and res.delivered_where == ""
+    assert_cleaned_up(env)
+
+
+def test_atticdb_only_env_on_every_session(env):
+    cfg = make_cfg(env, models=dict(MODELS))
+    steps = run.plan(cfg, CASES["H3"], "atticdb-only", "claude-code", "claude-code", "/tmp/zhe-root")
+    sessions = steps["writer"] + steps["reader"]
+    assert len(sessions) == 3
+    for step in sessions:
+        assert step.extra_env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
+    steps = run.plan(cfg, CASES["H3"], "atticdb", "claude-code", "claude-code", "/tmp/zhe-root")
+    for step in steps["writer"] + steps["reader"]:
+        assert "CLAUDE_CODE_DISABLE_AUTO_MEMORY" not in step.extra_env
+    assert arms.session_env("codex", "atticdb-only") == {} and arms.session_env("copilot", "atticdb-only") == {}
+    assert arms.native_memory_off("atticdb-only") is True
+    assert not any(arms.native_memory_off(a) for a in arms.ARMS if a != "atticdb-only")
+    assert arms.ARMS[-2:] == ("atticdb-only", "blank")
+    assert "atticdb-only" not in arms.DEFAULT_ARMS
+
+
+def test_atticdb_only_codex_argv():
+    argv = arms.session_argv("codex", "p", "m", "atticdb-only")
+    assert argv[-5:] == ["--disable", "memories", "-m", "m", "p"]
+    assert agents.CODEX_APPROVE in argv
+    assert "--disable" not in arms.session_argv("codex", "p", "m", "atticdb")
+    claude = arms.session_argv("claude-code", "p", "m", "atticdb-only")
+    assert claude == arms.session_argv("claude-code", "p", "m", "atticdb")
+
+
+def test_inherited_memory_switch_is_dropped(env):
+    """A CLAUDE_CODE_DISABLE_AUTO_MEMORY from the owner's shell would make atticdb and atticdb-only
+    the same. Only the arm sets it."""
+    cfg = make_cfg(env)
+    cfg.base_env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
+    root, hroot = "/tmp/zhe-root", "/tmp/zhh-root"
+    for arm in ("native", "atticdb"):
+        steps = run.plan(cfg, CASES["H1"], arm, "codex", "claude-code", root, hroot)
+        for phase in ("disconnect", "setup", "writer", "hook", "reader", "teardown"):
+            for step in steps[phase]:
+                assert "CLAUDE_CODE_DISABLE_AUTO_MEMORY" not in run.env_for(cfg, root, step, hroot), (arm, phase)
+    steps = run.plan(cfg, CASES["H1"], "atticdb-only", "codex", "claude-code", root, hroot)
+    (reader,) = steps["reader"]
+    assert run.env_for(cfg, root, reader, hroot)["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
+    (writer,) = steps["writer"]
+    assert "CLAUDE_CODE_DISABLE_AUTO_MEMORY" not in run.env_for(cfg, root, writer, hroot)
+
+
+def test_copilot_never_enables_memory():
+    for arm in arms.ARMS:
+        assert "--enable-memory" not in arms.session_argv("copilot", "p", "m", arm)
+
+
+def test_atticdb_only_sets_up_atticdb(env):
+    cfg = make_cfg(env, models=dict(MODELS))
+    assert arms.uses_atticdb("atticdb-only") is True and arms.has_writer("atticdb-only") is True
+    only = run.plan(cfg, CASES["H1"], "atticdb-only", "claude-code", "codex", "/tmp/zhe-root")
+    full = run.plan(cfg, CASES["H1"], "atticdb", "claude-code", "codex", "/tmp/zhe-root")
+    for phase in ("setup", "hook", "teardown"):
+        assert only[phase] and only[phase] == full[phase], phase
+
+
+@needs_atticdb
+def test_atticdb_only_flags_native_memory_write(env, monkeypatch):
+    """The stub ignores CLAUDE_CODE_DISABLE_AUTO_MEMORY, like a harness that ignores the switch."""
+    monkeypatch.setenv("STUB_NATIVE_MEMORY", "1")
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], "atticdb-only", "claude-code", "codex", 1)
+    assert not res.errored, res.reasons
+    assert "claude-memory:MEMORY.md[LEDG-7731,412]" in res.captured_where
+    assert "native memory written with memory off" in res.reasons
+    assert_cleaned_up(env)
+
+    # Without a memory write, no flag. The atticdb arm never sets it.
+    monkeypatch.delenv("STUB_NATIVE_MEMORY")
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], "atticdb-only", "claude-code", "codex", 1)
+    assert not res.errored, res.reasons
+    assert res.captured is True and "native memory written with memory off" not in res.reasons
+    monkeypatch.setenv("STUB_NATIVE_MEMORY", "1")
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], "atticdb", "claude-code", "codex", 1)
+    assert not res.errored, res.reasons
+    assert "native memory written with memory off" not in res.reasons
+    assert_cleaned_up(env)
+
+
+def test_default_arms_unchanged():
+    a = cli.parse(["--cases", "H1", "--claude-model", "X", "--codex-model", "Y", "--dry-run"])
+    assert a.arms == ["native", "files", "atticdb", "oracle"] == list(arms.DEFAULT_ARMS)
+    a = cli.parse(["--cases", "H1", "--arms", "blank,native", "--claude-model", "X", "--codex-model", "Y", "--dry-run"])
+    assert a.arms == ["blank", "native"]
+    assert a.writer_sessions == 2 and a.reader_sessions == 4
 
 
 CODEX_FAILED = ('{"type":"thread.started","thread_id":"t1"}\n{"type":"turn.started"}\n'
@@ -500,11 +681,20 @@ def test_model_flags_are_required(tmp_path, capsys):
         with pytest.raises(SystemExit) as e:
             cli.parse(base + flags)
         assert e.value.code == 2 and f"{missing} is required" in capsys.readouterr().err
-    # The pilot is cross-harness only.
-    for same in ("codex:codex", "claude-code:claude-code"):
-        with pytest.raises(SystemExit) as e:
-            cli.parse(base + ["--directions", same, "--claude-model", "X", "--codex-model", "Y"])
-        assert e.value.code == 2 and "the pilot is cross-harness only" in capsys.readouterr().err
+
+
+def test_same_harness_direction_accepted(tmp_path):
+    assert cli.direction_list("claude-code:claude-code,copilot:copilot") == [
+        ("claude-code", "claude-code"), ("copilot", "copilot")]
+    assert cli.direction_list("codex:codex") == [("codex", "codex")]
+    for bad in ("claude:claude", "codex", "codex:gpt", "copilot:"):
+        with pytest.raises(argparse.ArgumentTypeError, match="bad direction"):
+            cli.direction_list(bad)
+    # A same-harness direction needs only its own model.
+    a = cli.parse(["--cases", "H1", "--directions", "codex:codex", "--codex-model", "Y", "--dry-run",
+                   "--out", str(tmp_path / "r.csv")])
+    assert a.directions == [("codex", "codex")]
+    assert "claude-code:claude-code" in cli.CROSS and "copilot:copilot" in cli.CROSS
 
 
 def test_session_argv_adds_the_model_flag():
@@ -779,7 +969,7 @@ def test_copilot_reader_grep_finds_no_writer_transcript(env, monkeypatch, arm, w
     if writer == "copilot":
         _, rd = agent_calls(env["log"])
         assert rd["copilot_home_files"] == [], "the copilot writer's dir is empty once it is done"
-    monkeypatch.setattr(run, "scrub_harness_dir", lambda hroot, harness: [])
+    monkeypatch.setattr(run, "scrub_harness_dir", lambda hroot, harness, keep=None: [])
     res = run_handoff(make_cfg(env), Runner(), CASES["H1"], arm, writer, reader, 1)
     assert res.delivered is True and res.delivered_where == "transcript[LEDG-7731,412]"
 
@@ -869,9 +1059,8 @@ def test_copilot_directions_need_only_their_models(tmp_path, capsys, monkeypatch
     assert e.value.code == 2 and "--copilot-model is required" in capsys.readouterr().err
     a = cli.parse(base + ["--dry-run", "--claude-model", "X", "--copilot-model", "Z"])
     assert a.models == {"claude-code": "X", "codex": "", "copilot": "Z"}
-    with pytest.raises(SystemExit):
-        cli.parse(base[:-4] + ["--directions", "copilot:copilot", "--copilot-model", "Z", "--dry-run"])
-    assert "the pilot is cross-harness only" in capsys.readouterr().err
+    a = cli.parse(base[:-4] + ["--directions", "copilot:copilot", "--copilot-model", "Z", "--dry-run"])
+    assert a.directions == [("copilot", "copilot")] and a.models["copilot"] == "Z"
 
     env = fake_home(monkeypatch, tmp_path)
     parent = tempfile.mkdtemp(prefix="zhe-t-", dir="/tmp")
@@ -1041,3 +1230,244 @@ def test_batch_refuses_a_csv_with_old_columns(env, tmp_path, capsys):
     assert "has other columns than this version writes" in capsys.readouterr().err
     assert stub_calls(env["log"]) == [] and out.read_text() == before
     assert not (tmp_path / "old.md").exists()
+
+
+# ---- same-harness directions ----
+
+SAME = [("claude-code", "claude-code"), ("codex", "codex"), ("copilot", "copilot")]
+
+
+def tree(folder: str) -> list[str]:
+    """Every file under `folder`, as sorted relative paths."""
+    return sorted(os.path.relpath(os.path.join(d, n), folder) for d, _, names in os.walk(folder) for n in names)
+
+
+def record_scrub(monkeypatch) -> list[dict]:
+    """Wraps the scrub. Each call records its keep path, what it deleted and the files left. A Claude
+    dir gets a login file first, as a real one may have."""
+    seen = []
+    real = run.scrub_harness_dir
+
+    def scrub(hroot, harness, keep=None):
+        folder = run.harness_dir(hroot, harness)
+        if harness == "claude-code":
+            with open(os.path.join(folder, ".credentials.json"), "w") as f:
+                f.write("{}\n")
+        gone = real(hroot, harness, keep=keep)
+        seen.append({"folder": folder, "keep": keep, "gone": gone, "left": tree(folder)})
+        return gone
+
+    monkeypatch.setattr(run, "scrub_harness_dir", scrub)
+    return seen
+
+
+def test_scrub_keeps_a_path_and_its_parents(tmp_path):
+    hroot = str(tmp_path)
+    folder = run.harness_dir(hroot, "claude-code")
+    mem = os.path.join(folder, "projects", "-r-evalrepo", "memory")
+
+    def fill():
+        for rel in (".credentials.json", "settings.json", "history.jsonl", "projects/-r-evalrepo/s1.jsonl",
+                    "projects/-r-evalrepo/memory/MEMORY.md", "projects/-r-other/s2.jsonl"):
+            path = os.path.join(folder, rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                f.write("x\n")
+
+    fill()
+    gone = run.scrub_harness_dir(hroot, "claude-code", keep=mem)
+    assert tree(folder) == [".credentials.json", "projects/-r-evalrepo/memory/MEMORY.md"]
+    assert gone == ["history.jsonl", "projects/-r-evalrepo/s1.jsonl", "projects/-r-other", "settings.json"]
+    # No keep, or a keep that doesn't exist, deletes as before: all but the login.
+    for keep in (None, os.path.join(folder, "projects", "-r-none", "memory")):
+        fill()
+        assert run.scrub_harness_dir(hroot, "claude-code", keep=keep) == ["history.jsonl", "projects",
+                                                                           "settings.json"]
+        assert tree(folder) == [".credentials.json"]
+    # A keep outside the harness dir, or the dir itself, is refused before anything goes.
+    fill()
+    for bad in (str(tmp_path), folder, os.path.join(run.harness_dir(hroot, "codex"))):
+        os.makedirs(bad, exist_ok=True)
+        with pytest.raises(ValueError, match="keep"):
+            run.scrub_harness_dir(hroot, "claude-code", keep=bad)
+    assert "settings.json" in tree(folder)
+
+
+def test_native_memory_delivery_reads_what_the_harness_loads(tmp_path):
+    """Claude loads only MEMORY.md at start, up to 200 lines or 25 KB. Topic files load only when
+    read, which the transcript scan sees. What Codex loads is not checked, so its label says so."""
+    keep = str(tmp_path / "memory")
+    os.makedirs(keep)
+    tokens = CASES["H1"].evidence
+
+    def write(name, lines):
+        with open(os.path.join(keep, name), "w") as f:
+            f.write("".join(f"{line}\n" for line in lines))
+
+    write("debugging.md", ["ticket LEDG-7731"])
+    assert run.memory_delivery("claude-code", keep, tokens) == []
+    write("MEMORY.md", ["# Memory"] * 4 + ["ticket LEDG-7731"])
+    assert run.memory_delivery("claude-code", keep, tokens) == [("native-memory", "LEDG-7731")]
+    write("MEMORY.md", ["- a note"] * 249 + ["ticket LEDG-7731"])
+    assert run.memory_delivery("claude-code", keep, tokens) == []
+    write("MEMORY.md", ["x" * 1000] * 30 + ["ticket LEDG-7731"])  # line 31, past 25 KB
+    assert run.memory_delivery("claude-code", keep, tokens) == []
+    # Codex: the whole dir, labelled unverified.
+    assert run.memory_delivery("codex", keep, tokens) == [("native-memory-unverified", "LEDG-7731")]
+    assert run.memory_delivery("copilot", keep, tokens) == []
+
+
+@needs_atticdb
+@pytest.mark.parametrize("harness,label,name,login,transcript,place", [
+    ("claude-code", "claude-memory", "MEMORY.md", ".credentials.json", "projects/{slug}/s1.jsonl", "native-memory"),
+    ("codex", "codex-memory", "stub.md", "auth.json", "sessions", "native-memory-unverified")])
+def test_same_harness_keeps_native_memory_only(env, monkeypatch, harness, label, name, login, transcript, place):
+    """The reader keeps the writer's native memory for the repo. Transcripts and the rest still go."""
+    with open(os.path.join(env["codex_dir"], "config.toml"), "w") as f:
+        f.write('model_reasoning_effort = "low"\n')
+    monkeypatch.setenv("STUB_NATIVE_MEMORY", "1")
+    seen = record_scrub(monkeypatch)
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], "native", harness, harness, 1)
+    assert not res.errored, res.reasons
+    (call,) = seen
+    repo = agent_calls(env["log"])[0]["cwd"]
+    assert call["keep"] == run.native_memory_dir(os.path.dirname(call["folder"]), harness, repo)
+    mem = os.path.relpath(call["keep"], call["folder"])
+    slug = mem.split(os.sep)[1] if harness == "claude-code" else ""
+    assert call["left"] == [login, os.path.join(mem, name)]
+    assert transcript.format(slug=slug) in call["gone"]
+    assert res.captured_where == f"{label}:{name}[LEDG-7731,412]"
+    assert (place, "LEDG-7731") in run.parse_where(res.delivered_where)
+    assert res.delivered is True and res.delivered_where == f"{place}[LEDG-7731,412]"
+    writer, reader = agent_calls(env["log"])
+    assert writer["dirs"] == reader["dirs"]
+    if harness == "codex":
+        # The reader gets its config back, but not the writer's sessions.
+        assert reader["codex_home_files"] == ["auth.json", "config.toml", "memories"]
+    assert_cleaned_up(env)
+
+
+@needs_atticdb
+def test_cross_harness_scrub_unchanged(env, monkeypatch):
+    monkeypatch.setenv("STUB_NATIVE_MEMORY", "1")
+    seen = record_scrub(monkeypatch)
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], "native", "claude-code", "copilot", 1)
+    assert not res.errored, res.reasons
+    (call,) = seen
+    assert call["keep"] is None and call["left"] == [".credentials.json"] and "projects" in call["gone"]
+    assert res.captured is True and res.delivered is False and res.delivered_where == ""
+    assert_cleaned_up(env)
+
+
+@needs_atticdb
+def test_same_harness_copilot_keeps_nothing(env, monkeypatch):
+    monkeypatch.setenv("STUB_NATIVE_MEMORY", "1")
+    seen = record_scrub(monkeypatch)
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], "native", "copilot", "copilot", 1)
+    assert not res.errored, res.reasons
+    (call,) = seen
+    assert call["keep"] is None and call["left"] == [] and "session-store.db" in call["gone"]
+    _, rd = agent_calls(env["log"])
+    assert rd["copilot_home_files"] == [], "COPILOT_HOME is empty before the reader"
+    assert res.delivered is False and res.delivered_where == ""
+    assert_cleaned_up(env)
+
+
+@needs_atticdb
+def test_atticdb_only_same_harness_keeps_nothing_in_memory(env, monkeypatch):
+    """With memory off, the writer leaves no memory dir, so nothing is kept. The stub ignores the
+    switch, so here it is told to write no memory. The reader still gets its AtticDB setup back."""
+    seen = record_scrub(monkeypatch)
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], "atticdb-only", "claude-code", "claude-code", 1)
+    assert not res.errored, res.reasons
+    (call,) = seen
+    assert call["keep"] is None and call["left"] == [".credentials.json"]
+    assert res.delivered_where == "hook[LEDG-7731,412]" and res.passed is True
+    assert_cleaned_up(env)
+
+    # A harness that ignores the switch writes memory anyway. The run flags it, and keeps none of it.
+    monkeypatch.setenv("STUB_NATIVE_MEMORY", "1")
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], "atticdb-only", "claude-code", "claude-code", 1)
+    assert not res.errored, res.reasons
+    assert "native memory written with memory off" in res.reasons
+    assert seen[-1]["keep"] is None and seen[-1]["left"] == [".credentials.json"]
+    assert "native-memory" not in res.delivered_where
+    assert_cleaned_up(env)
+
+
+@needs_atticdb
+@pytest.mark.parametrize("harness", [w for w, _ in SAME])
+def test_same_harness_reader_gets_its_setup_back(env, harness):
+    """Writer and reader share 1 config dir, so the scrub takes the AtticDB wiring too. It is set up
+    again before the reader, whose own hook then gives it the fact."""
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], "atticdb", harness, harness, 1)
+    assert not res.errored, res.reasons
+    assert res.captured is True and res.delivered_where == "hook[LEDG-7731,412]"
+    assert res.passed is True, res.reasons
+    assert_cleaned_up(env)
+
+
+@needs_atticdb
+@pytest.mark.parametrize("writer,reader", SAME)
+def test_same_harness_reader_grep_finds_no_writer_transcript(env, monkeypatch, writer, reader):
+    monkeypatch.setenv("STUB_READER_GREP", "1")
+    monkeypatch.setenv("STUB_WRITER", "silent")
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], "native", writer, reader, 1)
+    assert not res.errored, res.reasons
+    assert res.captured is False and res.delivered is False and res.delivered_where == ""
+    assert_cleaned_up(env)
+
+
+@needs_atticdb
+def test_same_harness_codex_keeps_a_refreshed_login(env, monkeypatch):
+    """The reader's dir is set up again from the eval dir. A login the writer refreshed goes there first."""
+    monkeypatch.setenv("STUB_REFRESH_AUTH", "v2")
+    res = run_handoff(make_cfg(env), Runner(), CASES["H1"], "native", "codex", "codex", 1)
+    assert not res.errored, res.reasons
+    assert res.reasons.count("codex refreshed its login; the eval dir's auth.json was updated") == 1
+    with open(os.path.join(env["codex_dir"], "auth.json")) as f:
+        assert json.load(f) == {"refreshed": "v2"}
+
+
+def test_same_harness_dry_run(env):
+    text = "\n".join(run.describe(make_cfg(env), CASES["H1"], "atticdb", "claude-code", "claude-code"))
+    assert ("[capture] then delete all but .credentials.json and the claude-code native memory for this repo "
+            "in the claude-code dir") in text
+    assert "[capture] then set the claude-code dir up again for the reader" in text
+    text = "\n".join(run.describe(make_cfg(env), CASES["H1"], "native", "copilot", "copilot"))
+    assert "[capture] then delete everything in the copilot dir" in text
+    text = "\n".join(run.describe(make_cfg(env), CASES["H1"], "native", "claude-code", "codex"))
+    assert "[capture] then delete all but .credentials.json in the claude-code dir" in text
+    assert "set the claude-code dir up again" not in text
+
+
+@needs_atticdb
+@pytest.mark.parametrize("disconnect_fails,why", [
+    (False, "error in setup: harness config mentions atticdb before the reader: codex-dir:config.toml"),
+    (True, "error in setup: pre-disconnect codex exited 1")])
+def test_same_harness_setup_again_has_the_first_pass_defences(env, monkeypatch, tmp_path, disconnect_fails, why):
+    """The eval dir's config.toml is copied in again before the reader. If it now holds atticdb
+    wiring, the disconnect and wiring check run again, and the reader never starts wired."""
+    mark = tmp_path / "second-pass"
+    wrap = tmp_path / "atticdb-wrap"
+    fail = "exit 1" if disconnect_fails else "exit 0"
+    # Disconnect does nothing, so wiring stays. Once the writer is done it may also fail.
+    wrap.write_text(f'#!/bin/sh\nif [ "$1" = disconnect ]; then [ -e "{mark}" ] && {fail}; exit 0; fi\n'
+                    f'exec "{ATTICDB}" "$@"\n')
+    wrap.chmod(0o755)
+    real = run.scrub_harness_dir
+
+    def scrub(hroot, harness, keep=None):
+        gone = real(hroot, harness, keep=keep)
+        mark.write_text("")
+        with open(os.path.join(env["codex_dir"], "config.toml"), "w") as f:
+            f.write('[mcp_servers.atticdb]\ncommand = "/old/atticdb"\n')
+        return gone
+
+    monkeypatch.setattr(run, "scrub_harness_dir", scrub)
+    cfg = make_cfg(env)
+    cfg.atticdb = str(wrap)
+    res = run_handoff(cfg, Runner(), CASES["H1"], "native", "codex", "codex", 1)
+    assert res.errored and res.error_stage == "setup" and why in res.reasons, res.reasons
+    assert [c["argv"][0] for c in agent_calls(env["log"])] == ["exec"], "only the writer ran"
+    assert_cleaned_up(env)

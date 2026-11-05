@@ -19,12 +19,15 @@ After the capture scan, the writer harness's dir loses everything but its login 
 reader's env names it and its transcripts hold the writer's prompts. For Copilot that is
 everything, session-store.db included: it is session history, not memory a reader loads.
 
+In a same-harness run, writer and reader share that dir. It also keeps the writer's native memory
+for the repo, unless the arm turns memory off. Then the dir is set up again for the reader.
+
 A run uses the 2 harnesses of its direction. Only those are disconnected, set up and torn down.
 
 Before any agent starts, the run checks that no harness config it will use mentions atticdb
-(outside the setup the atticdb arm does itself), and that the store, the repo and both config dirs
-hold none of the case's evidence. After the run it disconnects both harnesses, stops the AtticDB
-server the run started, and deletes both temp dirs.
+(outside the setup the atticdb and atticdb-only arms do themselves), and that the store, the repo
+and both config dirs hold none of the case's evidence. After the run it disconnects both harnesses,
+stops the AtticDB server the run started, and deletes both temp dirs.
 
 Stages, each None when not measured or not applicable:
 
@@ -33,8 +36,9 @@ Stages, each None when not measured or not applicable:
   captured_all: every evidence token sits in 1 of those places, such as 1 note or 1 file. For H1
   that is the decision's ticket and its reason, 412 bytes, saved together.
 - delivered: before the reader's final reply, an evidence token was in its context: the
-  SessionStart hook block for the reader harness (atticdb arm), a tool result or file read in the
-  reader's transcript, or the reader prompt (oracle arm only). None for H5.
+  SessionStart hook block for the reader harness (atticdb and atticdb-only arms), a tool result or
+  file read in the reader's transcript, or the reader prompt (oracle arm only). In a same-harness
+  run, also the loaded part of the kept native memory. None for H5.
 - passed: `grade.grade` on the reader's final reply and the repo it leaves.
 
 Tokens match through `EVIDENCE_PATTERNS`, never as bare substrings.
@@ -107,6 +111,11 @@ def tokens_in(text: str, tokens) -> list[str]:
     return [t for t in tokens if has_token(text, t)]
 
 
+# The tokens a reader can't guess: ticket ids and the runner's name. "Python 3.9", "412 bytes" and
+# "plain files" can come from a reader that knows nothing, so they never make a leak.
+LEAK_TOKENS = ("LEDG-7731", "INC-2209", "STOR-5150", "bramble-ci", "FIN-88")
+
+
 # ---- budget, config and result ----
 
 
@@ -150,6 +159,8 @@ class HandoffResult:
     captured_all: bool | None = None
     delivered: bool | None = None
     delivered_where: str = ""
+    # Blank arm only: an evidence token in the reader's reply or tool outputs. None for other arms.
+    leaked: bool | None = None
     passed: bool | None = None
     check_timed_out: bool = False  # a code check of the grader timed out
     errored: bool = False
@@ -226,29 +237,48 @@ def run_harnesses(writer: str, reader: str) -> tuple[str, ...]:
 LOGIN_FILES = {"claude-code": (".credentials.json",), "codex": ("auth.json",), "copilot": ()}
 
 
-def scrub_harness_dir(hroot: str, harness: str) -> list[str]:
+def scrub_harness_dir(hroot: str, harness: str, keep: str | None = None) -> list[str]:
     """Deletes everything in `harness`'s run dir but its login files: transcripts, sessions,
-    history, memory and config. Returns the top-level names it deleted."""
+    history, memory and config. `keep`, a path in that dir, stays too, with its parent dirs. Other
+    files in those parents still go. A `keep` that doesn't exist, or is a link, keeps nothing.
+    Returns the paths it deleted, relative to the dir."""
     folder = harness_dir(hroot, harness)
+    rel_keep = None
+    if keep is not None and os.path.exists(keep) and not os.path.islink(keep):
+        rel_keep = os.path.relpath(os.path.normpath(keep), os.path.normpath(folder))
+        if not os.path.isabs(keep) or rel_keep == os.curdir or rel_keep.split(os.sep)[0] == os.pardir:
+            raise ValueError(f"keep {keep!r} is not a path inside {folder}")
     gone = []
-    for name in sorted(os.listdir(folder)) if os.path.isdir(folder) else []:
-        if name in LOGIN_FILES[harness]:
-            continue
-        path = os.path.join(folder, name)
-        if os.path.isdir(path) and not os.path.islink(path):
-            shutil.rmtree(path)
-        else:
-            os.remove(path)
-        gone.append(name)
+
+    def clear(sub: str) -> None:
+        for name in sorted(os.listdir(os.path.join(folder, sub))):
+            rel = os.path.join(sub, name) if sub else name
+            path = os.path.join(folder, rel)
+            if (not sub and name in LOGIN_FILES[harness]) or rel == rel_keep:
+                continue
+            real_dir = os.path.isdir(path) and not os.path.islink(path)
+            if real_dir and rel_keep is not None and rel_keep.startswith(rel + os.sep):
+                clear(rel)
+                continue
+            if real_dir:
+                shutil.rmtree(path)
+            else:
+                os.remove(path)
+            gone.append(rel)
+
+    if os.path.isdir(folder):
+        clear("")
     return gone
 
 
 def env_for(cfg: Config, root: str, step: Step, hroot: str) -> dict:
     """setup_eval's child env, with the run's own config dirs, and Claude's login looked up under
-    the eval Claude dir. An inherited CLAUDE_SECURESTORAGE_CONFIG_DIR is always replaced."""
+    the eval Claude dir. An inherited CLAUDE_SECURESTORAGE_CONFIG_DIR is always replaced. An
+    inherited memory switch is dropped, so only the arm, through `step.extra_env`, sets it."""
     zh, _ = paths(root)
     claude, codex = run_dirs(hroot)
-    return agents.child_env(cfg.base_env, home=cfg.home, atticdb_home=zh, claude_dir=claude, codex_dir=codex,
+    base = {k: v for k, v in cfg.base_env.items() if k not in arms.CLAUDE_MEMORY_OFF_ENV}
+    return agents.child_env(base, home=cfg.home, atticdb_home=zh, claude_dir=claude, codex_dir=codex,
                             copilot_dir=harness_dir(hroot, "copilot"),
                             extra={SECURE_STORAGE_ENV: cfg.claude_dir, **step.extra_env},
                             keep_api_keys=cfg.keep_api_keys)
@@ -370,12 +400,14 @@ def plan(cfg: HandoffConfig, case: Case, arm: str, writer: str, reader: str, roo
                   for h in both]
         if arms.uses_atticdb(arm) else [],
         "writer": [Step("writer", arms.session_argv(writer, p, cfg.models.get(writer, ""), arm), repo,
-                        cfg.agent_timeout) for p in case.writer_prompts] if arms.has_writer(arm) else [],
+                        cfg.agent_timeout, arms.session_env(writer, arm)) for p in case.writer_prompts]
+        if arms.has_writer(arm) else [],
         "capture": [search_step(cfg, repo, "capture", t) for t in case.evidence] if arms.has_writer(arm) else [],
         "hook": [Step("hook", agents.hook_argv(z, reader), repo, agents.HOOK_TIMEOUT, stdin=hook_input(repo))]
         if arms.uses_atticdb(arm) else [],
         "reader": [Step("reader", arms.session_argv(reader, arms.reader_prompt(case, arm),
-                                                    cfg.models.get(reader, ""), arm), repo, cfg.agent_timeout)],
+                                                    cfg.models.get(reader, ""), arm), repo, cfg.agent_timeout,
+                        arms.session_env(reader, arm))],
         "grade": [Step("grade", ["git", "diff", BASE_REF], repo, agents.GIT_TIMEOUT, git)],
         "teardown": [Step("teardown", agents.disconnect_argv(z, h), repo, agents.SETUP_TIMEOUT,
                           setup_env(hroot, h)) for h in both],
@@ -507,6 +539,32 @@ def native_memory_dir(hroot: str, harness: str, repo: str) -> str | None:
     if harness == "copilot":
         return None
     raise ValueError(f"unknown harness {harness!r}")
+
+
+# What Claude Code loads from its memory dir at session start: MEMORY.md, up to its first 200 lines
+# or 25 KB, whichever comes first (code.claude.com/docs/en/memory). Topic files load only when read.
+CLAUDE_MEMORY_FILE, CLAUDE_MEMORY_LINES, CLAUDE_MEMORY_BYTES = "MEMORY.md", 200, 25 * 1024
+
+
+def memory_delivery(harness: str, keep: str, tokens) -> list[tuple[str, str]]:
+    """The tokens a same-harness reader gets from the kept native memory at start. Claude: the loaded
+    head of MEMORY.md. Codex: every file, as what it loads is not checked, so the place is
+    `native-memory-unverified`. Copilot keeps no memory."""
+    if harness == "claude-code":
+        path = os.path.join(keep, CLAUDE_MEMORY_FILE)
+        if os.path.islink(path):
+            return []
+        try:
+            with open(path, "rb") as f:
+                head = f.read(CLAUDE_MEMORY_BYTES).decode("utf-8", "replace")
+        except OSError:
+            return []
+        text = "".join(head.splitlines(keepends=True)[:CLAUDE_MEMORY_LINES])
+        return [("native-memory", t) for t in tokens_in(text, tokens)]
+    if harness == "codex":
+        found = [t for _, t in file_hits(keep, tokens, "")]
+        return [("native-memory-unverified", t) for t in tokens if t in found]
+    return []
 
 
 def changed_files(before: dict, after: dict) -> set[str]:
@@ -842,6 +900,22 @@ def grader_timed_out(verdict) -> bool:
     return any("timed out" in why for why in verdict.reasons)
 
 
+def _disconnect_and_check(cfg: Config, runner: Runner, root: str, hroot: str, steps: dict, arm: str,
+                          res: HandoffResult, when: str) -> None:
+    """Disconnects the run's harnesses from AtticDB, then checks no config mentions atticdb. Outside
+    the arms that wire AtticDB, a failed disconnect may have left wiring in place, so the run stops.
+    Wiring that is still there always stops it."""
+    for step in steps["disconnect"]:
+        r = _exec(cfg, runner, root, step, hroot)
+        if r.code != 0:
+            if not arms.uses_atticdb(arm):
+                raise HarnessError(f"pre-disconnect {step.argv[-1]} exited {_code(r)}")
+            res.reasons.append(f"pre-disconnect {step.argv[-1]} exited {_code(r)}")
+    wired = wiring_hits(hroot)
+    if wired:
+        raise HarnessError(f"harness config mentions atticdb {when}: {', '.join(wired)}")
+
+
 def run_handoff(cfg: HandoffConfig, runner: Runner, case: Case, arm: str, writer: str, reader: str,
                 index: int) -> HandoffResult:
     arms.check_arm(arm)
@@ -873,18 +947,9 @@ def run_handoff(cfg: HandoffConfig, runner: Runner, case: Case, arm: str, writer
 
         stage = "setup"
         prepare_config_dirs(cfg, hroot, run_harnesses(writer, reader))
-        # Any AtticDB wiring left in the copied config goes first. Outside the atticdb arm, a
-        # disconnect that fails may have left it in place, so the run stops.
+        # Any AtticDB wiring left in the copied config goes first.
         touched = True
-        for step in steps["disconnect"]:
-            r = _exec(cfg, runner, root, step, hroot)
-            if r.code != 0:
-                if not arms.uses_atticdb(arm):
-                    raise HarnessError(f"pre-disconnect {step.argv[-1]} exited {_code(r)}")
-                res.reasons.append(f"pre-disconnect {step.argv[-1]} exited {_code(r)}")
-        wired = wiring_hits(hroot)
-        if wired:
-            raise HarnessError(f"harness config mentions atticdb before the run: {', '.join(wired)}")
+        _disconnect_and_check(cfg, runner, root, hroot, steps, arm, res, "before the run")
 
         stage = "start"
         dirty = _searches(cfg, runner, root, hroot, steps["start"])
@@ -906,6 +971,7 @@ def run_handoff(cfg: HandoffConfig, runner: Runner, case: Case, arm: str, writer
         for step in steps["setup"]:
             _required(cfg, runner, root, step, hroot)
 
+        delivered: list[tuple[str, str]] = []
         if arms.has_writer(arm):
             stage = "writer"
             mem = native_memory_dir(hroot, writer, repo)
@@ -922,17 +988,37 @@ def run_handoff(cfg: HandoffConfig, runner: Runner, case: Case, arm: str, writer
             found += file_hits(repo, case.evidence, "repo")
             if mem:
                 label = "claude-memory" if writer == "claude-code" else "codex-memory"
-                found += file_hits(mem, case.evidence, label, only=changed_files(mem_before, guard.snapshot(mem)))
+                mem_found = file_hits(mem, case.evidence, label, only=changed_files(mem_before, guard.snapshot(mem)))
+                found += mem_found
+                # The switch was ignored, so this run does not separate AtticDB from native memory.
+                if mem_found and arms.native_memory_off(arm):
+                    res.reasons.append("native memory written with memory off")
             res.captured, res.captured_where = bool(found), _where(found)
             res.captured_all = all_in_one_place(found, case.evidence)
             # The writer's transcripts and sessions hold its prompts. The reader gets the writer's
-            # config dir in its env, so all but the login goes before the reader starts.
+            # config dir in its env, so all but the login goes before the reader starts. A reader in
+            # the writer's harness keeps the writer's native memory, as its next session would. With
+            # memory off, any memory there ignored the switch, so none is kept.
+            keep = mem if writer == reader and not arms.native_memory_off(arm) else None
             try:
-                scrub_harness_dir(hroot, writer)
+                scrub_harness_dir(hroot, writer, keep=keep)
             except OSError as e:
                 raise HarnessError(f"could not clear the {writer} dir before the reader: {e}") from e
+            if writer == reader:
+                if keep:
+                    delivered += memory_delivery(writer, keep, case.evidence)
+                # The reader shares the writer's dir, so the scrub took its config and AtticDB wiring
+                # too. A login Codex refreshed goes to the eval dir first. Then the dir is made again.
+                # The first pass's disconnect and wiring check run again. Arms that wire AtticDB set up again.
+                stage = "setup"
+                note = sync_codex_auth(cfg, hroot)
+                if note:
+                    res.reasons.append(note)
+                prepare_config_dirs(cfg, hroot, (reader,))
+                _disconnect_and_check(cfg, runner, root, hroot, steps, arm, res, "before the reader")
+                for step in steps["setup"]:
+                    _required(cfg, runner, root, step, hroot)
 
-        delivered: list[tuple[str, str]] = []
         if arms.uses_atticdb(arm):
             stage = "hook"
             (hook,) = steps["hook"]
@@ -954,6 +1040,10 @@ def run_handoff(cfg: HandoffConfig, runner: Runner, case: Case, arm: str, writer
         delivered += [("transcript", t) for t in tokens_in(outputs, case.evidence)]
         if case.id not in NO_DELIVERY:
             res.delivered, res.delivered_where = bool(delivered), _where(delivered)
+        if arm == "blank":
+            # Read even for H5: the blank reader has no source, so any unguessable token is a leak.
+            secret = [t for t in case.evidence if t in LEAK_TOKENS]
+            res.leaked = bool(tokens_in(out.reply, secret)) or any(t in secret for _, t in delivered)
 
         stage = "grade"
         (diff_step,) = steps["grade"]
@@ -1029,7 +1119,12 @@ def describe(cfg: HandoffConfig, case: Case, arm: str, writer: str, reader: str,
                       else "no copilot memory (off in prompt mode)")
             lines.append(f"  [capture] also scan {repo} and {memory}")
             keep = ", ".join(LOGIN_FILES[writer])
+            if writer == reader and native_memory_dir(hroot, writer, repo) and not arms.native_memory_off(arm):
+                keep = " and ".join(filter(None, [keep, f"the {writer} native memory for this repo"]))
             lines.append(f"  [capture] then delete {'all but ' + keep if keep else 'everything'} in the {writer} dir")
+            if writer == reader:
+                lines.append(f"  [capture] then set the {writer} dir up again for the reader: the copies, "
+                             "disconnects, atticdb check and setup steps above")
         for step in steps:
             env = f" + {', '.join(sorted(step.extra_env))}" if step.extra_env else ""
             stdin = " <stdin: hook JSON>" if step.stdin is not None else ""
