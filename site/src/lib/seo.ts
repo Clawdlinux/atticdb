@@ -42,7 +42,7 @@ const OG_IMAGE = {
   url: "/og.png",
   width: 1200,
   height: 630,
-  alt: "AtticDB: memory that hits the disk. Acked 94 µs.",
+  alt: "Your coding agent forgets everything between chats. AtticDB remembers, on your own disk.",
 };
 
 // Next replaces a layout's alternates with a page's, so every page repeats the feed link.

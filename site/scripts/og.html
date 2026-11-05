@@ -23,17 +23,20 @@
         --ink: #EDE6D8;
         --muted: #A89C8C;
         --accent: #C8F03C;
-        --step-small: 24px;
         --step-body: 28px;
-        --step-lead: 40px;
+        --step-lead: 32px;
         --step-head: 48px;
-        --step-display: 160px;
+        --step-display: 60px;
       }
       * { box-sizing: border-box; margin: 0; }
       body {
         width: 1200px;
         height: 630px;
         overflow: hidden;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        padding: 44px 64px 52px;
         background: var(--bg);
         color: var(--ink);
         font-family: "EB Garamond", Georgia, serif;
@@ -44,67 +47,95 @@
         display: flex;
         align-items: center;
         justify-content: space-between;
-        padding: 42px 64px 0;
       }
       .brand {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.3em;
         font-family: "Bebas Neue", Impact, sans-serif;
         font-size: var(--step-head);
+        line-height: 1;
+      }
+      .mark {
+        width: 1.1em;
+        height: 1.1em;
+        flex: none;
+        transform: translateY(-2px);
       }
       .domain { color: var(--muted); }
-      main { padding-top: 74px; text-align: center; }
+      main {
+        text-align: center;
+      }
       h1 {
         font-family: "Bebas Neue", Impact, sans-serif;
         font-size: var(--step-display);
         font-weight: 400;
-        line-height: 0.85;
-        letter-spacing: -0.02em;
+        line-height: 0.96;
+        letter-spacing: -0.01em;
+        text-transform: uppercase;
       }
-      .line { display: block; white-space: nowrap; }
-      .ack {
-        display: inline-block;
-        overflow: hidden;
-        width: 1.66em;
-        height: 0.85em;
-        margin-left: 0.14em;
-        vertical-align: baseline;
-        background: var(--surface);
-        letter-spacing: 0;
+      .line {
+        display: block;
+        white-space: nowrap;
       }
-      .ack-inner {
+      .summary {
+        max-width: 56ch;
+        margin: 28px auto 0;
+        font-size: var(--step-lead);
+        line-height: 1.38;
+      }
+      footer {
         display: flex;
-        height: 100%;
         align-items: center;
         justify-content: center;
-        gap: 0.09em;
-        padding-inline: 0.12em;
+        gap: 20px;
+        color: var(--muted);
+        font-size: 26px;
       }
-      .light {
-        flex: none;
-        width: 0.1em;
-        height: 0.1em;
-        border-radius: 50%;
-        background: var(--accent);
-      }
-      .ack-text {
-        font-family: "EB Garamond", Georgia, serif;
-        font-size: var(--step-lead);
+      .ack {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        height: 46px;
+        padding-inline: 18px;
+        background: var(--surface);
+        color: var(--ink);
+        font-size: 26px;
         line-height: 1;
         font-variant-numeric: tabular-nums lining-nums;
       }
-      .summary { margin-top: 42px; font-size: var(--step-lead); }
+      .light {
+        flex: none;
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: var(--accent);
+      }
     </style>
   </head>
   <body>
     <header>
-      <span class="brand">ATTICDB</span>
+      <span class="brand">
+        <svg class="mark" viewBox="0 0 64 64" aria-hidden="true">
+          <path d="M32 3 63 30 55 38.5 32 19 9 38.5 1 30z" fill="var(--ink)" />
+          <rect x="19" y="39" width="26" height="22" rx="3" fill="var(--accent)" />
+        </svg>
+        ATTICDB
+      </span>
       <span class="domain">atticdb.com</span>
     </header>
     <main>
       <h1>
-        <span class="line">MEMORY THAT<span class="ack"><span class="ack-inner"><span class="light"></span><span class="ack-text">acked 94 µs</span></span></span></span>
-        <span class="line">HITS THE DISK</span>
+        <span class="line">Your coding agent forgets everything between chats.</span>
+        <span class="line">AtticDB remembers, on your own disk.</span>
       </h1>
-      <p class="summary">Durable memory for coding agents.</p>
+      <p class="summary">
+        It saves your rules and decisions on your machine. Every new chat in Claude Code, Codex, Copilot and VS Code starts with them.
+      </p>
     </main>
+    <footer>
+      <span>Free, open source, 1 small binary, no account.</span>
+      <span class="ack"><span class="light"></span><span>acked 94 µs</span></span>
+    </footer>
   </body>
 </html>
