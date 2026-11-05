@@ -11,7 +11,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
 jobs:
-  test:
+  # Lint and the unit and integration tests, debug and release.
+  unit:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -27,6 +28,21 @@ jobs:
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --locked --workspace
       - run: cargo test --locked --workspace --release
+      - if: runner.os == 'Linux'
+        run: shellcheck install.sh
+  # The sims, the fault-inject suite and the Python tests against the release binary.
+  sim-it:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # The sims spread seeds over every core. ATTICDB_SIM_THREADS=1 runs them in order.
       - run: cargo test --locked -p atticdb-tape --release --features sim --test sim
         env:
           ATTICDB_SIM_SEEDS: "2000"
@@ -44,30 +60,60 @@ jobs:
       # Research code: synthetic fixtures only, no network.
       - run: python3 -m pytest research/ctxcache/tests
       # Stub agents only, never a real model. The end-to-end test runs the binary built above.
-      - run: ATTICDB_BIN=target/release/atticdb python3 -m pytest research/setup_eval/tests
+      - run: ATTICDB_BIN=target/release/atticdb python3 -m pytest research/setup_eval/tests research/handoff_eval/tests
       # install.sh against fake releases on 127.0.0.1. It never touches the real HOME.
       - run: python3 -m pytest scripts/tests
-      - if: runner.os == 'Linux'
-        run: shellcheck install.sh
+  # Branch protection requires these 2 names. Add jobs to `needs`, never rename this.
+  test:
+    name: test (${{ matrix.os }})
+    if: always()
+    needs: [unit, sim-it]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - run: test "$UNIT" = success && test "$SIM_IT" = success
+        env:
+          UNIT: ${{ needs.unit.result }}
+          SIM_IT: ${{ needs.sim-it.result }}
   # The Windows port (#137): the storage crates, the server, the CLI and the app wiring.
+  # 2 suites side by side, like unit and sim-it. Not a required check, so the names can change.
   windows:
+    name: windows (${{ matrix.suite }})
     runs-on: windows-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [unit, sim]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup toolchain install
+      # Both suites share this job id. The key keeps their caches apart.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - run: cargo clippy --locked -p atticdb-sys -p atticdb-tape -p atticdb-core --all-targets -- -D warnings
-      - run: cargo test --locked -p atticdb-sys -p atticdb-tape -p atticdb-core
+        with:
+          key: ${{ matrix.suite }}
+      - if: matrix.suite == 'unit'
+        run: cargo clippy --locked -p atticdb-sys -p atticdb-tape -p atticdb-core --all-targets -- -D warnings
+      - if: matrix.suite == 'unit'
+        run: cargo test --locked -p atticdb-sys -p atticdb-tape -p atticdb-core
       # The server, CLI and adapters on loopback TCP. The Unix-only `it` modules compile out.
-      - run: cargo clippy --locked -p atticdb --all-targets --all-features -- -D warnings
-      - run: cargo test --locked -p atticdb --lib
-      - run: cargo test --locked -p atticdb --test it
+      - if: matrix.suite == 'unit'
+        run: cargo clippy --locked -p atticdb --all-targets --all-features -- -D warnings
+      - if: matrix.suite == 'unit'
+        run: cargo test --locked -p atticdb --lib
+      - if: matrix.suite == 'unit'
+        run: cargo test --locked -p atticdb --test it
       # Tests ignored in debug, such as 10,000 renames over an existing file.
-      - run: cargo test --locked -p atticdb-tape --release --lib --test it -- --include-ignored
-      - run: cargo test --locked -p atticdb-tape --release --features sim --test sim
+      - if: matrix.suite == 'unit'
+        run: cargo test --locked -p atticdb-tape --release --lib --test it -- --include-ignored
+      - if: matrix.suite == 'sim'
+        run: cargo test --locked -p atticdb-tape --release --features sim --test sim
         env:
           ATTICDB_SIM_SEEDS: "2000"
-      - run: cargo test --locked -p atticdb-core --release --features sim --test engine_sim
+      - if: matrix.suite == 'sim'
+        run: cargo test --locked -p atticdb-core --release --features sim --test engine_sim
         env:
           ATTICDB_SIM_SEEDS: "2000"

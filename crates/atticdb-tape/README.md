@@ -270,4 +270,5 @@ ATTICDB_SIM_SEEDS=2000 cargo test -p atticdb-core --release --features sim --tes
 
 The default tape run uses 500 seeds. CI sets 2,000 explicitly.
 `ATTICDB_SIM_SEED` selects a starting seed. Failures print a reproduction command.
+Seeds run on every core. `ATTICDB_SIM_THREADS=1` runs them in order.
 Release tests also run the real-filesystem stress test.

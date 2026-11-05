@@ -1017,3 +1017,103 @@ fn large_record(seed: u64) {
     let (tape, _) = Tape::open(Arc::new(disk.crash().unwrap()), clock, "large", opts).unwrap();
     oracle.verify(&tape);
 }
+
+/// Worker threads for seed sweeps: `ATTICDB_SIM_THREADS`, else every core.
+pub fn sim_threads() -> usize {
+    std::env::var("ATTICDB_SIM_THREADS").map_or_else(
+        |_| std::thread::available_parallelism().map_or(1, usize::from),
+        |v| v.parse::<usize>().unwrap().max(1),
+    )
+}
+
+/// The smallest failing seed and its panic payload.
+pub type SeedFailure = (u64, Box<dyn std::any::Any + Send>);
+
+/// Runs seeds `first..first + count`, wrapping past `u64::MAX`, on `threads` workers.
+/// Each seed must build its own state, so the order seeds run in can't change a result.
+/// On failure, returns the smallest failing seed whatever the thread count, so the repro
+/// line names the same seed a serial sweep would.
+pub fn try_each_seed(
+    first: u64,
+    count: u64,
+    threads: usize,
+    run: impl Fn(u64) + Sync,
+) -> std::result::Result<(), SeedFailure> {
+    let next = AtomicU64::new(0);
+    // Offsets at or past this are skipped. Offsets are handed out in order, so every
+    // offset below the first failure still runs, and the smallest failure wins.
+    let stop_at = AtomicU64::new(count);
+    let failure: Mutex<Option<SeedFailure>> = Mutex::new(None);
+    std::thread::scope(|scope| {
+        for _ in 0..threads.max(1) {
+            scope.spawn(|| loop {
+                let offset = next.fetch_add(1, Ordering::Relaxed);
+                if offset >= stop_at.load(Ordering::Acquire) {
+                    return;
+                }
+                let seed = first.wrapping_add(offset);
+                if let Err(error) =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(seed)))
+                {
+                    stop_at.fetch_min(offset, Ordering::AcqRel);
+                    let mut slot = failure.lock().unwrap_or_else(|e| e.into_inner());
+                    if slot.as_ref().is_none_or(|(seen, _)| offset < *seen) {
+                        *slot = Some((offset, error));
+                    }
+                }
+            });
+        }
+    });
+    match failure.into_inner().unwrap_or_else(|e| e.into_inner()) {
+        Some((offset, error)) => Err((first.wrapping_add(offset), error)),
+        None => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod seed_runner_tests {
+    use super::try_each_seed;
+    use std::sync::Mutex;
+
+    #[test]
+    fn every_seed_runs_once_across_threads() {
+        let seen = Mutex::new(Vec::new());
+        try_each_seed(10, 200, 4, |seed| seen.lock().unwrap().push(seed)).unwrap();
+        let mut seen = seen.into_inner().unwrap();
+        seen.sort_unstable();
+        assert_eq!(seen, (10..210).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn seeds_wrap_past_u64_max() {
+        let seen = Mutex::new(Vec::new());
+        try_each_seed(u64::MAX - 1, 3, 2, |seed| seen.lock().unwrap().push(seed)).unwrap();
+        let mut seen = seen.into_inner().unwrap();
+        seen.sort_unstable();
+        assert_eq!(seen, vec![0, u64::MAX - 1, u64::MAX]);
+    }
+
+    #[test]
+    fn reports_the_smallest_failing_seed() {
+        for threads in [1, 3, 8] {
+            let failed = try_each_seed(0, 400, threads, |seed| {
+                assert!(seed < 50 || seed % 7 != 3, "seed {seed} failed");
+            })
+            .unwrap_err();
+            assert_eq!(failed.0, 52, "threads={threads}");
+            assert_eq!(failed.1.downcast_ref::<String>().unwrap(), "seed 52 failed");
+        }
+    }
+
+    #[test]
+    fn stops_handing_out_seeds_after_a_failure() {
+        let ran = std::sync::atomic::AtomicU64::new(0);
+        // Real seeds take about 150 ms. 1 ms keeps the bound about stopping, not panic-hook speed.
+        let _ = try_each_seed(0, 1_000_000, 4, |seed| {
+            ran.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            assert_ne!(seed, 5);
+        });
+        assert!(ran.into_inner() < 1_000, "seeds kept running after seed 5 failed");
+    }
+}
