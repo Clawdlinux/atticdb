@@ -21,6 +21,10 @@ const MAX_INPUT: u64 = 1 << 20;
 /// Time from the hook's start for its reads, so stdin and setup use it up too. A read needs
 /// 2 s left to start, so the first one has at most 1 s to connect or start the server.
 const BUDGET: Duration = Duration::from_secs(3);
+/// `post-compact`'s deadline. A lost summary is worse than a late block, so its write may
+/// connect or start the server up to 3 s in, past the 2 s a request keeps. [`HARD_STOP`]
+/// still ends the hook at 4 s.
+const SAVE_BUDGET: Duration = Duration::from_secs(5);
 /// Past this, whatever blocks, the hook exits, under Copilot's 5 s timeout. `session-start`
 /// prints `{}` first.
 pub(crate) const HARD_STOP: Duration = Duration::from_secs(4);
@@ -104,7 +108,7 @@ pub fn post_compact(harness: Option<&str>, home: Option<&str>) -> u8 {
     }
     hard_stop(start, "post-compact", false);
     let stdin = std::io::stdin().lock().take(MAX_INPUT);
-    if let Err(error) = lookup(home).and_then(|lookup| save(stdin, start + BUDGET, &lookup)) {
+    if let Err(error) = lookup(home).and_then(|lookup| save(stdin, start + SAVE_BUDGET, &lookup)) {
         fail(&error);
     }
     0
