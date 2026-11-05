@@ -358,8 +358,12 @@ fn notes(home: &Path, session: &str) -> Vec<Value> {
 
 /// Runs the hook as Claude Code's group does. It must exit 0 and print nothing.
 fn saved(home: &Path, stdin: &Value) {
+    let started = Instant::now();
     let (code, out, err) = post_compact(home, &["--harness", "claude-code"], stdin);
+    let took = started.elapsed();
     assert_eq!((code, out.as_str()), (Some(0), ""), "{err}");
+    // A failed save still exits 0, so its stderr line is the only sign.
+    assert!(!err.contains("hook post-compact:"), "after {took:?}: {err}");
 }
 
 /// The summary is saved as 1 Claude Code note in the repo's session, with a pointer to the
