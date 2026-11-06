@@ -861,8 +861,8 @@ mod tcp_tests {
         assert_eq!(entry.len() as u64 + 1, super::MIN_TENANT_JSON);
         let most = crate::config::MAX_FILE_BYTES / super::MIN_TENANT_JSON;
         let proofs: Vec<String> = (0..most).map(|_| "0".repeat(64)).collect();
-        let body =
-            serde_json::json!({"status": "ok", "instance": "0".repeat(32), "proofs": proofs});
+        let body = serde_json::json!({"status": "ok", "instance": "0".repeat(32), "proofs": proofs,
+                "version": crate::VERSION});
         assert!(body.to_string().len() as u64 <= super::PROOF_BYTES);
     }
 }
