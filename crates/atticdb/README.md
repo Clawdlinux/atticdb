@@ -718,7 +718,8 @@ An entry with connection flags is refused, as for Copilot CLI, unless `--force`.
 An older AtticDB entry is updated where it stands, so other servers keep their places and bytes.
 `settings.json` is edited as text, as Claude Code's is. The hook group is found by its content the same way.
 A group wired by hand counts as AtticDB's too. Its command runs an absolute path to `atticdb` or `atticdb.exe`, then `hook session-start`.
-The path may be quoted or not, and any flags may follow. Connect replaces that group where it stands, and says `updated`.
+The path may be quoted or not. Only `--` flags may follow, with the values of `--harness` and `--home`.
+A command with anything else, such as `&& other-hook`, stays yours. Connect replaces AtticDB's group where it stands, and says `updated`.
 So Gemini CLI never gets 2 memory blocks. `disconnect` removes it.
 If `hooksConfig.enabled` is false, or `hooksConfig.disabled` lists `atticdb`, Gemini CLI never runs the hook.
 Connect warns, setup says so in its next steps, and doctor warns on its hook line.

@@ -776,8 +776,10 @@ fn handler_exe(harness: Harness, event: Event, handler: &Value) -> Option<String
 /// The binary a SessionStart command wired by hand runs, when it is AtticDB's: an absolute
 /// path to a file named `atticdb` or `atticdb.exe`, then `hook session-start`. The path may
 /// be bare, or single- or double-quoted. An `ATTICDB_HOME=` prefix or PowerShell's `& ` may
-/// come first, and any flags may follow. Only Gemini CLI reads hooks so, as people wired it
-/// by hand before `connect gemini` existed.
+/// come first. After it come only flags that start with `--`, and the values of `--harness`
+/// and `--home`. Any other word, such as `&&`, `;` or `|`, makes it the user's, so a command
+/// that runs more than atticdb is never dropped. Only Gemini CLI reads hooks so, as people
+/// wired it by hand before `connect gemini` existed.
 fn hand_wired_exe(event: Event, command: &str) -> Option<String> {
     if event != Event::SessionStart {
         return None;
@@ -787,28 +789,55 @@ fn hand_wired_exe(event: Event, command: &str) -> Option<String> {
         rest = first_word(after)?.1.trim_start();
     }
     rest = rest.strip_prefix("& ").unwrap_or(rest).trim_start();
-    let (exe, rest) = first_word(rest)?;
+    let (exe, mut rest) = first_word(rest)?;
     let path = Path::new(&exe);
     let named = path.file_name().is_some_and(|name| name == "atticdb" || name == "atticdb.exe");
-    let mut words = rest.split_whitespace();
-    let runs_hook = words.next() == Some("hook") && words.next() == Some(event.subcommand());
-    // The word after the binary must start after a space, so `atticdbhook` isn't read.
-    let spaced = rest.starts_with(char::is_whitespace);
-    (path.is_absolute() && named && runs_hook && spaced).then_some(exe)
+    if !(path.is_absolute() && named) {
+        return None;
+    }
+    for want in ["hook", event.subcommand()] {
+        // Each word must start after a space, so `atticdbhook` isn't read.
+        let (word, after) = first_word(rest.strip_prefix(char::is_whitespace)?.trim_start())?;
+        (word == want).then_some(())?;
+        rest = after;
+    }
+    loop {
+        rest = rest.trim_start();
+        if rest.is_empty() {
+            return Some(exe);
+        }
+        let (flag, after) = first_word(rest)?;
+        rest = after;
+        if !flag.starts_with("--") {
+            return None;
+        }
+        if flag == "--harness" || flag == "--home" {
+            rest = first_word(rest.strip_prefix(char::is_whitespace)?.trim_start())?.1;
+        }
+        // The next word must start after a space, so `--home '/x';y` isn't read.
+        if !(rest.is_empty() || rest.starts_with(char::is_whitespace)) {
+            return None;
+        }
+    }
 }
 
 /// Splits the first word off `text`: single-quoted as `sh` writes it, double-quoted, or bare
-/// up to the first whitespace. Returns the word and the rest.
+/// up to the first whitespace. Returns the word and the rest. A bare word that holds a shell
+/// operator or expansion, or a double-quoted one that holds an expansion, is refused. So
+/// `;`, `&`, `|`, `<`, `>`, `$`, backticks and parentheses never pass as part of a word.
 fn first_word(text: &str) -> Option<(String, &str)> {
     if text.starts_with('\'') {
         return unquote(text);
     }
     if let Some(inner) = text.strip_prefix('"') {
         let end = inner.find('"')?;
-        return Some((inner[..end].to_owned(), &inner[end + 1..]));
+        let word = &inner[..end];
+        return (!word.contains(['$', '`'])).then(|| (word.to_owned(), &inner[end + 1..]));
     }
     let end = text.find(char::is_whitespace).unwrap_or(text.len());
-    (end > 0).then(|| (text[..end].to_owned(), &text[end..]))
+    let word = &text[..end];
+    let plain = !word.is_empty() && !word.contains([';', '&', '|', '<', '>', '$', '`', '(', ')']);
+    plain.then(|| (word.to_owned(), &text[end..]))
 }
 
 /// The binary `command` names when `handler` is Claude Code's hook for `event` in exec form,
@@ -965,7 +994,8 @@ fn mixed(harness: Harness, event: Event, text: &str) -> Vec<Value> {
 /// `text` with `group` in `hooks.<event>`, and without AtticDB's other groups there. For
 /// Gemini CLI, the first of those is replaced where it stands, by [`replace_stale`]. When
 /// AtticDB's handler already sits in a group with other hooks, no group is added. An older
-/// one there is refused, as it can't be updated without touching the other hooks.
+/// one there, or for Gemini CLI one wired by hand, is refused, as it can't be updated without
+/// touching the other hooks.
 pub(super) fn add_hook(harness: Harness, event: Event, text: &str, group: &Value) -> Edit {
     let stale = |old: &Value| our_group(harness, event, old) && old != group;
     let (text, stale) = if harness == Harness::Gemini {
@@ -976,8 +1006,10 @@ pub(super) fn add_hook(harness: Harness, event: Event, text: &str, group: &Value
     let handler = &group["hooks"][0];
     let mixed = mixed(harness, event, &text);
     if mixed.iter().any(|other| *other != handler_key(handler)) {
+        // Gemini CLI's may be wired by hand, so not older. The others' words stay as they were.
+        let which = if harness == Harness::Gemini { "an" } else { "an older" };
         return Err(Refused {
-            why: "an older atticdb hook is inside a group with other hooks".into(),
+            why: format!("{which} atticdb hook is inside a group with other hooks"),
             by_hand: Some(format!(
                 "Update the atticdb handler inside that group by hand, to run: {}",
                 handler_text(handler)
@@ -1323,6 +1355,8 @@ mod hook_tests {
             ("\"/opt/a b/atticdb.exe\"  hook\tsession-start --home /x", "/opt/a b/atticdb.exe"),
             ("& '/opt/atticdb' hook session-start --harness gemini", "/opt/atticdb"),
             ("ATTICDB_HOME='/h o' /opt/atticdb hook session-start", "/opt/atticdb"),
+            ("/opt/atticdb hook session-start --harness claude-code --home '/x y'", "/opt/atticdb"),
+            ("/opt/atticdb hook session-start --home \"/x y\" --harness=gemini ", "/opt/atticdb"),
         ];
         for (command, exe) in ours {
             assert_eq!(hand_wired_exe(start, command).as_deref(), Some(exe), "{command}");
@@ -1342,6 +1376,19 @@ mod hook_tests {
             "'/opt/atticdb hook session-start",
             "/opt/atticdbhook session-start",
             "",
+            // Only flags and their values may follow, so another command is never dropped.
+            "/opt/atticdb hook session-start && /opt/other-hook",
+            "/opt/atticdb hook session-start; /opt/other-hook",
+            "/opt/atticdb hook session-start --harness gemini | tee /tmp/log",
+            "/opt/atticdb hook session-start || true",
+            "/opt/atticdb hook session-start > /tmp/log",
+            "/opt/atticdb hook session-start 2>&1",
+            "/opt/atticdb hook session-start `echo x`",
+            "/opt/atticdb hook session-start --home /x;/opt/other-hook",
+            "/opt/atticdb hook session-start --home \"$HOME/x\"",
+            "/opt/atticdb hook session-start --harness gemini extra",
+            "/opt/atticdb hook session-start --home",
+            "ATTICDB_HOME=/x;/opt/other /opt/atticdb hook session-start",
         ] {
             assert_eq!(hand_wired_exe(start, command), None, "{command}");
         }

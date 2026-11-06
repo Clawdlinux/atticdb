@@ -2767,6 +2767,7 @@ fn gemini_replaces_a_hand_wired_hook_in_place() {
         "/Users/sunny/.cargo/bin/atticdb hook session-start --harness claude-code",
         "'/opt/my tools/atticdb' hook session-start",
         "\"/usr/local/bin/atticdb.exe\" hook  session-start --harness gemini --home /h",
+        "/opt/atticdb hook session-start --harness claude-code --home '/x y'",
     ];
     for command in commands {
         std::fs::write(it.settings(), gemini_hand_wired(command)).unwrap();
@@ -2796,11 +2797,13 @@ fn gemini_replaces_a_hand_wired_hook_in_place() {
     assert!(out.contains("\nSessionStart hook: removed ("), "{out}");
     assert_eq!(it.groups(), std::slice::from_ref(&user));
 
-    // Not atticdb's: another binary, a relative path, or another hook verb.
+    // Not atticdb's: another binary, a relative path, another hook verb, or a command that
+    // runs more than atticdb. The user's bytes stay, and AtticDB's group goes last.
     for command in [
         "/opt/bin/atticdb-wrapper hook session-start",
         "atticdb hook session-start --harness gemini",
         "/opt/bin/atticdb hook post-compact",
+        "/opt/atticdb hook session-start && /opt/other-hook",
     ] {
         let text = gemini_hand_wired(command);
         std::fs::write(it.settings(), &text).unwrap();
@@ -2810,7 +2813,32 @@ fn gemini_replaces_a_hand_wired_hook_in_place() {
         assert_eq!(code, Some(0), "{command}: {out}");
         assert!(out.contains("\nSessionStart hook: added ("), "{command}: {out}");
         assert_eq!(it.groups(), [theirs, user.clone(), it.group(None)], "{command}");
+        let kept = &text[..text.rfind("\n    ]").unwrap()];
+        let after = std::fs::read_to_string(it.settings()).unwrap();
+        assert!(after.starts_with(kept), "{command}: {after}");
+        let (code, out) = it.run(&["disconnect", "gemini"]);
+        assert_eq!(code, Some(0), "{command}: {out}");
+        let after = std::fs::read_to_string(it.settings()).unwrap();
+        assert!(after.starts_with(kept), "{command}: disconnect keeps it: {after}");
     }
+
+    // A hand-wired atticdb handler in a group with another hook is left for the user, with
+    // neutral words: it may not be older.
+    let mixed = json!({"hooks": {"SessionStart": [{"hooks": [
+        {"type": "command", "command": commands[0]},
+        {"type": "command", "command": "/opt/other-hook"}
+    ]}]}});
+    let text = serde_json::to_string_pretty(&mixed).unwrap();
+    std::fs::write(it.settings(), &text).unwrap();
+    let (code, out) = it.run(&["connect", "gemini"]);
+    assert_eq!(code, Some(1), "{out}");
+    let said = format!(
+        "SessionStart hook: skipped, {}: an atticdb hook is inside a group with other hooks. \
+         Update the atticdb handler inside that group by hand, to run: ",
+        it.settings().display()
+    );
+    assert!(out.contains(&said) && !out.contains("an older"), "{out}");
+    assert_eq!(it.read()["hooks"], mixed["hooks"], "the group stays");
 }
 
 /// A GEMINI.md that mentions AtticDB outside a block is the user's own guide. It stays as it
