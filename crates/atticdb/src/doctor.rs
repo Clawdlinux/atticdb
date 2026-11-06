@@ -1,5 +1,6 @@
-//! `atticdb doctor`: checks this install and writes nothing. Each check prints 1 line, `ok` or
-//! the problem and what to do. The store check may start the home's server, as any read does.
+//! `atticdb doctor`: checks this install and writes nothing but the update check's cache.
+//! Each check prints 1 line, `ok` or the problem and what to do. The store check may start
+//! the home's server, as any read does.
 //! The parts check is [`connect::connect`] in [`Mode::Plan`], the code that writes.
 
 use crate::connect::{self, Harness, Mode, Notes, Options, Report};
@@ -12,8 +13,10 @@ use std::path::{Path, PathBuf};
 /// What `atticdb doctor --help` prints.
 pub const USAGE: &str = "usage: atticdb doctor [--harness <list>]
 
-Checks this atticdb install and writes nothing: the binary, the home, the server and store,
-and each app. The store check may start the home's server.
+Checks this atticdb install: the binary, the home, the server and store, and each app. The
+store check may start the home's server. Once a day it also checks for a new release. It
+writes nothing but that answer, cached in the home. ATTICDB_NO_UPDATE_CHECK=1 or CI turns
+the check off.
 
   --harness <list>  check these apps, a comma list of copilot, vscode, claude-code, codex,
                     gemini, antigravity and claude-desktop
@@ -64,8 +67,17 @@ impl Checks {
 }
 
 /// Runs `atticdb doctor` on `harnesses`, else on every app. Returns the exit code: 1 when a
-/// check failed, else 0.
+/// check failed, else 0. The update notice, if any, comes last and doesn't change the code.
 pub fn run(harnesses: Option<Vec<Harness>>) -> u8 {
+    let code = check(harnesses);
+    if let Ok(dir) = crate::home::dir() {
+        crate::update::show(&dir);
+    }
+    code
+}
+
+/// The checks of [`run`]. Returns the exit code.
+fn check(harnesses: Option<Vec<Harness>>) -> u8 {
     let mut checks = Checks::default();
     println!("atticdb:");
     let (version, exe) = (crate::VERSION, connect::binary());

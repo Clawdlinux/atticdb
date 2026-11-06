@@ -25,3 +25,5 @@ mod setup;
 mod studio;
 #[cfg(unix)]
 mod support;
+#[cfg(unix)]
+mod update;

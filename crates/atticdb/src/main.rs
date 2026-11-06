@@ -70,7 +70,8 @@ const USAGE: &str = "usage:
   setup finds VS Code, Copilot CLI, Claude Code, Codex, Gemini CLI, Antigravity and Claude
   Desktop. It asks which to connect and shows the plan. Then it connects them and checks each.
   See atticdb setup --help.
-  doctor checks the install and writes nothing. See atticdb doctor --help.";
+  doctor checks the install. It writes nothing but the daily update check's cache. See
+  atticdb doctor --help.";
 
 /// Commands that use the home. A relative `ATTICDB_HOME` fails them with exit 2, so none falls
 /// back to the default home. The hooks exit 0 for it, as for any error.

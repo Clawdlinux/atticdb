@@ -456,6 +456,10 @@ fn apply(chosen: &[(Harness, Options)]) -> u8 {
         println!("Then open a new chat and ask: what are this repo's rules?");
         println!("See what your agent gets at chat start: {atticdb} studio");
     }
+    // The update notice, if any, comes last and doesn't change the code.
+    if let Ok(dir) = crate::home::dir() {
+        crate::update::show(&dir);
+    }
     exit
 }
 

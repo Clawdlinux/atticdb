@@ -120,6 +120,8 @@ impl Profile {
             command.env_remove(var);
         }
         command.env_remove("ATTICDB_SETUP_INTERACTIVE");
+        // No test asks the real releases API.
+        command.env("ATTICDB_NO_UPDATE_CHECK", "1");
         if cfg!(windows) {
             command.env("USERPROFILE", &self.root);
             command.env("APPDATA", self.root.join("AppData").join("Roaming"));

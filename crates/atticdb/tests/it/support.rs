@@ -78,12 +78,14 @@ const HOME_VARS: [&str; 8] = [
 ];
 
 /// A command for `program`, the `atticdb` binary or anything that runs it, without
-/// [`HOME_VARS`]. Every spawn of AtticDB in these tests starts here.
+/// [`HOME_VARS`]. Every spawn of AtticDB in these tests starts here. The update check is off,
+/// so no test asks the real releases API. The `update` tests turn it back on.
 pub fn command(program: impl AsRef<OsStr>) -> Command {
     let mut command = Command::new(program);
     for var in HOME_VARS {
         command.env_remove(var);
     }
+    command.env("ATTICDB_NO_UPDATE_CHECK", "1");
     command
 }
 
@@ -616,7 +618,12 @@ impl Mcp {
         if let Some(token) = token {
             command.env("ATTICDB_TOKEN", token);
         }
-        let mut process = Process::start(&mut command);
+        Self::spawn(&mut command)
+    }
+
+    /// Starts `command`, an `atticdb mcp` with stdin piped.
+    pub fn spawn(command: &mut Command) -> Self {
+        let mut process = Process::start(command);
         let stdin = process.child.stdin.take();
         Self { process, stdin, read: 0, asked: 0, next_id: 0 }
     }
