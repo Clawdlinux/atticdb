@@ -53,7 +53,14 @@ Exit 0 when every app connected and passed its checks, 1 when not, 2 for a usage
 const NEEDS_TERMINAL: &str = "atticdb setup needs a terminal, or --yes. See atticdb setup --help.";
 
 /// A testing aid: when it is `1`, stdin counts as a terminal, so tests can pipe the answers.
+/// `atticdb upgrade` reads it too.
 const INTERACTIVE_ENV: &str = "ATTICDB_SETUP_INTERACTIVE";
+
+/// Whether stdin is a terminal, or counts as one by [`INTERACTIVE_ENV`].
+pub(crate) fn terminal() -> bool {
+    std::io::stdin().is_terminal()
+        || std::env::var_os(INTERACTIVE_ENV).is_some_and(|value| value == "1")
+}
 
 /// How many answers a question takes before setup gives up.
 const TRIES: usize = 3;
@@ -135,8 +142,7 @@ pub(crate) fn title(harness: Harness) -> &'static str {
 /// skipped part and passed its checks, 1 when not, 2 for a usage error or no answer. An app
 /// that stopped gives its own code when that is higher. `--dry-run` exits as the plan would.
 pub fn run(flags: Flags) -> u8 {
-    let terminal = std::io::stdin().is_terminal()
-        || std::env::var_os(INTERACTIVE_ENV).is_some_and(|value| value == "1");
+    let terminal = terminal();
     if !terminal && !flags.yes && !flags.dry_run {
         eprintln!("{NEEDS_TERMINAL}");
         return 2;
@@ -221,7 +227,7 @@ impl<R: BufRead> Asker<R> {
 }
 
 /// `true` for y or yes, `false` for n or no, in any case.
-fn yes_no(answer: &str) -> Option<bool> {
+pub(crate) fn yes_no(answer: &str) -> Option<bool> {
     match answer.to_ascii_lowercase().as_str() {
         "y" | "yes" => Some(true),
         "n" | "no" => Some(false),

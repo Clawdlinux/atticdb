@@ -36,6 +36,12 @@ const MAX_DIGITS: usize = 9;
 const MAX_TIME: &str = "3";
 /// Most bytes read from the API. GitHub's reply lists the assets and notes, so it gets room.
 const MAX_REPLY: u64 = 1 << 20;
+/// Most bytes of a download. `install.sh` is under 10 KiB.
+#[cfg(unix)]
+const MAX_DOWNLOAD: u64 = 1 << 20;
+/// How long curl may take for a download, in seconds, as its `--max-time`.
+#[cfg(unix)]
+const DOWNLOAD_TIME: &str = "60";
 /// Most bytes read from the cache, which is well under 100.
 const MAX_CACHE: u64 = 4 << 10;
 
@@ -62,19 +68,35 @@ fn off(var: impl Fn(&str) -> Option<OsString>) -> bool {
 /// [`latest`] with the API at `api`, whatever the off switches say.
 fn latest_from(home: &Path, now: SystemTime, api: &str) -> Option<String> {
     let now = now.duration_since(UNIX_EPOCH).ok()?.as_secs();
-    let cache = home.join(CACHE);
-    match cached(&cache, now) {
+    match cached(&home.join(CACHE), now) {
         Some(Cached::Latest(latest)) => return Some(latest),
         Some(Cached::Failed) => return None,
         None => {}
     }
+    refresh(Some(home), now, api)
+}
+
+/// The latest release's version, asked now, as `upgrade` needs it. It skips the cache, the
+/// 1 h back-off and the off switches, since the user asked. The answer still goes to the
+/// cache in `home`, when there is one. `None` when the check fails.
+#[cfg(unix)]
+pub(crate) fn latest_fresh(home: Option<&Path>, now: SystemTime) -> Option<String> {
+    let api = std::env::var(API_ENV).ok().filter(|api| !api.is_empty());
+    let now = now.duration_since(UNIX_EPOCH).ok()?.as_secs();
+    refresh(home, now, api.as_deref().unwrap_or(DEFAULT_API))
+}
+
+/// Asks the API at `api`, then caches the answer, or the failure, in `home` at `now`.
+fn refresh(home: Option<&Path>, now: u64, api: &str) -> Option<String> {
     let latest = fetch(api);
     let entry = match &latest {
         Some(latest) => json!({"checked": now, "latest": latest}),
         None => json!({"checked": now}),
     };
     // A cache that can't be written costs a request next time, nothing more.
-    let _ = store(home, &cache, &entry);
+    if let Some(home) = home {
+        let _ = store(home, &home.join(CACHE), &entry);
+    }
     latest
 }
 
@@ -107,42 +129,67 @@ fn cached(cache: &Path, now: u64) -> Option<Cached> {
     (age < FRESH_SECS).then(|| Cached::Latest(latest.to_owned()))
 }
 
-/// Asks the API at `api` with `curl -fsSL --max-time 3`, and reads `tag_name`. `None` for an
-/// `api` that isn't http or https. Also `None` when curl is missing or fails, or the reply is
-/// over [`MAX_REPLY`]. So is a tag that isn't `x.y.z` with an optional `v`.
+/// Asks the API at `api` with `curl -fsSL --max-time 3`, and reads `tag_name`. `None` when
+/// [`get`] fails, or for a tag that isn't `x.y.z` with an optional `v`.
 fn fetch(api: &str) -> Option<String> {
+    let reply = get(api, MAX_TIME, MAX_REPLY).ok()?;
+    let reply: Value = serde_json::from_slice(&reply).ok()?;
+    version_of(reply.get("tag_name")?.as_str()?)
+}
+
+/// Downloads `url` into `file`, which must not exist yet, with mode 0600. It uses [`get`]
+/// with [`MAX_DOWNLOAD`] bytes in at most [`DOWNLOAD_TIME`] seconds. A file this made is
+/// removed when the write fails.
+#[cfg(unix)]
+pub(crate) fn download(url: &str, file: &Path) -> Result<(), String> {
+    let body = get(url, DOWNLOAD_TIME, MAX_DOWNLOAD)?;
+    let mut options = OpenOptions::new();
+    let opened = options.write(true).create_new(true).mode(0o600).open(file);
+    let mut opened = opened.map_err(|error| format!("{}: {error}", file.display()))?;
+    opened.write_all(&body).map_err(|error| {
+        let _ = std::fs::remove_file(file);
+        format!("{}: {error}", file.display())
+    })
+}
+
+/// The body at `url`, by `curl -fsSL --max-time <max_time> <url>`, at most `max` bytes. It
+/// fails for a `url` that isn't http or https. It also fails when curl is missing or fails,
+/// or for a longer body.
+fn get(url: &str, max_time: &str, max: u64) -> Result<Vec<u8>, String> {
     // Anything else could be a file URL, or read by curl as an option.
-    if !api.starts_with("https://") && !api.starts_with("http://") {
-        return None;
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        return Err("the URL is not http or https".into());
     }
     let mut command = Command::new(curl());
-    command.args(["-fsSL", "--max-time", MAX_TIME, api]);
+    command.args(["-fsSL", "--max-time", max_time, url]);
     // curl needs no AtticDB token.
     command.env_remove(crate::client::TOKEN_ENV);
     command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
     #[cfg(windows)]
     crate::platform::no_window(&mut command);
-    let mut child = crate::spawn(&mut command).ok()?;
-    let mut reply = Vec::new();
+    let mut child = crate::spawn(&mut command).map_err(|error| format!("curl: {error}"))?;
+    let mut body = Vec::new();
     let read = match child.stdout.take() {
-        Some(stdout) => stdout.take(MAX_REPLY + 1).read_to_end(&mut reply).is_ok(),
+        Some(stdout) => stdout.take(max + 1).read_to_end(&mut body).is_ok(),
         None => false,
     };
-    let read = read && reply.len() as u64 <= MAX_REPLY;
-    if !read {
+    let fits = body.len() as u64 <= max;
+    if !read || !fits {
         let _ = child.kill();
     }
-    let exited = child.wait().ok()?;
-    if !read || !exited.success() {
-        return None;
+    let exited = child.wait().map_err(|error| format!("curl: {error}"))?;
+    if !fits {
+        return Err(format!("the reply is over {max} bytes"));
     }
-    let reply: Value = serde_json::from_slice(&reply).ok()?;
-    version_of(reply.get("tag_name")?.as_str()?)
+    if !read || !exited.success() {
+        return Err(format!("curl failed ({exited})"));
+    }
+    Ok(body)
 }
 
 /// The version in a release `tag`: `x.y.z` without the optional `v`. `None` for a tag over
 /// [`MAX_TAG`] bytes, or a version [`parse`] rejects.
-fn version_of(tag: &str) -> Option<String> {
+pub(crate) fn version_of(tag: &str) -> Option<String> {
     if tag.len() > MAX_TAG {
         return None;
     }

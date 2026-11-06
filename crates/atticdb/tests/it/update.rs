@@ -1,7 +1,8 @@
-//! The daily update check. `doctor` and `setup` ask a fake releases API on 127.0.0.1 with the
-//! real `curl`. They cache the answer in the home. The hook and `mcp` never ask. A source
-//! build reports `+dev` and never prints the notice. So these assert the request and the
-//! cache. A release build also gets the notice line checked.
+//! The daily update check, and `atticdb upgrade`. `doctor` and `setup` ask a fake releases API
+//! on 127.0.0.1 with the real `curl`. They cache the answer in the home. The hook and `mcp`
+//! never ask. A source build reports `+dev` and never prints the notice. So these assert the
+//! request and the cache. A release build also gets the notice line checked. `upgrade` runs on
+//! a copy of the binary, with a stub `install.sh` from the fake release.
 
 use crate::support::{self, data_dir, Dir, Holders, Mcp, Process};
 use serde_json::{json, Value};
@@ -9,10 +10,10 @@ use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const OFF: &str = "ATTICDB_NO_UPDATE_CHECK";
@@ -23,21 +24,22 @@ const TAG: &str = r#"{"tag_name": "v9.9.9", "name": "AtticDB 9.9.9"}"#;
 /// The exit code, stdout and stderr of a finished `atticdb`.
 type Output = (Option<i32>, String, String);
 
-/// A fake releases API on 127.0.0.1 that answers each request with `status` and `body`.
-/// Returns its URL and a count of connections, so it also records any connection at all.
-fn fake_api(status: u16, body: &str) -> (String, Arc<AtomicUsize>) {
+/// A fake HTTP server on 127.0.0.1. Each request's path goes to `answer`, which gives the
+/// status and body. It answers each connection, then closes it. Returns `http://<addr>`.
+fn fake_http(answer: impl Fn(&str) -> (u16, String) + Send + 'static) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}/repos/x/releases/latest", listener.local_addr().unwrap());
-    let hits = Arc::new(AtomicUsize::new(0));
-    let (counted, body) = (hits.clone(), body.to_owned());
+    let url = format!("http://{}", listener.local_addr().unwrap());
     std::thread::spawn(move || {
         for mut stream in listener.incoming().map_while(Result::ok) {
-            counted.fetch_add(1, Ordering::SeqCst);
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             let mut line = String::new();
+            let mut path = None;
             while reader.read_line(&mut line).unwrap_or(0) > 0 && line != "\r\n" {
+                // The request line: `GET <path> HTTP/1.1`.
+                path = path.or_else(|| line.split(' ').nth(1).map(str::to_owned));
                 line.clear();
             }
+            let (status, body) = answer(path.as_deref().unwrap_or_default());
             let length = body.len();
             let reply = format!(
                 "HTTP/1.1 {status} X\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n{body}"
@@ -45,7 +47,19 @@ fn fake_api(status: u16, body: &str) -> (String, Arc<AtomicUsize>) {
             let _ = stream.write_all(reply.as_bytes());
         }
     });
-    (url, hits)
+    url
+}
+
+/// A fake releases API on 127.0.0.1 that answers each request with `status` and `body`.
+/// Returns its URL and a count of requests.
+fn fake_api(status: u16, body: &str) -> (String, Arc<AtomicUsize>) {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let (counted, body) = (hits.clone(), body.to_owned());
+    let url = fake_http(move |_| {
+        counted.fetch_add(1, Ordering::SeqCst);
+        (status, body.clone())
+    });
+    (format!("{url}/repos/x/releases/latest"), hits)
 }
 
 fn hits(count: &AtomicUsize) -> usize {
@@ -105,7 +119,20 @@ impl Setup {
         env: &[(&str, &str)],
         stdin: &str,
     ) -> Output {
-        let mut command = support::command(env!("CARGO_BIN_EXE_atticdb"));
+        self.run_exe(env!("CARGO_BIN_EXE_atticdb").as_ref(), path, url, args, env, stdin)
+    }
+
+    /// [`Self::run_on`] with the binary at `exe`.
+    fn run_exe(
+        &self,
+        exe: &Path,
+        path: &OsStr,
+        url: &str,
+        args: &[&str],
+        env: &[(&str, &str)],
+        stdin: &str,
+    ) -> Output {
+        let mut command = support::command(exe);
         command.args(args).current_dir(&self.dir.0).env("HOME", self.dir.0.join("h"));
         command.env("ATTICDB_HOME", self.home()).env("PATH", path).env(API, url);
         command.env_remove(OFF).env_remove("CI");
@@ -365,4 +392,401 @@ fn hook_never_checks() {
     assert_eq!(mcp.close().0.code(), Some(0));
     assert_eq!(hits(&count), 0, "mcp never checks");
     assert!(!setup.cache().exists());
+}
+
+/// The warning every upgrade plan shows.
+const WARNING: &str = "If this release changes the store format, the previous binary can't open \
+                       the store after the first write.";
+/// What `upgrade` says when stdin is not a terminal and there is no `--yes`.
+const NEEDS_TERMINAL: &str = "atticdb upgrade needs a terminal, or --yes.\n";
+
+/// What the stub `install.sh` does.
+#[derive(Clone, Copy, Debug)]
+enum Stub {
+    /// Writes the new binary as install.sh does: a temp file renamed over `atticdb`.
+    Install,
+    /// Fails before it writes anything, as on a checksum mismatch.
+    Fail,
+    /// Writes the new binary, then fails, as when the new one won't run.
+    SwapThenFail,
+}
+
+/// The stub `install.sh`. It records its settings in `installer.env` beside the binary. The
+/// new binary is a script that prints `new atticdb <version> <args>`.
+fn stub(mode: Stub) -> String {
+    let head = r#"#!/bin/sh
+set -eu
+dir=$ATTICDB_INSTALL_DIR
+printf '%s\n' "ATTICDB_VERSION=$ATTICDB_VERSION" "ATTICDB_INSTALL_DIR=$dir" \
+    "ATTICDB_DOWNLOAD_BASE=${ATTICDB_DOWNLOAD_BASE:-}" > "$dir/installer.env"
+"#;
+    let swap = r#"printf '#!/bin/sh\necho "new atticdb %s $*"\n' "$ATTICDB_VERSION" > "$dir/.part"
+chmod 755 "$dir/.part"
+mv -f "$dir/.part" "$dir/atticdb"
+"#;
+    let fail = "echo 'stub: checksum mismatch' >&2\nexit 1\n";
+    match mode {
+        Stub::Install => format!("{head}{swap}exit 0\n"),
+        Stub::Fail => format!("{head}{fail}"),
+        Stub::SwapThenFail => format!("{head}{swap}{fail}"),
+    }
+}
+
+/// The bytes of the binary the stub installs at `version`.
+fn new_binary(version: &str) -> Vec<u8> {
+    format!("#!/bin/sh\necho \"new atticdb {version} $*\"\n").into_bytes()
+}
+
+/// A fake release on 127.0.0.1: the API at `api` answers with `tag`, and any
+/// `<base>/download/<tag>/install.sh` is `script`. `paths` lists the requests.
+struct Release {
+    base: String,
+    api: String,
+    paths: Arc<Mutex<Vec<String>>>,
+}
+
+impl Release {
+    fn new(tag: &str, script: String) -> Self {
+        let paths = Arc::new(Mutex::new(Vec::new()));
+        let (seen, tag) = (paths.clone(), json!({ "tag_name": tag }).to_string());
+        let url = fake_http(move |path| {
+            seen.lock().unwrap().push(path.to_owned());
+            match path {
+                "/repos/x/releases/latest" => (200, tag.clone()),
+                path if path.starts_with("/releases/download/")
+                    && path.ends_with("/install.sh") =>
+                {
+                    (200, script.clone())
+                }
+                _ => (404, String::new()),
+            }
+        });
+        let api = format!("{url}/repos/x/releases/latest");
+        Self { base: format!("{url}/releases"), api, paths }
+    }
+
+    fn paths(&self) -> Vec<String> {
+        self.paths.lock().unwrap().clone()
+    }
+}
+
+/// The API's path, and the installer's for `version`.
+const LATEST: &str = "/repos/x/releases/latest";
+fn installer(version: &str) -> String {
+    format!("/releases/download/v{version}/install.sh")
+}
+
+impl Setup {
+    /// A copy of this test's `atticdb` at `<dir>/atticdb`, with `dir` made. Returns its real
+    /// path, as `upgrade` prints it.
+    fn copy_binary(&self, dir: &str) -> PathBuf {
+        let dir = self.dir.0.join(dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("atticdb");
+        std::fs::copy(env!("CARGO_BIN_EXE_atticdb"), &exe).unwrap();
+        std::fs::canonicalize(exe).unwrap()
+    }
+
+    /// `TMPDIR` for `upgrade`, so a test sees what it leaves there.
+    fn tmp(&self) -> PathBuf {
+        let tmp = self.dir.0.join("tmp");
+        std::fs::create_dir_all(&tmp).unwrap();
+        tmp
+    }
+
+    /// Runs `<exe> upgrade args` against `release`, with `env` added. `PATH` holds `curl` and
+    /// the system's tools, for the stub.
+    fn upgrade(
+        &self,
+        exe: &Path,
+        release: &Release,
+        args: &[&str],
+        env: &[(&str, &str)],
+        stdin: &str,
+    ) -> Output {
+        let path = format!("{}:/bin:/usr/bin", self.path.to_str().unwrap());
+        let tmp = self.tmp();
+        let mut all = vec![
+            ("ATTICDB_DOWNLOAD_BASE", release.base.as_str()),
+            ("TMPDIR", tmp.to_str().unwrap()),
+        ];
+        all.extend_from_slice(env);
+        let args = [&["upgrade"], args].concat();
+        self.run_exe(exe, path.as_ref(), &release.api, &args, &all, stdin)
+    }
+
+    /// Starts the home's server, by a write that makes the home. Returns the data dir.
+    fn start_server(&self) -> PathBuf {
+        let args = ["fact", "set", "--key", "k", "--content", "v"];
+        let (code, out, err) = self.run("http://127.0.0.1:9/", &args, &[(OFF, "1")], "");
+        assert_eq!(code, Some(0), "{out}{err}");
+        let data = self.home().join("data");
+        assert!(support::locked(&data), "{out}{err}");
+        data
+    }
+}
+
+/// The names in `dir`, sorted.
+fn names(dir: &Path) -> Vec<String> {
+    let entries = std::fs::read_dir(dir).unwrap();
+    let mut names: Vec<String> =
+        entries.map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+    names.sort_unstable();
+    names
+}
+
+/// The plan `upgrade` prints first, for `exe` going to `to`.
+fn plan(exe: &Path, to: &str) -> String {
+    let exe = exe.display();
+    let current = atticdb::VERSION;
+    format!(
+        "Upgrade AtticDB:\n  from: {current}\n  to: {to}\n  \
+         notes: https://github.com/Clawdlinux/atticdb/releases/tag/v{to}\n  \
+         binary: {exe}, the old one kept as {exe}.prev\n{WARNING}\n"
+    )
+}
+
+/// `upgrade --yes` checks the API, then installs the release's `install.sh` pinned to it and
+/// to the binary's folder. The old binary is kept as `atticdb.prev`. It ends with the new
+/// binary's doctor. A check that failed within the hour doesn't stop it, and the temp file is
+/// gone.
+#[test]
+fn upgrade_installs_and_keeps_prev() {
+    let setup = Setup::new();
+    setup.make_home();
+    std::fs::write(setup.cache(), json!({"checked": now()}).to_string()).unwrap();
+    let exe = setup.copy_binary("bin2");
+    let old = std::fs::read(&exe).unwrap();
+    let release = Release::new("v9.9.9", stub(Stub::Install));
+    let (code, out, err) = setup.upgrade(&exe, &release, &["--yes"], &[], "");
+    assert_eq!(code, Some(0), "{out}{err}");
+    assert_eq!(release.paths(), [LATEST.to_owned(), installer("9.9.9")]);
+    assert!(out.starts_with(&plan(&exe, "9.9.9")), "{out}");
+    let installed = format!("Installed AtticDB 9.9.9 at {}.\n", exe.display());
+    assert!(out.contains(&installed), "{out}");
+    assert!(out.ends_with("new atticdb 9.9.9 doctor\n"), "the new binary's doctor: {out}");
+    assert!(!out.contains("Upgrade? [y/N]"), "{out}");
+
+    assert_eq!(std::fs::read(&exe).unwrap(), new_binary("9.9.9"));
+    let prev = exe.with_file_name("atticdb.prev");
+    assert_eq!(std::fs::read(&prev).unwrap(), old, "the old bytes");
+    assert_eq!(std::fs::metadata(&prev).unwrap().mode() & 0o777, 0o755);
+    let dir = exe.parent().unwrap();
+    let env = std::fs::read_to_string(dir.join("installer.env")).unwrap();
+    let base = &release.base;
+    let wanted = format!(
+        "ATTICDB_VERSION=9.9.9\nATTICDB_INSTALL_DIR={}\nATTICDB_DOWNLOAD_BASE={base}\n",
+        dir.display()
+    );
+    assert_eq!(env, wanted);
+    assert_eq!(names(dir), ["atticdb", "atticdb.prev", "installer.env"]);
+    assert!(names(&setup.tmp()).is_empty(), "the temp script is removed");
+    assert_eq!(setup.read_cache()["latest"], "9.9.9");
+}
+
+/// `--version` wins: no check, and the installer is pinned to it. A `v` is dropped. A version
+/// that isn't `x.y.z` is a usage error, with no request. So is a relative `ATTICDB_HOME`.
+#[test]
+fn upgrade_takes_version() {
+    let setup = Setup::new();
+    let exe = setup.copy_binary("bin2");
+    let release = Release::new("v9.9.9", stub(Stub::Install));
+    for bad in ["nightly", "1.2", "v1.2.3+x", "--yes", ""] {
+        let (code, out, err) = setup.upgrade(&exe, &release, &["--yes", "--version", bad], &[], "");
+        assert_eq!(code, Some(2), "{bad}: {out}{err}");
+        assert!(err.starts_with("atticdb: --version "), "{bad}: {err}");
+    }
+    // upgrade reads the home, so a relative one is a usage error too.
+    let rel = [("ATTICDB_HOME", "rel")];
+    let (code, _, err) = setup.upgrade(&exe, &release, &["--yes"], &rel, "");
+    assert_eq!((code, err.as_str()), (Some(2), "atticdb: ATTICDB_HOME must be an absolute path\n"));
+    assert_eq!(release.paths(), Vec::<String>::new());
+
+    let (code, out, err) =
+        setup.upgrade(&exe, &release, &["--version", "v0.0.7", "--yes"], &[], "");
+    assert_eq!(code, Some(0), "{out}{err}");
+    assert_eq!(release.paths(), [installer("0.0.7")], "no check");
+    assert!(out.starts_with(&plan(&exe, "0.0.7")), "{out}");
+    assert_eq!(std::fs::read(&exe).unwrap(), new_binary("0.0.7"));
+}
+
+/// The upgrade stops the home's server by the pid in `LOCK`. That server must first prove it
+/// is the one for this data dir. The lock is free when it returns. A `LOCK` held by something
+/// that isn't a server is never signalled: here that is this test process.
+#[test]
+fn upgrade_stops_server() {
+    let setup = Setup::new();
+    let data = setup.start_server();
+    let _holders = Holders(vec![data.clone()]);
+    let lock = std::fs::read_to_string(data.join("LOCK")).unwrap();
+    let pid = lock.strip_prefix("pid=").unwrap().split(' ').next().unwrap().to_owned();
+    let exe = setup.copy_binary("bin2");
+    let release = Release::new("v9.9.9", stub(Stub::Install));
+    let (code, out, err) = setup.upgrade(&exe, &release, &["--yes"], &[], "");
+    assert_eq!(code, Some(0), "{out}{err}");
+    assert!(out.contains(&format!("Stopped the server, pid {pid}.\n")), "{out}");
+    assert!(!support::locked(&data), "the lock is free: {out}{err}");
+
+    // A LOCK that names this process, held by it, with no server behind it.
+    let me = std::process::id();
+    let text = format!("pid={me} instance=0123 unix={}/no.sock tcp=none\n", data.display());
+    let file = std::fs::File::options().write(true).truncate(true).open(data.join("LOCK"));
+    let mut file = file.unwrap();
+    file.write_all(text.as_bytes()).unwrap();
+    file.lock().unwrap();
+    let exe = setup.copy_binary("bin3");
+    let (code, out, err) = setup.upgrade(&exe, &release, &["--yes"], &[], "");
+    assert_eq!(code, Some(0), "{out}{err}");
+    assert!(err.contains("atticdb: the server was not stopped: "), "{err}");
+    assert!(!out.contains("Stopped"), "{out}");
+    assert!(support::locked(&data));
+    drop(file);
+}
+
+/// An installer that fails leaves the binary as it was, also when it had replaced it. The
+/// `.prev` copy is removed, and the server keeps running.
+#[test]
+fn upgrade_keeps_binary_when_installer_fails() {
+    let setup = Setup::new();
+    let data = setup.start_server();
+    let _holders = Holders(vec![data.clone()]);
+    let lock = std::fs::read_to_string(data.join("LOCK")).unwrap();
+    let exe = setup.copy_binary("bin2");
+    let old = std::fs::read(&exe).unwrap();
+    let ino = std::fs::metadata(&exe).unwrap().ino();
+    for mode in [Stub::Fail, Stub::SwapThenFail] {
+        let release = Release::new("v9.9.9", stub(mode));
+        let (code, out, err) = setup.upgrade(&exe, &release, &["--yes"], &[], "");
+        assert_eq!(code, Some(1), "{mode:?}: {out}{err}");
+        assert!(err.contains("stub: checksum mismatch\n"), "{mode:?}: {err}");
+        let kept = format!(
+            "atticdb: the installer failed (exit status: 1). {} is unchanged.\n",
+            exe.display()
+        );
+        assert!(err.ends_with(&kept), "{mode:?}: {err}");
+        assert!(!out.contains("Installed"), "{mode:?}: {out}");
+        assert_eq!(std::fs::read(&exe).unwrap(), old, "{mode:?}");
+        let dir = exe.parent().unwrap();
+        assert_eq!(names(dir), ["atticdb", "installer.env"], "{mode:?}");
+        assert!(names(&setup.tmp()).is_empty(), "{mode:?}");
+        assert!(support::locked(&data), "{mode:?}: the server runs on");
+        assert_eq!(std::fs::read_to_string(data.join("LOCK")).unwrap(), lock, "{mode:?}");
+        std::fs::remove_file(dir.join("installer.env")).unwrap();
+    }
+    // Restored by a rename, so not the same file, but the same bytes and mode.
+    assert_ne!(std::fs::metadata(&exe).unwrap().ino(), ino);
+    assert_eq!(std::fs::metadata(&exe).unwrap().mode() & 0o777, 0o755);
+}
+
+/// Without a terminal on stdin and without `--yes`, it refuses with exit 2 before any request.
+#[test]
+fn upgrade_needs_yes_without_terminal() {
+    let setup = Setup::new();
+    let exe = setup.copy_binary("bin2");
+    let old = std::fs::read(&exe).unwrap();
+    let release = Release::new("v9.9.9", stub(Stub::Install));
+    for args in [&[][..], &["--version", "9.9.9"]] {
+        let (code, out, err) = setup.upgrade(&exe, &release, args, &[], "y\n");
+        assert_eq!((code, out.as_str(), err.as_str()), (Some(2), "", NEEDS_TERMINAL), "{args:?}");
+    }
+    assert_eq!(release.paths(), Vec::<String>::new());
+    assert_eq!(std::fs::read(&exe).unwrap(), old);
+    assert_eq!(names(exe.parent().unwrap()), ["atticdb"]);
+}
+
+/// With a terminal, it shows the plan and asks. Only y or yes installs. No answer is exit 2.
+#[test]
+fn upgrade_asks_first() {
+    let setup = Setup::new();
+    let exe = setup.copy_binary("bin2");
+    let old = std::fs::read(&exe).unwrap();
+    let release = Release::new("v9.9.9", stub(Stub::Install));
+    let terminal = [("ATTICDB_SETUP_INTERACTIVE", "1")];
+    for answer in ["n\n", "\n", "maybe\n"] {
+        let (code, out, err) = setup.upgrade(&exe, &release, &[], &terminal, answer);
+        assert_eq!(code, Some(0), "{answer:?}: {out}{err}");
+        let asked = format!("{}Upgrade? [y/N] Nothing changed.\n", plan(&exe, "9.9.9"));
+        assert_eq!(out, asked, "{answer:?}");
+    }
+    let (code, out, err) = setup.upgrade(&exe, &release, &[], &terminal, "");
+    assert_eq!(code, Some(2), "{out}{err}");
+    assert_eq!(err, "atticdb: no answer on stdin. atticdb upgrade needs a terminal, or --yes.\n");
+    assert_eq!(std::fs::read(&exe).unwrap(), old);
+    assert_eq!(release.paths(), vec![LATEST.to_owned(); 4], "no installer yet");
+
+    let (code, out, err) = setup.upgrade(&exe, &release, &[], &terminal, "Yes\n");
+    assert_eq!(code, Some(0), "{out}{err}");
+    assert!(out.contains("Upgrade? [y/N] Installed AtticDB 9.9.9 at "), "{out}");
+    assert_eq!(std::fs::read(&exe).unwrap(), new_binary("9.9.9"));
+}
+
+/// When the latest release isn't newer, it says so and exits 0, with no installer. It asks
+/// the API even when the cache holds a newer release from the last day.
+#[test]
+fn upgrade_up_to_date() {
+    let setup = Setup::new();
+    setup.make_home();
+    let exe = setup.copy_binary("bin2");
+    let current = atticdb::VERSION;
+    // A source build counts as older than its own release, so only 0.0.0 is not newer.
+    let latest: &[&str] = if current.ends_with("+dev") { &["0.0.0"] } else { &["0.0.0", current] };
+    for latest in latest {
+        std::fs::write(setup.cache(), json!({"checked": now(), "latest": "9.9.9"}).to_string())
+            .unwrap();
+        let release = Release::new(&format!("v{latest}"), stub(Stub::Install));
+        let (code, out, err) = setup.upgrade(&exe, &release, &["--yes"], &[], "");
+        assert_eq!((code, err.as_str()), (Some(0), ""), "{latest}: {out}");
+        assert_eq!(out, format!("AtticDB {current} is the latest.\n"), "{latest}");
+        assert_eq!(release.paths(), [LATEST], "{latest}");
+        assert_eq!(setup.read_cache()["latest"], *latest);
+    }
+    assert_eq!(names(exe.parent().unwrap()), ["atticdb"]);
+}
+
+/// A failed check prints 1 error line and exits 1, with no installer. The off switches don't
+/// apply, as the user asked to upgrade.
+#[test]
+fn upgrade_reports_a_failed_check() {
+    let setup = Setup::new();
+    let exe = setup.copy_binary("bin2");
+    let release = Release::new("nightly", stub(Stub::Install));
+    for env in [&[][..], &[(OFF, "1"), ("CI", "1")]] {
+        let (code, out, err) = setup.upgrade(&exe, &release, &["--yes"], env, "");
+        assert_eq!((code, out.as_str()), (Some(1), ""), "{env:?}: {err}");
+        assert_eq!(err.lines().count(), 1, "{env:?}: {err}");
+        assert!(err.starts_with("atticdb: cannot find the latest release"), "{env:?}: {err}");
+    }
+    assert_eq!(release.paths(), [LATEST, LATEST]);
+    assert_eq!(names(exe.parent().unwrap()), ["atticdb"]);
+}
+
+/// A binary under `.cargo/bin`, `/opt/homebrew/` or a Homebrew `Cellar` gets its tool's
+/// command, and exit 1. Nothing runs: no request, and no change. A symlink into the Cellar
+/// counts as the Cellar.
+#[test]
+fn upgrade_points_cargo_and_brew_to_their_tool() {
+    let setup = Setup::new();
+    let cargo =
+        "Installed by cargo. Run: cargo install --git https://github.com/Clawdlinux/atticdb \
+                 atticdb --locked\n";
+    let brew = "Installed by Homebrew. Run: brew upgrade atticdb\n";
+    let cellar = setup.copy_binary("usr/local/Cellar/atticdb/0.1.0/bin");
+    let link = setup.dir.0.join("usr/local/bin");
+    std::fs::create_dir_all(&link).unwrap();
+    std::os::unix::fs::symlink(&cellar, link.join("atticdb")).unwrap();
+    let rows = [
+        (setup.copy_binary("h/.cargo/bin"), cargo),
+        (setup.copy_binary("opt/homebrew/bin"), brew),
+        (cellar.clone(), brew),
+        (link.join("atticdb"), brew),
+    ];
+    let release = Release::new("v9.9.9", stub(Stub::Install));
+    for (exe, said) in rows {
+        let old = std::fs::read(&exe).unwrap();
+        let (code, out, err) = setup.upgrade(&exe, &release, &["--yes"], &[], "");
+        assert_eq!((code, out.as_str(), err.as_str()), (Some(1), said, ""), "{}", exe.display());
+        assert_eq!(std::fs::read(&exe).unwrap(), old);
+        assert_eq!(names(exe.parent().unwrap()), ["atticdb"], "{}", exe.display());
+    }
+    assert_eq!(release.paths(), Vec::<String>::new());
 }

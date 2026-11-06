@@ -23,6 +23,7 @@ const USAGE: &str = "usage:
   atticdb mcp <connect>
   atticdb setup [--yes] [--harness <list>] [--no-hook] [--notes ask|auto] [--dry-run]
   atticdb doctor [--harness <list>]
+  atticdb upgrade [--yes] [--version <v>]
   atticdb connect <vscode|copilot> [--force] [--dry-run]
   atticdb connect <antigravity|claude-desktop> [--force] [--dry-run]
   atticdb connect <claude-code|codex|gemini> [--force] [--no-hook] [--notes ask|auto] [--dry-run]
@@ -71,13 +72,16 @@ const USAGE: &str = "usage:
   Desktop. It asks which to connect and shows the plan. Then it connects them and checks each.
   See atticdb setup --help.
   doctor checks the install. It writes nothing but the daily update check's cache. See
-  atticdb doctor --help.";
+  atticdb doctor --help.
+  upgrade installs the latest release, or --version, over this binary with the release's
+  install.sh. It keeps the old binary as atticdb.prev. Then it stops the server and runs
+  doctor. It asks first, unless --yes. Without a terminal on stdin, it needs --yes.";
 
 /// Commands that use the home. A relative `ATTICDB_HOME` fails them with exit 2, so none falls
 /// back to the default home. The hooks exit 0 for it, as for any error.
-const HOME_COMMANDS: [&str; 13] = [
+const HOME_COMMANDS: [&str; 14] = [
     "mcp", "connect", "setup", "doctor", "studio", "append", "recent", "search", "fact", "tree",
-    "file", "forget", "export",
+    "file", "forget", "export", "upgrade",
 ];
 
 /// Flags of every command that talks to a server as a tenant. The first 5 pick the store.
@@ -148,6 +152,10 @@ fn main() -> ExitCode {
                 Some(0)
             }
             "doctor" => flags(rest, &["--harness"], &[]).and_then(doctor),
+            "upgrade" => flags(rest, &["--version"], &["--yes"]).map(|flags| {
+                let version = flags.get("--version").map(String::as_str);
+                atticdb::upgrade::upgrade(flags.contains_key("--yes"), version)
+            }),
             "disconnect" => match rest {
                 [name] => Harness::parse(name).map(atticdb::connect::disconnect),
                 _ => None,
