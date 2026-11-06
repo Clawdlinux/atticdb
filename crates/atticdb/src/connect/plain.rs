@@ -3,13 +3,12 @@
 //!
 //! People edit these files by hand, so [`crate::jsonedit`] edits them and changes only the
 //! bytes it must. A file that isn't strict JSON is never rewritten. Its line says what to do
-//! by hand. The entry follows Copilot CLI's rules: an older one is updated, and one with
-//! connection flags is replaced only with `--force`.
+//! by hand. The entry follows Copilot CLI's rules: an older one is updated in place, and one
+//! with connection flags is replaced only with `--force`. Disconnect removes only the entry,
+//! so an emptied `mcpServers` stays as `{}`.
 
 use super::claude::{done, edit_file, split, Edit, Part};
-use super::{
-    absolute_env, add_or_update, binary, check_flags, moved_home, Harness, Mode, Report, State,
-};
+use super::{absolute_env, binary, check_flags, moved_home, Harness, Mode, Report, State};
 use crate::home::user_home;
 use crate::jsonedit;
 use serde_json::Value;
@@ -95,33 +94,32 @@ pub(super) fn disconnect(harness: Harness) -> u8 {
     Report { lines, ..Report::default() }.print()
 }
 
-/// `text` with `entry` as `harness`'s AtticDB entry. One that differs is removed, and `entry`
-/// goes last in the section. The section is created when missing.
+/// `text` with `entry` as `harness`'s AtticDB entry. One that differs is replaced where it
+/// stands, so the other servers keep their places and bytes. A new one goes last in the
+/// section, which is created when missing.
 fn set_entry(harness: Harness, text: &str, entry: &Value) -> Edit {
     let section = harness.section();
-    let (without, had) = jsonedit::remove_key(text, &[section], "atticdb")?;
-    if had {
-        let root: Value = serde_json::from_str(text).unwrap_or_default();
-        if root[section]["atticdb"] == *entry {
-            return done(text.to_owned(), State::Unchanged, "unchanged");
-        }
+    let (replaced, had) = jsonedit::replace_key(text, &[section], "atticdb", entry)?;
+    if !had {
+        let text = jsonedit::add_key(text, &[section], "atticdb", entry)?;
+        return done(text, State::Added, "added");
     }
-    let text = jsonedit::add_key(&without, &[section], "atticdb", entry)?;
-    done(text, add_or_update(had), if had { "updated" } else { "added" })
+    // `text` is strict JSON here, as `replace_key` parsed it.
+    let root: Value = serde_json::from_str(text).unwrap_or_default();
+    if root[section]["atticdb"] == *entry {
+        return done(text.to_owned(), State::Unchanged, "unchanged");
+    }
+    done(replaced, State::Updated, "updated")
 }
 
-/// `text` without `harness`'s AtticDB entry. A section this empties goes too, so a config
-/// that had none before connect reads as it did.
+/// `text` without `harness`'s AtticDB entry. Only the `atticdb` key goes, never the section.
+/// So a user's own empty section comes back byte for byte. A config that had no section
+/// before connect keeps an empty one.
 fn drop_entry(harness: Harness, text: &str) -> Edit {
-    let section = harness.section();
-    let (text, had) = jsonedit::remove_key(text, &[section], "atticdb")?;
-    if !had {
-        return done(text, State::Unchanged, "not found");
+    let (text, had) = jsonedit::remove_key(text, &[harness.section()], "atticdb")?;
+    if had {
+        done(text, State::Removed, "removed")
+    } else {
+        done(text, State::Unchanged, "not found")
     }
-    let root: Value = serde_json::from_str(&text).unwrap_or_default();
-    let text = match root[section].as_object() {
-        Some(servers) if servers.is_empty() => jsonedit::remove_key(&text, &[], section)?.0,
-        _ => text,
-    };
-    done(text, State::Removed, "removed")
 }

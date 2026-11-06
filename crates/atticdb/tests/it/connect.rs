@@ -2285,13 +2285,19 @@ fn connect_adds_entry_for_entry_only_apps() {
     }
 }
 
-/// Disconnect gives back the user's file byte for byte, with or without `mcpServers`.
+/// Disconnect gives back the user's file byte for byte, its own empty `mcpServers` too. It
+/// never removes `mcpServers`, so a file that had none keeps an empty one.
 #[test]
 fn connect_keeps_user_entries() {
     let it = Plain::new();
+    let empty_servers = "{\n  \"mcpServers\": {}\n}\n";
     let no_servers = "{\n  \"preferences\": {\n    \"quickEntryShortcut\": \"off\"\n  }\n}\n";
+    let kept_empty = "{\n  \"preferences\": {\n    \"quickEntryShortcut\": \"off\"\n  },\n  \
+                      \"mcpServers\": {}\n}\n";
+    let cases =
+        [(PLAIN_CONFIG, PLAIN_CONFIG), (empty_servers, empty_servers), (no_servers, kept_empty)];
     for (app, _) in plain_apps() {
-        for text in [PLAIN_CONFIG, no_servers] {
+        for (text, after) in cases {
             it.write(app, text);
             let (code, out) = it.run(&["connect", app]);
             assert_eq!(code, Some(0), "{app}: {out}");
@@ -2300,9 +2306,42 @@ fn connect_keeps_user_entries() {
             assert_eq!(code, Some(0), "{app}: {out}");
             let shown = it.config(app).display().to_string();
             assert!(out.starts_with(&format!("MCP entry: removed ({shown}, backup: ")), "{out}");
-            assert_eq!(std::fs::read_to_string(it.config(app)).unwrap(), text, "{app}");
+            assert_eq!(std::fs::read_to_string(it.config(app)).unwrap(), after, "{app}");
             let (code, out) = it.run(&["disconnect", app]);
             assert_eq!((code, out), (Some(0), format!("MCP entry: not found ({shown})\n")));
+        }
+    }
+}
+
+/// An older entry is updated where it stands: it stays first, and the user's server after it
+/// keeps its bytes. So does one with flags, replaced with `--force`.
+#[test]
+fn connect_updates_entries_in_place() {
+    let it = Plain::new();
+    for (app, _) in plain_apps() {
+        for (args, force) in
+            [(r#"["mcp", "--agent", "APP"]"#, false), (r#"["mcp", "--url", "/x"]"#, true)]
+        {
+            let args = args.replace("APP", app);
+            let config = format!(
+                "{{\n  \"mcpServers\": {{\n    \"atticdb\": {{\n      \"args\": {args},\n      \
+                 \"command\": \"/old/atticdb\"\n    }},\n    \"github\": {{\"command\": \"npx\", \
+                 \"args\": [\"-y\"]}}\n  }}\n}}\n"
+            );
+            it.write(app, &config);
+            let mut run = vec!["connect", app];
+            run.extend(force.then_some("--force"));
+            let (code, out) = it.run(&run);
+            assert_eq!(code, Some(0), "{app}: {out}");
+            assert!(out.starts_with("MCP entry: updated ("), "{app}: {out}");
+            let block = format!(
+                "    \"atticdb\": {{\n      \"args\": [\n        \"mcp\",\n        \"--agent\",\n        \
+                 \"{app}\"\n      ],\n      \"command\": {}\n    }},\n",
+                json!(it.exe)
+            );
+            let github = "    \"github\": {\"command\": \"npx\", \"args\": [\"-y\"]}\n  }\n}\n";
+            let want = format!("{{\n  \"mcpServers\": {{\n{block}{github}");
+            assert_eq!(std::fs::read_to_string(it.config(app)).unwrap(), want, "{app} {force}");
         }
     }
 }
