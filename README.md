@@ -44,6 +44,50 @@ cargo install --git https://github.com/Clawdlinux/atticdb atticdb --locked   # p
 
 The downloads badge counts release archive downloads. Our own install tests are left out. A daily workflow updates it.
 
+## Updating
+
+`atticdb doctor` and `atticdb setup` check for a new release at most once a day. When one is out, they end with:
+
+```
+AtticDB 0.4.0 is out (you have 0.3.0). Run: atticdb upgrade
+```
+
+The notice never changes their exit code. A failed check prints nothing, and the next try waits 1 h.
+The hook, `atticdb mcp`, `atticdb serve` and the other commands never check.
+
+```sh
+atticdb upgrade                   # shows the plan, then asks
+atticdb upgrade --yes             # doesn't ask. Needed when stdin is not a terminal
+atticdb upgrade --version 0.3.0   # installs this release, even an older one
+```
+
+It runs the new release's own `install.sh`, which checks the download against `SHA256SUMS`.
+The old binary stays beside the new one as `atticdb.prev`.
+Then it stops the running server and runs `atticdb doctor` from the new binary, which starts the new server.
+It stops the server only after the server proves it serves this home's store. Else it says to stop it by hand.
+The plan always warns that a release may change the store format. Then the old binary can't open the store after the first write.
+
+To roll back with the default install dir:
+
+```sh
+mv ~/.local/bin/atticdb.prev ~/.local/bin/atticdb
+```
+
+Then stop the server as in [Uninstall](#uninstall) step 2. The next AtticDB call starts the old one.
+Each upgrade replaces `atticdb.prev`. A failed upgrade keeps the earlier one.
+
+To turn the daily check off, set `ATTICDB_NO_UPDATE_CHECK` to any value but empty or `0`.
+Any `CI` variable, even an empty one, turns it off too.
+Builds from source, whose version ends in `+dev`, still check but never print the notice.
+`atticdb upgrade` ignores the off switches, since you asked. With `--version` it doesn't check at all.
+
+What's sent: 1 `GET` to `https://api.github.com/repos/Clawdlinux/atticdb/releases/latest`, by `curl` with a 3 s limit.
+It carries no token, no ID and no data about you. GitHub sees your IP address, as for any download.
+The answer is cached in the home as `update-check.json`.
+
+If cargo installed `atticdb`, `upgrade` prints the `cargo install` command to run instead. If Homebrew did, it prints `brew upgrade atticdb`.
+Neither runs anything. On Windows, `upgrade` prints the manual steps, as in Install above.
+
 ## Quick start
 
 ```sh
@@ -211,7 +255,7 @@ AtticDB does a few things on purpose. We add features when people ask for them.
 
 ## Docs
 
-- [atticdb](crates/atticdb/README.md): server, HTTP API, MCP, studio, `tree`, `forget`, `export`, `stats`, `load`, `verify`, `dump` and `recover`. It also has these:
+- [atticdb](crates/atticdb/README.md): server, HTTP API, MCP, studio, `tree`, `forget`, `export`, `upgrade`, `stats`, `load`, `verify`, `dump` and `recover`. It also has these:
   - [Run a server by hand](crates/atticdb/README.md#run-a-server-by-hand), [Keys](crates/atticdb/README.md#keys) and [Where to keep the data directory](crates/atticdb/README.md#where-to-keep-the-data-directory).
   - [MCP](crates/atticdb/README.md#atticdb-mcp), [Secrets](crates/atticdb/README.md#secrets), [Shell verbs](crates/atticdb/README.md#shell-verbs) and [Connect](crates/atticdb/README.md#atticdb-connect-and-atticdb-disconnect).
   - [Studio](crates/atticdb/README.md#atticdb-studio), [`atticdb export`](crates/atticdb/README.md#atticdb-export) and [Windows](crates/atticdb/README.md#windows).
