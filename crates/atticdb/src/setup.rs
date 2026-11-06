@@ -32,11 +32,13 @@ pub struct Flags {
 pub const USAGE: &str =
     "usage: atticdb setup [--yes] [--harness <list>] [--no-hook] [--notes ask|auto] [--dry-run]
 
-Finds VS Code, Copilot CLI, Claude Code and Codex, asks which to connect, and shows the plan.
+Finds VS Code, Copilot CLI, Claude Code, Codex, Gemini CLI, Antigravity and Claude Desktop.
+It asks which to connect, and shows the plan.
 Then it connects them, checks each one, and says what to do next.
 
   --yes             take every default, and don't ask Apply?
-  --harness <list>  connect these apps, a comma list of copilot, vscode, claude-code and codex
+  --harness <list>  connect these apps, a comma list of copilot, vscode, claude-code, codex,
+                    gemini, antigravity and claude-desktop
   --no-hook         no chat-start memory in Claude Code and Codex, and no saved compaction summaries
   --notes ask|auto  ask before saving notes in Claude Code and Codex, or don't (the default)
   --dry-run         print the plan, and write nothing
@@ -94,11 +96,19 @@ pub(crate) fn typed() -> String {
 /// server that is still starting, such as the one the hook check started, gets 13 s.
 const STORE_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// The order apps are listed and connected in: the Copilot ones, then Claude Code and Codex.
-pub(crate) const ORDER: [Harness; 4] =
-    [Harness::Copilot, Harness::Vscode, Harness::ClaudeCode, Harness::Codex];
+/// The order apps are listed and connected in: the Copilot ones, Claude Code and Codex, then
+/// the newer apps.
+pub(crate) const ORDER: [Harness; 7] = [
+    Harness::Copilot,
+    Harness::Vscode,
+    Harness::ClaudeCode,
+    Harness::Codex,
+    Harness::Gemini,
+    Harness::Antigravity,
+    Harness::ClaudeDesktop,
+];
 
-/// The apps in a comma list of `vscode`, `copilot`, `claude-code` and `codex`, in [`ORDER`].
+/// The apps in a comma list of their names, such as `vscode` and `claude-code`, in [`ORDER`].
 /// `None` when a name isn't one of those.
 pub fn apps(list: &str) -> Option<Vec<Harness>> {
     let mut chosen = Vec::new();
@@ -110,12 +120,7 @@ pub fn apps(list: &str) -> Option<Vec<Harness>> {
 
 /// The app's name in sentences.
 pub(crate) fn title(harness: Harness) -> &'static str {
-    match harness {
-        Harness::Vscode => "VS Code",
-        Harness::Copilot => "Copilot CLI",
-        Harness::ClaudeCode => "Claude Code",
-        Harness::Codex => "Codex",
-    }
+    harness.title()
 }
 
 /// Runs `atticdb setup`. Returns the exit code: 0 when every chosen app connected with no
@@ -229,16 +234,18 @@ fn choose(
             let found: Vec<Harness> = ORDER.into_iter().filter(|h| connect::detect(*h)).collect();
             if found.is_empty() {
                 println!(
-                    "atticdb found no apps: none of VS Code, Copilot CLI, Claude Code or Codex has \
-                     a config dir, and none of code, copilot, claude or codex is on PATH. \
-                     Install one, or name it with --harness.\n{}",
+                    "atticdb found no apps: none of VS Code, Copilot CLI, Claude Code, Codex, \
+                     Gemini CLI, Antigravity or Claude Desktop has a config dir. None of code, \
+                     copilot, claude, codex or gemini is on PATH. Install one, or name it with \
+                     --harness.\n{}",
                     try_shell(&typed())
                 );
                 return Ok(None);
             }
             let names: Vec<&str> = found.iter().map(|harness| harness.name()).collect();
             let prompt = format!("Which apps? [{}] ", names.join(","));
-            let hint = "Answer with a comma list of copilot, vscode, claude-code and codex.";
+            let hint = "Answer with a comma list of copilot, vscode, claude-code, codex, gemini, \
+                        antigravity and claude-desktop.";
             if ask {
                 asker.ask(&prompt, found, apps, hint)?
             } else {
@@ -379,11 +386,18 @@ fn apply(chosen: &[(Harness, Options)]) -> u8 {
                 }
             }
         }
-        // Codex on Windows has no hook to check.
+        // Codex on Windows has no hook to check. Antigravity and Claude Desktop have none.
         let codex_hook = !(cfg!(windows) && harness == Harness::Codex);
-        if (options.hook && codex_hook) || matches!(harness, Harness::Vscode | Harness::Copilot) {
+        let own_hook = matches!(harness, Harness::ClaudeCode | Harness::Codex | Harness::Gemini);
+        if (options.hook && codex_hook && own_hook)
+            || matches!(harness, Harness::Vscode | Harness::Copilot)
+        {
             let hook = cwd.clone().and_then(|cwd| check_hook(harness, &cwd));
             failed.extend(hook.err().map(|why| format!("hook: {why}")));
+        }
+        // They read their config only at start.
+        if matches!(harness, Harness::Antigravity | Harness::ClaudeDesktop) {
+            next.extend(report.next.iter().cloned());
         }
         let checked = || cwd.clone().and_then(|cwd| check_store(&cwd));
         let store = store.get_or_insert_with(checked);
@@ -452,10 +466,13 @@ pub(crate) fn check_hook(harness: Harness, cwd: &Path) -> Result<(), String> {
     // The harness sends `cwd` as a JSON string, which must be UTF-8.
     let cwd = cwd.to_str().ok_or("the current dir is not UTF-8, so it can't go in JSON")?;
     let input = match harness {
-        Harness::ClaudeCode | Harness::Codex => {
+        Harness::ClaudeCode | Harness::Codex | Harness::Gemini => {
             json!({"cwd": cwd, "hook_event_name": "SessionStart"})
         }
-        Harness::Vscode | Harness::Copilot => json!({"cwd": cwd}),
+        // Antigravity and Claude Desktop have no hook, so they get the plain shape.
+        Harness::Vscode | Harness::Copilot | Harness::Antigravity | Harness::ClaudeDesktop => {
+            json!({"cwd": cwd})
+        }
     };
     let mut command = Command::new(exe);
     command.args(["hook", "session-start", "--harness", harness.name()]);

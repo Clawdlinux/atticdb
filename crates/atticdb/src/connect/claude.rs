@@ -879,7 +879,7 @@ impl From<jsonedit::Error> for Refused {
 }
 
 /// A `Done` for `text` that did `state` and says `said`.
-fn done(text: String, state: State, said: &str) -> Edit {
+pub(super) fn done(text: String, state: State, said: &str) -> Edit {
     Ok(Done { text, said: said.into(), state, by_hand: false })
 }
 

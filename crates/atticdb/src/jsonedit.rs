@@ -179,6 +179,33 @@ pub fn remove_key(text: &str, path: &[&str], key: &str) -> Result<(String, bool)
     Ok((edited, true))
 }
 
+/// Adds the member `key: value` as the last one of the object at `path`. Missing objects on
+/// the way are created. A `key` already there is refused, so remove it first to replace it.
+pub fn add_key(text: &str, path: &[&str], key: &str, value: &Value) -> Result<String, Error> {
+    let root = parse(text)?;
+    let mut want = original(text, path)?;
+    let (node, found) = walk(&root, path)?;
+    let edited = match path.get(found) {
+        Some(first) => {
+            let mut nested = Value::Object(Map::from_iter([(key.to_owned(), value.clone())]));
+            for inner in path[found + 1..].iter().rev() {
+                nested = Value::Object(Map::from_iter([((*inner).to_owned(), nested)]));
+            }
+            insert(text, node, Some(first), &nested)
+        }
+        None => match &node.kind {
+            Kind::Object(members) if members.iter().any(|member| member.key == key) => {
+                return Err(refused(path, format!("the object already holds {key:?}")));
+            }
+            Kind::Object(_) => insert(text, node, Some(key), value),
+            _ => return Err(wrong_type(path, "an object", node)),
+        },
+    };
+    put(&mut want, path, key, value)?;
+    check(&edited, &want, path)?;
+    Ok(edited)
+}
+
 /// The original text as serde_json reads it.
 fn original(text: &str, path: &[&str]) -> Result<Value, Error> {
     serde_json::from_str(text)
@@ -217,6 +244,24 @@ fn push(root: &mut Value, path: &[&str], value: &Value) -> Result<(), Error> {
     match at {
         Value::Array(items) => {
             items.push(value.clone());
+            Ok(())
+        }
+        _ => Err(refused(path, "the path differs in serde_json")),
+    }
+}
+
+/// The edit [`add_key`] makes, applied to a [`Value`].
+fn put(root: &mut Value, path: &[&str], key: &str, value: &Value) -> Result<(), Error> {
+    let mut at = root;
+    for step in path {
+        let Value::Object(map) = at else {
+            return Err(refused(path, "the path differs in serde_json"));
+        };
+        at = map.entry(*step).or_insert_with(|| Value::Object(Map::new()));
+    }
+    match at {
+        Value::Object(map) if !map.contains_key(key) => {
+            map.insert(key.to_owned(), value.clone());
             Ok(())
         }
         _ => Err(refused(path, "the path differs in serde_json")),
@@ -680,7 +725,7 @@ impl Parser<'_> {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
-    use super::{append, remove, remove_key};
+    use super::{add_key, append, remove, remove_key};
     use serde_json::{json, Value};
 
     /// An edit and its arguments, with values written as JSON.
@@ -1224,5 +1269,40 @@ mod tests {
             remove(&unhooked, &["permissions", "allow"], |v| *v == tool).unwrap();
         assert_eq!(removed, 1, "settings: 1 tool removed");
         assert_eq!(restored, SETTINGS, "settings: byte-identical after removing both");
+    }
+
+    /// A Claude Desktop config with 1 server, and one with no `mcpServers`.
+    const DESKTOP: &str = "{\n  \"mcpServers\": {\n    \"github\": {\n      \"command\": \"npx\",\n      \
+                           \"args\": [\"-y\", \"server-github\"]\n    }\n  },\n  \"preferences\": {}\n}\n";
+    const NO_SERVERS: &str = "{\n  \"preferences\": {\n    \"theme\": \"dark\"\n  }\n}\n";
+
+    #[test]
+    fn add_key_then_remove_key_restores_a_config() {
+        let entry = json!({"command": "/opt/atticdb", "args": ["mcp"]});
+        let added = add_key(DESKTOP, &["mcpServers"], "atticdb", &entry).unwrap();
+        let block =
+            "    },\n    \"atticdb\": {\n      \"args\": [\n        \"mcp\"\n      ],\n      \
+                     \"command\": \"/opt/atticdb\"\n    }\n  },\n";
+        assert!(added.contains(block), "the entry follows its sibling's layout: {added}");
+        let (restored, had) = remove_key(&added, &["mcpServers"], "atticdb").unwrap();
+        assert_eq!((restored.as_str(), had), (DESKTOP, true), "byte-identical after removing");
+
+        let added = add_key(NO_SERVERS, &["mcpServers"], "atticdb", &entry).unwrap();
+        let root: Value = serde_json::from_str(&added).unwrap();
+        assert_eq!(root["mcpServers"], json!({"atticdb": entry}), "the object is created");
+        let (emptied, _) = remove_key(&added, &["mcpServers"], "atticdb").unwrap();
+        let (restored, had) = remove_key(&emptied, &[], "mcpServers").unwrap();
+        assert_eq!((restored.as_str(), had), (NO_SERVERS, true), "byte-identical after removing");
+
+        let one_line = add_key("{}", &["a", "b"], "c", &json!(1)).unwrap();
+        assert_eq!(one_line, r#"{"a": {"b":{"c":1}}}"#, "a 1-line file stays 1 line");
+        let err = add_key(r#"{"a": {"c": 2}}"#, &["a"], "c", &json!(1)).unwrap_err();
+        let want = "refused the edit at [\"a\"], as the result did not verify: the object \
+                    already holds \"c\"";
+        assert_eq!(err.to_string(), want, "a key already there");
+        let err = add_key(r#"{"a": []}"#, &["a"], "c", &json!(1)).unwrap_err();
+        assert_eq!(err.to_string(), "[\"a\"] should be an object but is an array");
+        let err = add_key("{\n  // no\n}\n", &["a"], "c", &json!(1)).unwrap_err();
+        assert!(err.to_string().starts_with("invalid JSON at byte 4"), "{err}");
     }
 }

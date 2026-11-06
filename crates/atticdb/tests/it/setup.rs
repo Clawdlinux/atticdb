@@ -870,3 +870,114 @@ fn doctor_checks_an_install_and_writes_nothing() {
     let others = dir.0.join("other");
     assert!(!others.join("copilot.argv").exists() && !others.join("code.argv").exists());
 }
+
+/// The entry-only apps on this OS: name, name in sentences, config. Claude Desktop has no
+/// Linux app.
+fn plain_apps(home: &Path) -> Vec<(&'static str, &'static str, PathBuf)> {
+    let mut apps =
+        vec![("antigravity", "Antigravity", home.join(".gemini/antigravity/mcp_config.json"))];
+    if cfg!(target_os = "macos") {
+        let config = "Library/Application Support/Claude/claude_desktop_config.json";
+        apps.push(("claude-desktop", "Claude Desktop", home.join(config)));
+    }
+    apps
+}
+
+/// `--harness` for [`plain_apps`].
+fn plain_list(home: &Path) -> String {
+    plain_apps(home).iter().map(|(name, ..)| *name).collect::<Vec<_>>().join(",")
+}
+
+/// A `HOME` under `dir` with the dirs of Antigravity and Claude Desktop, and an empty `PATH`.
+fn plain_home(dir: &Path) -> (PathBuf, OsString) {
+    let home = dir.join("h");
+    for (.., config) in plain_apps(&home) {
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    }
+    std::fs::create_dir(dir.join("empty")).unwrap();
+    (home, OsString::from(dir.join("empty")))
+}
+
+/// Setup's plan lists each new app whose dir exists, and none that's missing. Applying
+/// connects Antigravity and Claude Desktop, checks each, and says to restart them. A rerun
+/// has nothing to restart.
+#[test]
+fn setup_detects_new_apps() {
+    let dir = Dir::new();
+    let (home, empty) = plain_home(&dir.0);
+    let _holders = Holders(vec![data_dir(&home)]);
+    let (code, out, err) = setup(&home, &dir.0, &empty, &[], &["--dry-run", "--yes"], "");
+    for (_, title, config) in plain_apps(&home) {
+        let plan = format!("\n{title}:\n  {}: add the MCP entry\n", config.display());
+        assert!(out.contains(&plan), "{title} {code:?}: {out}{err}");
+    }
+    // `~/.gemini` holds Antigravity's dir, so Gemini CLI is found too.
+    assert!(out.contains("\nGemini CLI:\n"), "{out}");
+    for app in ["Copilot CLI:", "VS Code:", "Claude Code:", "Codex:"] {
+        assert!(!out.contains(app), "{app}: {out}");
+    }
+    assert!(tree(&home).values().all(Option::is_none), "the dry run wrote nothing");
+
+    // Only Claude Desktop's dir, on macOS. Nothing on Linux.
+    let other = dir.0.join("o");
+    std::fs::create_dir(&other).unwrap();
+    let claude = plain_apps(&other).into_iter().find(|(name, ..)| *name == "claude-desktop");
+    if let Some((.., config)) = &claude {
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    }
+    let (_, out, err) = setup(&other, &dir.0, &empty, &[], &["--dry-run", "--yes"], "");
+    assert!(!out.contains("Antigravity:") && !out.contains("Gemini CLI:"), "{out}{err}");
+    assert_eq!(out.contains("\nClaude Desktop:\n"), claude.is_some(), "{out}{err}");
+
+    let args = ["--yes", "--harness", &plain_list(&home)];
+    let (code, out, err) = setup(&home, &dir.0, &empty, &[], &args, "");
+    assert_eq!(code, Some(0), "{out}{err}");
+    for (_, title, _) in plain_apps(&home) {
+        assert!(out.contains(&format!("\n  {title}: ok\n")), "{title}: {out}");
+        assert!(out.contains(&format!("\n  Restart {title} to load it.\n")), "{title}: {out}");
+    }
+    let (code, out, err) = setup(&home, &dir.0, &empty, &[], &args, "");
+    assert_eq!(code, Some(0), "{out}{err}");
+    assert!(!out.contains("Restart "), "{out}");
+}
+
+/// Doctor shows each connected new app's entry as ok, and an entry that runs a binary that
+/// is gone as stale.
+#[test]
+fn doctor_reports_new_apps() {
+    let dir = Dir::new();
+    let (home, empty) = plain_home(&dir.0);
+    let _holders = Holders(vec![data_dir(&home)]);
+    let list = plain_list(&home);
+    let args = ["--yes", "--harness", &list];
+    let (code, out, err) = setup(&home, &dir.0, &empty, &[], &args, "");
+    assert_eq!(code, Some(0), "{out}{err}");
+    let doctor = ["--harness", &list];
+    let (code, out, err) = atticdb("doctor", &home, &dir.0, &empty, &[], &doctor, "");
+    assert_eq!(code, Some(0), "{out}{err}");
+    for (_, title, _) in plain_apps(&home) {
+        let ok = format!("\n{title}:\n  parts: ok\n  binary: ok\n");
+        assert!(out.contains(&ok), "{title}: {out}");
+    }
+    assert!(!out.contains("hook:"), "no hook to check: {out}");
+    // Found, so listed without --harness too.
+    let (_, out, err) = atticdb("doctor", &home, &dir.0, &empty, &[], &[], "");
+    assert!(out.contains("\nAntigravity:\n  parts: ok\n"), "{out}{err}");
+
+    let exe = std::fs::canonicalize(env!("CARGO_BIN_EXE_atticdb")).unwrap();
+    for (.., config) in plain_apps(&home) {
+        let text = std::fs::read_to_string(&config).unwrap();
+        std::fs::write(&config, text.replace(exe.to_str().unwrap(), OLD)).unwrap();
+    }
+    let (code, out, err) = atticdb("doctor", &home, &dir.0, &empty, &[], &doctor, "");
+    assert_eq!(code, Some(1), "{out}{err}");
+    for (name, title, config) in plain_apps(&home) {
+        let fix = format!("run atticdb setup --harness {name}, or atticdb connect {name}");
+        let file = config.display();
+        let stale = format!(
+            "\n{title}:\n  parts: 1 would change, {fix}\n    {file}: update the MCP entry\n  \
+             binary: stale, {fix}\n    {file} runs {OLD}, which no longer exists\n"
+        );
+        assert!(out.contains(&stale), "{title}: {out}");
+    }
+}

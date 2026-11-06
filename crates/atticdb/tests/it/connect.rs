@@ -2184,3 +2184,248 @@ fn connect_codex_adds_its_parts() {
     }
     assert!(calls().iter().all(|call| *call == get), "only codex mcp get atticdb --json runs");
 }
+
+/// A home for the entry-only apps, Antigravity and Claude Desktop: an empty `HOME`, and a
+/// `PATH` with no programs.
+struct Plain {
+    dir: Dir,
+    exe: String,
+}
+
+impl Plain {
+    fn new() -> Self {
+        let dir = Dir::new();
+        std::fs::create_dir_all(dir.0.join("bin")).unwrap();
+        let exe = std::fs::canonicalize(env!("CARGO_BIN_EXE_atticdb")).unwrap();
+        Self { dir, exe: exe.to_str().unwrap().to_owned() }
+    }
+
+    /// Runs `atticdb` with `args`, and returns its exit code and output.
+    fn run(&self, args: &[&str]) -> (Option<i32>, String) {
+        let mut command = support::command(&self.exe);
+        command.args(args).current_dir(&self.dir.0).env("HOME", self.dir.0.join("h"));
+        command.env("PATH", self.dir.0.join("bin")).env_remove("ATTICDB_TOKEN");
+        let (status, out) = Process::start(command.stdin(Stdio::null())).wait();
+        (status.code(), out)
+    }
+
+    /// The config file of `app` under `HOME`.
+    fn config(&self, app: &str) -> std::path::PathBuf {
+        let home = self.dir.0.join("h");
+        match app {
+            "antigravity" => home.join(".gemini/antigravity/mcp_config.json"),
+            _ => home.join("Library/Application Support/Claude/claude_desktop_config.json"),
+        }
+    }
+
+    /// Writes `text` to `app`'s config, making its dir.
+    fn write(&self, app: &str, text: &str) {
+        let config = self.config(app);
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(config, text).unwrap();
+    }
+
+    /// `app`'s config, read as JSON.
+    fn read(&self, app: &str) -> Value {
+        serde_json::from_slice(&std::fs::read(self.config(app)).unwrap()).unwrap()
+    }
+
+    /// The entry AtticDB writes for `app`.
+    fn entry(&self, app: &str) -> Value {
+        json!({"command": self.exe, "args": ["mcp", "--agent", app]})
+    }
+}
+
+/// The entry-only apps on this OS, with their names in sentences. Claude Desktop has no Linux
+/// app.
+fn plain_apps() -> Vec<(&'static str, &'static str)> {
+    let mut apps = vec![("antigravity", "Antigravity")];
+    if cfg!(target_os = "macos") {
+        apps.push(("claude-desktop", "Claude Desktop"));
+    }
+    apps
+}
+
+/// A config as people keep it: 1 user server, with an inline array, and another key.
+const PLAIN_CONFIG: &str = r#"{
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"]
+    }
+  },
+  "preferences": {
+    "quickEntryShortcut": "off"
+  }
+}
+"#;
+
+/// Connect adds AtticDB's entry next to the user's server, and says to restart the app.
+#[test]
+fn connect_adds_entry_for_entry_only_apps() {
+    let it = Plain::new();
+    for (app, title) in plain_apps() {
+        it.write(app, PLAIN_CONFIG);
+        let (code, out) = it.run(&["connect", app]);
+        assert_eq!(code, Some(0), "{app}: {out}");
+        let shown = it.config(app).display().to_string();
+        assert!(out.starts_with(&format!("MCP entry: added ({shown}, backup: ")), "{app}: {out}");
+        assert!(out.ends_with(&format!(")\nRestart {title} to load it.\n")), "{app}: {out}");
+        let root = it.read(app);
+        assert_eq!(root["mcpServers"]["atticdb"], it.entry(app), "{app}");
+        let theirs =
+            json!({"command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"]});
+        assert_eq!(root["mcpServers"]["github"], theirs, "{app}");
+        assert_eq!(root["preferences"], json!({"quickEntryShortcut": "off"}), "{app}");
+    }
+    if !cfg!(target_os = "macos") {
+        let (code, out) = it.run(&["connect", "claude-desktop"]);
+        assert_eq!(code, Some(1), "{out}");
+        assert!(out.contains("Claude Desktop is only available on macOS and Windows"), "{out}");
+    }
+}
+
+/// Disconnect gives back the user's file byte for byte, with or without `mcpServers`.
+#[test]
+fn connect_keeps_user_entries() {
+    let it = Plain::new();
+    let no_servers = "{\n  \"preferences\": {\n    \"quickEntryShortcut\": \"off\"\n  }\n}\n";
+    for (app, _) in plain_apps() {
+        for text in [PLAIN_CONFIG, no_servers] {
+            it.write(app, text);
+            let (code, out) = it.run(&["connect", app]);
+            assert_eq!(code, Some(0), "{app}: {out}");
+            assert_eq!(it.read(app)["mcpServers"]["atticdb"], it.entry(app), "{app}");
+            let (code, out) = it.run(&["disconnect", app]);
+            assert_eq!(code, Some(0), "{app}: {out}");
+            let shown = it.config(app).display().to_string();
+            assert!(out.starts_with(&format!("MCP entry: removed ({shown}, backup: ")), "{out}");
+            assert_eq!(std::fs::read_to_string(it.config(app)).unwrap(), text, "{app}");
+            let (code, out) = it.run(&["disconnect", app]);
+            assert_eq!((code, out), (Some(0), format!("MCP entry: not found ({shown})\n")));
+        }
+    }
+}
+
+/// A rerun reports the entry unchanged, writes nothing, and asks for no restart.
+#[test]
+fn connect_is_idempotent_for_new_apps() {
+    let it = Plain::new();
+    for (app, _) in plain_apps() {
+        it.write(app, PLAIN_CONFIG);
+        assert_eq!(it.run(&["connect", app]).0, Some(0), "{app}");
+        let parent = it.config(app).parent().unwrap().to_owned();
+        let before = files(&parent);
+        let shown = it.config(app).display().to_string();
+        let (code, out) = it.run(&["connect", app]);
+        assert_eq!((code, out), (Some(0), format!("MCP entry: unchanged ({shown})\n")), "{app}");
+        let (code, out) = it.run(&["connect", app, "--dry-run"]);
+        assert_eq!((code, out), (Some(0), format!("{shown}: MCP entry unchanged\n")), "{app}");
+        assert_eq!(files(&parent), before, "{app}: nothing written");
+    }
+}
+
+/// An entry from an older binary is updated. One with connection flags is kept unless
+/// `--force`.
+#[test]
+fn connect_updates_stale_entries_for_new_apps() {
+    let it = Plain::new();
+    for (app, title) in plain_apps() {
+        let mut stale = it.entry(app);
+        stale["command"] = json!("/old/atticdb");
+        it.write(app, &json!({"mcpServers": {"atticdb": stale}}).to_string());
+        let (code, out) = it.run(&["connect", app]);
+        assert_eq!(code, Some(0), "{app}: {out}");
+        assert!(out.starts_with("MCP entry: updated (") && out.contains(title), "{app}: {out}");
+        assert_eq!(it.read(app)["mcpServers"]["atticdb"], it.entry(app), "{app}");
+
+        let flagged = json!({"command": it.exe, "args": ["mcp", "--url", "/old"]});
+        it.write(app, &json!({"mcpServers": {"atticdb": flagged}}).to_string());
+        let parent = it.config(app).parent().unwrap().to_owned();
+        let before = files(&parent);
+        let (code, out) = it.run(&["connect", app]);
+        assert_eq!(code, Some(1), "{app}: {out}");
+        let force = format!("atticdb connect {app} --force");
+        assert!(out.contains("uses --url /old.") && out.contains(&force), "{app}: {out}");
+        assert!(out.contains(&format!("quit {title}, then")), "{app}: {out}");
+        assert_eq!(files(&parent), before, "{app}: nothing written");
+        let (code, out) = it.run(&["connect", app, "--force"]);
+        assert_eq!(code, Some(0), "{app}: {out}");
+        assert_eq!(it.read(app)["mcpServers"]["atticdb"], it.entry(app), "{app}");
+    }
+}
+
+/// A config with a comment or a trailing comma is never rewritten. The report shows the
+/// entry to add by hand.
+#[test]
+fn connect_leaves_non_strict_json_alone() {
+    let it = Plain::new();
+    let texts = [
+        "{\n  // my servers\n  \"mcpServers\": {}\n}\n",
+        "{\n  \"mcpServers\": {\n    \"x\": {\"command\": \"x\"},\n  }\n}\n",
+    ];
+    for (app, title) in plain_apps() {
+        for text in texts {
+            it.write(app, text);
+            let parent = it.config(app).parent().unwrap().to_owned();
+            let before = files(&parent);
+            let (code, out) = it.run(&["connect", app]);
+            assert_eq!(code, Some(1), "{app}: {out}");
+            let shown = it.config(app).display().to_string();
+            assert!(out.starts_with(&format!("MCP entry: skipped, {shown}: ")), "{app}: {out}");
+            let by_hand = format!("Add \"atticdb\": {} to \"mcpServers\" by hand", it.entry(app));
+            assert!(out.contains(&by_hand), "{app}: {out}");
+            assert!(!out.contains(&format!("Restart {title}")), "{app}: {out}");
+            assert_eq!(files(&parent), before, "{app}: unchanged");
+            let (code, out) = it.run(&["disconnect", app]);
+            assert_eq!(code, Some(1), "{app}: {out}");
+            assert!(out.contains("Remove \"atticdb\" from \"mcpServers\" by hand"), "{out}");
+            assert_eq!(files(&parent), before, "{app}: unchanged by disconnect");
+        }
+    }
+}
+
+/// With the app's dir but no config, connect creates an owner-only config with the entry.
+#[test]
+fn connect_creates_missing_config() {
+    let it = Plain::new();
+    for (app, title) in plain_apps() {
+        let config = it.config(app);
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        let (code, out) = it.run(&["connect", app]);
+        assert_eq!(code, Some(0), "{app}: {out}");
+        let shown = config.display();
+        assert_eq!(out, format!("MCP entry: added ({shown})\nRestart {title} to load it.\n"));
+        assert_eq!(it.read(app), json!({"mcpServers": {"atticdb": it.entry(app)}}), "{app}");
+        assert_eq!(std::fs::metadata(&config).unwrap().mode() & 0o777, 0o600, "{app}");
+    }
+}
+
+/// Under `ATTICDB_HOME`, the entry passes it on.
+#[test]
+fn connect_new_apps_pass_the_home() {
+    let it = Plain::new();
+    let moved = it.dir.0.join("moved");
+    for (app, _) in plain_apps() {
+        let mut command = support::command(&it.exe);
+        command.args(["connect", app]).current_dir(&it.dir.0).env("HOME", it.dir.0.join("h"));
+        command.env("PATH", it.dir.0.join("bin")).env("ATTICDB_HOME", &moved);
+        let (status, out) = Process::start(command.stdin(Stdio::null())).wait();
+        assert_eq!(status.code(), Some(0), "{app}: {out}");
+        let mut entry = it.entry(app);
+        entry["env"] = json!({"ATTICDB_HOME": moved});
+        assert_eq!(it.read(app)["mcpServers"]["atticdb"], entry, "{app}");
+    }
+}
+
+/// Gemini CLI waits for its own parts.
+#[test]
+fn connect_gemini_is_not_supported_yet() {
+    let it = Plain::new();
+    for verb in ["connect", "disconnect"] {
+        let (code, out) = it.run(&[verb, "gemini"]);
+        assert_eq!(code, Some(1), "{verb}: {out}");
+        assert!(out.contains("gemini is not supported yet"), "{verb}: {out}");
+    }
+    assert!(!it.dir.0.join("h/.gemini").exists(), "nothing written");
+}

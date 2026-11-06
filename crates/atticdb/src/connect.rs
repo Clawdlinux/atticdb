@@ -1,12 +1,13 @@
 //! `atticdb connect` and `atticdb disconnect`: add or remove AtticDB's entry in a harness's
 //! user MCP config, and 2 Copilot files VS Code and Copilot CLI share: the `sessionStart`
 //! hook and the instructions file. Claude Code and Codex have their own parts, in [`claude`]
-//! and [`codex`]. The entry
+//! and [`codex`]. Antigravity and Claude Desktop get only their entry, by [`plain`]. The entry
 //! and the hook run the binary on the home, so they hold no token. The only paths they hold
 //! are the binary's and, under `ATTICDB_HOME`, the home's.
 
 mod claude;
 mod codex;
+mod plain;
 
 pub use claude::Notes;
 /// What to do after Codex's hook is added.
@@ -181,14 +182,28 @@ pub enum Harness {
     ClaudeCode,
     /// Codex, through its `config.toml` and `hooks.json`.
     Codex,
+    /// Gemini CLI, through its `settings.json`.
+    Gemini,
+    /// Antigravity's `mcp_config.json`, its MCP entry only.
+    Antigravity,
+    /// Claude Desktop's `claude_desktop_config.json`, its MCP entry only. macOS and Windows.
+    ClaudeDesktop,
 }
 
 /// The harnesses that share the Copilot hook and instructions files, which read 1 home.
 const COPILOT_SHARED: [Harness; 2] = [Harness::Vscode, Harness::Copilot];
 
 impl Harness {
-    /// Every harness.
-    pub const ALL: [Self; 4] = [Self::Vscode, Self::Copilot, Self::ClaudeCode, Self::Codex];
+    /// Every harness, the first 4 in the order they were added.
+    pub const ALL: [Self; 7] = [
+        Self::Vscode,
+        Self::Copilot,
+        Self::ClaudeCode,
+        Self::Codex,
+        Self::Gemini,
+        Self::Antigravity,
+        Self::ClaudeDesktop,
+    ];
 
     /// The harness called `name` on the command line.
     pub fn parse(name: &str) -> Option<Self> {
@@ -197,6 +212,9 @@ impl Harness {
             "copilot" => Some(Self::Copilot),
             "claude-code" => Some(Self::ClaudeCode),
             "codex" => Some(Self::Codex),
+            "gemini" => Some(Self::Gemini),
+            "antigravity" => Some(Self::Antigravity),
+            "claude-desktop" => Some(Self::ClaudeDesktop),
             _ => None,
         }
     }
@@ -208,6 +226,22 @@ impl Harness {
             Self::Copilot => "copilot",
             Self::ClaudeCode => "claude-code",
             Self::Codex => "codex",
+            Self::Gemini => "gemini",
+            Self::Antigravity => "antigravity",
+            Self::ClaudeDesktop => "claude-desktop",
+        }
+    }
+
+    /// The app's name in sentences.
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Vscode => "VS Code",
+            Self::Copilot => "Copilot CLI",
+            Self::ClaudeCode => "Claude Code",
+            Self::Codex => "Codex",
+            Self::Gemini => "Gemini CLI",
+            Self::Antigravity => "Antigravity",
+            Self::ClaudeDesktop => "Claude Desktop",
         }
     }
 
@@ -218,12 +252,17 @@ impl Harness {
             Self::Copilot => "copilot",
             Self::ClaudeCode => "claude-code",
             Self::Codex => "codex",
+            Self::Gemini => "gemini",
+            Self::Antigravity => "antigravity",
+            Self::ClaudeDesktop => "claude-desktop",
         }
     }
 
     /// The config file. VS Code's lives in its user profile. Copilot's in `$COPILOT_HOME`.
     /// Claude Code's is `.claude.json`, which only the `claude` CLI writes. Codex's is
-    /// `config.toml`, which isn't JSON, so only [`codex`] reads it.
+    /// `config.toml`, which isn't JSON, so only [`codex`] reads it. Gemini CLI's and
+    /// Antigravity's are under `~/.gemini`. Claude Desktop's is in its app data dir, which
+    /// only macOS and Windows have.
     pub(crate) fn file(self) -> Result<PathBuf, String> {
         Ok(match self {
             Self::Vscode if cfg!(target_os = "macos") => {
@@ -241,6 +280,9 @@ impl Harness {
             Self::Copilot => copilot_home()?.join("mcp-config.json"),
             Self::ClaudeCode => claude::state_file()?,
             Self::Codex => codex::config_file()?,
+            Self::Gemini => plain::gemini_dir()?.join("settings.json"),
+            Self::Antigravity => plain::gemini_dir()?.join("antigravity").join("mcp_config.json"),
+            Self::ClaudeDesktop => plain::desktop_dir()?.join("claude_desktop_config.json"),
         })
     }
 
@@ -248,7 +290,11 @@ impl Harness {
     pub(crate) fn section(self) -> &'static str {
         match self {
             Self::Vscode => "servers",
-            Self::Copilot | Self::ClaudeCode => "mcpServers",
+            Self::Copilot
+            | Self::ClaudeCode
+            | Self::Gemini
+            | Self::Antigravity
+            | Self::ClaudeDesktop => "mcpServers",
             Self::Codex => "mcp_servers",
         }
     }
@@ -264,6 +310,11 @@ impl Harness {
             Self::Copilot => json!({"type": "local", "command": command,
                 "args": ["mcp", "--agent", self.agent()], "tools": ["*"]}),
             Self::ClaudeCode | Self::Codex => json!({"type": "stdio", "command": command,
+                "args": ["mcp", "--agent", self.agent()]}),
+            // `trust` skips Gemini CLI's confirmation before each tool call.
+            Self::Gemini => json!({"command": command,
+                "args": ["mcp", "--agent", self.agent()], "trust": true}),
+            Self::Antigravity | Self::ClaudeDesktop => json!({"command": command,
                 "args": ["mcp", "--agent", self.agent()]}),
         };
         with_home(entry, home)
@@ -303,19 +354,26 @@ pub(crate) fn binary() -> Result<String, String> {
 /// Whether `harness` looks installed: its config exists, or its program is on `PATH`. For
 /// VS Code, that is the profile dir that holds `mcp.json`. Claude Code and Codex: their config
 /// dir. Copilot CLI: its `mcp-config.json` or `config.json`, not the dir, as connecting VS
-/// Code writes the shared hook and instructions there. Nothing runs.
+/// Code writes the shared hook and instructions there. Gemini CLI: `~/.gemini`. Antigravity:
+/// `~/.gemini/antigravity`. Claude Desktop: its app data dir, never on Linux. Nothing runs.
 pub fn detect(harness: Harness) -> bool {
     let copilot = |name: &str| copilot_home().ok().map(|dir| dir.join(name));
+    let gemini = plain::gemini_dir().ok();
     let (paths, program) = match harness {
         Harness::Vscode => {
-            (vec![harness.file().ok().and_then(|f| Some(f.parent()?.into()))], "code")
+            (vec![harness.file().ok().and_then(|f| Some(f.parent()?.into()))], Some("code"))
         }
-        Harness::Copilot => (vec![copilot("mcp-config.json"), copilot("config.json")], "copilot"),
-        Harness::ClaudeCode => (vec![claude::config_dir().ok()], "claude"),
-        Harness::Codex => (vec![codex::codex_home().ok()], "codex"),
+        Harness::Copilot => {
+            (vec![copilot("mcp-config.json"), copilot("config.json")], Some("copilot"))
+        }
+        Harness::ClaudeCode => (vec![claude::config_dir().ok()], Some("claude")),
+        Harness::Codex => (vec![codex::codex_home().ok()], Some("codex")),
+        Harness::Antigravity => (vec![gemini.map(|dir| dir.join("antigravity"))], None),
+        Harness::Gemini => (vec![gemini], Some("gemini")),
+        Harness::ClaudeDesktop => (vec![plain::desktop_dir().ok()], None),
     };
     paths.into_iter().flatten().any(|path: PathBuf| path.exists())
-        || claude::find_program(program).is_some()
+        || program.and_then(claude::find_program).is_some()
 }
 
 /// Connects `harness`, or in [`Mode::Plan`] says what that would do. Prints nothing.
@@ -345,12 +403,19 @@ pub fn detect(harness: Harness) -> bool {
 ///
 /// For Claude Code and Codex, a part that can't be applied is skipped, with what to do by
 /// hand, and the others still apply.
+///
+/// Antigravity and Claude Desktop: adds their MCP entry only, by [`plain::connect`]. They read
+/// it only at start, so the report says to restart them.
+///
+/// Gemini CLI is not supported yet, so it stops with exit code 1.
 pub fn connect(harness: Harness, options: Options, mode: Mode) -> Report {
     let Options { force, hook, notes } = options;
     match harness {
         Harness::ClaudeCode => claude::connect(force, hook, notes, mode),
         Harness::Codex => codex::connect(hook, notes, mode),
         Harness::Vscode | Harness::Copilot => connect_shared(harness, force, mode, false),
+        Harness::Gemini => Report::stopped(1, plain::not_yet(harness)),
+        Harness::Antigravity | Harness::ClaudeDesktop => plain::connect(harness, force, mode),
     }
 }
 
@@ -545,13 +610,15 @@ fn moved_home(harness: Harness) -> Result<Option<String>, String> {
 /// once neither VS Code nor Copilot CLI has one. Both removals are tried, and every error is
 /// reported. VS Code also reads Copilot CLI's entry, so while that is left, disconnecting VS
 /// Code says so and keeps both shared files. Claude Code's and Codex's parts go by
-/// [`claude`]'s and [`codex`]'s rules. Returns the exit code.
+/// [`claude`]'s and [`codex`]'s rules, and Antigravity's and Claude Desktop's by [`plain`]'s.
+/// Returns the exit code.
 pub fn disconnect(harness: Harness) -> u8 {
-    if harness == Harness::ClaudeCode {
-        return claude::disconnect();
-    }
-    if harness == Harness::Codex {
-        return codex::disconnect();
+    match harness {
+        Harness::ClaudeCode => return claude::disconnect(),
+        Harness::Codex => return codex::disconnect(),
+        Harness::Gemini => return finish(Err(plain::not_yet(harness))),
+        Harness::Antigravity | Harness::ClaudeDesktop => return plain::disconnect(harness),
+        Harness::Vscode | Harness::Copilot => {}
     }
     finish(edit(harness, None, None, Mode::Apply).and_then(|line| {
         if harness == Harness::Vscode && copilot_entry() {
@@ -692,8 +759,10 @@ fn refuse_flags(harness: Harness, file: &Path, current: &Value, data: &Path) -> 
     }
     let (file, data) = (file.display(), data.display());
     let name = harness.name();
-    let apps =
-        if harness == Harness::ClaudeCode { "Claude Code" } else { "VS Code and Copilot CLI" };
+    let apps = match harness {
+        Harness::Vscode | Harness::Copilot => "VS Code and Copilot CLI",
+        other => other.title(),
+    };
     Err(format!(
         "{file}: the atticdb entry for {name} uses {used}. {file} was not changed.\n\
          Its memory stays in that store and would not follow a switch to the home.\n\
@@ -860,20 +929,26 @@ pub fn binaries(harness: Harness) -> Vec<(PathBuf, String)> {
         Harness::ClaudeCode => claude::binaries(),
         Harness::Codex => codex::binaries(),
         Harness::Vscode | Harness::Copilot => {
-            let mut found = Vec::new();
-            if let Ok(path) = harness.file() {
-                let entry = load(&path)
-                    .ok()
-                    .and_then(|(_, root)| entry_exe(root.get(harness.section())?.get("atticdb")?));
-                found.extend(entry.map(|exe| (path, exe)));
-            }
+            let mut found: Vec<_> = entry_binary(harness).into_iter().collect();
             if let Ok(path) = hook_file() {
                 let exe = read(&path).ok().flatten().and_then(|(bytes, _)| hook_exe(&bytes));
                 found.extend(exe.map(|exe| (path, exe)));
             }
             found
         }
+        Harness::Gemini | Harness::Antigravity | Harness::ClaudeDesktop => {
+            entry_binary(harness).into_iter().collect()
+        }
     }
+}
+
+/// The binary that `harness`'s MCP entry runs, with its config file, when the config is strict
+/// JSON and the entry names an absolute path.
+fn entry_binary(harness: Harness) -> Option<(PathBuf, String)> {
+    let path = harness.file().ok()?;
+    let (_, root) = load(&path).ok()?;
+    let exe = entry_exe(root.get(harness.section())?.get("atticdb")?)?;
+    Some((path, exe))
 }
 
 /// The program an MCP entry runs, when it is an absolute path.
@@ -1283,7 +1358,28 @@ fn create(path: &Path, bytes: &[u8], mode: Option<u32>) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
-    use super::{hook_exe, hook_text, ps_quote, ps_unquote};
+    use super::{hook_exe, hook_text, ps_quote, ps_unquote, Harness};
+
+    /// Every name parses back to its harness, and the 4 first apps keep their order.
+    #[test]
+    fn harness_names_round_trip() {
+        let names = [
+            "vscode",
+            "copilot",
+            "claude-code",
+            "codex",
+            "gemini",
+            "antigravity",
+            "claude-desktop",
+        ];
+        assert_eq!(Harness::ALL.map(Harness::name), names);
+        for harness in Harness::ALL {
+            assert_eq!(Harness::parse(harness.name()), Some(harness));
+        }
+        let agents: Vec<&str> = Harness::ALL[4..].iter().map(|h| h.agent()).collect();
+        assert_eq!(agents, ["gemini", "antigravity", "claude-desktop"]);
+        assert_eq!(Harness::parse("claude"), None);
+    }
 
     /// Paths with spaces, quotes, `&` and `$`, which neither shell may read.
     const PATHS: [&str; 4] = [

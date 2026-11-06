@@ -14,7 +14,8 @@ pub const USAGE: &str = "usage: atticdb doctor [--harness <list>]
 Checks this atticdb install and writes nothing: the binary, the home, the server and store,
 and each app. The store check may start the home's server.
 
-  --harness <list>  check these apps, a comma list of copilot, vscode, claude-code and codex
+  --harness <list>  check these apps, a comma list of copilot, vscode, claude-code, codex,
+                    gemini, antigravity and claude-desktop
 
 Exit 0 when every check is ok or only warns, 1 when a check failed, 2 for a usage error.";
 
@@ -61,7 +62,7 @@ impl Checks {
     }
 }
 
-/// Runs `atticdb doctor` on `harnesses`, else on all 4 apps. Returns the exit code: 1 when a
+/// Runs `atticdb doctor` on `harnesses`, else on every app. Returns the exit code: 1 when a
 /// check failed, else 0.
 pub fn run(harnesses: Option<Vec<Harness>>) -> u8 {
     let mut checks = Checks::default();
@@ -128,12 +129,20 @@ pub fn run(harnesses: Option<Vec<Harness>>) -> u8 {
             checks.failed = true;
         }
     }
+    let named = harnesses.is_some();
     for harness in harnesses.unwrap_or_else(|| ORDER.to_vec()) {
+        // The newer apps show only when found or named, so most installs see no extra lines.
+        if !named && NEWER.contains(&harness) && !connect::detect(harness) {
+            continue;
+        }
         app(&mut checks, harness, &exe, &cwd);
     }
     sandboxes(Some(&dir));
     u8::from(checks.failed)
 }
+
+/// The apps doctor checks only when they are found or named.
+const NEWER: [Harness; 3] = [Harness::Gemini, Harness::Antigravity, Harness::ClaudeDesktop];
 
 /// Checks `harness`, when it is found: its parts, the binary its entry and hook run, and
 /// the hook. `exe` is this binary.

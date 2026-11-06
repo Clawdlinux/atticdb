@@ -519,3 +519,26 @@ fn session_start_shows_the_compact_note() {
     let block = out["additionalContext"].as_str().unwrap();
     assert!(block.contains("\n- Compaction summary (manual): a summary "), "{block}");
 }
+
+/// Notes saved by Gemini CLI, Antigravity and Claude Desktop show in Claude Code's block.
+#[test]
+fn session_start_shows_new_agents_notes() {
+    let dir = Dir::new();
+    let home = dir.0.join("h");
+    let repo = home.join("myrepo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let _holders = Holders(vec![data_dir(&home)]);
+    let agents = ["gemini", "antigravity", "claude-desktop"];
+    for agent in agents {
+        let note = format!("{agent} note");
+        seed(&home, &["append", "--agent", agent, "--session", "myrepo", "--content", &note]);
+    }
+    let args = ["hook", "session-start", "--harness", "claude-code"];
+    let (code, out, err) = atticdb(&home, &home, &args, &[], cwd(&repo).as_bytes(), 0);
+    assert_eq!(code, Some(0), "{err}");
+    let out: Value = serde_json::from_str(&out).unwrap();
+    let block = out["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+    for agent in agents {
+        assert!(block.contains(&format!("\n- {agent} note")), "{agent}: {block}");
+    }
+}
