@@ -15,12 +15,13 @@
 use super::claude::{add_hook, drop_hooks, edit_file, hook_binaries, hook_command, Event, Part};
 use super::guide::{self, GEMINI as GUIDE};
 use super::plain::{self, Prepared, EMPTY, PART};
-use super::{absolute_env, entry_binary, Harness, Mode, Notes, Report};
+use super::{absolute_env, check_absolute_env, entry_binary, Harness, Mode, Notes, Report};
 use crate::home::user_home;
 use serde_json::{json, Value};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-/// The variable that moves Gemini CLI's home, the dir that holds its `.gemini`.
+/// The variable that moves Gemini CLI's home, the dir that holds its `.gemini`. A relative one
+/// is refused: Gemini CLI reads it from its own working dir, which AtticDB can't know.
 const HOME_ENV: &str = "GEMINI_CLI_HOME";
 /// The hook's name, which Gemini CLI shows in its logs and commands.
 const NAME: &str = "atticdb";
@@ -28,18 +29,6 @@ const NAME: &str = "atticdb";
 const TIMEOUT_MS: u64 = 5_000;
 /// What to do after connecting.
 const NEXT: &str = "Start a new Gemini CLI session to load atticdb.";
-
-/// Refuses a relative `GEMINI_CLI_HOME`. Gemini CLI reads it from its own working dir, which
-/// AtticDB can't know. An empty one counts as unset, as it does for Gemini CLI.
-fn check_env() -> Result<(), String> {
-    match std::env::var_os(HOME_ENV) {
-        Some(dir) if !dir.is_empty() && !Path::new(&dir).is_absolute() => Err(format!(
-            "{HOME_ENV} {} must be an absolute path. Nothing changed",
-            Path::new(&dir).display()
-        )),
-        _ => Ok(()),
-    }
-}
 
 /// `.gemini` in `$GEMINI_CLI_HOME` when set and absolute, else in `~`.
 pub(super) fn config_dir() -> Result<PathBuf, String> {
@@ -73,7 +62,7 @@ fn hook_group(exe: &str, home: Option<&str>) -> Value {
 /// connection flags is refused before anything changes, unless `force`. It stops with exit
 /// code 2 for a relative `GEMINI_CLI_HOME`. In Plan mode, it writes nothing.
 pub(super) fn connect(force: bool, hook: bool, notes: Notes, mode: Mode) -> Report {
-    if let Err(error) = check_env() {
+    if let Err(error) = check_absolute_env(HOME_ENV) {
         return Report::stopped(2, error);
     }
     let prepared =
@@ -109,7 +98,7 @@ pub(super) fn connect(force: bool, hook: bool, notes: Notes, mode: Mode) -> Repo
 /// Removes the MCP entry, whatever it runs, every SessionStart group that runs AtticDB's
 /// hook, and the guide's block. Returns the exit code: 2 for a relative `GEMINI_CLI_HOME`.
 pub(super) fn disconnect() -> u8 {
-    if let Err(error) = check_env() {
+    if let Err(error) = check_absolute_env(HOME_ENV) {
         eprintln!("atticdb: {error}");
         return 2;
     }

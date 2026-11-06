@@ -13,8 +13,9 @@
 //! identical part added by hand.
 
 use super::{
-    absolute_env, add_or_update, binary, entry_exe, entry_home, home_words, moved_home, planned,
-    read, refuse_flags, save, write, Harness, Line, Mode, Report, State, COPILOT_SHARED,
+    absolute_env, add_or_update, binary, check_absolute_env, entry_exe, entry_home, home_words,
+    moved_home, planned, read, refuse_flags, save, write, Harness, Line, Mode, Report, State,
+    COPILOT_SHARED,
 };
 use crate::home::{user_home, HOME_ENV};
 use crate::jsonedit;
@@ -132,21 +133,10 @@ const MAX_STDOUT: usize = 1 << 20;
 /// How long a `claude` or `codex` command may run.
 const CHILD_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The variable that moves Claude Code's config dir.
+/// The variable that moves Claude Code's config dir. A relative one is refused: the `claude`
+/// child inherits it, so it would write `.claude.json` under the current directory, where
+/// AtticDB doesn't look.
 const CONFIG_ENV: &str = "CLAUDE_CONFIG_DIR";
-
-/// Refuses a relative `CLAUDE_CONFIG_DIR`. The `claude` child inherits it, so it would write
-/// `.claude.json` under the current directory, where AtticDB doesn't look. An empty one
-/// counts as unset.
-fn check_config_env() -> Result<(), String> {
-    match std::env::var_os(CONFIG_ENV) {
-        Some(dir) if !dir.is_empty() && !Path::new(&dir).is_absolute() => Err(format!(
-            "{CONFIG_ENV} {} must be an absolute path. Nothing changed",
-            Path::new(&dir).display()
-        )),
-        _ => Ok(()),
-    }
-}
 
 /// `$CLAUDE_CONFIG_DIR` when set and absolute, else `~/.claude`.
 pub(super) fn config_dir() -> Result<PathBuf, String> {
@@ -164,7 +154,7 @@ pub(crate) fn state_file() -> Result<PathBuf, String> {
 /// differs is refused before anything changes, unless `force`. It stops with exit code 2 for
 /// a relative `CLAUDE_CONFIG_DIR`. In Plan mode, it writes nothing and runs no `claude`.
 pub(super) fn connect(force: bool, hook: bool, notes: Notes, mode: Mode) -> Report {
-    if let Err(error) = check_config_env() {
+    if let Err(error) = check_absolute_env(CONFIG_ENV) {
         return Report::stopped(2, error);
     }
     let prepared = (|| {
@@ -234,7 +224,7 @@ pub(super) fn connect(force: bool, hook: bool, notes: Notes, mode: Mode) -> Repo
 /// hook, and AtticDB's allow rules. Returns the exit code: 2 for a relative
 /// `CLAUDE_CONFIG_DIR`.
 pub(super) fn disconnect() -> u8 {
-    if let Err(error) = check_config_env() {
+    if let Err(error) = check_absolute_env(CONFIG_ENV) {
         eprintln!("atticdb: {error}");
         return 2;
     }

@@ -335,6 +335,18 @@ fn absolute_env(name: &str) -> Option<PathBuf> {
     std::env::var_os(name).map(PathBuf::from).filter(|path| path.is_absolute())
 }
 
+/// Refuses the variable `name` when it holds a relative path, which an app would read from a
+/// working dir AtticDB can't know. An empty one counts as unset. The callers exit 2 for it.
+fn check_absolute_env(name: &str) -> Result<(), String> {
+    match std::env::var_os(name) {
+        Some(dir) if !dir.is_empty() && !Path::new(&dir).is_absolute() => Err(format!(
+            "{name} {} must be an absolute path. Nothing changed",
+            Path::new(&dir).display()
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// `$COPILOT_HOME` when set and absolute, else `~/.copilot`.
 pub(crate) fn copilot_home() -> Result<PathBuf, String> {
     absolute_env("COPILOT_HOME").map_or_else(|| Ok(user_home()?.join(".copilot")), Ok)

@@ -20,8 +20,8 @@ use super::claude::{
 };
 use super::guide::{self, CODEX as GUIDE};
 use super::{
-    absolute_env, add_or_update, binary, delete, moved_home, planned, read, write, Harness, Line,
-    Mode, Notes, Report, State,
+    absolute_env, add_or_update, binary, check_absolute_env, delete, moved_home, planned, read,
+    write, Harness, Line, Mode, Notes, Report, State,
 };
 use crate::home::{user_home, HOME_ENV};
 use atticdb_tape::{Io, StdIo};
@@ -34,7 +34,8 @@ use std::process::Command;
 mod scan;
 use scan::{scan, Entry, Item};
 
-/// The variable that moves Codex's config dir.
+/// The variable that moves Codex's config dir. A relative one is refused: a `codex` child
+/// inherits it, so it would read another `config.toml` than AtticDB writes.
 const CODEX_ENV: &str = "CODEX_HOME";
 /// The begin line AtticDB writes.
 const BEGIN_LINE: &str = "# atticdb:begin v1. atticdb disconnect codex removes this block.";
@@ -58,18 +59,6 @@ pub(crate) const APPROVE: &str =
 const POSITION: &str = "Codex keys hook approvals by position, so it may ask you to approve \
                         the SessionStart hooks after atticdb's again.";
 
-/// Refuses a relative `CODEX_HOME`. A `codex` child inherits it, so it would read another
-/// `config.toml` than AtticDB writes. An empty one counts as unset.
-fn check_codex_env() -> Result<(), String> {
-    match std::env::var_os(CODEX_ENV) {
-        Some(dir) if !dir.is_empty() && !Path::new(&dir).is_absolute() => Err(format!(
-            "{CODEX_ENV} {} must be an absolute path. Nothing changed",
-            Path::new(&dir).display()
-        )),
-        _ => Ok(()),
-    }
-}
-
 /// `$CODEX_HOME` when set and absolute, else `~/.codex`.
 pub(crate) fn codex_home() -> Result<PathBuf, String> {
     absolute_env(CODEX_ENV).map_or_else(|| Ok(user_home()?.join(".codex")), Ok)
@@ -89,7 +78,7 @@ pub(crate) fn hooks_file() -> Result<PathBuf, String> {
 /// MCP block. It stops with exit code 2 for a relative `CODEX_HOME`. In Plan mode, it writes
 /// nothing and runs no `codex`.
 pub(super) fn connect(hook: bool, notes: Notes, mode: Mode) -> Report {
-    if let Err(error) = check_codex_env() {
+    if let Err(error) = check_absolute_env(CODEX_ENV) {
         return Report::stopped(2, error);
     }
     let prepared = (|| {
@@ -175,7 +164,7 @@ pub(super) fn binaries() -> Vec<(PathBuf, String)> {
 /// Checks that `codex mcp get atticdb --json`, which only reads config, shows AtticDB's entry
 /// for this binary and home. `Ok` without running anything when `codex` is not on `PATH`.
 pub(super) fn verify() -> Result<(), String> {
-    check_codex_env()?;
+    check_absolute_env(CODEX_ENV)?;
     let home = moved_home(Harness::Codex)?;
     let (exe, config) = (binary()?, config_file()?);
     let Some(codex) = find_program("codex") else { return Ok(()) };
@@ -185,7 +174,7 @@ pub(super) fn verify() -> Result<(), String> {
 /// Removes AtticDB's MCP block, every hook group that runs AtticDB's hook, and the guide's
 /// block. Returns the exit code: 2 for a relative `CODEX_HOME`.
 pub(super) fn disconnect() -> u8 {
-    if let Err(error) = check_codex_env() {
+    if let Err(error) = check_absolute_env(CODEX_ENV) {
         eprintln!("atticdb: {error}");
         return 2;
     }
