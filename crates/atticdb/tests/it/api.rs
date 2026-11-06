@@ -1,4 +1,4 @@
-use crate::support::{append_body, serve, sim_engine, Dir, Via, TOKEN_A, TOKEN_B};
+use crate::support::{self, append_body, serve, sim_engine, Dir, Via, TOKEN_A, TOKEN_B};
 use atticdb::outcome::{self, Attempt, Merge};
 use atticdb::serve::MAX_CONNECTIONS;
 use atticdb_core::{EngineError, EngineOptions, ErrorKind, NewTurn, Role, Scope};
@@ -638,6 +638,25 @@ fn auth_and_host_rules() {
     running.server.shutdown();
 }
 
+/// `/healthz` reports the version `atticdb --version` prints, on both listeners, with no token.
+/// So a client can tell a server left on old code after the binary is replaced.
+#[test]
+fn healthz_reports_version() {
+    let out = support::command(env!("CARGO_BIN_EXE_atticdb")).arg("--version").output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let printed = String::from_utf8(out.stdout).unwrap();
+    let version = printed.trim_end().strip_prefix("atticdb ").unwrap().to_owned();
+    assert_eq!(version, atticdb::VERSION);
+    let (disk, dir) = (SimDisk::new(4), Dir::new());
+    let running = serve(sim_engine(&disk, |_| {}), &dir, MAX_CONNECTIONS);
+    for via in &running.vias {
+        let (status, body) = via.call(Some("127.0.0.1"), None, "GET", "/healthz", None);
+        assert_eq!(status, 200, "{}: {body}", via.name());
+        assert_eq!(body["version"], json!(version), "{}: {body}", via.name());
+    }
+    running.server.shutdown();
+}
+
 #[test]
 fn health_tracks_engine_state() {
     let disk = SimDisk::new(3);
@@ -649,7 +668,7 @@ fn health_tracks_engine_state() {
     });
     let running = serve(engine, &dir, MAX_CONNECTIONS);
     let unix = &running.vias[1];
-    let instance = running.instance.as_str();
+    let (instance, version) = (running.instance.as_str(), atticdb::VERSION);
     let health = || unix.call(None, None, "GET", "/healthz", None);
     let stats = || {
         let (status, stats) = unix.call(None, None, "GET", "/v1/stats", None);
@@ -664,7 +683,7 @@ fn health_tracks_engine_state() {
         assert_eq!(status, 200, "windows keep serving");
         window["turns"].as_array().unwrap().iter().map(|t| t["content"].clone()).collect::<Vec<_>>()
     };
-    assert_eq!(health(), (200, json!({"status": "ok", "instance": instance})));
+    assert_eq!(health(), (200, json!({"status": "ok", "instance": instance, "version": version})));
 
     // Over the 4 MiB tape batch but under the 8 MiB body cap.
     let mut big = append_body("s", "big", "");
@@ -707,7 +726,10 @@ fn health_tracks_engine_state() {
     assert_eq!(unix.a("POST", "/v1/facts/put", Some(&fact("new", "f2"))), (507, disk_full));
     let (status, rule) = unix.a("GET", "/v1/facts/get?key=rule", None);
     assert_eq!((status, &rule["fact"]["content"]), (200, &json!("kept")), "fact reads serve");
-    assert_eq!(health(), (200, json!({"status": "read_only", "instance": instance})));
+    assert_eq!(
+        health(),
+        (200, json!({"status": "read_only", "instance": instance, "version": version}))
+    );
     let (_, kept) = unix.a("GET", "/v1/facts/get?key=rule", None);
     assert_eq!(stats(), (json!("read_only"), kept["fact"]["lsn"].clone(), json!(1)));
     // The same numbers for Prometheus, on the socket only.
@@ -745,7 +767,10 @@ fn health_tracks_engine_state() {
     disk.fail_next_sync().unwrap();
     let unknown = append("sync", "three");
     assert_eq!(unknown, (500, json!({"outcome": "unknown", "error": "storage"})));
-    assert_eq!(health(), (503, json!({"status": "poisoned", "instance": instance})));
+    assert_eq!(
+        health(),
+        (503, json!({"status": "poisoned", "instance": instance, "version": version}))
+    );
     assert_eq!(stats().0, "poisoned");
     assert_eq!(contents(), ["one", "two"], "reads keep the published view");
     // A failed sync publishes no dedup entry, so the retry gets not_committed from the

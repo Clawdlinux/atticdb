@@ -3,7 +3,8 @@
 //! The parts check is [`connect::connect`] in [`Mode::Plan`], the code that writes.
 
 use crate::connect::{self, Harness, Mode, Notes, Options, Report};
-use crate::setup::{check_hook, check_store, title, typed, ORDER};
+use crate::launch::Found;
+use crate::setup::{check_hook, check_server, title, typed, ORDER};
 use atticdb_tape::{Io, StdIo};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -122,12 +123,19 @@ pub fn run(harnesses: Option<Vec<Harness>>) -> u8 {
         return 1;
     }
     let cwd = std::env::current_dir().map_err(|error| format!("no current dir: {error}"));
-    match cwd.clone().and_then(|cwd| check_store(&cwd)) {
+    let (checked, found) = match cwd.clone() {
+        Ok(cwd) => check_server(&cwd),
+        Err(why) => (Err(why), None),
+    };
+    match checked {
         Ok(()) => println!("Server and store: ok"),
         Err(why) => {
             println!("Server and store: {why}");
             checks.failed = true;
         }
+    }
+    if let Some(found) = found {
+        server_version(&mut checks, &found);
     }
     let named = harnesses.is_some();
     for harness in harnesses.unwrap_or_else(|| ORDER.to_vec()) {
@@ -144,6 +152,25 @@ pub fn run(harnesses: Option<Vec<Harness>>) -> u8 {
 
 /// The apps doctor checks only when their config holds an atticdb entry, or they are named.
 const NEWER: [Harness; 3] = [Harness::Gemini, Harness::Antigravity, Harness::ClaudeDesktop];
+
+/// Prints the server's version against this binary's, by [`version_line`].
+fn server_version(checks: &mut Checks, found: &Found) {
+    let (what, result) = version_line(found, crate::VERSION);
+    checks.line(&what, result);
+}
+
+/// The line for a server `found` on `this` binary's version. Any other version fails, as
+/// does none from a server too old to send one. That server runs old code until restarted.
+fn version_line(found: &Found, this: &str) -> (String, Result<(), String>) {
+    let version = found.version.as_deref().unwrap_or("unknown");
+    if found.version.as_deref() == Some(this) {
+        return (format!("server version: {version}"), Ok(()));
+    }
+    let stop =
+        found.pid.map_or_else(|| "stop the server".to_owned(), |pid| format!("stop pid {pid}"));
+    let what = format!("server version: {version}, this binary is {this}");
+    (what, Err(format!("restart it with atticdb upgrade, or {stop}")))
+}
 
 /// Checks `harness`, when it is found: its parts, the binary its entry and hook run, and
 /// the hook. `exe` is this binary.
@@ -420,6 +447,34 @@ fn sandboxes(dir: Option<&PathBuf>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A server on this binary's version is ok. Another version, or none, fails with the fix.
+    #[test]
+    fn server_version_lines() {
+        let found = |version: Option<&str>, pid| Found { version: version.map(Into::into), pid };
+        let fix = |stop: &str| Err(format!("restart it with atticdb upgrade, or {stop}"));
+        let rows = [
+            (found(Some("1.2.0"), Some(7)), "server version: 1.2.0", Ok(())),
+            (
+                found(Some("1.1.0"), Some(7)),
+                "server version: 1.1.0, this binary is 1.2.0",
+                fix("stop pid 7"),
+            ),
+            (
+                found(None, Some(7)),
+                "server version: unknown, this binary is 1.2.0",
+                fix("stop pid 7"),
+            ),
+            (
+                found(Some("1.1.0"), None),
+                "server version: 1.1.0, this binary is 1.2.0",
+                fix("stop the server"),
+            ),
+        ];
+        for (found, what, result) in rows {
+            assert_eq!(version_line(&found, "1.2.0"), (what.to_owned(), result), "{found:?}");
+        }
+    }
 
     /// Free space against a 100-byte floor, and filesystem names.
     #[test]

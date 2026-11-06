@@ -4,6 +4,7 @@
 
 use crate::connect::{self, Harness, Line, Mode, Notes, Options, Report, State};
 use crate::home::Lookup;
+use crate::launch::Found;
 use serde_json::{json, Value};
 use std::io::{BufRead, IsTerminal, Read, Write};
 #[cfg(unix)]
@@ -557,8 +558,18 @@ pub(crate) fn kill_group(child: &mut std::process::Child) {
 
 /// Reads `fact_list` from the home, as the hook does for a chat in `cwd`.
 pub(crate) fn check_store(cwd: &Path) -> Result<(), String> {
+    check_server(cwd).0
+}
+
+/// [`check_store`], and the server it found through `LOCK`, if any. That one may have answered
+/// even when the read failed.
+pub(crate) fn check_server(cwd: &Path) -> (Result<(), String>, Option<Found>) {
     let session = crate::home::repo(cwd).unwrap_or_else(|| "setup".into());
     let deadline = Instant::now() + STORE_TIMEOUT;
-    let mut home = crate::client::HomeReader::in_home(&session, deadline, &Lookup::ENV)?;
-    home.read("setup", "fact_list", &json!({"prefix": "user/", "limit": 1})).map(drop)
+    let mut home = match crate::client::HomeReader::in_home(&session, deadline, &Lookup::ENV) {
+        Ok(home) => home,
+        Err(why) => return (Err(why), None),
+    };
+    let read = home.read("setup", "fact_list", &json!({"prefix": "user/", "limit": 1}));
+    (read.map(drop), home.found().cloned())
 }

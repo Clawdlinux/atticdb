@@ -179,6 +179,9 @@ Each check prints 1 line: `ok`, or the problem and what to do. They run in this 
 - **Synced folder:** it warns when the home is in iCloud Drive, in `~/Library/CloudStorage`, or in a `Dropbox`, `OneDrive` or `Google Drive` folder.
 - **Server and store:** the store must answer `fact_list`. This reads as any AtticDB read does.
   So it may start the home's server, which writes its own files in `data/`.
+  - **server version:** the version the server's `/healthz` gives must be this binary's.
+    Else it fails with `server version: <v>, this binary is <w>: restart it with atticdb upgrade, or stop pid <pid>`.
+    A server too old to send a version shows `unknown`. A server keeps running old code after its binary is replaced.
 - **Each app:** the apps it finds, or those in `--harness`. An app that isn't found prints `not found`. That is not a failure.
   Gemini CLI, Antigravity and Claude Desktop show only when named, or when their config holds an `atticdb` entry.
   So an app found but never connected prints no line, and doctor stays green after an upgrade. Setup still offers it.
@@ -256,7 +259,7 @@ Send `Authorization: Bearer <token>`. The token picks the tenant. On TCP the `Ho
 | `GET /v1/records` | Optional `before=LSN`, `limit=N` (default 50, cap 1,000), `kind=turn` or `kind=fact`, and `max_bytes=B` | `{"records": [{"kind": "turn", "lsn", "commit_time_ns", "agent", "session", "seq", "role", "content", "meta"} or {"kind": "fact", "lsn", "commit_time_ns", "key", "agent", "deleted", "content", "meta"}], "next"}` |
 | `POST /v1/forget` | `{"idem_key"}` plus exactly 1 of `"session": {"agent", "session"}`, `"key"` or `"lsns": [n, ...]` (1 to 1,024). Optional `up_to_lsn` | `{"outcome": "committed", "deduplicated", "txn", "lsn", "cutoff"}` |
 | `GET /v1/export` | `?format=markdown`, optional `max_bytes=B` (64 KiB to 8 MiB, default 1 MiB). Later pages pass back `next` as `at`, then `after_key`, or `after_agent`, `after_session` and `after_seq`, then `skip` and `offset` | `{"format": "markdown", "at", "chunks": [{"path", "offset", "markdown"}], "next"}`. `next` is null on the last page |
-| `GET /healthz` | No token | `{"status": "ok" or "read_only", "instance"}`. 503 with `"poisoned"` |
+| `GET /healthz` | No token | `{"status": "ok" or "read_only", "instance", "version"}`. 503 with `"poisoned"` |
 | `GET /v1/stats` | Unix socket only, no token | One flat object: `instance`, `health`, `durable_lsn`, tenant and fact counts, writer groups, checkpoint and lock timings, tape-index memory. Counters cover this open |
 | `GET /metrics` | Unix socket only, no token | The same numbers in Prometheus text format 0.0.4: counters as `atticdb_<name>_total`, gauges as `atticdb_<name>`, `_ns` maxima as `_seconds`, `atticdb_read_only`, the `atticdb_append_ack_seconds` histogram of committed appends (50 µs to 1 s), and the `atticdb_turn_content_bytes` histogram of new turns (64 B to 4 MiB). `turn_repeats` counts new turns whose content matches one of about 4,096 recent hashes, a lower bound on exact repeats |
 
