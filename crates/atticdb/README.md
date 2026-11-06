@@ -181,7 +181,7 @@ Each check prints 1 line: `ok`, or the problem and what to do. They run in this 
 - **Server and store:** the store must answer `fact_list`. This reads as any AtticDB read does.
   So it may start the home's server, which writes its own files in `data/`.
   - **server version:** the version the server's `/healthz` gives must be this binary's.
-    Else it fails with `server version: <v>, this binary is <w>: restart it with atticdb upgrade, or stop pid <pid>`.
+    Else it fails with `server version: <v>, this binary is <w>: stop pid <pid>. The next AtticDB call starts this binary's server.`
     A server too old to send a version shows `unknown`. A server keeps running old code after its binary is replaced.
 - **Each app:** the apps it finds, or those in `--harness`. An app that isn't found prints `not found`. That is not a failure.
   Gemini CLI, Antigravity and Claude Desktop show only when named, or when their config holds an `atticdb` entry.
@@ -235,6 +235,7 @@ Upgrade? [y/N]
 ```
 
 Releases carry no store format version, so the warning always shows.
+An older `--version` shows this warning instead: `This is an older release. It may not open a store a newer release has written. Roll back with atticdb.prev.`
 Without `--version` it asks GitHub for the latest release now, past the cache and the off switches.
 When this binary is already the latest, it prints `AtticDB <v> is the latest.` and exits 0.
 A `+dev` source build counts as older than its own release.
@@ -252,7 +253,7 @@ When the installer fails, the binary is as it was, and an earlier `atticdb.prev`
 A successful upgrade replaces `atticdb.prev`, so it holds only the last binary.
 
 It signals only a server that proves it serves this home's `data/`.
-That server must answer on the socket in `LOCK`, owned by you, with the `LOCK` instance id and pid.
+That server must answer on the socket in `LOCK`, owned by you, with the `LOCK` instance id. The pid is read from that `LOCK`.
 Pid 0, pid 1 and the upgrade's own pid are never signalled. Otherwise it prints why, and says to stop the server by hand.
 
 To roll back, put `atticdb.prev` back and stop the server. With the default install dir:

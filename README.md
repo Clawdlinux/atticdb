@@ -66,6 +66,7 @@ The old binary stays beside the new one as `atticdb.prev`.
 Then it stops the running server and runs `atticdb doctor` from the new binary, which starts the new server.
 It stops the server only after the server proves it serves this home's store. Else it says to stop it by hand.
 The plan always warns that a release may change the store format. Then the old binary can't open the store after the first write.
+With an older `--version`, the plan warns instead. The older binary may not open a store a newer release wrote.
 
 To roll back with the default install dir:
 
@@ -83,6 +84,7 @@ Builds from source, whose version ends in `+dev`, still check but never print th
 
 What's sent: 1 `GET` to `https://api.github.com/repos/Clawdlinux/atticdb/releases/latest`, by `curl` with a 3 s limit.
 It carries no token, no ID and no data about you. GitHub sees your IP address, as for any download.
+curl runs with `-q`, so your `~/.curlrc` doesn't apply.
 The answer is cached in the home as `update-check.json`.
 
 If cargo installed `atticdb`, `upgrade` prints the `cargo install` command to run instead. If Homebrew did, it prints `brew upgrade atticdb`.
@@ -230,6 +232,7 @@ A forget hides turn content, meta, role and time, and fact values. These stay ob
 
    ```sh
    rm ~/.local/bin/atticdb                         # or: cargo uninstall atticdb
+   rm -f ~/.local/bin/atticdb.prev ~/.local/bin/atticdb.prev.old   # left by atticdb upgrade
    rm -rf ~/Library/Application\ Support/atticdb   # macOS
    rm -rf ~/.local/share/atticdb                   # Linux
    ```
