@@ -2213,7 +2213,7 @@ impl Plain {
     fn config(&self, app: &str) -> std::path::PathBuf {
         let home = self.dir.0.join("h");
         match app {
-            "antigravity" => home.join(".gemini/antigravity/mcp_config.json"),
+            "antigravity" => home.join(".gemini/config/mcp_config.json"),
             _ => home.join("Library/Application Support/Claude/claude_desktop_config.json"),
         }
     }
@@ -2457,6 +2457,70 @@ fn connect_new_apps_pass_the_home() {
     }
 }
 
+/// A migrated Antigravity install: `~/.gemini/config/mcp_config.json`, and the legacy
+/// `~/.gemini/antigravity/mcp_config.json` as a symlink to it. Connect and disconnect edit the
+/// real file by its own path, and never write through the symlink.
+#[test]
+fn antigravity_edits_the_config_file_not_the_legacy_link() {
+    let it = Plain::new();
+    it.write("antigravity", PLAIN_CONFIG);
+    let config = it.config("antigravity");
+    let legacy_dir = it.dir.0.join("h/.gemini/antigravity");
+    std::fs::create_dir_all(&legacy_dir).unwrap();
+    let legacy = legacy_dir.join("mcp_config.json");
+    let target = Path::new("../config/mcp_config.json");
+    std::os::unix::fs::symlink(target, &legacy).unwrap();
+    let shown = config.display().to_string();
+    let (code, out) = it.run(&["connect", "antigravity", "--dry-run"]);
+    assert_eq!((code, out), (Some(0), format!("{shown}: add the MCP entry\n")));
+    let (code, out) = it.run(&["connect", "antigravity"]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.starts_with(&format!("MCP entry: added ({shown}, backup: ")), "{out}");
+    assert_eq!(it.read("antigravity")["mcpServers"]["atticdb"], it.entry("antigravity"));
+    let meta = std::fs::symlink_metadata(&legacy).unwrap();
+    assert!(meta.is_symlink(), "the legacy link stays a link");
+    assert_eq!(std::fs::read_link(&legacy).unwrap(), target);
+    assert!(std::fs::symlink_metadata(&config).unwrap().is_file(), "the config stays a file");
+    let (code, out) = it.run(&["disconnect", "antigravity"]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.starts_with(&format!("MCP entry: removed ({shown}, backup: ")), "{out}");
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), PLAIN_CONFIG);
+    assert!(std::fs::symlink_metadata(&legacy).unwrap().is_symlink());
+}
+
+/// An older Antigravity install has only the legacy file, as a regular file. Connect edits it,
+/// and makes no `~/.gemini/config`.
+#[test]
+fn antigravity_uses_a_regular_legacy_file() {
+    let it = Plain::new();
+    let legacy = it.dir.0.join("h/.gemini/antigravity/mcp_config.json");
+    std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    std::fs::write(&legacy, PLAIN_CONFIG).unwrap();
+    let (code, out) = it.run(&["connect", "antigravity"]);
+    assert_eq!(code, Some(0), "{out}");
+    let shown = legacy.display().to_string();
+    assert!(out.starts_with(&format!("MCP entry: added ({shown}, backup: ")), "{out}");
+    let root: Value = serde_json::from_slice(&std::fs::read(&legacy).unwrap()).unwrap();
+    assert_eq!(root["mcpServers"]["atticdb"], it.entry("antigravity"));
+    assert!(!it.dir.0.join("h/.gemini/config").exists(), "no config dir made");
+}
+
+/// With neither file, but Antigravity's dir, connect creates `~/.gemini/config/mcp_config.json`
+/// and writes nothing in the legacy dir.
+#[test]
+fn antigravity_creates_the_config_file() {
+    let it = Plain::new();
+    let legacy_dir = it.dir.0.join("h/.gemini/antigravity");
+    std::fs::create_dir_all(&legacy_dir).unwrap();
+    let (code, out) = it.run(&["connect", "antigravity"]);
+    let shown = it.config("antigravity").display().to_string();
+    assert_eq!(out, format!("MCP entry: added ({shown})\nRestart Antigravity to load it.\n"));
+    assert_eq!(code, Some(0));
+    let want = json!({"mcpServers": {"atticdb": it.entry("antigravity")}});
+    assert_eq!(it.read("antigravity"), want);
+    assert!(files(&legacy_dir).is_empty(), "nothing in the legacy dir");
+}
+
 /// A home for Gemini CLI: an empty `HOME` with `~/.gemini`, and a `PATH` with no programs.
 struct Gemini {
     dir: Dir,
@@ -2671,6 +2735,82 @@ fn gemini_keeps_user_hook_groups() {
     assert!(out.contains("\nSessionStart hook: removed ("), "{out}");
     assert_eq!(std::fs::read_to_string(it.settings()).unwrap(), GEMINI_SETTINGS);
     assert_eq!(std::fs::read_to_string(it.guide()).unwrap(), GEMINI_GUIDE);
+}
+
+/// The user's group in [`GEMINI_HAND_WIRED`], as its bytes stand.
+const GEMINI_USER_GROUP: &str = r#"      {
+        "matcher": "startup",
+        "hooks": [{"type": "command", "name": "branch", "command": "~/.gemini/hooks/branch.sh"}]
+      }"#;
+
+/// A settings.json wired by hand: an unquoted atticdb hook with another harness's flag,
+/// before the user's own group.
+fn gemini_hand_wired(command: &str) -> String {
+    format!(
+        "{{\n  \"hooks\": {{\n    \"SessionStart\": [\n      {{\n        \"hooks\": [\n          \
+         {{\n            \"type\": \"command\",\n            \"command\": {}\n          }}\n        \
+         ]\n      }},\n{GEMINI_USER_GROUP}\n    ]\n  }}\n}}\n",
+        json!(command)
+    )
+}
+
+/// A SessionStart group wired by hand to run an atticdb binary's `hook session-start` is
+/// AtticDB's, quoted or not, whatever flags follow. Connect replaces it where it stands, so
+/// Gemini CLI never gets 2 memory blocks. The user's group next to it keeps its bytes.
+/// Disconnect then removes it. A command that runs another program stays the user's.
+#[test]
+fn gemini_replaces_a_hand_wired_hook_in_place() {
+    let it = Gemini::new();
+    let at = it.settings().display().to_string();
+    let user: Value = serde_json::from_str(GEMINI_USER_GROUP).unwrap();
+    let commands = [
+        "/Users/sunny/.cargo/bin/atticdb hook session-start --harness claude-code",
+        "'/opt/my tools/atticdb' hook session-start",
+        "\"/usr/local/bin/atticdb.exe\" hook  session-start --harness gemini --home /h",
+    ];
+    for command in commands {
+        std::fs::write(it.settings(), gemini_hand_wired(command)).unwrap();
+        let (code, out) = it.run(&["connect", "gemini", "--dry-run"]);
+        assert_eq!(code, Some(0), "{command}: {out}");
+        assert!(out.contains(&format!("\n{at}: update the SessionStart hook\n")), "{out}");
+        let (code, out) = it.run(&["connect", "gemini"]);
+        assert_eq!(code, Some(0), "{command}: {out}");
+        let line = format!("\nSessionStart hook: updated ({at}, backup: ");
+        assert!(out.contains(&line), "{command}: {out}");
+        assert_eq!(it.groups(), [it.group(None), user.clone()], "{command}");
+        let text = std::fs::read_to_string(it.settings()).unwrap();
+        assert!(text.contains(&format!("}},\n{GEMINI_USER_GROUP}\n    ]")), "{text}");
+        let (code, out) = it.run(&["connect", "gemini"]);
+        assert_eq!(code, Some(0), "{command}: {out}");
+        assert!(out.contains(&format!("\nSessionStart hook: unchanged ({at})\n")), "{out}");
+        let (code, out) = it.run(&["disconnect", "gemini"]);
+        assert_eq!(code, Some(0), "{command}: {out}");
+        assert!(out.contains("\nSessionStart hook: removed ("), "{command}: {out}");
+        assert_eq!(it.groups(), std::slice::from_ref(&user), "{command}");
+    }
+
+    // Disconnect alone removes a hand-wired group too.
+    std::fs::write(it.settings(), gemini_hand_wired(commands[0])).unwrap();
+    let (code, out) = it.run(&["disconnect", "gemini"]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.contains("\nSessionStart hook: removed ("), "{out}");
+    assert_eq!(it.groups(), std::slice::from_ref(&user));
+
+    // Not atticdb's: another binary, a relative path, or another hook verb.
+    for command in [
+        "/opt/bin/atticdb-wrapper hook session-start",
+        "atticdb hook session-start --harness gemini",
+        "/opt/bin/atticdb hook post-compact",
+    ] {
+        let text = gemini_hand_wired(command);
+        std::fs::write(it.settings(), &text).unwrap();
+        let theirs: Value = serde_json::from_str(&text).unwrap();
+        let theirs = theirs["hooks"]["SessionStart"][0].clone();
+        let (code, out) = it.run(&["connect", "gemini"]);
+        assert_eq!(code, Some(0), "{command}: {out}");
+        assert!(out.contains("\nSessionStart hook: added ("), "{command}: {out}");
+        assert_eq!(it.groups(), [theirs, user.clone(), it.group(None)], "{command}");
+    }
 }
 
 /// A GEMINI.md that mentions AtticDB outside a block is the user's own guide. It stays as it

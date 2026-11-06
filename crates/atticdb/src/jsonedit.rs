@@ -249,6 +249,48 @@ pub fn replace_key(
     Ok((edited, true))
 }
 
+/// Replaces the first element of the array at `path` for which `pred` is true with `value`,
+/// where it stands. Returns the text and whether one was replaced. A missing path replaces
+/// nothing. The new element is laid out as [`replace_key`] lays out a value.
+pub fn replace(
+    text: &str,
+    path: &[&str],
+    pred: impl Fn(&Value) -> bool,
+    value: &Value,
+) -> Result<(String, bool), Error> {
+    let root = parse(text)?;
+    let mut want = original(text, path)?;
+    let (node, found) = walk(&root, path)?;
+    if found < path.len() {
+        return Ok((text.to_owned(), false));
+    }
+    let Kind::Array(items) = &node.kind else {
+        return Err(wrong_type(path, "an array", node));
+    };
+    let mut at = &mut want;
+    for key in path {
+        at = at.get_mut(*key).ok_or_else(|| refused(path, "the path differs in serde_json"))?;
+    }
+    let values = match at {
+        Value::Array(values) if values.len() == items.len() => values,
+        _ => return Err(refused(path, "the array differs in serde_json")),
+    };
+    let Some(i) = values.iter().position(pred) else {
+        return Ok((text.to_owned(), false));
+    };
+    values[i] = value.clone();
+    let (start, end) = (items[i].start, items[i].end);
+    let new = if text[start..end].contains('\n') {
+        let (nl, unit) = style(text);
+        render(value, line_indent(text, start), unit, nl)
+    } else {
+        value.to_string()
+    };
+    let edited = format!("{}{new}{}", &text[..start], &text[end..]);
+    check(&edited, &want, path)?;
+    Ok((edited, true))
+}
+
 /// The original text as serde_json reads it.
 fn original(text: &str, path: &[&str]) -> Result<Value, Error> {
     serde_json::from_str(text)
@@ -768,7 +810,7 @@ impl Parser<'_> {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
-    use super::{add_key, append, remove, remove_key, replace_key};
+    use super::{add_key, append, remove, remove_key, replace, replace_key};
     use serde_json::{json, Value};
 
     /// An edit and its arguments, with values written as JSON.
@@ -1368,6 +1410,30 @@ mod tests {
         assert_eq!(err.to_string(), "[\"s\"] should be an object but is an array");
         let crlf = text.replace('\n', "\r\n");
         let (out, _) = replace_key(&crlf, &["s"], "a", &entry).unwrap();
+        assert_eq!(out, want.replace('\n', "\r\n"), "CRLF stays CRLF");
+    }
+
+    #[test]
+    fn replace_keeps_the_element_in_place() {
+        let group = json!({"hooks": [{"command": "/new"}]});
+        let text = "{\n  \"a\": [\n    {\n      \"hooks\": [{\"command\": \"/old\"}]\n    },\n    \
+                    {\"x\": 1},\n    {\"command\": \"/old\"}\n  ]\n}\n";
+        let old = |value: &Value| value.to_string().contains("/old");
+        let (out, hit) = replace(text, &["a"], old, &group).unwrap();
+        let want = "{\n  \"a\": [\n    {\n      \"hooks\": [\n        {\n          \"command\": \
+                    \"/new\"\n        }\n      ]\n    },\n    {\"x\": 1},\n    {\"command\": \
+                    \"/old\"}\n  ]\n}\n";
+        assert_eq!((out.as_str(), hit), (want, true), "only the first, pretty, in place");
+        let one_line = |value: &Value| *value == json!({"x": 1});
+        let (out, hit) = replace(text, &["a"], one_line, &json!({"y": [2]})).unwrap();
+        assert!(hit && out.contains("},\n    {\"y\":[2]},\n    {\"command\""), "{out}");
+        let none = |_: &Value| false;
+        assert_eq!(replace(text, &["a"], none, &group).unwrap(), (text.to_owned(), false));
+        assert_eq!(replace(text, &["b"], old, &group).unwrap(), (text.to_owned(), false));
+        let err = replace(r#"{"a": {}}"#, &["a"], old, &group).unwrap_err();
+        assert_eq!(err.to_string(), "[\"a\"] should be an array but is an object");
+        let crlf = text.replace('\n', "\r\n");
+        let (out, _) = replace(&crlf, &["a"], old, &group).unwrap();
         assert_eq!(out, want.replace('\n', "\r\n"), "CRLF stays CRLF");
     }
 }

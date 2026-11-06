@@ -131,8 +131,9 @@ pub fn run(harnesses: Option<Vec<Harness>>) -> u8 {
     }
     let named = harnesses.is_some();
     for harness in harnesses.unwrap_or_else(|| ORDER.to_vec()) {
-        // The newer apps show only when found or named, so most installs see no extra lines.
-        if !named && NEWER.contains(&harness) && !connect::detect(harness) {
+        // The newer apps show only when connected or named. So an upgrade adds no lines, nor
+        // a failure for an app found but never connected.
+        if !named && NEWER.contains(&harness) && !connect::holds_entry(harness) {
             continue;
         }
         app(&mut checks, harness, &exe, &cwd);
@@ -141,7 +142,7 @@ pub fn run(harnesses: Option<Vec<Harness>>) -> u8 {
     u8::from(checks.failed)
 }
 
-/// The apps doctor checks only when they are found or named.
+/// The apps doctor checks only when their config holds an atticdb entry, or they are named.
 const NEWER: [Harness; 3] = [Harness::Gemini, Harness::Antigravity, Harness::ClaudeDesktop];
 
 /// Checks `harness`, when it is found: its parts, the binary its entry and hook run, and
@@ -190,7 +191,8 @@ fn app(
         println!("  note: {warning}");
     }
     if plan.hooks_off {
-        checks.warn("hook", HOOKS_OFF);
+        let off = if harness == Harness::Gemini { GEMINI_HOOKS_OFF } else { HOOKS_OFF };
+        checks.warn("hook", off);
     } else if plan.hook.is_some_and(connect::State::in_place) {
         let hook = cwd.clone().and_then(|cwd| check_hook(harness, &cwd));
         checks.line("hook", hook);
@@ -212,6 +214,11 @@ fn app(
 /// What doctor says when Codex's config turns its hooks off.
 const HOOKS_OFF: &str = "Codex's hooks are off, so memory won't load at chat start. Turn them \
                          on in [features] in config.toml: remove hooks = false, or set hooks = true";
+
+/// What doctor says when Gemini CLI's settings turn AtticDB's hook off.
+const GEMINI_HOOKS_OFF: &str = "Gemini CLI's hooks are off, so memory won't load at chat \
+                                start. In hooksConfig in settings.json, set enabled to true, \
+                                and remove \"atticdb\" from disabled";
 
 /// The plan for `harness`. For Claude Code, Codex and Gemini CLI, the first of [`CHOSEN`] that
 /// changes nothing, else the defaults' plan. The hooks count as left out on purpose only when

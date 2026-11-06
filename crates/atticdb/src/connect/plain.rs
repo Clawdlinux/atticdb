@@ -21,10 +21,37 @@ pub(super) const EMPTY: &str = "{\n}\n";
 /// Why Claude Desktop can't be connected on this system.
 const NO_DESKTOP: &str = "Claude Desktop is only available on macOS and Windows";
 
-/// `~/.gemini`, which holds Antigravity's dir. Gemini CLI's own config dir moves with
+/// `~/.gemini`, which holds Antigravity's files. Gemini CLI's own config dir moves with
 /// `GEMINI_CLI_HOME`, by [`super::gemini::config_dir`].
 pub(super) fn gemini_dir() -> Result<PathBuf, String> {
     Ok(user_home()?.join(".gemini"))
+}
+
+/// Antigravity's MCP config: `~/.gemini/config/mcp_config.json`, which its app, CLI and IDE
+/// share. An older install keeps `~/.gemini/antigravity/mcp_config.json` instead. That one is
+/// used only when it is a regular file and the shared one is missing. A migrated install
+/// makes it a symlink to the shared one, which is never written through.
+pub(super) fn antigravity_file() -> Result<PathBuf, String> {
+    let gemini = gemini_dir()?;
+    let config = gemini.join("config").join("mcp_config.json");
+    let legacy = gemini.join("antigravity").join("mcp_config.json");
+    let missing = |path: &PathBuf| std::fs::symlink_metadata(path).is_err();
+    let regular = std::fs::symlink_metadata(&legacy).is_ok_and(|meta| meta.is_file());
+    Ok(if regular && missing(&config) { legacy } else { config })
+}
+
+/// Whether Antigravity looks installed: its shared config exists, or `~/.gemini` holds a dir
+/// whose name starts with `antigravity`, such as `antigravity` or `antigravity-ide`.
+pub(super) fn antigravity_found() -> bool {
+    let Ok(gemini) = gemini_dir() else { return false };
+    if gemini.join("config").join("mcp_config.json").exists() {
+        return true;
+    }
+    let Ok(entries) = std::fs::read_dir(&gemini) else { return false };
+    entries.flatten().any(|entry| {
+        let named = entry.file_name().to_string_lossy().starts_with("antigravity");
+        named && entry.path().is_dir()
+    })
 }
 
 /// Claude Desktop's config dir: `~/Library/Application Support/Claude` on macOS, and

@@ -65,6 +65,11 @@ const HOOK_TIMEOUT: Duration = Duration::from_secs(crate::hook::HARD_STOP.as_sec
 const CODEX_HOOKS_OFF: &str = "Codex: hooks are off ([features] hooks = false in config.toml), so \
                                memory won't load at chat start. Remove that line to turn them on.";
 
+/// Gemini CLI's next step when its settings turn AtticDB's hook off.
+const GEMINI_HOOKS_OFF: &str = "Gemini CLI: hooks are off (hooksConfig in settings.json), so \
+                                memory won't load at chat start. Set enabled to true, and \
+                                remove \"atticdb\" from disabled.";
+
 /// What setup says after "found no apps": the shell verbs need no app. `atticdb` is how to
 /// type this binary, from [`typed`].
 fn try_shell(atticdb: &str) -> String {
@@ -237,9 +242,9 @@ fn choose(
             if found.is_empty() {
                 println!(
                     "atticdb found no apps: none of VS Code, Copilot CLI, Claude Code, Codex, \
-                     Gemini CLI, Antigravity or Claude Desktop has a config dir. None of code, \
-                     copilot, claude, codex or gemini is on PATH. Install one, or name it with \
-                     --harness.\n{}",
+                     Gemini CLI, Antigravity or Claude Desktop has a config. None of code, \
+                     copilot, claude, codex, gemini or agy is on PATH. Install one, or name it \
+                     with --harness.\n{}",
                     try_shell(&typed())
                 );
                 return Ok(None);
@@ -397,6 +402,9 @@ fn apply(chosen: &[(Harness, Options)]) -> u8 {
                     next.push(connect::CODEX_APPROVE.into());
                 }
             }
+        }
+        if harness == Harness::Gemini && plan.hooks_off {
+            next.push(GEMINI_HOOKS_OFF.into());
         }
         // Codex on Windows has no hook to check. Antigravity and Claude Desktop have none.
         let codex_hook = !(cfg!(windows) && harness == Harness::Codex);

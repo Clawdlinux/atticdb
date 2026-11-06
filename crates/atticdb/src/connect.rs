@@ -124,7 +124,8 @@ pub struct Report {
     pub hook: Option<State>,
     /// What the PostCompact hook part did: for Claude Code when the hooks were asked for.
     pub post_compact: Option<State>,
-    /// Whether the harness's config turns hooks off, so its hook never runs. Codex only.
+    /// Whether the harness's config turns hooks off, so its hook never runs. Codex and Gemini
+    /// CLI only.
     pub hooks_off: bool,
 }
 
@@ -263,7 +264,8 @@ impl Harness {
     /// The config file. VS Code's lives in its user profile. Copilot's in `$COPILOT_HOME`.
     /// Claude Code's is `.claude.json`, which only the `claude` CLI writes. Codex's is
     /// `config.toml`, which isn't JSON, so only [`codex`] reads it. Gemini CLI's is in
-    /// `$GEMINI_CLI_HOME/.gemini`, else `~/.gemini`. Antigravity's is under `~/.gemini`.
+    /// `$GEMINI_CLI_HOME/.gemini`, else `~/.gemini`. Antigravity's is under `~/.gemini`, by
+    /// [`plain::antigravity_file`].
     /// Claude Desktop's is in its app data dir, which only macOS and Windows have.
     pub(crate) fn file(self) -> Result<PathBuf, String> {
         Ok(match self {
@@ -283,7 +285,7 @@ impl Harness {
             Self::ClaudeCode => claude::state_file()?,
             Self::Codex => codex::config_file()?,
             Self::Gemini => gemini::settings_file()?,
-            Self::Antigravity => plain::gemini_dir()?.join("antigravity").join("mcp_config.json"),
+            Self::Antigravity => plain::antigravity_file()?,
             Self::ClaudeDesktop => plain::desktop_dir()?.join("claude_desktop_config.json"),
         })
     }
@@ -368,9 +370,10 @@ pub(crate) fn binary() -> Result<String, String> {
 /// Whether `harness` looks installed: its config exists, or its program is on `PATH`. For
 /// VS Code, that is the profile dir that holds `mcp.json`. Claude Code and Codex: their config
 /// dir. Copilot CLI: its `mcp-config.json` or `config.json`, not the dir, as connecting VS
-/// Code writes the shared hook and instructions there. Gemini CLI: its config dir, by
-/// [`gemini::config_dir`]. Antigravity: `~/.gemini/antigravity`. Claude Desktop: its app data
-/// dir, never on Linux. Nothing runs.
+/// Code writes the shared hook and instructions there. Gemini CLI: its `settings.json`, by
+/// [`gemini::settings_file`], not the bare dir, which Antigravity uses too. Antigravity: its
+/// shared config or an `antigravity*` dir in `~/.gemini`, by [`plain::antigravity_found`], or
+/// `agy`. Claude Desktop: its app data dir, never on Linux. Nothing runs.
 pub fn detect(harness: Harness) -> bool {
     let copilot = |name: &str| copilot_home().ok().map(|dir| dir.join(name));
     let (paths, program) = match harness {
@@ -382,10 +385,8 @@ pub fn detect(harness: Harness) -> bool {
         }
         Harness::ClaudeCode => (vec![claude::config_dir().ok()], Some("claude")),
         Harness::Codex => (vec![codex::codex_home().ok()], Some("codex")),
-        Harness::Antigravity => {
-            (vec![plain::gemini_dir().ok().map(|dir| dir.join("antigravity"))], None)
-        }
-        Harness::Gemini => (vec![gemini::config_dir().ok()], Some("gemini")),
+        Harness::Antigravity => return plain::antigravity_found() || on_path("agy"),
+        Harness::Gemini => (vec![gemini::settings_file().ok()], Some("gemini")),
         Harness::ClaudeDesktop => (vec![plain::desktop_dir().ok()], None),
     };
     paths.into_iter().flatten().any(|path: PathBuf| path.exists())
@@ -981,6 +982,12 @@ fn entry_exe(entry: &Value) -> Option<String> {
 fn connected(harness: Harness) -> Result<bool, String> {
     let Some((bytes, _)) = read(&harness.file()?)? else { return Ok(false) };
     Ok(has_entry(harness, &bytes))
+}
+
+/// Whether `harness`'s config holds an AtticDB entry, by [`connected`]. A config that can't be
+/// read holds none. It only reads.
+pub fn holds_entry(harness: Harness) -> bool {
+    connected(harness).unwrap_or(false)
 }
 
 /// Whether `bytes`, `harness`'s config, have an AtticDB entry, as [`connected`] reads them.

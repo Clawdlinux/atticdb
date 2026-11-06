@@ -15,10 +15,10 @@
 use super::claude::{add_hook, drop_hooks, edit_file, hook_binaries, hook_command, Event, Part};
 use super::guide::{self, GEMINI as GUIDE};
 use super::plain::{self, Prepared, EMPTY, PART};
-use super::{absolute_env, check_absolute_env, entry_binary, Harness, Mode, Notes, Report};
+use super::{absolute_env, check_absolute_env, entry_binary, read, Harness, Mode, Notes, Report};
 use crate::home::user_home;
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The variable that moves Gemini CLI's home, the dir that holds its `.gemini`. A relative one
 /// is refused: Gemini CLI reads it from its own working dir, which AtticDB can't know.
@@ -71,6 +71,10 @@ pub(super) fn connect(force: bool, hook: bool, notes: Notes, mode: Mode) -> Repo
         Ok(prepared) => prepared,
         Err(error) => return Report::stopped(1, error),
     };
+    let off = if hook { hooks_off(&path) } else { None };
+    warnings.extend(off.map(|why| {
+        format!("{} {why}, so Gemini CLI skips atticdb's hook. {TURN_ON}", path.display())
+    }));
     let home = home.as_deref();
     let entry = entry(&exe, home, notes);
     let group = hook_group(&exe, home);
@@ -92,7 +96,26 @@ pub(super) fn connect(force: bool, hook: bool, notes: Notes, mode: Mode) -> Repo
         Mode::Apply => vec![NEXT.into()],
         Mode::Plan => Vec::new(),
     };
-    Report { lines, warnings, next, hook: hook_state, ..Report::default() }
+    let hooks_off = off.is_some();
+    Report { lines, warnings, next, hook: hook_state, hooks_off, ..Report::default() }
+}
+
+/// What to do when Gemini CLI's settings turn AtticDB's hook off.
+const TURN_ON: &str = "To load memory at chat start, set hooksConfig.enabled to true, and \
+                       remove \"atticdb\" from hooksConfig.disabled";
+
+/// Why the strict JSON `settings.json` at `path` turns AtticDB's hook off, if it does:
+/// `hooksConfig.enabled` is false, or `hooksConfig.disabled` lists the hook's name. A missing
+/// or unreadable file turns nothing off.
+fn hooks_off(path: &Path) -> Option<&'static str> {
+    let (bytes, _) = read(path).ok()??;
+    let root: Value = serde_json::from_slice(&bytes).ok()?;
+    let config = &root["hooksConfig"];
+    if config["enabled"] == json!(false) {
+        return Some("sets hooksConfig.enabled to false");
+    }
+    let disabled = config["disabled"].as_array()?;
+    disabled.contains(&json!(NAME)).then_some("lists atticdb in hooksConfig.disabled")
 }
 
 /// Removes the MCP entry, whatever it runs, every SessionStart group that runs AtticDB's
