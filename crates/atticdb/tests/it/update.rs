@@ -135,7 +135,8 @@ impl Setup {
         let mut command = support::command(exe);
         command.args(args).current_dir(&self.dir.0).env("HOME", self.dir.0.join("h"));
         command.env("ATTICDB_HOME", self.home()).env("PATH", path).env(API, url);
-        command.env_remove(OFF).env_remove("CI");
+        // CURL_HOME would move curl's config away from the test's `HOME`.
+        command.env_remove(OFF).env_remove("CI").env_remove("CURL_HOME");
         command.env_remove("ATTICDB_TOKEN").env_remove("ATTICDB_SETUP_INTERACTIVE");
         command.envs(env.iter().copied()).stdin(Stdio::piped());
         let mut process = Process::start(&mut command);
@@ -397,6 +398,9 @@ fn hook_never_checks() {
 /// The warning every upgrade plan shows.
 const WARNING: &str = "If this release changes the store format, the previous binary can't open \
                        the store after the first write.";
+/// The warning instead of [`WARNING`] for an older release.
+const DOWNGRADE: &str = "This is an older release. It may not open a store a newer release has \
+                         written. Roll back with atticdb.prev.";
 /// What `upgrade` says when stdin is not a terminal and there is no `--yes`.
 const NEEDS_TERMINAL: &str = "atticdb upgrade needs a terminal, or --yes.\n";
 
@@ -535,14 +539,19 @@ fn names(dir: &Path) -> Vec<String> {
     names
 }
 
-/// The plan `upgrade` prints first, for `exe` going to `to`.
+/// The plan `upgrade` prints first, for `exe` going to `to`, a newer release.
 fn plan(exe: &Path, to: &str) -> String {
+    plan_with(exe, to, WARNING)
+}
+
+/// [`plan`] with `warning` as its last line.
+fn plan_with(exe: &Path, to: &str, warning: &str) -> String {
     let exe = exe.display();
     let current = atticdb::VERSION;
     format!(
         "Upgrade AtticDB:\n  from: {current}\n  to: {to}\n  \
          notes: https://github.com/Clawdlinux/atticdb/releases/tag/v{to}\n  \
-         binary: {exe}, the old one kept as {exe}.prev\n{WARNING}\n"
+         binary: {exe}, the old one kept as {exe}.prev\n{warning}\n"
     )
 }
 
@@ -587,7 +596,8 @@ fn upgrade_installs_and_keeps_prev() {
 }
 
 /// `--version` wins: no check, and the installer is pinned to it. A `v` is dropped. A version
-/// that isn't `x.y.z` is a usage error, with no request. So is a relative `ATTICDB_HOME`.
+/// that isn't `x.y.z` is a usage error, with no request. So is a relative `ATTICDB_HOME`. An
+/// older release gets the downgrade warning.
 #[test]
 fn upgrade_takes_version() {
     let setup = Setup::new();
@@ -608,7 +618,9 @@ fn upgrade_takes_version() {
         setup.upgrade(&exe, &release, &["--version", "v0.0.7", "--yes"], &[], "");
     assert_eq!(code, Some(0), "{out}{err}");
     assert_eq!(release.paths(), [installer("0.0.7")], "no check");
-    assert!(out.starts_with(&plan(&exe, "0.0.7")), "{out}");
+    // 0.0.7 is older than this binary, so the plan warns about a downgrade instead.
+    assert!(out.starts_with(&plan_with(&exe, "0.0.7", DOWNGRADE)), "{out}");
+    assert!(!out.contains(WARNING), "{out}");
     assert_eq!(std::fs::read(&exe).unwrap(), new_binary("0.0.7"));
 }
 
@@ -808,4 +820,24 @@ fn upgrade_points_cargo_and_brew_to_their_tool() {
         assert_eq!(names(exe.parent().unwrap()), ["atticdb"], "{}", exe.display());
     }
     assert_eq!(release.paths(), Vec::<String>::new());
+}
+
+/// curl skips the user's `~/.curlrc`. One that caps downloads at 1 byte would fail the
+/// doctor check, the upgrade's fresh check and the `install.sh` download.
+#[test]
+fn curl_ignores_curlrc() {
+    let setup = Setup::new();
+    setup.make_home();
+    std::fs::write(setup.dir.0.join("h/.curlrc"), "max-filesize = 1\n").unwrap();
+    let (url, count) = fake_api(200, TAG);
+    let (_, out, err) = setup.run(&url, &["doctor"], &[], "");
+    assert_eq!(hits(&count), 1, "{out}{err}");
+    assert_eq!(setup.read_cache()["latest"], "9.9.9", "{out}{err}");
+
+    let exe = setup.copy_binary("bin2");
+    let release = Release::new("v9.9.9", stub(Stub::Install));
+    let (code, out, err) = setup.upgrade(&exe, &release, &["--yes"], &[], "");
+    assert_eq!(code, Some(0), "{out}{err}");
+    assert_eq!(release.paths(), [LATEST.to_owned(), installer("9.9.9")]);
+    assert_eq!(std::fs::read(&exe).unwrap(), new_binary("9.9.9"));
 }

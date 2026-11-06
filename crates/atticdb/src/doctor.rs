@@ -173,6 +173,7 @@ fn server_version(checks: &mut Checks, found: &Found) {
 
 /// The line for a server `found` on `this` binary's version. Any other version fails, as
 /// does none from a server too old to send one. That server runs old code until restarted.
+/// The fix is to stop it, as `atticdb upgrade` may not: it is a no-op when up to date.
 fn version_line(found: &Found, this: &str) -> (String, Result<(), String>) {
     let version = found.version.as_deref().unwrap_or("unknown");
     if found.version.as_deref() == Some(this) {
@@ -181,7 +182,7 @@ fn version_line(found: &Found, this: &str) -> (String, Result<(), String>) {
     let stop =
         found.pid.map_or_else(|| "stop the server".to_owned(), |pid| format!("stop pid {pid}"));
     let what = format!("server version: {version}, this binary is {this}");
-    (what, Err(format!("restart it with atticdb upgrade, or {stop}")))
+    (what, Err(format!("{stop}. The next AtticDB call starts this binary's server.")))
 }
 
 /// Checks `harness`, when it is found: its parts, the binary its entry and hook run, and
@@ -464,7 +465,8 @@ mod tests {
     #[test]
     fn server_version_lines() {
         let found = |version: Option<&str>, pid| Found { version: version.map(Into::into), pid };
-        let fix = |stop: &str| Err(format!("restart it with atticdb upgrade, or {stop}"));
+        let fix =
+            |stop: &str| Err(format!("{stop}. The next AtticDB call starts this binary's server."));
         let rows = [
             (found(Some("1.2.0"), Some(7)), "server version: 1.2.0", Ok(())),
             (

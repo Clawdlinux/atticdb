@@ -561,7 +561,7 @@ fn doctor_compares_the_server_version() {
     let pid = std::process::id();
     let holder = format!("pid={pid} instance=X unix={} tcp=none\n", socket.display());
     lock.write_all(holder.as_bytes()).unwrap();
-    let advice = format!("this binary is {version}: restart it with atticdb upgrade, or stop pid");
+    let advice = format!("this binary is {version}: stop pid");
     let rows = [
         ("older", json!({"status": "ok", "instance": "X", "version": "0.0.1"}), "0.0.1"),
         ("no version", json!({"status": "ok", "instance": "X"}), "unknown"),
@@ -571,7 +571,9 @@ fn doctor_compares_the_server_version() {
         support::fake_store(&socket, Some(Duration::ZERO), health);
         let (code, out, err) = doctor();
         assert_eq!(code, Some(1), "{case}: {out}{err}");
-        let line = format!("\nServer and store: ok\n  server version: {said}, {advice} {pid}\n");
+        let next = "The next AtticDB call starts this binary's server.";
+        let line =
+            format!("\nServer and store: ok\n  server version: {said}, {advice} {pid}. {next}\n");
         assert!(out.contains(&line), "{case}: {out}{err}");
     }
     drop(lock);

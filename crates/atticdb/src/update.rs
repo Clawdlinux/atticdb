@@ -129,7 +129,7 @@ fn cached(cache: &Path, now: u64) -> Option<Cached> {
     (age < FRESH_SECS).then(|| Cached::Latest(latest.to_owned()))
 }
 
-/// Asks the API at `api` with `curl -fsSL --max-time 3`, and reads `tag_name`. `None` when
+/// Asks the API at `api` with `curl -q -fsSL --max-time 3`, and reads `tag_name`. `None` when
 /// [`get`] fails, or for a tag that isn't `x.y.z` with an optional `v`.
 fn fetch(api: &str) -> Option<String> {
     let reply = get(api, MAX_TIME, MAX_REPLY).ok()?;
@@ -152,7 +152,7 @@ pub(crate) fn download(url: &str, file: &Path) -> Result<(), String> {
     })
 }
 
-/// The body at `url`, by `curl -fsSL --max-time <max_time> <url>`, at most `max` bytes. It
+/// The body at `url`, by `curl -q -fsSL --max-time <max_time> <url>`, at most `max` bytes. It
 /// fails for a `url` that isn't http or https. It also fails when curl is missing or fails,
 /// or for a longer body.
 fn get(url: &str, max_time: &str, max: u64) -> Result<Vec<u8>, String> {
@@ -161,7 +161,7 @@ fn get(url: &str, max_time: &str, max: u64) -> Result<Vec<u8>, String> {
         return Err("the URL is not http or https".into());
     }
     let mut command = Command::new(curl());
-    command.args(["-fsSL", "--max-time", max_time, url]);
+    command.args(curl_args(url, max_time));
     // curl needs no AtticDB token.
     command.env_remove(crate::client::TOKEN_ENV);
     command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
@@ -185,6 +185,12 @@ fn get(url: &str, max_time: &str, max: u64) -> Result<Vec<u8>, String> {
         return Err(format!("curl failed ({exited})"));
     }
     Ok(body)
+}
+
+/// curl's arguments for [`get`]. `-q` must come first, so curl skips the user's `.curlrc`.
+/// A header or `user` line there would join the request.
+fn curl_args<'a>(url: &'a str, max_time: &'a str) -> [&'a str; 5] {
+    ["-q", "-fsSL", "--max-time", max_time, url]
 }
 
 /// The version in a release `tag`: `x.y.z` without the optional `v`. `None` for a tag over
@@ -315,6 +321,13 @@ mod tests {
             assert!(!newer(garbage, "0.0.1"), "{garbage:?}");
             assert!(!newer("9.9.9", garbage), "{garbage:?}");
         }
+    }
+
+    /// Every curl call goes through [`curl_args`], with `-q` first, so no `.curlrc` is read.
+    #[test]
+    fn curl_skips_curlrc() {
+        let args = curl_args("https://example.com/x", "3");
+        assert_eq!(args, ["-q", "-fsSL", "--max-time", "3", "https://example.com/x"]);
     }
 
     /// A tag is at most 32 bytes. Each number has at most 9 digits, and no leading zero

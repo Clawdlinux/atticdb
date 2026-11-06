@@ -68,6 +68,9 @@ mod unix {
     /// Shown in every plan. Releases carry no store format version, so it can't be narrower.
     const WARNING: &str = "If this release changes the store format, the previous binary \
                            can't open the store after the first write.";
+    /// Shown instead of [`WARNING`] when the release is older than this binary.
+    const DOWNGRADE: &str = "This is an older release. It may not open a store a newer \
+                             release has written. Roll back with atticdb.prev.";
     /// What it says when it can't ask.
     const NEEDS_TERMINAL: &str = "atticdb upgrade needs a terminal, or --yes.";
     /// The 1 line for a failed check.
@@ -142,7 +145,7 @@ mod unix {
         println!("  to: {to}");
         println!("  notes: {RELEASES}/tag/v{to}");
         println!("  binary: {}, the old one kept as {}", exe.display(), prev.display());
-        println!("{WARNING}");
+        println!("{}", if older(&to, crate::VERSION) { DOWNGRADE } else { WARNING });
         if !yes {
             match ask("Upgrade? [y/N] ") {
                 None => return Err(Error::Usage(format!("no answer on stdin. {NEEDS_TERMINAL}"))),
@@ -206,6 +209,12 @@ mod unix {
             }
             None => update::newer(to, current),
         }
+    }
+
+    /// Whether `to`, a release's `x.y.z`, is older than `current`: `newer(current, to)`. A
+    /// source build, `x.y.z+dev`, compares as `x.y.z`, as in [`wanted`].
+    fn older(to: &str, current: &str) -> bool {
+        update::newer(current.strip_suffix("+dev").unwrap_or(current), to)
     }
 
     /// Prints `prompt` and reads 1 answer from stdin, trimmed. `None` at the end of stdin.
@@ -398,6 +407,16 @@ mod unix {
             assert!(!wanted("0.1.9", "0.2.0+dev"));
             assert!(!wanted("nightly", "0.2.0+dev"));
             assert!(!wanted("0.2.0+dev", "0.2.0+dev"));
+        }
+
+        #[test]
+        fn older_for_a_downgrade() {
+            assert!(older("0.1.0", "0.2.0"));
+            assert!(older("0.1.9", "0.2.0+dev"));
+            assert!(!older("0.2.0", "0.2.0"));
+            assert!(!older("0.2.0", "0.2.0+dev"));
+            assert!(!older("0.3.0", "0.2.0"));
+            assert!(!older("0.3.0", "0.2.0+dev"));
         }
 
         #[test]
