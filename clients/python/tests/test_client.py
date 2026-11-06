@@ -15,7 +15,12 @@ def contents(client, session):
 @pytest.mark.parametrize("listener", ["http", "unix"])
 def test_append_retry_and_window(server, listener):
     client = Client(server.url[listener], TOKEN)
-    assert client.health() == {"status": "ok", "instance": server.instance}
+    health = client.health()
+    assert {"status": health["status"], "instance": health["instance"]} == {
+        "status": "ok",
+        "instance": server.instance,
+    }
+    assert isinstance(health["version"], str) and health["version"]
     batch = turns("one", "two" * 10, "three" * 10)
     first = client.append("a", "s", batch, idem_key="k1")
     assert first["outcome"] == "committed" and first["deduplicated"] is False

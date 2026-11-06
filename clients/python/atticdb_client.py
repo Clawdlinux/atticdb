@@ -209,7 +209,7 @@ class Client:
         return self._read(f"/v1/search?{query}", (200,))
 
     def health(self):
-        """Returns `{"status", "instance"}`. A poisoned server answers too, with 503."""
+        """Returns `{"status", "instance", "version"}`. A poisoned server answers too, with 503."""
         return self._read("/healthz", (200, 503))
 
     def _read(self, target, ok):
