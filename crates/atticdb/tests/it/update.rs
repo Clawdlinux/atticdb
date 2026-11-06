@@ -557,6 +557,8 @@ fn upgrade_installs_and_keeps_prev() {
     std::fs::write(setup.cache(), json!({"checked": now()}).to_string()).unwrap();
     let exe = setup.copy_binary("bin2");
     let old = std::fs::read(&exe).unwrap();
+    // A `.prev` from an earlier upgrade gives way to this one's, with no `.prev.old` left.
+    std::fs::write(exe.with_file_name("atticdb.prev"), "earlier rollback").unwrap();
     let release = Release::new("v9.9.9", stub(Stub::Install));
     let (code, out, err) = setup.upgrade(&exe, &release, &["--yes"], &[], "");
     assert_eq!(code, Some(0), "{out}{err}");
@@ -644,7 +646,8 @@ fn upgrade_stops_server() {
 }
 
 /// An installer that fails leaves the binary as it was, also when it had replaced it. The
-/// `.prev` copy is removed, and the server keeps running.
+/// new `.prev` copy is removed, and the server keeps running. A `.prev` from an earlier
+/// upgrade is kept, with no `.prev.old` left.
 #[test]
 fn upgrade_keeps_binary_when_installer_fails() {
     let setup = Setup::new();
@@ -654,23 +657,39 @@ fn upgrade_keeps_binary_when_installer_fails() {
     let exe = setup.copy_binary("bin2");
     let old = std::fs::read(&exe).unwrap();
     let ino = std::fs::metadata(&exe).unwrap().ino();
-    for mode in [Stub::Fail, Stub::SwapThenFail] {
+    let (dir, prev) = (exe.parent().unwrap(), exe.with_file_name("atticdb.prev"));
+    let earlier: &[u8] = b"#!/bin/sh\necho the earlier rollback\n";
+    for (mode, kept_prev) in [
+        (Stub::Fail, false),
+        (Stub::Fail, true),
+        (Stub::SwapThenFail, false),
+        (Stub::SwapThenFail, true),
+    ] {
+        let case = format!("{mode:?}, earlier .prev: {kept_prev}");
+        if kept_prev {
+            std::fs::write(&prev, earlier).unwrap();
+        }
         let release = Release::new("v9.9.9", stub(mode));
         let (code, out, err) = setup.upgrade(&exe, &release, &["--yes"], &[], "");
-        assert_eq!(code, Some(1), "{mode:?}: {out}{err}");
-        assert!(err.contains("stub: checksum mismatch\n"), "{mode:?}: {err}");
+        assert_eq!(code, Some(1), "{case}: {out}{err}");
+        assert!(err.contains("stub: checksum mismatch\n"), "{case}: {err}");
         let kept = format!(
             "atticdb: the installer failed (exit status: 1). {} is unchanged.\n",
             exe.display()
         );
-        assert!(err.ends_with(&kept), "{mode:?}: {err}");
-        assert!(!out.contains("Installed"), "{mode:?}: {out}");
-        assert_eq!(std::fs::read(&exe).unwrap(), old, "{mode:?}");
-        let dir = exe.parent().unwrap();
-        assert_eq!(names(dir), ["atticdb", "installer.env"], "{mode:?}");
-        assert!(names(&setup.tmp()).is_empty(), "{mode:?}");
-        assert!(support::locked(&data), "{mode:?}: the server runs on");
-        assert_eq!(std::fs::read_to_string(data.join("LOCK")).unwrap(), lock, "{mode:?}");
+        assert!(err.ends_with(&kept), "{case}: {err}");
+        assert!(!out.contains("Installed"), "{case}: {out}");
+        assert_eq!(std::fs::read(&exe).unwrap(), old, "{case}");
+        if kept_prev {
+            assert_eq!(std::fs::read(&prev).unwrap(), earlier, "{case}");
+            assert_eq!(names(dir), ["atticdb", "atticdb.prev", "installer.env"], "{case}");
+            std::fs::remove_file(&prev).unwrap();
+        } else {
+            assert_eq!(names(dir), ["atticdb", "installer.env"], "{case}");
+        }
+        assert!(names(&setup.tmp()).is_empty(), "{case}");
+        assert!(support::locked(&data), "{case}: the server runs on");
+        assert_eq!(std::fs::read_to_string(data.join("LOCK")).unwrap(), lock, "{case}");
         std::fs::remove_file(dir.join("installer.env")).unwrap();
     }
     // Restored by a rename, so not the same file, but the same bytes and mode.

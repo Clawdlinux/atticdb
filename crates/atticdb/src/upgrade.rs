@@ -63,6 +63,8 @@ mod unix {
     const NAME: &str = "atticdb";
     /// The old binary's name, beside the new one.
     const PREV: &str = "atticdb.prev";
+    /// Where an earlier `atticdb.prev` waits while the installer runs.
+    const PREV_OLD: &str = "atticdb.prev.old";
     /// Shown in every plan. Releases carry no store format version, so it can't be narrower.
     const WARNING: &str = "If this release changes the store format, the previous binary \
                            can't open the store after the first write.";
@@ -242,8 +244,9 @@ mod unix {
     }
 
     /// Copies `exe` to `prev`, then runs `sh <script>` pinned to `to` and to `exe`'s folder.
+    /// An earlier `prev` waits as `prev.old` meanwhile. It is removed on success.
     /// When the script fails, `exe` is as it was. The copy goes back if the script replaced
-    /// it. Otherwise the copy is removed.
+    /// it. Otherwise the copy is removed. Either way the earlier `prev` comes back.
     fn run_installer(
         exe: &Path,
         prev: &Path,
@@ -254,10 +257,17 @@ mod unix {
         let dir = exe.parent().unwrap_or(Path::new("/"));
         let before = std::fs::metadata(exe)
             .map_err(|error| Error::Failed(format!("{}: {error}", exe.display())))?;
-        keep(exe, prev).map_err(|error| {
+        let old = exe.with_file_name(PREV_OLD);
+        let aside = set_aside(prev, &old).map_err(|error| {
             let prev = prev.display();
-            Error::Failed(format!("cannot copy the binary to {prev}: {error}. Nothing changed."))
+            Error::Failed(format!("cannot move {prev} aside: {error}. Nothing changed."))
         })?;
+        if let Err(error) = keep(exe, prev) {
+            bring_back(aside, &old, prev);
+            let prev = prev.display();
+            let why = format!("cannot copy the binary to {prev}: {error}. Nothing changed.");
+            return Err(Error::Failed(why));
+        }
         let mut command = Command::new("/bin/sh");
         command.arg(script).env("ATTICDB_VERSION", to).env("ATTICDB_INSTALL_DIR", dir);
         if let Some(base) = base {
@@ -267,7 +277,12 @@ mod unix {
         command.env_remove(crate::client::TOKEN_ENV).stdin(Stdio::null());
         let _ = std::io::stdout().flush();
         let why = match crate::spawn(&mut command).and_then(|mut child| child.wait()) {
-            Ok(status) if status.success() => return Ok(()),
+            Ok(status) if status.success() => {
+                if aside {
+                    let _ = std::fs::remove_file(&old);
+                }
+                return Ok(());
+            }
             Ok(status) => status.to_string(),
             Err(error) => format!("cannot run /bin/sh: {error}"),
         };
@@ -276,13 +291,37 @@ mod unix {
         if !replaced {
             let _ = std::fs::remove_file(prev);
         } else if let Err(error) = std::fs::rename(prev, exe) {
+            // `prev` holds the only copy of the old binary now, so `prev.old` stays put.
             let (exe, prev) = (exe.display(), prev.display());
             return Err(Error::Failed(format!(
                 "the installer failed ({why}), and {exe} could not be put back: {error}. The old \
                  binary is {prev}."
             )));
         }
+        bring_back(aside, &old, prev);
         Err(Error::Failed(format!("the installer failed ({why}). {} is unchanged.", exe.display())))
+    }
+
+    /// Renames an existing `prev` to `old`, replacing any `old` an interrupted run left.
+    /// Returns whether there was one.
+    fn set_aside(prev: &Path, old: &Path) -> std::io::Result<bool> {
+        match std::fs::symlink_metadata(prev) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+            Ok(_) => std::fs::rename(prev, old).map(|()| true),
+        }
+    }
+
+    /// Renames `old` back to `prev` when [`set_aside`] moved it. A failure is only reported,
+    /// as the binary itself is fine.
+    fn bring_back(aside: bool, old: &Path, prev: &Path) {
+        if !aside {
+            return;
+        }
+        if let Err(error) = std::fs::rename(old, prev) {
+            let (old, prev) = (old.display(), prev.display());
+            eprintln!("atticdb: cannot rename {old} back to {prev}: {error}.");
+        }
     }
 
     /// Copies `exe` to `prev` through a temp file beside it, renamed over `prev`. So a link at
