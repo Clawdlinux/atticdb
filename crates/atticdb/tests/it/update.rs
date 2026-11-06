@@ -135,8 +135,9 @@ impl Setup {
         let mut command = support::command(exe);
         command.args(args).current_dir(&self.dir.0).env("HOME", self.dir.0.join("h"));
         command.env("ATTICDB_HOME", self.home()).env("PATH", path).env(API, url);
-        // CURL_HOME would move curl's config away from the test's `HOME`.
+        // CURL_HOME and XDG_CONFIG_HOME would move curl's config away from the test's `HOME`.
         command.env_remove(OFF).env_remove("CI").env_remove("CURL_HOME");
+        command.env_remove("XDG_CONFIG_HOME");
         command.env_remove("ATTICDB_TOKEN").env_remove("ATTICDB_SETUP_INTERACTIVE");
         command.envs(env.iter().copied()).stdin(Stdio::piped());
         let mut process = Process::start(&mut command);
