@@ -99,11 +99,13 @@ atticdb setup --help      # the flags
 It looks for VS Code, Copilot CLI, Claude Code, Codex, Gemini CLI, Antigravity and Claude Desktop.
 Nothing runs to find them.
 An app counts as found when its program is on `PATH`, or its config exists.
-For VS Code, Claude Code, Codex and Gemini CLI, the config is their config dir.
+For VS Code, Claude Code and Codex, the config is their config dir.
 For Copilot CLI, it is `mcp-config.json` or `config.json` in `~/.copilot`.
 The dir alone doesn't count, as connecting VS Code writes there too.
-Antigravity and Claude Desktop have no program to find, so only their config dir counts.
-Antigravity's dir is `~/.gemini/antigravity`. So with Antigravity installed, Gemini CLI counts as found too, unless `GEMINI_CLI_HOME` moves it.
+For Gemini CLI, it is `settings.json` in its config dir. Gemini CLI writes it on first run.
+The bare `~/.gemini` doesn't count, as Antigravity keeps its files there too.
+For Antigravity, it is `~/.gemini/config/mcp_config.json`, or any `~/.gemini/antigravity*` dir. Its program is `agy`.
+Claude Desktop has no program to find, so only its config dir counts.
 Claude Desktop is never found on Linux, as it has no Linux app.
 
 It asks which apps to connect. Empty answers take the defaults in brackets.
@@ -178,7 +180,8 @@ Each check prints 1 line: `ok`, or the problem and what to do. They run in this 
 - **Server and store:** the store must answer `fact_list`. This reads as any AtticDB read does.
   So it may start the home's server, which writes its own files in `data/`.
 - **Each app:** the apps it finds, or those in `--harness`. An app that isn't found prints `not found`. That is not a failure.
-  Gemini CLI, Antigravity and Claude Desktop show only when found or named. So without them, doctor prints no line for them.
+  Gemini CLI, Antigravity and Claude Desktop show only when named, or when their config holds an `atticdb` entry.
+  So an app found but never connected prints no line, and doctor stays green after an upgrade. Setup still offers it.
   - **parts:** a plan, as in `atticdb setup --dry-run`, must find every part in place. Else it lists each part that would change.
     A missing Claude Code, Codex or Gemini CLI hook counts as left out on purpose, as with `--no-hook`. So do the rules `--notes ask` leaves out.
     For Gemini CLI, that is the entry's `trust`.
@@ -714,6 +717,11 @@ On Windows the hook runs in PowerShell. See [Windows](#windows).
 An entry with connection flags is refused, as for Copilot CLI, unless `--force`.
 An older AtticDB entry is updated where it stands, so other servers keep their places and bytes.
 `settings.json` is edited as text, as Claude Code's is. The hook group is found by its content the same way.
+A group wired by hand counts as AtticDB's too. Its command runs an absolute path to `atticdb` or `atticdb.exe`, then `hook session-start`.
+The path may be quoted or not, and any flags may follow. Connect replaces that group where it stands, and says `updated`.
+So Gemini CLI never gets 2 memory blocks. `disconnect` removes it.
+If `hooksConfig.enabled` is false, or `hooksConfig.disabled` lists `atticdb`, Gemini CLI never runs the hook.
+Connect warns, setup says so in its next steps, and doctor warns on its hook line.
 The guide follows Codex's rules, with `GEMINI.md` in place of `AGENTS.md`. There is no override file and no size warning.
 A `GEMINI.md` that mentions AtticDB outside the block is your own guide. AtticDB leaves it alone and says `kept`.
 `disconnect` removes the entry, AtticDB's hook group and the guide block.
@@ -727,9 +735,12 @@ Each part prints 1 line, and the exit code works as for Claude Code. Then start 
 
 | Name | File | Entry |
 |---|---|---|
-| `antigravity` | `~/.gemini/antigravity/mcp_config.json`. `GEMINI_CLI_HOME` doesn't move it | `mcpServers.atticdb`: `atticdb mcp --agent antigravity` |
+| `antigravity` | `~/.gemini/config/mcp_config.json`, which its app, CLI and IDE share. `GEMINI_CLI_HOME` doesn't move it | `mcpServers.atticdb`: `atticdb mcp --agent antigravity` |
 | `claude-desktop` | macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`. Windows: `%APPDATA%\Claude\claude_desktop_config.json`. Linux: none | `mcpServers.atticdb`: `atticdb mcp --agent claude-desktop` |
 
+Older Antigravity installs keep `~/.gemini/antigravity/mcp_config.json` instead.
+AtticDB uses that file only when it is a regular file and the shared one is missing.
+A migrated install makes it a symlink to the shared file. AtticDB never writes through it.
 Claude Desktop has no Linux app. On Linux, both verbs exit 1 and change nothing.
 The entry follows the Gemini CLI entry's rules above, without `trust`. Under `ATTICDB_HOME` it gets the same `env`.
 A missing file starts as `{}`. A file that isn't strict JSON is skipped, and its line says what to add by hand.
@@ -939,7 +950,7 @@ Antigravity and Claude Desktop get only their MCP entry, as on macOS.
 | Claude Code | `%USERPROFILE%\.claude.json` and `%USERPROFILE%\.claude\settings.json` | The hook runs in exec form, below. `claude` may be `claude.exe` or npm's `claude.cmd` |
 | Codex | `%USERPROFILE%\.codex\config.toml` | Only the MCP entry. No hook and no `AGENTS.md` guide |
 | Gemini CLI | `settings.json` and `GEMINI.md` in `%USERPROFILE%\.gemini`, or `%GEMINI_CLI_HOME%\.gemini` | The hook command is PowerShell: `& '<binary>' hook session-start --harness gemini`. Under `ATTICDB_HOME` it ends with `--home '<path>'` |
-| Antigravity | `%USERPROFILE%\.gemini\antigravity\mcp_config.json` | Nothing |
+| Antigravity | `%USERPROFILE%\.gemini\config\mcp_config.json`, or the older `antigravity\mcp_config.json` as on macOS | Nothing |
 | Claude Desktop | `%APPDATA%\Claude\claude_desktop_config.json` | Nothing |
 
 The Copilot hook's binary path is single-quoted for PowerShell, so `$`, `&` and spaces stay as they are.
