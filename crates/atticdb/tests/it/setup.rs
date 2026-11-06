@@ -981,3 +981,37 @@ fn doctor_reports_new_apps() {
         assert!(out.contains(&stale), "{title}: {out}");
     }
 }
+
+/// Setup connects Gemini CLI: its entry, its hook and its guide. Doctor finds them in place
+/// and runs the hook. So it does after `--notes ask --no-hook`, with no hook to run.
+#[test]
+fn setup_and_doctor_connect_gemini() {
+    let dir = Dir::new();
+    std::fs::create_dir(dir.0.join("empty")).unwrap();
+    let empty = OsString::from(dir.0.join("empty"));
+    let options: [&[&str]; 2] = [&[], &["--notes", "ask", "--no-hook"]];
+    for (row, options) in options.into_iter().enumerate() {
+        let home = dir.0.join(format!("h{row}"));
+        let gemini = home.join(".gemini");
+        std::fs::create_dir_all(&gemini).unwrap();
+        let _holders = Holders(vec![data_dir(&home)]);
+        let args = [&["--yes", "--harness", "gemini"][..], options].concat();
+        let (code, out, err) = setup(&home, &dir.0, &empty, &[], &args, "");
+        assert_eq!(code, Some(0), "{options:?}: {out}{err}");
+        assert!(out.contains("\n  Gemini CLI: ok\n"), "{options:?}: {out}");
+        let settings: Value =
+            serde_json::from_slice(&std::fs::read(gemini.join("settings.json")).unwrap()).unwrap();
+        assert_eq!(
+            settings["mcpServers"]["atticdb"]["trust"].as_bool(),
+            options.is_empty().then_some(true)
+        );
+        assert_eq!(settings["hooks"].is_object(), options.is_empty(), "{options:?}");
+        assert!(std::fs::read_to_string(gemini.join("GEMINI.md")).unwrap().contains("AtticDB"));
+        let doctor = ["--harness", "gemini"];
+        let (code, out, err) = atticdb("doctor", &home, &dir.0, &empty, &[], &doctor, "");
+        assert_eq!(code, Some(0), "{options:?}: {out}{err}");
+        let hook = if options.is_empty() { "  hook: ok\n" } else { "" };
+        let ok = format!("\nGemini CLI:\n  parts: ok\n  binary: ok\n{hook}");
+        assert!(out.contains(&ok), "{options:?}: {out}");
+    }
+}

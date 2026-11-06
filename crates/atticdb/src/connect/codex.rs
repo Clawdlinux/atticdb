@@ -8,7 +8,7 @@
 //! - The guide: the MCP server's instructions as a block in `AGENTS.md`, or in
 //!   `AGENTS.override.md` when Codex reads that instead. Codex 0.147 didn't pass MCP server
 //!   instructions to the model in `codex exec`, so the guide goes where Codex reads the
-//!   user's own. See [`guide`].
+//!   user's own. See [`super::guide`].
 //!
 //! Codex keeps 1 approval per hook in `config.toml`. AtticDB never writes those.
 //!
@@ -18,6 +18,7 @@ use super::claude::{
     add_hook, drop_hooks, edit_file, find_program, hook_binaries, hook_command, our_group, run,
     shell_line, split, Edit, Event, Part,
 };
+use super::guide::{self, CODEX as GUIDE};
 use super::{
     absolute_env, add_or_update, binary, delete, moved_home, planned, read, write, Harness, Line,
     Mode, Notes, Report, State,
@@ -30,7 +31,6 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-mod guide;
 mod scan;
 use scan::{scan, Entry, Item};
 
@@ -141,7 +141,7 @@ pub(super) fn connect(hook: bool, notes: Notes, mode: Mode) -> Report {
         }
     }
     if !mcp_only {
-        let (guide, too_big) = guide::add(&dir, mode);
+        let (guide, too_big) = guide::add(&GUIDE, &dir, mode);
         lines.push(guide);
         warnings.extend(too_big);
     }
@@ -205,7 +205,7 @@ pub(super) fn disconnect() -> u8 {
     let parts = [Part { name, by_hand, edit: &drop, adds: None }];
     let mut lines = vec![drop_block(&config).unwrap_or_else(|line| line)];
     lines.extend(edit_file(hooks.clone(), NO_HOOKS, &parts, Mode::Apply));
-    lines.extend(guide::remove(&dir));
+    lines.extend(guide::remove(&GUIDE, &dir));
     // A removal that left another AtticDB handler to do by hand still moved the groups after it.
     let next = saved(&hooks, &tracked).filter(|moved| *moved).map(|_| POSITION.to_owned());
     Report { lines, next: next.into_iter().collect(), ..Report::default() }.print()

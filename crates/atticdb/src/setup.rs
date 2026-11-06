@@ -19,10 +19,10 @@ pub struct Flags {
     pub yes: bool,
     /// The apps to connect, from `--harness`.
     pub harnesses: Option<Vec<Harness>>,
-    /// `--no-hook`: no SessionStart hook for Claude Code and Codex, and no PostCompact hook
-    /// for Claude Code.
+    /// `--no-hook`: no SessionStart hook for Claude Code, Codex and Gemini CLI, and no
+    /// PostCompact hook for Claude Code.
     pub no_hook: bool,
-    /// Whether Claude Code and Codex save notes without asking, from `--notes`.
+    /// Whether Claude Code, Codex and Gemini CLI save notes without asking, from `--notes`.
     pub notes: Option<Notes>,
     /// Print the plan and write nothing.
     pub dry_run: bool,
@@ -39,8 +39,10 @@ Then it connects them, checks each one, and says what to do next.
   --yes             take every default, and don't ask Apply?
   --harness <list>  connect these apps, a comma list of copilot, vscode, claude-code, codex,
                     gemini, antigravity and claude-desktop
-  --no-hook         no chat-start memory in Claude Code and Codex, and no saved compaction summaries
-  --notes ask|auto  ask before saving notes in Claude Code and Codex, or don't (the default)
+  --no-hook         no chat-start memory in Claude Code, Codex and Gemini CLI, and no saved
+                    compaction summaries
+  --notes ask|auto  ask before saving notes in Claude Code, Codex and Gemini CLI, or don't
+                    (the default)
   --dry-run         print the plan, and write nothing
 
 Without a terminal on stdin, it needs --yes or --dry-run.
@@ -253,8 +255,11 @@ fn choose(
             }
         }
     };
-    // Only Claude Code and Codex take these 2. VS Code and Copilot CLI always get the hook.
-    let own = harnesses.iter().any(|h| matches!(h, Harness::ClaudeCode | Harness::Codex));
+    // Only Claude Code, Codex and Gemini CLI take these 2. VS Code and Copilot CLI always get
+    // the hook.
+    let own = harnesses
+        .iter()
+        .any(|h| matches!(h, Harness::ClaudeCode | Harness::Codex | Harness::Gemini));
     let hint = "Answer y or n.";
     // Claude Code's PostCompact hook saves summaries, which can hold file contents and
     // secrets. So the question names it when Claude Code is chosen.
@@ -271,8 +276,15 @@ fn choose(
     let notes = match flags.notes {
         Some(notes) => notes,
         None if ask && own => {
-            let prompt = "Save notes without asking? (Claude Code and Codex. Saving a rule always \
-                          asks.) [Y/n] ";
+            // Gemini CLI's `trust` covers every atticdb tool, so there a rule saves without
+            // asking too. The question says so only when Gemini CLI is chosen.
+            let prompt = if harnesses.contains(&Harness::Gemini) {
+                "Save notes without asking? (Claude Code, Codex and Gemini CLI. Saving a rule \
+                 always asks, except in Gemini CLI, which then trusts every atticdb tool.) [Y/n] "
+            } else {
+                "Save notes without asking? (Claude Code and Codex. Saving a rule always asks.) \
+                 [Y/n] "
+            };
             if asker.ask(prompt, true, yes_no, hint)? {
                 Notes::Auto
             } else {

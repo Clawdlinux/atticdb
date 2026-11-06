@@ -28,8 +28,8 @@ fn not_set_up() -> String {
     )
 }
 
-/// The options a Claude Code or Codex install may have been connected with, the defaults
-/// first. Parts are in place when any of them plans no change.
+/// The options a Claude Code, Codex or Gemini CLI install may have been connected with, the
+/// defaults first. Parts are in place when any of them plans no change.
 const CHOSEN: [Options; 4] = [
     Options { force: false, hook: true, notes: Notes::Auto },
     Options { force: false, hook: true, notes: Notes::Ask },
@@ -213,15 +213,16 @@ fn app(
 const HOOKS_OFF: &str = "Codex's hooks are off, so memory won't load at chat start. Turn them \
                          on in [features] in config.toml: remove hooks = false, or set hooks = true";
 
-/// The plan for `harness`. For Claude Code and Codex, the first of [`CHOSEN`] that changes
-/// nothing, else the defaults' plan. The hooks count as left out on purpose only when all of
-/// them are missing, so a hook that would change is never hidden.
+/// The plan for `harness`. For Claude Code, Codex and Gemini CLI, the first of [`CHOSEN`] that
+/// changes nothing, else the defaults' plan. The hooks count as left out on purpose only when
+/// all of them are missing, so a hook that would change is never hidden.
 fn plan(harness: Harness) -> Report {
     let in_place = |report: &Report| {
         report.stopped.is_none() && report.lines.iter().all(|line| line.state.in_place())
     };
     let first = connect::connect(harness, CHOSEN[0], Mode::Plan);
-    if in_place(&first) || !matches!(harness, Harness::ClaudeCode | Harness::Codex) {
+    let chosen = matches!(harness, Harness::ClaudeCode | Harness::Codex | Harness::Gemini);
+    if in_place(&first) || !chosen {
         return first;
     }
     // Claude Code's PostCompact hook must be missing too, so a stale one still shows.

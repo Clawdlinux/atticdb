@@ -2457,14 +2457,314 @@ fn connect_new_apps_pass_the_home() {
     }
 }
 
-/// Gemini CLI waits for its own parts.
-#[test]
-fn connect_gemini_is_not_supported_yet() {
-    let it = Plain::new();
-    for verb in ["connect", "disconnect"] {
-        let (code, out) = it.run(&[verb, "gemini"]);
-        assert_eq!(code, Some(1), "{verb}: {out}");
-        assert!(out.contains("gemini is not supported yet"), "{verb}: {out}");
+/// A home for Gemini CLI: an empty `HOME` with `~/.gemini`, and a `PATH` with no programs.
+struct Gemini {
+    dir: Dir,
+    exe: String,
+}
+
+impl Gemini {
+    fn new() -> Self {
+        let dir = Dir::new();
+        std::fs::create_dir_all(dir.0.join("bin")).unwrap();
+        std::fs::create_dir_all(dir.0.join("h/.gemini")).unwrap();
+        let exe = std::fs::canonicalize(env!("CARGO_BIN_EXE_atticdb")).unwrap();
+        Self { dir, exe: exe.to_str().unwrap().to_owned() }
     }
-    assert!(!it.dir.0.join("h/.gemini").exists(), "nothing written");
+
+    /// Runs `atticdb` with `args` and `env`, and returns its exit code and output.
+    fn run_with(&self, args: &[&str], env: &[(&str, &Path)]) -> (Option<i32>, String) {
+        let mut command = support::command(&self.exe);
+        command.args(args).current_dir(&self.dir.0).env("HOME", self.dir.0.join("h"));
+        command.env("PATH", self.dir.0.join("bin")).env_remove("ATTICDB_TOKEN");
+        command.envs(env.iter().copied());
+        let (status, out) = Process::start(command.stdin(Stdio::null())).wait();
+        (status.code(), out)
+    }
+
+    /// Runs `atticdb` with `args`, and returns its exit code and output.
+    fn run(&self, args: &[&str]) -> (Option<i32>, String) {
+        self.run_with(args, &[])
+    }
+
+    fn settings(&self) -> std::path::PathBuf {
+        self.dir.0.join("h/.gemini/settings.json")
+    }
+
+    fn guide(&self) -> std::path::PathBuf {
+        self.dir.0.join("h/.gemini/GEMINI.md")
+    }
+
+    /// `settings.json`, read as JSON.
+    fn read(&self) -> Value {
+        serde_json::from_slice(&std::fs::read(self.settings()).unwrap()).unwrap()
+    }
+
+    /// The groups in `hooks.SessionStart` of `settings.json`.
+    fn groups(&self) -> Vec<Value> {
+        self.read()["hooks"]["SessionStart"].as_array().cloned().unwrap_or_default()
+    }
+
+    /// The entry AtticDB writes. `trust` unless notes ask.
+    fn entry(&self, trust: bool) -> Value {
+        let mut entry = json!({"command": self.exe, "args": ["mcp", "--agent", "gemini"]});
+        if trust {
+            entry["trust"] = json!(true);
+        }
+        entry
+    }
+
+    /// The SessionStart group AtticDB adds, with its timeout in milliseconds.
+    fn group(&self, home: Option<&Path>) -> Value {
+        let quoted = format!("'{}'", self.exe.replace('\'', r"'\''"));
+        let prefix = home.map(|home| format!("ATTICDB_HOME='{}' ", home.display()));
+        let command =
+            format!("{}{quoted} hook session-start --harness gemini", prefix.unwrap_or_default());
+        json!({"hooks": [{"type": "command", "name": "atticdb", "command": command,
+            "timeout": 5000}]})
+    }
+}
+
+/// The guide's block, from its spec: the MCP server's instructions between 2 markers that
+/// name `atticdb disconnect gemini`.
+fn gemini_block() -> String {
+    format!(
+        "<!-- atticdb:begin v1. atticdb disconnect gemini removes this block. -->\n## AtticDB \
+         memory\n{}\n<!-- atticdb:end -->\n",
+        atticdb::mcp::INSTRUCTIONS
+    )
+}
+
+/// A settings.json as people keep it: a theme, 1 user server, and a user SessionStart group.
+const GEMINI_SETTINGS: &str = r#"{
+  "theme": "GitHub",
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"]
+    }
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "name": "branch",
+            "command": "~/.gemini/hooks/branch.sh",
+            "timeout": 2000
+          }
+        ]
+      }
+    ]
+  }
+}
+"#;
+
+/// A global GEMINI.md as people keep it.
+const GEMINI_GUIDE: &str = "# My rules\n\n- Use pnpm, not npm.\n";
+
+/// What `connect gemini` prints last in Apply mode.
+const GEMINI_NEXT: &str = "Start a new Gemini CLI session to load atticdb.";
+
+/// Connect adds the entry with `trust`, the SessionStart group and the guide block, next to
+/// the user's own. A fresh `~/.gemini` gets both files. A rerun changes nothing, and a dry
+/// run says what it would add.
+#[test]
+fn gemini_connect_adds_entry_hook_and_guide() {
+    let it = Gemini::new();
+    let (settings, guide) = (it.settings(), it.guide());
+    let (at, shown) = (settings.display().to_string(), guide.display().to_string());
+    let (code, out) = it.run(&["connect", "gemini", "--dry-run"]);
+    let plan = format!(
+        "{at}: add the MCP entry\n{at}: add the SessionStart hook\n{shown}: add the atticdb guide\n"
+    );
+    assert_eq!((code, out), (Some(0), plan));
+    assert!(files(&it.dir.0.join("h/.gemini")).is_empty(), "the dry run wrote nothing");
+
+    let (code, out) = it.run(&["connect", "gemini"]);
+    let added = format!(
+        "MCP entry: added ({at})\nSessionStart hook: added ({at})\natticdb guide: added \
+         ({shown})\n{GEMINI_NEXT}\n"
+    );
+    assert_eq!((code, out), (Some(0), added));
+    assert_eq!(
+        it.read(),
+        json!({"mcpServers": {"atticdb": it.entry(true)},
+        "hooks": {"SessionStart": [it.group(None)]}})
+    );
+    assert_eq!(std::fs::read_to_string(&guide).unwrap(), gemini_block());
+
+    let before = files(&it.dir.0.join("h/.gemini"));
+    let (code, out) = it.run(&["connect", "gemini"]);
+    let unchanged = format!(
+        "MCP entry: unchanged ({at})\nSessionStart hook: unchanged ({at})\natticdb guide: \
+         unchanged ({shown})\n{GEMINI_NEXT}\n"
+    );
+    assert_eq!((code, out), (Some(0), unchanged));
+    assert_eq!(files(&it.dir.0.join("h/.gemini")), before, "nothing written");
+
+    // Hand-kept files keep every byte of the user's, with AtticDB's parts added last.
+    std::fs::write(&settings, GEMINI_SETTINGS).unwrap();
+    std::fs::write(&guide, GEMINI_GUIDE).unwrap();
+    let (code, out) = it.run(&["connect", "gemini"]);
+    assert_eq!(code, Some(0), "{out}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(lines[0].starts_with(&format!("MCP entry: added ({at}, backup: ")), "{out}");
+    assert!(lines[1].starts_with(&format!("SessionStart hook: added ({at}, backup: ")), "{out}");
+    assert!(lines[2].starts_with(&format!("atticdb guide: added ({shown}, backup: ")), "{out}");
+    assert_eq!(lines[3..], [GEMINI_NEXT], "{out}");
+    let root = it.read();
+    assert_eq!(root["theme"], "GitHub");
+    let github = json!({"command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"]});
+    assert_eq!(root["mcpServers"], json!({"github": github, "atticdb": it.entry(true)}));
+    let theirs: Value = serde_json::from_str(GEMINI_SETTINGS).unwrap();
+    let theirs = theirs["hooks"]["SessionStart"][0].clone();
+    assert_eq!(it.groups(), [theirs, it.group(None)]);
+    let text = std::fs::read_to_string(&guide).unwrap();
+    assert_eq!(text, format!("{GEMINI_GUIDE}\n{}", gemini_block()));
+}
+
+/// `--notes ask` leaves out `trust`, so Gemini CLI asks before each atticdb tool. Connecting
+/// with the default notes puts it back, in place.
+#[test]
+fn gemini_notes_ask_drops_trust() {
+    let it = Gemini::new();
+    let (code, out) = it.run(&["connect", "gemini", "--notes", "ask"]);
+    assert_eq!(code, Some(0), "{out}");
+    assert_eq!(it.read()["mcpServers"]["atticdb"], it.entry(false));
+    let (code, out) = it.run(&["connect", "gemini", "--notes", "ask"]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.starts_with("MCP entry: unchanged ("), "{out}");
+    let (code, out) = it.run(&["connect", "gemini"]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.starts_with("MCP entry: updated ("), "{out}");
+    assert_eq!(it.read()["mcpServers"]["atticdb"], it.entry(true));
+}
+
+/// `--no-hook` adds no SessionStart group. The entry and the guide still go in.
+#[test]
+fn gemini_no_hook() {
+    let it = Gemini::new();
+    let (code, out) = it.run(&["connect", "gemini", "--no-hook"]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(!out.contains("SessionStart hook"), "{out}");
+    assert_eq!(it.read(), json!({"mcpServers": {"atticdb": it.entry(true)}}));
+    assert_eq!(std::fs::read_to_string(it.guide()).unwrap(), gemini_block());
+}
+
+/// A user's own SessionStart group survives connect and disconnect, which give both files
+/// back byte for byte.
+#[test]
+fn gemini_keeps_user_hook_groups() {
+    let it = Gemini::new();
+    std::fs::write(it.settings(), GEMINI_SETTINGS).unwrap();
+    std::fs::write(it.guide(), GEMINI_GUIDE).unwrap();
+    let (code, out) = it.run(&["connect", "gemini"]);
+    assert_eq!(code, Some(0), "{out}");
+    let theirs: Value = serde_json::from_str(GEMINI_SETTINGS).unwrap();
+    let theirs = theirs["hooks"]["SessionStart"][0].clone();
+    assert_eq!(it.groups(), [theirs.clone(), it.group(None)]);
+    let (code, out) = it.run(&["disconnect", "gemini"]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.contains("\nSessionStart hook: removed ("), "{out}");
+    assert_eq!(std::fs::read_to_string(it.settings()).unwrap(), GEMINI_SETTINGS);
+    assert_eq!(std::fs::read_to_string(it.guide()).unwrap(), GEMINI_GUIDE);
+}
+
+/// A GEMINI.md that mentions AtticDB outside a block is the user's own guide. It stays as it
+/// is, and the guide part says so. The other parts still apply.
+#[test]
+fn gemini_guide_skips_user_guide() {
+    let it = Gemini::new();
+    let theirs = "# Memory\n\nUse AtticDB's memory_search before you ask me.\n";
+    std::fs::write(it.guide(), theirs).unwrap();
+    let shown = it.guide().display().to_string();
+    let (code, out) = it.run(&["connect", "gemini", "--dry-run"]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.contains(&format!("\n{shown}: keep the user's guide, which mentions atticdb\n")));
+    let (code, out) = it.run(&["connect", "gemini"]);
+    assert_eq!(code, Some(0), "{out}");
+    let kept = format!("\natticdb guide: kept, {shown} already mentions atticdb\n");
+    assert!(out.contains(&kept), "{out}");
+    assert_eq!(it.read()["mcpServers"]["atticdb"], it.entry(true));
+    assert_eq!(std::fs::read_to_string(it.guide()).unwrap(), theirs);
+    let (code, out) = it.run(&["disconnect", "gemini"]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.ends_with(&format!("\natticdb guide: not found ({shown})\n")), "{out}");
+    assert_eq!(std::fs::read_to_string(it.guide()).unwrap(), theirs);
+}
+
+/// Disconnect removes the entry, the hook group and the guide block. A rerun finds none.
+#[test]
+fn gemini_disconnect_removes_all_parts() {
+    let it = Gemini::new();
+    assert_eq!(it.run(&["connect", "gemini"]).0, Some(0));
+    let (at, shown) = (it.settings().display().to_string(), it.guide().display().to_string());
+    let (code, out) = it.run(&["disconnect", "gemini"]);
+    assert_eq!(code, Some(0), "{out}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(lines[0].starts_with(&format!("MCP entry: removed ({at}, backup: ")), "{out}");
+    assert!(lines[1].starts_with(&format!("SessionStart hook: removed ({at}, backup: ")), "{out}");
+    assert!(lines[2].starts_with(&format!("atticdb guide: removed ({shown}, backup: ")), "{out}");
+    assert_eq!(lines.len(), 3, "{out}");
+    // The emptied `mcpServers` and SessionStart array stay, as for the other apps.
+    assert_eq!(it.read(), json!({"mcpServers": {}, "hooks": {"SessionStart": []}}));
+    assert_eq!(std::fs::read_to_string(it.guide()).unwrap(), "");
+    let (code, out) = it.run(&["disconnect", "gemini"]);
+    let none = format!(
+        "MCP entry: not found ({at})\nSessionStart hook: not found ({at})\natticdb guide: not \
+         found ({shown})\n"
+    );
+    assert_eq!((code, out), (Some(0), none));
+}
+
+/// A settings.json with a comment is never rewritten. Its parts say what to add by hand, the
+/// guide still goes in, and the exit code is 1.
+#[test]
+fn gemini_leaves_non_strict_settings_alone() {
+    let it = Gemini::new();
+    let text = "{\n  // my theme\n  \"theme\": \"GitHub\"\n}\n";
+    std::fs::write(it.settings(), text).unwrap();
+    let (code, out) = it.run(&["connect", "gemini"]);
+    assert_eq!(code, Some(1), "{out}");
+    let entry = format!("Add \"atticdb\": {} to \"mcpServers\" by hand", it.entry(true));
+    let group = format!("Add this group to hooks.SessionStart by hand: {}", it.group(None));
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(lines[0].starts_with("MCP entry: skipped, ") && lines[0].ends_with(&entry), "{out}");
+    assert!(lines[1].starts_with("SessionStart hook: skipped, "), "{out}");
+    assert!(lines[1].ends_with(&group), "{out}");
+    assert!(lines[2].starts_with("atticdb guide: added ("), "{out}");
+    assert_eq!(std::fs::read_to_string(it.settings()).unwrap(), text);
+}
+
+/// `GEMINI_CLI_HOME` moves Gemini CLI's config dir to its `.gemini`, as Gemini CLI reads it.
+/// A relative one is refused. Under `ATTICDB_HOME`, the entry and the hook pass it on.
+#[test]
+fn gemini_follows_its_home_and_atticdb_home() {
+    let it = Gemini::new();
+    let (moved, home) = (it.dir.0.join("g"), it.dir.0.join("moved"));
+    let env = [("GEMINI_CLI_HOME", moved.as_path()), ("ATTICDB_HOME", home.as_path())];
+    let (code, out) = it.run_with(&["connect", "gemini"], &env);
+    assert_eq!(code, Some(0), "{out}");
+    let settings = moved.join(".gemini/settings.json");
+    assert!(out.starts_with(&format!("MCP entry: added ({})\n", settings.display())), "{out}");
+    let root: Value = serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
+    let mut entry = it.entry(true);
+    entry["env"] = json!({"ATTICDB_HOME": home});
+    assert_eq!(root["mcpServers"]["atticdb"], entry);
+    assert_eq!(root["hooks"]["SessionStart"], json!([it.group(Some(&home))]));
+    let guide = std::fs::read_to_string(moved.join(".gemini/GEMINI.md")).unwrap();
+    assert_eq!(guide, gemini_block());
+    assert!(files(&it.dir.0.join("h/.gemini")).is_empty(), "~/.gemini untouched");
+    let (code, out) = it.run_with(&["disconnect", "gemini"], &env);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(std::fs::read_to_string(moved.join(".gemini/GEMINI.md")).unwrap().is_empty());
+
+    for verb in ["connect", "disconnect"] {
+        let (code, out) = it.run_with(&[verb, "gemini"], &[("GEMINI_CLI_HOME", Path::new("g"))]);
+        assert_eq!(code, Some(2), "{verb}: {out}");
+        assert!(out.contains("GEMINI_CLI_HOME g must be an absolute path"), "{verb}: {out}");
+    }
 }

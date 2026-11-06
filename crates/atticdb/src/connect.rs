@@ -1,12 +1,14 @@
 //! `atticdb connect` and `atticdb disconnect`: add or remove AtticDB's entry in a harness's
 //! user MCP config, and 2 Copilot files VS Code and Copilot CLI share: the `sessionStart`
-//! hook and the instructions file. Claude Code and Codex have their own parts, in [`claude`]
-//! and [`codex`]. Antigravity and Claude Desktop get only their entry, by [`plain`]. The entry
-//! and the hook run the binary on the home, so they hold no token. The only paths they hold
-//! are the binary's and, under `ATTICDB_HOME`, the home's.
+//! hook and the instructions file. Claude Code, Codex and Gemini CLI have their own parts, in
+//! [`claude`], [`codex`] and [`gemini`]. Antigravity and Claude Desktop get only their entry,
+//! by [`plain`]. The entry and the hook run the binary on the home, so they hold no token. The
+//! only paths they hold are the binary's and, under `ATTICDB_HOME`, the home's.
 
 mod claude;
 mod codex;
+mod gemini;
+mod guide;
 mod plain;
 
 pub use claude::Notes;
@@ -94,8 +96,8 @@ fn add_or_update(existed: bool) -> State {
     }
 }
 
-/// How to connect Claude Code and Codex. VS Code and Copilot CLI always get the hook, and
-/// have no allow rules.
+/// How to connect Claude Code, Codex and Gemini CLI. VS Code and Copilot CLI always get the
+/// hook, and have no allow rules.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Options {
     /// Replace an entry that differs. Codex never edits a server AtticDB didn't write.
@@ -117,8 +119,8 @@ pub struct Report {
     pub warnings: Vec<String>,
     /// What to do next, printed last. Empty in Plan mode.
     pub next: Vec<String>,
-    /// What the SessionStart hook part did: for Claude Code and Codex when it was asked for,
-    /// and the shared sessionStart hook for VS Code and Copilot CLI.
+    /// What the SessionStart hook part did: for Claude Code, Codex and Gemini CLI when it was
+    /// asked for, and the shared sessionStart hook for VS Code and Copilot CLI.
     pub hook: Option<State>,
     /// What the PostCompact hook part did: for Claude Code when the hooks were asked for.
     pub post_compact: Option<State>,
@@ -182,7 +184,7 @@ pub enum Harness {
     ClaudeCode,
     /// Codex, through its `config.toml` and `hooks.json`.
     Codex,
-    /// Gemini CLI, through its `settings.json`.
+    /// Gemini CLI, through its `settings.json` and `GEMINI.md`.
     Gemini,
     /// Antigravity's `mcp_config.json`, its MCP entry only.
     Antigravity,
@@ -260,9 +262,9 @@ impl Harness {
 
     /// The config file. VS Code's lives in its user profile. Copilot's in `$COPILOT_HOME`.
     /// Claude Code's is `.claude.json`, which only the `claude` CLI writes. Codex's is
-    /// `config.toml`, which isn't JSON, so only [`codex`] reads it. Gemini CLI's and
-    /// Antigravity's are under `~/.gemini`. Claude Desktop's is in its app data dir, which
-    /// only macOS and Windows have.
+    /// `config.toml`, which isn't JSON, so only [`codex`] reads it. Gemini CLI's is in
+    /// `$GEMINI_CLI_HOME/.gemini`, else `~/.gemini`. Antigravity's is under `~/.gemini`.
+    /// Claude Desktop's is in its app data dir, which only macOS and Windows have.
     pub(crate) fn file(self) -> Result<PathBuf, String> {
         Ok(match self {
             Self::Vscode if cfg!(target_os = "macos") => {
@@ -280,7 +282,7 @@ impl Harness {
             Self::Copilot => copilot_home()?.join("mcp-config.json"),
             Self::ClaudeCode => claude::state_file()?,
             Self::Codex => codex::config_file()?,
-            Self::Gemini => plain::gemini_dir()?.join("settings.json"),
+            Self::Gemini => gemini::settings_file()?,
             Self::Antigravity => plain::gemini_dir()?.join("antigravity").join("mcp_config.json"),
             Self::ClaudeDesktop => plain::desktop_dir()?.join("claude_desktop_config.json"),
         })
@@ -354,11 +356,11 @@ pub(crate) fn binary() -> Result<String, String> {
 /// Whether `harness` looks installed: its config exists, or its program is on `PATH`. For
 /// VS Code, that is the profile dir that holds `mcp.json`. Claude Code and Codex: their config
 /// dir. Copilot CLI: its `mcp-config.json` or `config.json`, not the dir, as connecting VS
-/// Code writes the shared hook and instructions there. Gemini CLI: `~/.gemini`. Antigravity:
-/// `~/.gemini/antigravity`. Claude Desktop: its app data dir, never on Linux. Nothing runs.
+/// Code writes the shared hook and instructions there. Gemini CLI: its config dir, by
+/// [`gemini::config_dir`]. Antigravity: `~/.gemini/antigravity`. Claude Desktop: its app data
+/// dir, never on Linux. Nothing runs.
 pub fn detect(harness: Harness) -> bool {
     let copilot = |name: &str| copilot_home().ok().map(|dir| dir.join(name));
-    let gemini = plain::gemini_dir().ok();
     let (paths, program) = match harness {
         Harness::Vscode => {
             (vec![harness.file().ok().and_then(|f| Some(f.parent()?.into()))], Some("code"))
@@ -368,8 +370,10 @@ pub fn detect(harness: Harness) -> bool {
         }
         Harness::ClaudeCode => (vec![claude::config_dir().ok()], Some("claude")),
         Harness::Codex => (vec![codex::codex_home().ok()], Some("codex")),
-        Harness::Antigravity => (vec![gemini.map(|dir| dir.join("antigravity"))], None),
-        Harness::Gemini => (vec![gemini], Some("gemini")),
+        Harness::Antigravity => {
+            (vec![plain::gemini_dir().ok().map(|dir| dir.join("antigravity"))], None)
+        }
+        Harness::Gemini => (vec![gemini::config_dir().ok()], Some("gemini")),
         Harness::ClaudeDesktop => (vec![plain::desktop_dir().ok()], None),
     };
     paths.into_iter().flatten().any(|path: PathBuf| path.exists())
@@ -401,20 +405,22 @@ pub fn detect(harness: Harness) -> bool {
 /// `AGENTS.md` Codex reads. An `atticdb` server that AtticDB didn't write is never edited, so
 /// `force` doesn't apply. On Windows, Codex gets only its MCP entry.
 ///
-/// For Claude Code and Codex, a part that can't be applied is skipped, with what to do by
-/// hand, and the others still apply.
+/// Gemini CLI: adds its MCP entry to `settings.json`, with `trust` unless `notes` ask. Unless
+/// `hook` is false, its SessionStart hook goes there too. Its guide is a block in `GEMINI.md`.
+/// An entry with connection flags is replaced only with `force`. By [`gemini::connect`].
+///
+/// For Claude Code, Codex and Gemini CLI, a part that can't be applied is skipped, with what to
+/// do by hand, and the others still apply.
 ///
 /// Antigravity and Claude Desktop: adds their MCP entry only, by [`plain::connect`]. They read
 /// it only at start, so the report says to restart them.
-///
-/// Gemini CLI is not supported yet, so it stops with exit code 1.
 pub fn connect(harness: Harness, options: Options, mode: Mode) -> Report {
     let Options { force, hook, notes } = options;
     match harness {
         Harness::ClaudeCode => claude::connect(force, hook, notes, mode),
         Harness::Codex => codex::connect(hook, notes, mode),
         Harness::Vscode | Harness::Copilot => connect_shared(harness, force, mode, false),
-        Harness::Gemini => Report::stopped(1, plain::not_yet(harness)),
+        Harness::Gemini => gemini::connect(force, hook, notes, mode),
         Harness::Antigravity | Harness::ClaudeDesktop => plain::connect(harness, force, mode),
     }
 }
@@ -609,14 +615,14 @@ fn moved_home(harness: Harness) -> Result<Option<String>, String> {
 /// Removes AtticDB's entry from `harness`'s config, and the instructions file and the hook
 /// once neither VS Code nor Copilot CLI has one. Both removals are tried, and every error is
 /// reported. VS Code also reads Copilot CLI's entry, so while that is left, disconnecting VS
-/// Code says so and keeps both shared files. Claude Code's and Codex's parts go by
-/// [`claude`]'s and [`codex`]'s rules, and Antigravity's and Claude Desktop's by [`plain`]'s.
-/// Returns the exit code.
+/// Code says so and keeps both shared files. Claude Code's, Codex's and Gemini CLI's parts go
+/// by [`claude`]'s, [`codex`]'s and [`gemini`]'s rules, and Antigravity's and Claude Desktop's
+/// by [`plain`]'s. Returns the exit code.
 pub fn disconnect(harness: Harness) -> u8 {
     match harness {
         Harness::ClaudeCode => return claude::disconnect(),
         Harness::Codex => return codex::disconnect(),
-        Harness::Gemini => return finish(Err(plain::not_yet(harness))),
+        Harness::Gemini => return gemini::disconnect(),
         Harness::Antigravity | Harness::ClaudeDesktop => return plain::disconnect(harness),
         Harness::Vscode | Harness::Copilot => {}
     }
@@ -936,7 +942,8 @@ pub fn binaries(harness: Harness) -> Vec<(PathBuf, String)> {
             }
             found
         }
-        Harness::Gemini | Harness::Antigravity | Harness::ClaudeDesktop => {
+        Harness::Gemini => gemini::binaries(),
+        Harness::Antigravity | Harness::ClaudeDesktop => {
             entry_binary(harness).into_iter().collect()
         }
     }

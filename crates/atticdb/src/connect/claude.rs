@@ -101,10 +101,10 @@ impl Event {
     }
 }
 
-/// Whether Claude Code or Codex asks before AtticDB saves a note.
+/// Whether Claude Code, Codex or Gemini CLI asks before AtticDB saves a note.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Notes {
-    /// The harness asks before each `memory_append`.
+    /// The harness asks before each `memory_append`. Gemini CLI asks before each atticdb tool.
     Ask,
     /// `memory_append` is allowed, so notes are saved without asking.
     Auto,
@@ -693,13 +693,18 @@ fn exec_args(harness: Harness, event: Event, home: Option<&str>) -> Value {
 
 /// `harness`'s hook command for `event`: the quoted binary, after `ATTICDB_HOME='<home>' `
 /// when `home` is set. Claude's and Codex's command hooks have no env field, so the home goes
-/// in the command.
+/// in the command. Gemini CLI runs its hooks in PowerShell on Windows, so there its command is
+/// [`ps_hook_command`].
 pub(super) fn hook_command(
     harness: Harness,
     event: Event,
     exe: &str,
     home: Option<&str>,
 ) -> String {
+    #[cfg(windows)]
+    if harness == Harness::Gemini {
+        return ps_hook_command(harness, event, exe, home);
+    }
     let prefix = home.map(|home| format!("{HOME_ENV}={} ", quote(home))).unwrap_or_default();
     format!("{prefix}{}{}", quote(exe), hook_args(harness, event))
 }
@@ -718,6 +723,29 @@ fn hook_group(event: Event, exe: &str, home: Option<&str>) -> Value {
 fn hook_group(event: Event, exe: &str, home: Option<&str>) -> Value {
     let args = exec_args(Harness::ClaudeCode, event, home);
     json!({"hooks": [{"type": "command", "command": exe, "args": args, "timeout": 5}]})
+}
+
+/// `harness`'s hook command for `event` in PowerShell: the binary called with `&`, as a
+/// quoted path alone is a string there. The home goes in `--home`, as Claude Code's does on
+/// Windows.
+#[cfg(any(windows, test))]
+fn ps_hook_command(harness: Harness, event: Event, exe: &str, home: Option<&str>) -> String {
+    let home = home.map(|home| format!(" --home {}", super::ps_quote(home))).unwrap_or_default();
+    format!("& {}{}{home}", super::ps_quote(exe), hook_args(harness, event))
+}
+
+/// The binary path in `command` when it is a hook command [`ps_hook_command`] writes for
+/// `harness` and `event`, for any absolute binary path and any home.
+#[cfg(any(windows, test))]
+fn ps_command_exe(harness: Harness, event: Event, command: &str) -> Option<String> {
+    let (exe, rest) = super::ps_unquote(command.strip_prefix("& ")?)?;
+    let home = match rest.strip_prefix(&hook_args(harness, event))? {
+        "" => None,
+        rest => Some(super::ps_unquote(rest.strip_prefix(" --home ")?)?.0),
+    };
+    // Writing the command again for that binary and home must give the same text.
+    let again = ps_hook_command(harness, event, &exe, home.as_deref());
+    (Path::new(&exe).is_absolute() && again == command).then_some(exe)
 }
 
 /// Splits a single-quoted word, with `'\''` for each `'`, off the start of `text`. Returns
@@ -784,8 +812,13 @@ fn handler_text(handler: &Value) -> String {
 
 /// The binary path in `command` when it is a hook command AtticDB writes for `harness` and
 /// `event`, for any absolute binary path and any home. The binary's file name doesn't count,
-/// as an install may name it `atticdb-0.1.0`.
+/// as an install may name it `atticdb-0.1.0`. On Windows Gemini CLI's is in PowerShell, by
+/// [`ps_command_exe`].
 fn command_exe(harness: Harness, event: Event, command: &str) -> Option<String> {
+    #[cfg(windows)]
+    if harness == Harness::Gemini {
+        return ps_command_exe(harness, event, command);
+    }
     let (home, rest) = match command.strip_prefix(&format!("{HOME_ENV}=")) {
         Some(rest) => {
             let (home, rest) = unquote(rest)?;
@@ -1188,5 +1221,28 @@ mod hook_tests {
         }
         let start = hook_command(Harness::ClaudeCode, Event::SessionStart, exe, None);
         assert_eq!(start, format!("{quoted} hook session-start --harness claude-code"));
+    }
+
+    /// Gemini CLI runs its hooks in PowerShell on Windows. There the command calls the quoted
+    /// binary with `&`, and passes the home in `--home`. It reads back for any binary and home,
+    /// and for no other harness or event.
+    #[test]
+    fn powershell_hook_command_reads_back_its_binary() {
+        use super::{ps_command_exe, ps_hook_command};
+        let exe = if cfg!(windows) { r"C:\it's\atticdb.exe" } else { "/opt/it's/atticdb" };
+        let (gemini, start) = (Harness::Gemini, Event::SessionStart);
+        let bare = ps_hook_command(gemini, start, exe, None);
+        let quoted = exe.replace('\'', "''");
+        assert_eq!(bare, format!("& '{quoted}' hook session-start --harness gemini"));
+        let homed = ps_hook_command(gemini, start, exe, Some("/h o'm"));
+        assert_eq!(homed, format!("{bare} --home '/h o''m'"));
+        for command in [&bare, &homed] {
+            assert_eq!(ps_command_exe(gemini, start, command).as_deref(), Some(exe), "{command}");
+            assert_eq!(ps_command_exe(Harness::Codex, start, command), None, "{command}");
+            assert_eq!(ps_command_exe(gemini, Event::PostCompact, command), None, "{command}");
+            assert_eq!(ps_command_exe(gemini, start, &format!("{command} x")), None);
+        }
+        let relative = ps_hook_command(gemini, start, "atticdb", None);
+        assert_eq!(ps_command_exe(gemini, start, &relative), None);
     }
 }

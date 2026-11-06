@@ -66,7 +66,7 @@ pub fn fake_program(bin: &Path, name: &str) {
 /// Variables that point AtticDB at a home or at harness files, the real `HOME` included. No
 /// spawn inherits them, so a developer's own exports can't lead a test to a real home. A test
 /// that needs one sets it.
-const HOME_VARS: [&str; 7] = [
+const HOME_VARS: [&str; 8] = [
     "HOME",
     "ATTICDB_HOME",
     "XDG_DATA_HOME",
@@ -74,6 +74,7 @@ const HOME_VARS: [&str; 7] = [
     "COPILOT_HOME",
     "CLAUDE_CONFIG_DIR",
     "CODEX_HOME",
+    "GEMINI_CLI_HOME",
 ];
 
 /// A command for `program`, the `atticdb` binary or anything that runs it, without
