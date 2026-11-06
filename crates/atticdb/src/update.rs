@@ -21,10 +21,17 @@ pub(crate) const OFF_ENV: &str = "ATTICDB_NO_UPDATE_CHECK";
 const CI_ENV: &str = "CI";
 /// The latest release, by GitHub's API.
 const DEFAULT_API: &str = "https://api.github.com/repos/Clawdlinux/atticdb/releases/latest";
-/// The cache's name in the home: `{"checked": <unix seconds>, "latest": "<x.y.z>"}`.
+/// The cache's name in the home: `{"checked": <unix seconds>, "latest": "<x.y.z>"}`. After a
+/// failed check it holds `{"checked": <unix seconds>}` alone.
 const CACHE: &str = "update-check.json";
-/// How long the cache answers.
+/// How long the cache answers with a version.
 const FRESH_SECS: u64 = 24 * 60 * 60;
+/// How long after a failed check no other check runs.
+const BACKOFF_SECS: u64 = 60 * 60;
+/// Most bytes in a tag. A valid one has at most 30.
+const MAX_TAG: usize = 32;
+/// Most digits in a version's number.
+const MAX_DIGITS: usize = 9;
 /// How long curl may take, in seconds, as its `--max-time`.
 const MAX_TIME: &str = "3";
 /// Most bytes read from the API. GitHub's reply lists the assets and notes, so it gets room.
@@ -33,8 +40,9 @@ const MAX_REPLY: u64 = 1 << 20;
 const MAX_CACHE: u64 = 4 << 10;
 
 /// The latest release's version, `x.y.z` without its `v`. The cache in `home` answers for
-/// 24 h. Otherwise it asks the API, then writes the cache. `None` when the off switches are
-/// set, or on any failure. It never prints, and never makes `home`.
+/// 24 h. Otherwise it asks the API, then writes the cache. A failed check is cached too, and
+/// gives `None` for 1 h. `None` also when the off switches are set. It never prints, and
+/// never makes `home`.
 pub(crate) fn latest(home: &Path, now: SystemTime) -> Option<String> {
     let var = |name: &str| std::env::var_os(name);
     if off(var) {
@@ -55,18 +63,34 @@ fn off(var: impl Fn(&str) -> Option<OsString>) -> bool {
 fn latest_from(home: &Path, now: SystemTime, api: &str) -> Option<String> {
     let now = now.duration_since(UNIX_EPOCH).ok()?.as_secs();
     let cache = home.join(CACHE);
-    if let Some(latest) = cached(&cache, now) {
-        return Some(latest);
+    match cached(&cache, now) {
+        Some(Cached::Latest(latest)) => return Some(latest),
+        Some(Cached::Failed) => return None,
+        None => {}
     }
-    let latest = fetch(api)?;
+    let latest = fetch(api);
+    let entry = match &latest {
+        Some(latest) => json!({"checked": now, "latest": latest}),
+        None => json!({"checked": now}),
+    };
     // A cache that can't be written costs a request next time, nothing more.
-    let _ = store(home, &cache, now, &latest);
-    Some(latest)
+    let _ = store(home, &cache, &entry);
+    latest
 }
 
-/// The cache's version when it was checked less than 24 h before `now`. A cache from the
-/// future, after the clock was set back, doesn't count.
-fn cached(cache: &Path, now: u64) -> Option<String> {
+/// What a cache entry that still counts says.
+#[derive(Debug, PartialEq)]
+enum Cached {
+    /// The latest version, checked less than 24 h ago.
+    Latest(String),
+    /// A check that failed less than 1 h ago.
+    Failed,
+}
+
+/// The cache entry, when it still counts at `now`. One from the future, after the clock was
+/// set back, doesn't. Nor does one that can't be read, or holds a `latest` that isn't
+/// `x.y.z`.
+fn cached(cache: &Path, now: u64) -> Option<Cached> {
     let file = crate::config::open_regular(OpenOptions::new().read(true), cache).ok()?;
     let mut text = Vec::new();
     file.take(MAX_CACHE + 1).read_to_end(&mut text).ok()?;
@@ -74,10 +98,13 @@ fn cached(cache: &Path, now: u64) -> Option<String> {
         return None;
     }
     let cache: Value = serde_json::from_slice(&text).ok()?;
-    let checked = cache.get("checked")?.as_u64()?;
-    let latest = cache.get("latest")?.as_str()?;
+    let age = now.checked_sub(cache.get("checked")?.as_u64()?)?;
+    let Some(latest) = cache.get("latest") else {
+        return (age < BACKOFF_SECS).then_some(Cached::Failed);
+    };
+    let latest = latest.as_str()?;
     parse(latest)?;
-    (now.checked_sub(checked)? < FRESH_SECS).then(|| latest.to_owned())
+    (age < FRESH_SECS).then(|| Cached::Latest(latest.to_owned()))
 }
 
 /// Asks the API at `api` with `curl -fsSL --max-time 3`, and reads `tag_name`. `None` for an
@@ -110,10 +137,18 @@ fn fetch(api: &str) -> Option<String> {
         return None;
     }
     let reply: Value = serde_json::from_slice(&reply).ok()?;
-    let tag = reply.get("tag_name")?.as_str()?;
-    let latest = tag.strip_prefix('v').unwrap_or(tag);
-    parse(latest)?;
-    Some(latest.to_owned())
+    version_of(reply.get("tag_name")?.as_str()?)
+}
+
+/// The version in a release `tag`: `x.y.z` without the optional `v`. `None` for a tag over
+/// [`MAX_TAG`] bytes, or a version [`parse`] rejects.
+fn version_of(tag: &str) -> Option<String> {
+    if tag.len() > MAX_TAG {
+        return None;
+    }
+    let version = bare(tag);
+    parse(version)?;
+    Some(version.to_owned())
 }
 
 /// `curl` from `PATH`.
@@ -128,13 +163,13 @@ fn curl() -> std::path::PathBuf {
     crate::platform::system_program(r"System32\curl.exe")
 }
 
-/// Writes the cache, mode 0600, to a temp file in `home` that it then renames over `cache`.
+/// Writes `entry`, mode 0600, to a temp file in `home` that it then renames over `cache`.
 /// Fails when `home` is not a directory, so the home is never made here.
-fn store(home: &Path, cache: &Path, now: u64, latest: &str) -> std::io::Result<()> {
+fn store(home: &Path, cache: &Path, entry: &Value) -> std::io::Result<()> {
     if !std::fs::metadata(home)?.is_dir() {
         return Err(std::io::Error::other("the home is not a directory"));
     }
-    let text = json!({"checked": now, "latest": latest}).to_string();
+    let text = entry.to_string();
     let hex = crate::random_hex(8)?;
     let tmp = home.join(format!(".{CACHE}.{hex}"));
     let mut options = OpenOptions::new();
@@ -168,14 +203,15 @@ fn bare(version: &str) -> &str {
     version.strip_prefix('v').unwrap_or(version)
 }
 
-/// The 3 numbers of `x.y.z`, each only ASCII digits. `None` for anything else, a `v` or a
-/// suffix such as `+dev` included.
+/// The 3 numbers of `x.y.z`. Each is 1 to [`MAX_DIGITS`] ASCII digits, with no leading zero
+/// unless it is `0`. `None` for anything else, a `v` or a suffix such as `+dev` included.
 fn parse(version: &str) -> Option<[u64; 3]> {
     let mut parts = version.split('.');
     let mut numbers = [0; 3];
     for number in &mut numbers {
-        let part = parts.next().filter(|part| !part.is_empty())?;
-        if !part.bytes().all(|byte| byte.is_ascii_digit()) {
+        let part = parts.next().filter(|part| (1..=MAX_DIGITS).contains(&part.len()))?;
+        let leading_zero = part.len() > 1 && part.starts_with('0');
+        if leading_zero || !part.bytes().all(|byte| byte.is_ascii_digit()) {
             return None;
         }
         *number = part.parse().ok()?;
@@ -223,11 +259,36 @@ mod tests {
             "vv1.2.3",
             "V1.2.3",
             "99999999999999999999.0.0",
+            "1234567890.0.0",
+            "01.2.3",
+            "1.2.03",
+            "1.00.3",
         ];
         for garbage in garbage {
             assert!(!newer(garbage, "0.0.1"), "{garbage:?}");
             assert!(!newer("9.9.9", garbage), "{garbage:?}");
         }
+    }
+
+    /// A tag is at most 32 bytes. Each number has at most 9 digits, and no leading zero
+    /// unless it is `0`.
+    #[test]
+    fn tags_are_short_plain_versions() {
+        assert_eq!(version_of("v1.2.3").as_deref(), Some("1.2.3"));
+        assert_eq!(version_of("1.2.3").as_deref(), Some("1.2.3"));
+        assert_eq!(version_of("0.10.0").as_deref(), Some("0.10.0"));
+        assert_eq!(version_of("v0.0.0").as_deref(), Some("0.0.0"));
+        let widest = "v999999999.999999999.999999999";
+        assert_eq!(version_of(widest).as_deref(), Some(&widest[1..]));
+        assert_eq!(version_of("01.2.3"), None);
+        assert_eq!(version_of("v1.02.3"), None);
+        assert_eq!(version_of("1.2.3333333333"), None);
+        let long = format!("v1.2.3+{}", "a".repeat(26));
+        assert_eq!(long.len(), 33);
+        assert_eq!(version_of(&long), None);
+        let long = format!("v1.2.{}", "0".repeat(28));
+        assert_eq!(long.len(), 33);
+        assert_eq!(version_of(&long), None);
     }
 
     #[test]
@@ -374,10 +435,11 @@ mod tests {
             assert_eq!(hits(&count), 2, "a clock set back checks again");
         }
 
-        /// Any failure gives `None` and writes no cache. Failures are an HTTP error, bad JSON
-        /// or no `tag_name`. So are a tag that isn't `x.y.z`, an oversized reply or no server.
+        /// Any failure gives `None` and caches `{"checked": <now>}` alone. Failures are an
+        /// HTTP error, bad JSON or no `tag_name`. So are a bad or long tag, an oversized
+        /// reply or no server.
         #[test]
-        fn failures_give_none_and_no_cache() {
+        fn failures_give_none_and_cache_the_time() {
             let big = format!(r#"{{"tag_name": "v9.9.9", "pad": "{}"}}"#, "x".repeat(2 << 20));
             let rows = [
                 (500, TAG.to_owned()),
@@ -389,6 +451,8 @@ mod tests {
                 (200, r#"{"tag_name": "nightly"}"#.to_owned()),
                 (200, r#"{"tag_name": "vv9.9.9"}"#.to_owned()),
                 (200, r#"{"tag_name": "v9.9.9\u001b[2J"}"#.to_owned()),
+                (200, r#"{"tag_name": "v09.9.9"}"#.to_owned()),
+                (200, r#"{"tag_name": "v1.2.3333333333"}"#.to_owned()),
                 (200, big),
             ];
             for (status, body) in rows {
@@ -396,26 +460,48 @@ mod tests {
                 let (url, count) = api(status, body.clone());
                 assert_eq!(latest_from(&home.0, at(T), &url), None, "{status} {body:.60}");
                 assert_eq!(hits(&count), 1, "{status} {body:.60}");
-                assert!(home.names().is_empty(), "{status} {body:.60}: no cache");
+                assert_eq!(cache(&home), json!({"checked": T}), "{status} {body:.60}");
+                assert_eq!(home.names(), ["update-check.json"], "{status} {body:.60}");
             }
             let home = Home::new();
             let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
             let refused = format!("http://127.0.0.1:{port}/releases/latest");
             assert_eq!(latest_from(&home.0, at(T), &refused), None);
-            assert!(home.names().is_empty());
+            assert_eq!(cache(&home), json!({"checked": T}));
+        }
+
+        /// After a failed check, none runs for 1 h. Then, or with a clock set back before the
+        /// failure, it checks again. A version replaces the failure.
+        #[test]
+        fn failed_check_backs_off_for_an_hour() {
+            let home = Home::new();
+            let (url, count) = api(500, TAG.into());
+            assert_eq!(latest_from(&home.0, at(T), &url), None);
+            assert_eq!(hits(&count), 1);
+            let (url, count) = api(200, TAG.into());
+            assert_eq!(latest_from(&home.0, at(T + 3_599), &url), None);
+            assert_eq!(hits(&count), 0, "no check within the hour");
+            assert_eq!(latest_from(&home.0, at(T - 1), &url).as_deref(), Some("9.9.9"));
+            assert_eq!(hits(&count), 1, "a clock set back checks again");
+
+            std::fs::write(home.cache(), json!({"checked": T}).to_string()).unwrap();
+            assert_eq!(latest_from(&home.0, at(T + 3_600), &url).as_deref(), Some("9.9.9"));
+            assert_eq!(hits(&count), 2, "an hour later it checks again");
+            assert_eq!(cache(&home), json!({"checked": T + 3_600, "latest": "9.9.9"}));
         }
 
         /// Only an http or https URL goes to curl, so the URL can't be read as an option.
+        /// Any other counts as a failed check.
         #[test]
         fn only_http_urls() {
-            let home = Home::new();
             let (url, count) = api(200, TAG.into());
             let options = url.replace("http://", "-o/dev/null http://");
             for api in ["file:///etc/hosts", "-K/etc/hosts", "", &options] {
+                let home = Home::new();
                 assert_eq!(latest_from(&home.0, at(T), api), None, "{api}");
+                assert_eq!(cache(&home), json!({"checked": T}), "{api}");
             }
             assert_eq!(hits(&count), 0);
-            assert!(home.names().is_empty());
         }
 
         /// A cache that can't be read as `{"checked": <secs>, "latest": "x.y.z"}` is checked
@@ -426,8 +512,11 @@ mod tests {
                 String::new(),
                 "{".into(),
                 "{}".into(),
-                json!({"checked": T}).to_string(),
+                json!({"latest": "1.2.3"}).to_string(),
                 json!({"checked": T.to_string(), "latest": "1.2.3"}).to_string(),
+                json!({"checked": T.to_string()}).to_string(),
+                json!({"checked": T, "latest": null}).to_string(),
+                json!({"checked": T, "latest": "01.2.3"}).to_string(),
                 json!({"checked": T, "latest": "nightly"}).to_string(),
                 json!({"checked": T, "latest": 1}).to_string(),
             ];

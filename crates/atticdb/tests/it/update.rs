@@ -217,37 +217,70 @@ fn doctor_uses_cache() {
     assert!(setup.read_cache()["checked"].as_u64().unwrap() > old);
 }
 
-/// A failed check prints nothing more, not even on stderr, and leaves no cache. The failures
-/// are an HTTP error, bad JSON and no `tag_name`. So are a bad tag, no server and no `curl`.
+/// A failed check prints nothing more, not even on stderr. It caches only the time it ran.
+/// The failures are an HTTP error, bad JSON and no `tag_name`. So are a bad tag, no server
+/// and no `curl`.
 #[test]
 fn doctor_quiet_when_check_fails() {
     let setup = Setup::new();
     setup.make_home();
     let off = setup.doctor_off("http://127.0.0.1:9/");
+    let failed = |why: &str| {
+        let cache = setup.read_cache();
+        assert_eq!(cache.as_object().unwrap().len(), 1, "{why}: {cache}");
+        assert!(now() - cache["checked"].as_u64().unwrap() < 60, "{why}: {cache}");
+        std::fs::remove_file(setup.cache()).unwrap();
+    };
     let rows = [
         (500, TAG),
         (200, "{"),
         (200, r#"{"name": "v9.9.9"}"#),
         (200, r#"{"tag_name": "nightly"}"#),
+        (200, r#"{"tag_name": "v1.2.3333333333"}"#),
     ];
     for (status, body) in rows {
         let (url, count) = fake_api(status, body);
         let found = setup.run(&url, &["doctor"], &[], "");
         assert_eq!(hits(&count), 1, "{status} {body}");
         assert_eq!(found, off, "{status} {body}");
-        assert!(!setup.cache().exists(), "{status} {body}");
+        failed(&format!("{status} {body}"));
     }
     let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     let refused = format!("http://127.0.0.1:{port}/repos/x/releases/latest");
     assert_eq!(setup.run(&refused, &["doctor"], &[], ""), off, "no server");
-    assert!(!setup.cache().exists());
+    failed("no server");
 
     let (url, count) = fake_api(200, TAG);
     let empty = setup.dir.0.join("empty");
     std::fs::create_dir(&empty).unwrap();
     assert_eq!(setup.run_on(empty.as_os_str(), &url, &["doctor"], &[], ""), off, "no curl");
     assert_eq!(hits(&count), 0);
-    assert!(!setup.cache().exists());
+    failed("no curl");
+}
+
+/// After a failed check, a second doctor within the hour makes no request. An entry with no
+/// `latest`, checked 2 h ago, is checked again.
+#[test]
+fn doctor_backs_off_after_a_failure() {
+    let setup = Setup::new();
+    setup.make_home();
+    let (url, count) = fake_api(500, TAG);
+    let off = setup.doctor_off(&url);
+    assert_eq!(setup.run(&url, &["doctor"], &[], ""), off);
+    assert_eq!(hits(&count), 1);
+    assert_eq!(setup.read_cache().as_object().unwrap().len(), 1);
+
+    let (url, count) = fake_api(200, TAG);
+    assert_eq!(setup.run(&url, &["doctor"], &[], ""), off, "no notice while backing off");
+    assert_eq!(hits(&count), 0, "no request within the hour");
+
+    let old = now() - 2 * 60 * 60;
+    std::fs::write(setup.cache(), json!({"checked": old}).to_string()).unwrap();
+    let (code, out, err) = setup.run(&url, &["doctor"], &[], "");
+    assert_eq!(hits(&count), 1, "checked again after 2 h: {out}{err}");
+    assert_eq!((code, err), (off.0, off.2));
+    assert_eq!(out, with_notice(&off.1, "9.9.9"));
+    assert_eq!(setup.read_cache()["latest"], "9.9.9");
 }
 
 /// No notice when the latest release is this version or older. The check is still cached.
