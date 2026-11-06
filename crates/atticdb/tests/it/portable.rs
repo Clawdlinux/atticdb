@@ -15,7 +15,7 @@ use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant};
 
 /// Variables that could lead a test to a real home. No spawn inherits them.
-pub(crate) const HOME_VARS: [&str; 8] = [
+pub(crate) const HOME_VARS: [&str; 9] = [
     "HOME",
     "ATTICDB_HOME",
     "ATTICDB_TOKEN",
@@ -24,6 +24,7 @@ pub(crate) const HOME_VARS: [&str; 8] = [
     "COPILOT_HOME",
     "CLAUDE_CONFIG_DIR",
     "CODEX_HOME",
+    "GEMINI_CLI_HOME",
 ];
 /// Longest wait for 1 command.
 pub(crate) const COMMAND_TIMEOUT: Duration = Duration::from_secs(90);

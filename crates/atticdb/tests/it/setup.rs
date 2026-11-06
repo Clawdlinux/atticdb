@@ -870,3 +870,274 @@ fn doctor_checks_an_install_and_writes_nothing() {
     let others = dir.0.join("other");
     assert!(!others.join("copilot.argv").exists() && !others.join("code.argv").exists());
 }
+
+/// The entry-only apps on this OS: name, name in sentences, config. Claude Desktop has no
+/// Linux app.
+fn plain_apps(home: &Path) -> Vec<(&'static str, &'static str, PathBuf)> {
+    let mut apps =
+        vec![("antigravity", "Antigravity", home.join(".gemini/config/mcp_config.json"))];
+    if cfg!(target_os = "macos") {
+        let config = "Library/Application Support/Claude/claude_desktop_config.json";
+        apps.push(("claude-desktop", "Claude Desktop", home.join(config)));
+    }
+    apps
+}
+
+/// `--harness` for [`plain_apps`].
+fn plain_list(home: &Path) -> String {
+    plain_apps(home).iter().map(|(name, ..)| *name).collect::<Vec<_>>().join(",")
+}
+
+/// A `HOME` under `dir` with the dirs of Antigravity and Claude Desktop, and an empty `PATH`.
+/// Antigravity's are `~/.gemini/antigravity` and `~/.gemini/config`, with no config file.
+fn plain_home(dir: &Path) -> (PathBuf, OsString) {
+    let home = dir.join("h");
+    for (.., config) in plain_apps(&home) {
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    }
+    std::fs::create_dir_all(home.join(".gemini/antigravity")).unwrap();
+    std::fs::create_dir(dir.join("empty")).unwrap();
+    (home, OsString::from(dir.join("empty")))
+}
+
+/// Setup's plan lists each new app whose dir exists, and none that's missing. `~/.gemini`
+/// alone doesn't find Gemini CLI. Applying connects Antigravity and Claude Desktop, checks
+/// each, and says to restart them. A rerun has nothing to restart.
+#[test]
+fn setup_detects_new_apps() {
+    let dir = Dir::new();
+    let (home, empty) = plain_home(&dir.0);
+    let _holders = Holders(vec![data_dir(&home)]);
+    let (code, out, err) = setup(&home, &dir.0, &empty, &[], &["--dry-run", "--yes"], "");
+    for (_, title, config) in plain_apps(&home) {
+        let plan = format!("\n{title}:\n  {}: add the MCP entry\n", config.display());
+        assert!(out.contains(&plan), "{title} {code:?}: {out}{err}");
+    }
+    // Antigravity's dirs in `~/.gemini` don't make Gemini CLI found.
+    assert!(!out.contains("Gemini CLI:"), "{out}");
+    for app in ["Copilot CLI:", "VS Code:", "Claude Code:", "Codex:"] {
+        assert!(!out.contains(app), "{app}: {out}");
+    }
+    assert!(tree(&home).values().all(Option::is_none), "the dry run wrote nothing");
+
+    // Gemini CLI's settings.json finds it.
+    let other = dir.0.join("g");
+    std::fs::create_dir_all(other.join(".gemini")).unwrap();
+    std::fs::write(other.join(".gemini/settings.json"), "{}\n").unwrap();
+    let (_, out, err) = setup(&other, &dir.0, &empty, &[], &["--dry-run", "--yes"], "");
+    assert!(out.contains("\nGemini CLI:\n") && !out.contains("Antigravity:"), "{out}{err}");
+
+    // Antigravity's config file alone finds it, and so does any `~/.gemini/antigravity*` dir.
+    let other = dir.0.join("a");
+    let config = other.join(".gemini/config/mcp_config.json");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(&config, "{}\n").unwrap();
+    let (_, out, err) = setup(&other, &dir.0, &empty, &[], &["--dry-run", "--yes"], "");
+    let plan = format!("\nAntigravity:\n  {}: add the MCP entry\n", config.display());
+    assert!(out.contains(&plan) && !out.contains("Gemini CLI:"), "{out}{err}");
+    let other = dir.0.join("i");
+    std::fs::create_dir_all(other.join(".gemini/antigravity-ide")).unwrap();
+    let (_, out, err) = setup(&other, &dir.0, &empty, &[], &["--dry-run", "--yes"], "");
+    assert!(out.contains("\nAntigravity:\n"), "{out}{err}");
+
+    // Only Claude Desktop's dir, on macOS. Nothing on Linux.
+    let other = dir.0.join("o");
+    std::fs::create_dir(&other).unwrap();
+    let claude = plain_apps(&other).into_iter().find(|(name, ..)| *name == "claude-desktop");
+    if let Some((.., config)) = &claude {
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    }
+    let (_, out, err) = setup(&other, &dir.0, &empty, &[], &["--dry-run", "--yes"], "");
+    assert!(!out.contains("Antigravity:") && !out.contains("Gemini CLI:"), "{out}{err}");
+    assert_eq!(out.contains("\nClaude Desktop:\n"), claude.is_some(), "{out}{err}");
+
+    let args = ["--yes", "--harness", &plain_list(&home)];
+    let (code, out, err) = setup(&home, &dir.0, &empty, &[], &args, "");
+    assert_eq!(code, Some(0), "{out}{err}");
+    for (_, title, _) in plain_apps(&home) {
+        assert!(out.contains(&format!("\n  {title}: ok\n")), "{title}: {out}");
+        assert!(out.contains(&format!("\n  Restart {title} to load it.\n")), "{title}: {out}");
+    }
+    let (code, out, err) = setup(&home, &dir.0, &empty, &[], &args, "");
+    assert_eq!(code, Some(0), "{out}{err}");
+    assert!(!out.contains("Restart "), "{out}");
+}
+
+/// Doctor shows each connected new app's entry as ok, and an entry that runs a binary that
+/// is gone as stale.
+#[test]
+fn doctor_reports_new_apps() {
+    let dir = Dir::new();
+    let (home, empty) = plain_home(&dir.0);
+    let _holders = Holders(vec![data_dir(&home)]);
+    let list = plain_list(&home);
+    let args = ["--yes", "--harness", &list];
+    let (code, out, err) = setup(&home, &dir.0, &empty, &[], &args, "");
+    assert_eq!(code, Some(0), "{out}{err}");
+    let doctor = ["--harness", &list];
+    let (code, out, err) = atticdb("doctor", &home, &dir.0, &empty, &[], &doctor, "");
+    assert_eq!(code, Some(0), "{out}{err}");
+    for (_, title, _) in plain_apps(&home) {
+        let ok = format!("\n{title}:\n  parts: ok\n  binary: ok\n");
+        assert!(out.contains(&ok), "{title}: {out}");
+    }
+    assert!(!out.contains("hook:"), "no hook to check: {out}");
+    // Found, so listed without --harness too.
+    let (_, out, err) = atticdb("doctor", &home, &dir.0, &empty, &[], &[], "");
+    assert!(out.contains("\nAntigravity:\n  parts: ok\n"), "{out}{err}");
+
+    let exe = std::fs::canonicalize(env!("CARGO_BIN_EXE_atticdb")).unwrap();
+    for (.., config) in plain_apps(&home) {
+        let text = std::fs::read_to_string(&config).unwrap();
+        std::fs::write(&config, text.replace(exe.to_str().unwrap(), OLD)).unwrap();
+    }
+    let (code, out, err) = atticdb("doctor", &home, &dir.0, &empty, &[], &doctor, "");
+    assert_eq!(code, Some(1), "{out}{err}");
+    for (name, title, config) in plain_apps(&home) {
+        let fix = format!("run atticdb setup --harness {name}, or atticdb connect {name}");
+        let file = config.display();
+        let stale = format!(
+            "\n{title}:\n  parts: 1 would change, {fix}\n    {file}: update the MCP entry\n  \
+             binary: stale, {fix}\n    {file} runs {OLD}, which no longer exists\n"
+        );
+        assert!(out.contains(&stale), "{title}: {out}");
+    }
+}
+
+/// After an upgrade, doctor without `--harness` stays green: a new app that is found but
+/// holds no atticdb entry shows no line. Named in `--harness`, it still shows. Setup still
+/// offers it.
+#[test]
+fn doctor_hides_found_but_unconnected_new_apps() {
+    let dir = Dir::new();
+    let (home, empty) = plain_home(&dir.0);
+    let _holders = Holders(vec![data_dir(&home)]);
+    // Connect only Antigravity, which sets up the home. Then disconnect it.
+    let args = ["--yes", "--harness", "antigravity"];
+    let (code, out, err) = setup(&home, &dir.0, &empty, &[], &args, "");
+    assert_eq!(code, Some(0), "{out}{err}");
+    let (code, out, err) = atticdb("disconnect", &home, &dir.0, &empty, &[], &["antigravity"], "");
+    assert_eq!(code, Some(0), "{out}{err}");
+    // Gemini CLI found by its settings.json, with no atticdb entry.
+    std::fs::write(home.join(".gemini/settings.json"), "{\"theme\": \"GitHub\"}\n").unwrap();
+    let (code, out, err) = atticdb("doctor", &home, &dir.0, &empty, &[], &[], "");
+    assert_eq!(code, Some(0), "{out}{err}");
+    for title in ["Gemini CLI", "Antigravity", "Claude Desktop"] {
+        assert!(!out.contains(&format!("\n{title}")), "{title}: {out}");
+    }
+    let mut named = vec![("gemini", "Gemini CLI"), ("antigravity", "Antigravity")];
+    if cfg!(target_os = "macos") {
+        named.push(("claude-desktop", "Claude Desktop"));
+    }
+    for (name, title) in named {
+        let (code, out, err) =
+            atticdb("doctor", &home, &dir.0, &empty, &[], &["--harness", name], "");
+        assert_eq!(code, Some(1), "{name}: {out}{err}");
+        assert!(out.contains(&format!("\n{title}:\n  parts: ")), "{name}: {out}");
+    }
+    let (_, out, err) = setup(&home, &dir.0, &empty, &[], &["--dry-run", "--yes"], "");
+    for title in ["Gemini CLI", "Antigravity"] {
+        assert!(out.contains(&format!("\n{title}:\n")), "{title}: {out}{err}");
+    }
+}
+
+/// When Gemini CLI's settings turn its hooks off, or turn off the hook named atticdb, setup
+/// and doctor say memory won't load at chat start, as for Codex.
+#[test]
+fn setup_and_doctor_report_gemini_hooks_off() {
+    let dir = Dir::new();
+    std::fs::create_dir(dir.0.join("empty")).unwrap();
+    let empty = OsString::from(dir.0.join("empty"));
+    let cases = [
+        ("enabled", r#"{"hooksConfig": {"enabled": false}}"#, "sets hooksConfig.enabled to false"),
+        (
+            "disabled",
+            r#"{"hooksConfig": {"disabled": ["x", "atticdb"]}}"#,
+            "lists atticdb in hooksConfig.disabled",
+        ),
+    ];
+    for (row, (case, settings, why)) in cases.into_iter().enumerate() {
+        let home = dir.0.join(format!("h{row}"));
+        let gemini = home.join(".gemini");
+        std::fs::create_dir_all(&gemini).unwrap();
+        let file = gemini.join("settings.json");
+        std::fs::write(&file, format!("{settings}\n")).unwrap();
+        let _holders = Holders(vec![data_dir(&home)]);
+        let args = ["--yes", "--harness", "gemini"];
+        let (code, out, err) = setup(&home, &dir.0, &empty, &[], &args, "");
+        assert_eq!(code, Some(0), "{case}: {out}{err}");
+        let note = format!("\n  note: {} {why}, so Gemini CLI", file.display());
+        assert!(out.contains(&note), "{case}: {out}");
+        assert!(out.contains(&format!("\n  {GEMINI_HOOKS_OFF}\n")), "{case}: {out}");
+        let doctor = ["--harness", "gemini"];
+        let (code, out, err) = atticdb("doctor", &home, &dir.0, &empty, &[], &doctor, "");
+        assert_eq!(code, Some(0), "{case}: {out}{err}");
+        assert!(
+            out.contains(&format!("\n  hook: warning: {GEMINI_DOCTOR_OFF}\n")),
+            "{case}: {out}"
+        );
+        assert!(!out.contains("hook: ok"), "{case}: {out}");
+        let (_, out, err) = atticdb("connect", &home, &dir.0, &empty, &[], &["gemini"], "");
+        assert!(
+            err.contains(&format!("atticdb: {} {why}, so Gemini CLI", file.display())),
+            "{case}: {out}{err}"
+        );
+    }
+    // Hooks on, or another hook off: no warning.
+    for (row, settings) in
+        [r#"{"hooksConfig": {"enabled": true, "disabled": ["x"]}}"#].iter().enumerate()
+    {
+        let home = dir.0.join(format!("on{row}"));
+        std::fs::create_dir_all(home.join(".gemini")).unwrap();
+        std::fs::write(home.join(".gemini/settings.json"), settings).unwrap();
+        let _holders = Holders(vec![data_dir(&home)]);
+        let (code, out, err) =
+            setup(&home, &dir.0, &empty, &[], &["--yes", "--harness", "gemini"], "");
+        assert_eq!(code, Some(0), "{out}{err}");
+        assert!(!out.contains("hooks are off") && !out.contains("hooksConfig"), "{out}");
+    }
+}
+
+/// Setup's next step when Gemini CLI's settings turn its atticdb hook off.
+const GEMINI_HOOKS_OFF: &str = "Gemini CLI: hooks are off (hooksConfig in settings.json), so \
+                                memory won't load at chat start. Set enabled to true, and \
+                                remove \"atticdb\" from disabled.";
+
+/// Doctor's hook warning when Gemini CLI's settings turn its atticdb hook off.
+const GEMINI_DOCTOR_OFF: &str = "Gemini CLI's hooks are off, so memory won't load at chat \
+                                 start. In hooksConfig in settings.json, set enabled to true, \
+                                 and remove \"atticdb\" from disabled";
+
+/// Setup connects Gemini CLI: its entry, its hook and its guide. Doctor finds them in place
+/// and runs the hook. So it does after `--notes ask --no-hook`, with no hook to run.
+#[test]
+fn setup_and_doctor_connect_gemini() {
+    let dir = Dir::new();
+    std::fs::create_dir(dir.0.join("empty")).unwrap();
+    let empty = OsString::from(dir.0.join("empty"));
+    let options: [&[&str]; 2] = [&[], &["--notes", "ask", "--no-hook"]];
+    for (row, options) in options.into_iter().enumerate() {
+        let home = dir.0.join(format!("h{row}"));
+        let gemini = home.join(".gemini");
+        std::fs::create_dir_all(&gemini).unwrap();
+        let _holders = Holders(vec![data_dir(&home)]);
+        let args = [&["--yes", "--harness", "gemini"][..], options].concat();
+        let (code, out, err) = setup(&home, &dir.0, &empty, &[], &args, "");
+        assert_eq!(code, Some(0), "{options:?}: {out}{err}");
+        assert!(out.contains("\n  Gemini CLI: ok\n"), "{options:?}: {out}");
+        let settings: Value =
+            serde_json::from_slice(&std::fs::read(gemini.join("settings.json")).unwrap()).unwrap();
+        assert_eq!(
+            settings["mcpServers"]["atticdb"]["trust"].as_bool(),
+            options.is_empty().then_some(true)
+        );
+        assert_eq!(settings["hooks"].is_object(), options.is_empty(), "{options:?}");
+        assert!(std::fs::read_to_string(gemini.join("GEMINI.md")).unwrap().contains("AtticDB"));
+        let doctor = ["--harness", "gemini"];
+        let (code, out, err) = atticdb("doctor", &home, &dir.0, &empty, &[], &doctor, "");
+        assert_eq!(code, Some(0), "{options:?}: {out}{err}");
+        let hook = if options.is_empty() { "  hook: ok\n" } else { "" };
+        let ok = format!("\nGemini CLI:\n  parts: ok\n  binary: ok\n{hook}");
+        assert!(out.contains(&ok), "{options:?}: {out}");
+    }
+}

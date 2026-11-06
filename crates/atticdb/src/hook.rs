@@ -1,7 +1,7 @@
-//! `atticdb hook session-start`: the session-start hook of Copilot, Claude Code and Codex. It
-//! prints a small block of the user's rules, this repo's facts and its recent notes, which
-//! the harness adds to the chat. The block's text depends only on the repo name and memory,
-//! so the prompt prefix stays the same.
+//! `atticdb hook session-start`: the session-start hook of Copilot, Claude Code, Codex and
+//! Gemini CLI. It prints a small block of the user's rules, this repo's facts and its recent
+//! notes, which the harness adds to the chat. The block's text depends only on the repo name
+//! and memory, so the prompt prefix stays the same.
 //!
 //! `atticdb hook post-compact`: Claude Code's PostCompact hook. It saves the compaction
 //! summary as a Claude Code note in the repo's session, with a pointer to the transcript.
@@ -41,18 +41,19 @@ const MAX_SUMMARY: usize = 16_000;
 
 /// Reads the hook's JSON on stdin and prints the block in the shape `harness` reads, or `{}`
 /// when there is nothing to show, on any error, or 4 s after the start. Errors go to stderr.
-/// `claude-code` and `codex` read
+/// `claude-code`, `codex` and `gemini` read
 /// `{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "<block>"}}`.
 /// `None`, `vscode` and `copilot` read `{"additionalContext": "<block>"}`. Any other name,
 /// or an empty one for a `--harness` with no value, prints `{}`, as a hook must not fail.
 /// `home`, from `--home`, is the home to read, in place of `ATTICDB_HOME`. It must be an
 /// absolute path, else the hook prints `{}`. Claude Code's hook passes it on Windows, where
-/// it runs with no shell to set a variable. Returns exit code 0.
+/// it runs with no shell to set a variable. So does Gemini CLI's, which runs in PowerShell
+/// there. Returns exit code 0.
 pub fn session_start(harness: Option<&str>, home: Option<&str>) -> u8 {
     let start = Instant::now();
     let specific = match harness {
         None | Some("vscode" | "copilot") => false,
-        Some("claude-code" | "codex") => true,
+        Some("claude-code" | "codex" | "gemini") => true,
         Some(name) => {
             let why = match name {
                 "" => "--harness needs a name".to_owned(),
@@ -60,7 +61,8 @@ pub fn session_start(harness: Option<&str>, home: Option<&str>) -> u8 {
             };
             let _ = writeln!(
                 std::io::stderr(),
-                "atticdb: hook session-start: {why}. Use vscode, copilot, claude-code or codex"
+                "atticdb: hook session-start: {why}. Use vscode, copilot, claude-code, codex or \
+                 gemini"
             );
             print_once(&json!({}));
             return 0;

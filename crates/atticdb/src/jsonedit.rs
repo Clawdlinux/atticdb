@@ -21,6 +21,8 @@
 //! - A new object member goes last. Values on their own lines are pretty-printed, with keys
 //!   in sorted order, as [`Value`] keeps them.
 //! - Removing every element of an array leaves `[]`, and every member of an object `{}`.
+//! - A replaced value keeps its place. One that sat on 1 line goes on 1 line, as serde_json
+//!   writes it compactly. Any other is pretty-printed, indented like its member's line.
 //! - CRLF files stay CRLF. Bytes after the root value, such as a final newline, never change.
 
 use serde_json::{Map, Value};
@@ -179,6 +181,116 @@ pub fn remove_key(text: &str, path: &[&str], key: &str) -> Result<(String, bool)
     Ok((edited, true))
 }
 
+/// Adds the member `key: value` as the last one of the object at `path`. Missing objects on
+/// the way are created. A `key` already there is refused, so remove it first to replace it.
+pub fn add_key(text: &str, path: &[&str], key: &str, value: &Value) -> Result<String, Error> {
+    let root = parse(text)?;
+    let mut want = original(text, path)?;
+    let (node, found) = walk(&root, path)?;
+    let edited = match path.get(found) {
+        Some(first) => {
+            let mut nested = Value::Object(Map::from_iter([(key.to_owned(), value.clone())]));
+            for inner in path[found + 1..].iter().rev() {
+                nested = Value::Object(Map::from_iter([((*inner).to_owned(), nested)]));
+            }
+            insert(text, node, Some(first), &nested)
+        }
+        None => match &node.kind {
+            Kind::Object(members) if members.iter().any(|member| member.key == key) => {
+                return Err(refused(path, format!("the object already holds {key:?}")));
+            }
+            Kind::Object(_) => insert(text, node, Some(key), value),
+            _ => return Err(wrong_type(path, "an object", node)),
+        },
+    };
+    put(&mut want, path, key, value)?;
+    check(&edited, &want, path)?;
+    Ok(edited)
+}
+
+/// Replaces the value of the member `key` in the object at `path` with `value`, where it
+/// stands. Returns the text and whether the member was there. A missing path or member
+/// changes nothing.
+pub fn replace_key(
+    text: &str,
+    path: &[&str],
+    key: &str,
+    value: &Value,
+) -> Result<(String, bool), Error> {
+    let root = parse(text)?;
+    let mut want = original(text, path)?;
+    let (node, found) = walk(&root, path)?;
+    if found < path.len() {
+        return Ok((text.to_owned(), false));
+    }
+    let Kind::Object(members) = &node.kind else {
+        return Err(wrong_type(path, "an object", node));
+    };
+    let Some(member) = members.iter().find(|member| member.key == key) else {
+        return Ok((text.to_owned(), false));
+    };
+    let mut at = &mut want;
+    for step in path {
+        at = at.get_mut(*step).ok_or_else(|| refused(path, "the path differs in serde_json"))?;
+    }
+    match at.get_mut(key) {
+        Some(old) => *old = value.clone(),
+        None => return Err(refused(path, "the object differs in serde_json")),
+    }
+    let (start, end) = (member.value.start, member.value.end);
+    let new = if text[start..end].contains('\n') {
+        let (nl, unit) = style(text);
+        render(value, line_indent(text, member.start), unit, nl)
+    } else {
+        value.to_string()
+    };
+    let edited = format!("{}{new}{}", &text[..start], &text[end..]);
+    check(&edited, &want, path)?;
+    Ok((edited, true))
+}
+
+/// Replaces the first element of the array at `path` for which `pred` is true with `value`,
+/// where it stands. Returns the text and whether one was replaced. A missing path replaces
+/// nothing. The new element is laid out as [`replace_key`] lays out a value.
+pub fn replace(
+    text: &str,
+    path: &[&str],
+    pred: impl Fn(&Value) -> bool,
+    value: &Value,
+) -> Result<(String, bool), Error> {
+    let root = parse(text)?;
+    let mut want = original(text, path)?;
+    let (node, found) = walk(&root, path)?;
+    if found < path.len() {
+        return Ok((text.to_owned(), false));
+    }
+    let Kind::Array(items) = &node.kind else {
+        return Err(wrong_type(path, "an array", node));
+    };
+    let mut at = &mut want;
+    for key in path {
+        at = at.get_mut(*key).ok_or_else(|| refused(path, "the path differs in serde_json"))?;
+    }
+    let values = match at {
+        Value::Array(values) if values.len() == items.len() => values,
+        _ => return Err(refused(path, "the array differs in serde_json")),
+    };
+    let Some(i) = values.iter().position(pred) else {
+        return Ok((text.to_owned(), false));
+    };
+    values[i] = value.clone();
+    let (start, end) = (items[i].start, items[i].end);
+    let new = if text[start..end].contains('\n') {
+        let (nl, unit) = style(text);
+        render(value, line_indent(text, start), unit, nl)
+    } else {
+        value.to_string()
+    };
+    let edited = format!("{}{new}{}", &text[..start], &text[end..]);
+    check(&edited, &want, path)?;
+    Ok((edited, true))
+}
+
 /// The original text as serde_json reads it.
 fn original(text: &str, path: &[&str]) -> Result<Value, Error> {
     serde_json::from_str(text)
@@ -217,6 +329,24 @@ fn push(root: &mut Value, path: &[&str], value: &Value) -> Result<(), Error> {
     match at {
         Value::Array(items) => {
             items.push(value.clone());
+            Ok(())
+        }
+        _ => Err(refused(path, "the path differs in serde_json")),
+    }
+}
+
+/// The edit [`add_key`] makes, applied to a [`Value`].
+fn put(root: &mut Value, path: &[&str], key: &str, value: &Value) -> Result<(), Error> {
+    let mut at = root;
+    for step in path {
+        let Value::Object(map) = at else {
+            return Err(refused(path, "the path differs in serde_json"));
+        };
+        at = map.entry(*step).or_insert_with(|| Value::Object(Map::new()));
+    }
+    match at {
+        Value::Object(map) if !map.contains_key(key) => {
+            map.insert(key.to_owned(), value.clone());
             Ok(())
         }
         _ => Err(refused(path, "the path differs in serde_json")),
@@ -680,7 +810,7 @@ impl Parser<'_> {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
-    use super::{append, remove, remove_key};
+    use super::{add_key, append, remove, remove_key, replace, replace_key};
     use serde_json::{json, Value};
 
     /// An edit and its arguments, with values written as JSON.
@@ -1224,5 +1354,86 @@ mod tests {
             remove(&unhooked, &["permissions", "allow"], |v| *v == tool).unwrap();
         assert_eq!(removed, 1, "settings: 1 tool removed");
         assert_eq!(restored, SETTINGS, "settings: byte-identical after removing both");
+    }
+
+    /// A Claude Desktop config with 1 server, and one with no `mcpServers`.
+    const DESKTOP: &str = "{\n  \"mcpServers\": {\n    \"github\": {\n      \"command\": \"npx\",\n      \
+                           \"args\": [\"-y\", \"server-github\"]\n    }\n  },\n  \"preferences\": {}\n}\n";
+    const NO_SERVERS: &str = "{\n  \"preferences\": {\n    \"theme\": \"dark\"\n  }\n}\n";
+
+    #[test]
+    fn add_key_then_remove_key_restores_a_config() {
+        let entry = json!({"command": "/opt/atticdb", "args": ["mcp"]});
+        let added = add_key(DESKTOP, &["mcpServers"], "atticdb", &entry).unwrap();
+        let block =
+            "    },\n    \"atticdb\": {\n      \"args\": [\n        \"mcp\"\n      ],\n      \
+                     \"command\": \"/opt/atticdb\"\n    }\n  },\n";
+        assert!(added.contains(block), "the entry follows its sibling's layout: {added}");
+        let (restored, had) = remove_key(&added, &["mcpServers"], "atticdb").unwrap();
+        assert_eq!((restored.as_str(), had), (DESKTOP, true), "byte-identical after removing");
+
+        let added = add_key(NO_SERVERS, &["mcpServers"], "atticdb", &entry).unwrap();
+        let root: Value = serde_json::from_str(&added).unwrap();
+        assert_eq!(root["mcpServers"], json!({"atticdb": entry}), "the object is created");
+        let (emptied, _) = remove_key(&added, &["mcpServers"], "atticdb").unwrap();
+        let (restored, had) = remove_key(&emptied, &[], "mcpServers").unwrap();
+        assert_eq!((restored.as_str(), had), (NO_SERVERS, true), "byte-identical after removing");
+
+        let one_line = add_key("{}", &["a", "b"], "c", &json!(1)).unwrap();
+        assert_eq!(one_line, r#"{"a": {"b":{"c":1}}}"#, "a 1-line file stays 1 line");
+        let err = add_key(r#"{"a": {"c": 2}}"#, &["a"], "c", &json!(1)).unwrap_err();
+        let want = "refused the edit at [\"a\"], as the result did not verify: the object \
+                    already holds \"c\"";
+        assert_eq!(err.to_string(), want, "a key already there");
+        let err = add_key(r#"{"a": []}"#, &["a"], "c", &json!(1)).unwrap_err();
+        assert_eq!(err.to_string(), "[\"a\"] should be an object but is an array");
+        let err = add_key("{\n  // no\n}\n", &["a"], "c", &json!(1)).unwrap_err();
+        assert!(err.to_string().starts_with("invalid JSON at byte 4"), "{err}");
+    }
+
+    #[test]
+    fn replace_key_keeps_the_member_in_place() {
+        let entry = json!({"command": "/new", "args": ["mcp"]});
+        let text = "{\n  \"s\": {\n    \"a\": {\n      \"command\": \"/old\"\n    },\n    \
+                    \"b\": {\"x\": 1}\n  }\n}\n";
+        let (out, had) = replace_key(text, &["s"], "a", &entry).unwrap();
+        let want =
+            "{\n  \"s\": {\n    \"a\": {\n      \"args\": [\n        \"mcp\"\n      ],\n      \
+                    \"command\": \"/new\"\n    },\n    \"b\": {\"x\": 1}\n  }\n}\n";
+        assert_eq!((out.as_str(), had), (want, true), "multi-line: pretty, in place");
+        let (out, had) = replace_key(text, &["s"], "b", &json!({"y": [2]})).unwrap();
+        assert!(had && out.ends_with("\"b\": {\"y\":[2]}\n  }\n}\n"), "1 line stays 1 line: {out}");
+        assert_eq!(&out[..40], &text[..40], "the bytes before it are unchanged");
+        assert_eq!(replace_key(text, &["s"], "c", &entry).unwrap(), (text.to_owned(), false));
+        assert_eq!(replace_key(text, &["t"], "a", &entry).unwrap(), (text.to_owned(), false));
+        let err = replace_key(r#"{"s": []}"#, &["s"], "a", &entry).unwrap_err();
+        assert_eq!(err.to_string(), "[\"s\"] should be an object but is an array");
+        let crlf = text.replace('\n', "\r\n");
+        let (out, _) = replace_key(&crlf, &["s"], "a", &entry).unwrap();
+        assert_eq!(out, want.replace('\n', "\r\n"), "CRLF stays CRLF");
+    }
+
+    #[test]
+    fn replace_keeps_the_element_in_place() {
+        let group = json!({"hooks": [{"command": "/new"}]});
+        let text = "{\n  \"a\": [\n    {\n      \"hooks\": [{\"command\": \"/old\"}]\n    },\n    \
+                    {\"x\": 1},\n    {\"command\": \"/old\"}\n  ]\n}\n";
+        let old = |value: &Value| value.to_string().contains("/old");
+        let (out, hit) = replace(text, &["a"], old, &group).unwrap();
+        let want = "{\n  \"a\": [\n    {\n      \"hooks\": [\n        {\n          \"command\": \
+                    \"/new\"\n        }\n      ]\n    },\n    {\"x\": 1},\n    {\"command\": \
+                    \"/old\"}\n  ]\n}\n";
+        assert_eq!((out.as_str(), hit), (want, true), "only the first, pretty, in place");
+        let one_line = |value: &Value| *value == json!({"x": 1});
+        let (out, hit) = replace(text, &["a"], one_line, &json!({"y": [2]})).unwrap();
+        assert!(hit && out.contains("},\n    {\"y\":[2]},\n    {\"command\""), "{out}");
+        let none = |_: &Value| false;
+        assert_eq!(replace(text, &["a"], none, &group).unwrap(), (text.to_owned(), false));
+        assert_eq!(replace(text, &["b"], old, &group).unwrap(), (text.to_owned(), false));
+        let err = replace(r#"{"a": {}}"#, &["a"], old, &group).unwrap_err();
+        assert_eq!(err.to_string(), "[\"a\"] should be an array but is an object");
+        let crlf = text.replace('\n', "\r\n");
+        let (out, _) = replace(&crlf, &["a"], old, &group).unwrap();
+        assert_eq!(out, want.replace('\n', "\r\n"), "CRLF stays CRLF");
     }
 }

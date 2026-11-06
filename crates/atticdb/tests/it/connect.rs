@@ -2184,3 +2184,755 @@ fn connect_codex_adds_its_parts() {
     }
     assert!(calls().iter().all(|call| *call == get), "only codex mcp get atticdb --json runs");
 }
+
+/// A home for the entry-only apps, Antigravity and Claude Desktop: an empty `HOME`, and a
+/// `PATH` with no programs.
+struct Plain {
+    dir: Dir,
+    exe: String,
+}
+
+impl Plain {
+    fn new() -> Self {
+        let dir = Dir::new();
+        std::fs::create_dir_all(dir.0.join("bin")).unwrap();
+        let exe = std::fs::canonicalize(env!("CARGO_BIN_EXE_atticdb")).unwrap();
+        Self { dir, exe: exe.to_str().unwrap().to_owned() }
+    }
+
+    /// Runs `atticdb` with `args`, and returns its exit code and output.
+    fn run(&self, args: &[&str]) -> (Option<i32>, String) {
+        let mut command = support::command(&self.exe);
+        command.args(args).current_dir(&self.dir.0).env("HOME", self.dir.0.join("h"));
+        command.env("PATH", self.dir.0.join("bin")).env_remove("ATTICDB_TOKEN");
+        let (status, out) = Process::start(command.stdin(Stdio::null())).wait();
+        (status.code(), out)
+    }
+
+    /// The config file of `app` under `HOME`.
+    fn config(&self, app: &str) -> std::path::PathBuf {
+        let home = self.dir.0.join("h");
+        match app {
+            "antigravity" => home.join(".gemini/config/mcp_config.json"),
+            _ => home.join("Library/Application Support/Claude/claude_desktop_config.json"),
+        }
+    }
+
+    /// Writes `text` to `app`'s config, making its dir.
+    fn write(&self, app: &str, text: &str) {
+        let config = self.config(app);
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(config, text).unwrap();
+    }
+
+    /// `app`'s config, read as JSON.
+    fn read(&self, app: &str) -> Value {
+        serde_json::from_slice(&std::fs::read(self.config(app)).unwrap()).unwrap()
+    }
+
+    /// The entry AtticDB writes for `app`.
+    fn entry(&self, app: &str) -> Value {
+        json!({"command": self.exe, "args": ["mcp", "--agent", app]})
+    }
+}
+
+/// The entry-only apps on this OS, with their names in sentences. Claude Desktop has no Linux
+/// app.
+fn plain_apps() -> Vec<(&'static str, &'static str)> {
+    let mut apps = vec![("antigravity", "Antigravity")];
+    if cfg!(target_os = "macos") {
+        apps.push(("claude-desktop", "Claude Desktop"));
+    }
+    apps
+}
+
+/// A config as people keep it: 1 user server, with an inline array, and another key.
+const PLAIN_CONFIG: &str = r#"{
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"]
+    }
+  },
+  "preferences": {
+    "quickEntryShortcut": "off"
+  }
+}
+"#;
+
+/// Connect adds AtticDB's entry next to the user's server, and says to restart the app.
+#[test]
+fn connect_adds_entry_for_entry_only_apps() {
+    let it = Plain::new();
+    for (app, title) in plain_apps() {
+        it.write(app, PLAIN_CONFIG);
+        let (code, out) = it.run(&["connect", app]);
+        assert_eq!(code, Some(0), "{app}: {out}");
+        let shown = it.config(app).display().to_string();
+        assert!(out.starts_with(&format!("MCP entry: added ({shown}, backup: ")), "{app}: {out}");
+        assert!(out.ends_with(&format!(")\nRestart {title} to load it.\n")), "{app}: {out}");
+        let root = it.read(app);
+        assert_eq!(root["mcpServers"]["atticdb"], it.entry(app), "{app}");
+        let theirs =
+            json!({"command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"]});
+        assert_eq!(root["mcpServers"]["github"], theirs, "{app}");
+        assert_eq!(root["preferences"], json!({"quickEntryShortcut": "off"}), "{app}");
+    }
+    if !cfg!(target_os = "macos") {
+        let (code, out) = it.run(&["connect", "claude-desktop"]);
+        assert_eq!(code, Some(1), "{out}");
+        assert!(out.contains("Claude Desktop is only available on macOS and Windows"), "{out}");
+    }
+}
+
+/// Disconnect gives back the user's file byte for byte, its own empty `mcpServers` too. It
+/// never removes `mcpServers`, so a file that had none keeps an empty one.
+#[test]
+fn connect_keeps_user_entries() {
+    let it = Plain::new();
+    let empty_servers = "{\n  \"mcpServers\": {}\n}\n";
+    let no_servers = "{\n  \"preferences\": {\n    \"quickEntryShortcut\": \"off\"\n  }\n}\n";
+    let kept_empty = "{\n  \"preferences\": {\n    \"quickEntryShortcut\": \"off\"\n  },\n  \
+                      \"mcpServers\": {}\n}\n";
+    let cases =
+        [(PLAIN_CONFIG, PLAIN_CONFIG), (empty_servers, empty_servers), (no_servers, kept_empty)];
+    for (app, _) in plain_apps() {
+        for (text, after) in cases {
+            it.write(app, text);
+            let (code, out) = it.run(&["connect", app]);
+            assert_eq!(code, Some(0), "{app}: {out}");
+            assert_eq!(it.read(app)["mcpServers"]["atticdb"], it.entry(app), "{app}");
+            let (code, out) = it.run(&["disconnect", app]);
+            assert_eq!(code, Some(0), "{app}: {out}");
+            let shown = it.config(app).display().to_string();
+            assert!(out.starts_with(&format!("MCP entry: removed ({shown}, backup: ")), "{out}");
+            assert_eq!(std::fs::read_to_string(it.config(app)).unwrap(), after, "{app}");
+            let (code, out) = it.run(&["disconnect", app]);
+            assert_eq!((code, out), (Some(0), format!("MCP entry: not found ({shown})\n")));
+        }
+    }
+}
+
+/// An older entry is updated where it stands: it stays first, and the user's server after it
+/// keeps its bytes. So does one with flags, replaced with `--force`.
+#[test]
+fn connect_updates_entries_in_place() {
+    let it = Plain::new();
+    for (app, _) in plain_apps() {
+        for (args, force) in
+            [(r#"["mcp", "--agent", "APP"]"#, false), (r#"["mcp", "--url", "/x"]"#, true)]
+        {
+            let args = args.replace("APP", app);
+            let config = format!(
+                "{{\n  \"mcpServers\": {{\n    \"atticdb\": {{\n      \"args\": {args},\n      \
+                 \"command\": \"/old/atticdb\"\n    }},\n    \"github\": {{\"command\": \"npx\", \
+                 \"args\": [\"-y\"]}}\n  }}\n}}\n"
+            );
+            it.write(app, &config);
+            let mut run = vec!["connect", app];
+            run.extend(force.then_some("--force"));
+            let (code, out) = it.run(&run);
+            assert_eq!(code, Some(0), "{app}: {out}");
+            assert!(out.starts_with("MCP entry: updated ("), "{app}: {out}");
+            let block = format!(
+                "    \"atticdb\": {{\n      \"args\": [\n        \"mcp\",\n        \"--agent\",\n        \
+                 \"{app}\"\n      ],\n      \"command\": {}\n    }},\n",
+                json!(it.exe)
+            );
+            let github = "    \"github\": {\"command\": \"npx\", \"args\": [\"-y\"]}\n  }\n}\n";
+            let want = format!("{{\n  \"mcpServers\": {{\n{block}{github}");
+            assert_eq!(std::fs::read_to_string(it.config(app)).unwrap(), want, "{app} {force}");
+        }
+    }
+}
+
+/// A rerun reports the entry unchanged, writes nothing, and asks for no restart.
+#[test]
+fn connect_is_idempotent_for_new_apps() {
+    let it = Plain::new();
+    for (app, _) in plain_apps() {
+        it.write(app, PLAIN_CONFIG);
+        assert_eq!(it.run(&["connect", app]).0, Some(0), "{app}");
+        let parent = it.config(app).parent().unwrap().to_owned();
+        let before = files(&parent);
+        let shown = it.config(app).display().to_string();
+        let (code, out) = it.run(&["connect", app]);
+        assert_eq!((code, out), (Some(0), format!("MCP entry: unchanged ({shown})\n")), "{app}");
+        let (code, out) = it.run(&["connect", app, "--dry-run"]);
+        assert_eq!((code, out), (Some(0), format!("{shown}: MCP entry unchanged\n")), "{app}");
+        assert_eq!(files(&parent), before, "{app}: nothing written");
+    }
+}
+
+/// An entry from an older binary is updated. One with connection flags is kept unless
+/// `--force`.
+#[test]
+fn connect_updates_stale_entries_for_new_apps() {
+    let it = Plain::new();
+    for (app, title) in plain_apps() {
+        let mut stale = it.entry(app);
+        stale["command"] = json!("/old/atticdb");
+        it.write(app, &json!({"mcpServers": {"atticdb": stale}}).to_string());
+        let (code, out) = it.run(&["connect", app]);
+        assert_eq!(code, Some(0), "{app}: {out}");
+        assert!(out.starts_with("MCP entry: updated (") && out.contains(title), "{app}: {out}");
+        assert_eq!(it.read(app)["mcpServers"]["atticdb"], it.entry(app), "{app}");
+
+        let flagged = json!({"command": it.exe, "args": ["mcp", "--url", "/old"]});
+        it.write(app, &json!({"mcpServers": {"atticdb": flagged}}).to_string());
+        let parent = it.config(app).parent().unwrap().to_owned();
+        let before = files(&parent);
+        let (code, out) = it.run(&["connect", app]);
+        assert_eq!(code, Some(1), "{app}: {out}");
+        let force = format!("atticdb connect {app} --force");
+        assert!(out.contains("uses --url /old.") && out.contains(&force), "{app}: {out}");
+        assert!(out.contains(&format!("quit {title}, then")), "{app}: {out}");
+        assert_eq!(files(&parent), before, "{app}: nothing written");
+        let (code, out) = it.run(&["connect", app, "--force"]);
+        assert_eq!(code, Some(0), "{app}: {out}");
+        assert_eq!(it.read(app)["mcpServers"]["atticdb"], it.entry(app), "{app}");
+    }
+}
+
+/// A config with a comment or a trailing comma is never rewritten. The report shows the
+/// entry to add by hand.
+#[test]
+fn connect_leaves_non_strict_json_alone() {
+    let it = Plain::new();
+    let texts = [
+        "{\n  // my servers\n  \"mcpServers\": {}\n}\n",
+        "{\n  \"mcpServers\": {\n    \"x\": {\"command\": \"x\"},\n  }\n}\n",
+    ];
+    for (app, title) in plain_apps() {
+        for text in texts {
+            it.write(app, text);
+            let parent = it.config(app).parent().unwrap().to_owned();
+            let before = files(&parent);
+            let (code, out) = it.run(&["connect", app]);
+            assert_eq!(code, Some(1), "{app}: {out}");
+            let shown = it.config(app).display().to_string();
+            assert!(out.starts_with(&format!("MCP entry: skipped, {shown}: ")), "{app}: {out}");
+            let by_hand = format!("Add \"atticdb\": {} to \"mcpServers\" by hand", it.entry(app));
+            assert!(out.contains(&by_hand), "{app}: {out}");
+            assert!(!out.contains(&format!("Restart {title}")), "{app}: {out}");
+            assert_eq!(files(&parent), before, "{app}: unchanged");
+            let (code, out) = it.run(&["disconnect", app]);
+            assert_eq!(code, Some(1), "{app}: {out}");
+            assert!(out.contains("Remove \"atticdb\" from \"mcpServers\" by hand"), "{out}");
+            assert_eq!(files(&parent), before, "{app}: unchanged by disconnect");
+        }
+    }
+}
+
+/// With the app's dir but no config, connect creates an owner-only config with the entry.
+#[test]
+fn connect_creates_missing_config() {
+    let it = Plain::new();
+    for (app, title) in plain_apps() {
+        let config = it.config(app);
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        let (code, out) = it.run(&["connect", app]);
+        assert_eq!(code, Some(0), "{app}: {out}");
+        let shown = config.display();
+        assert_eq!(out, format!("MCP entry: added ({shown})\nRestart {title} to load it.\n"));
+        assert_eq!(it.read(app), json!({"mcpServers": {"atticdb": it.entry(app)}}), "{app}");
+        assert_eq!(std::fs::metadata(&config).unwrap().mode() & 0o777, 0o600, "{app}");
+    }
+}
+
+/// Under `ATTICDB_HOME`, the entry passes it on.
+#[test]
+fn connect_new_apps_pass_the_home() {
+    let it = Plain::new();
+    let moved = it.dir.0.join("moved");
+    for (app, _) in plain_apps() {
+        let mut command = support::command(&it.exe);
+        command.args(["connect", app]).current_dir(&it.dir.0).env("HOME", it.dir.0.join("h"));
+        command.env("PATH", it.dir.0.join("bin")).env("ATTICDB_HOME", &moved);
+        let (status, out) = Process::start(command.stdin(Stdio::null())).wait();
+        assert_eq!(status.code(), Some(0), "{app}: {out}");
+        let mut entry = it.entry(app);
+        entry["env"] = json!({"ATTICDB_HOME": moved});
+        assert_eq!(it.read(app)["mcpServers"]["atticdb"], entry, "{app}");
+    }
+}
+
+/// A migrated Antigravity install: `~/.gemini/config/mcp_config.json`, and the legacy
+/// `~/.gemini/antigravity/mcp_config.json` as a symlink to it. Connect and disconnect edit the
+/// real file by its own path, and never write through the symlink.
+#[test]
+fn antigravity_edits_the_config_file_not_the_legacy_link() {
+    let it = Plain::new();
+    it.write("antigravity", PLAIN_CONFIG);
+    let config = it.config("antigravity");
+    let legacy_dir = it.dir.0.join("h/.gemini/antigravity");
+    std::fs::create_dir_all(&legacy_dir).unwrap();
+    let legacy = legacy_dir.join("mcp_config.json");
+    let target = Path::new("../config/mcp_config.json");
+    std::os::unix::fs::symlink(target, &legacy).unwrap();
+    let shown = config.display().to_string();
+    let (code, out) = it.run(&["connect", "antigravity", "--dry-run"]);
+    assert_eq!((code, out), (Some(0), format!("{shown}: add the MCP entry\n")));
+    let (code, out) = it.run(&["connect", "antigravity"]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.starts_with(&format!("MCP entry: added ({shown}, backup: ")), "{out}");
+    assert_eq!(it.read("antigravity")["mcpServers"]["atticdb"], it.entry("antigravity"));
+    let meta = std::fs::symlink_metadata(&legacy).unwrap();
+    assert!(meta.is_symlink(), "the legacy link stays a link");
+    assert_eq!(std::fs::read_link(&legacy).unwrap(), target);
+    assert!(std::fs::symlink_metadata(&config).unwrap().is_file(), "the config stays a file");
+    let (code, out) = it.run(&["disconnect", "antigravity"]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.starts_with(&format!("MCP entry: removed ({shown}, backup: ")), "{out}");
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), PLAIN_CONFIG);
+    assert!(std::fs::symlink_metadata(&legacy).unwrap().is_symlink());
+}
+
+/// An older Antigravity install has only the legacy file, as a regular file. Connect edits it,
+/// and makes no `~/.gemini/config`.
+#[test]
+fn antigravity_uses_a_regular_legacy_file() {
+    let it = Plain::new();
+    let legacy = it.dir.0.join("h/.gemini/antigravity/mcp_config.json");
+    std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    std::fs::write(&legacy, PLAIN_CONFIG).unwrap();
+    let (code, out) = it.run(&["connect", "antigravity"]);
+    assert_eq!(code, Some(0), "{out}");
+    let shown = legacy.display().to_string();
+    assert!(out.starts_with(&format!("MCP entry: added ({shown}, backup: ")), "{out}");
+    let root: Value = serde_json::from_slice(&std::fs::read(&legacy).unwrap()).unwrap();
+    assert_eq!(root["mcpServers"]["atticdb"], it.entry("antigravity"));
+    assert!(!it.dir.0.join("h/.gemini/config").exists(), "no config dir made");
+}
+
+/// With neither file, but Antigravity's dir, connect creates `~/.gemini/config/mcp_config.json`
+/// and writes nothing in the legacy dir.
+#[test]
+fn antigravity_creates_the_config_file() {
+    let it = Plain::new();
+    let legacy_dir = it.dir.0.join("h/.gemini/antigravity");
+    std::fs::create_dir_all(&legacy_dir).unwrap();
+    let (code, out) = it.run(&["connect", "antigravity"]);
+    let shown = it.config("antigravity").display().to_string();
+    assert_eq!(out, format!("MCP entry: added ({shown})\nRestart Antigravity to load it.\n"));
+    assert_eq!(code, Some(0));
+    let want = json!({"mcpServers": {"atticdb": it.entry("antigravity")}});
+    assert_eq!(it.read("antigravity"), want);
+    assert!(files(&legacy_dir).is_empty(), "nothing in the legacy dir");
+}
+
+/// A home for Gemini CLI: an empty `HOME` with `~/.gemini`, and a `PATH` with no programs.
+struct Gemini {
+    dir: Dir,
+    exe: String,
+}
+
+impl Gemini {
+    fn new() -> Self {
+        let dir = Dir::new();
+        std::fs::create_dir_all(dir.0.join("bin")).unwrap();
+        std::fs::create_dir_all(dir.0.join("h/.gemini")).unwrap();
+        let exe = std::fs::canonicalize(env!("CARGO_BIN_EXE_atticdb")).unwrap();
+        Self { dir, exe: exe.to_str().unwrap().to_owned() }
+    }
+
+    /// Runs `atticdb` with `args` and `env`, and returns its exit code and output.
+    fn run_with(&self, args: &[&str], env: &[(&str, &Path)]) -> (Option<i32>, String) {
+        let mut command = support::command(&self.exe);
+        command.args(args).current_dir(&self.dir.0).env("HOME", self.dir.0.join("h"));
+        command.env("PATH", self.dir.0.join("bin")).env_remove("ATTICDB_TOKEN");
+        command.envs(env.iter().copied());
+        let (status, out) = Process::start(command.stdin(Stdio::null())).wait();
+        (status.code(), out)
+    }
+
+    /// Runs `atticdb` with `args`, and returns its exit code and output.
+    fn run(&self, args: &[&str]) -> (Option<i32>, String) {
+        self.run_with(args, &[])
+    }
+
+    fn settings(&self) -> std::path::PathBuf {
+        self.dir.0.join("h/.gemini/settings.json")
+    }
+
+    fn guide(&self) -> std::path::PathBuf {
+        self.dir.0.join("h/.gemini/GEMINI.md")
+    }
+
+    /// `settings.json`, read as JSON.
+    fn read(&self) -> Value {
+        serde_json::from_slice(&std::fs::read(self.settings()).unwrap()).unwrap()
+    }
+
+    /// The groups in `hooks.SessionStart` of `settings.json`.
+    fn groups(&self) -> Vec<Value> {
+        self.read()["hooks"]["SessionStart"].as_array().cloned().unwrap_or_default()
+    }
+
+    /// The entry AtticDB writes. `trust` unless notes ask.
+    fn entry(&self, trust: bool) -> Value {
+        let mut entry = json!({"command": self.exe, "args": ["mcp", "--agent", "gemini"]});
+        if trust {
+            entry["trust"] = json!(true);
+        }
+        entry
+    }
+
+    /// The SessionStart group AtticDB adds, with its timeout in milliseconds.
+    fn group(&self, home: Option<&Path>) -> Value {
+        let quoted = format!("'{}'", self.exe.replace('\'', r"'\''"));
+        let prefix = home.map(|home| format!("ATTICDB_HOME='{}' ", home.display()));
+        let command =
+            format!("{}{quoted} hook session-start --harness gemini", prefix.unwrap_or_default());
+        json!({"hooks": [{"type": "command", "name": "atticdb", "command": command,
+            "timeout": 5000}]})
+    }
+}
+
+/// The guide's block, from its spec: the MCP server's instructions between 2 markers that
+/// name `atticdb disconnect gemini`.
+fn gemini_block() -> String {
+    format!(
+        "<!-- atticdb:begin v1. atticdb disconnect gemini removes this block. -->\n## AtticDB \
+         memory\n{}\n<!-- atticdb:end -->\n",
+        atticdb::mcp::INSTRUCTIONS
+    )
+}
+
+/// A settings.json as people keep it: a theme, 1 user server, and a user SessionStart group.
+const GEMINI_SETTINGS: &str = r#"{
+  "theme": "GitHub",
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"]
+    }
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "name": "branch",
+            "command": "~/.gemini/hooks/branch.sh",
+            "timeout": 2000
+          }
+        ]
+      }
+    ]
+  }
+}
+"#;
+
+/// A global GEMINI.md as people keep it.
+const GEMINI_GUIDE: &str = "# My rules\n\n- Use pnpm, not npm.\n";
+
+/// What `connect gemini` prints last in Apply mode.
+const GEMINI_NEXT: &str = "Start a new Gemini CLI session to load atticdb.";
+
+/// Connect adds the entry with `trust`, the SessionStart group and the guide block, next to
+/// the user's own. A fresh `~/.gemini` gets both files. A rerun changes nothing, and a dry
+/// run says what it would add.
+#[test]
+fn gemini_connect_adds_entry_hook_and_guide() {
+    let it = Gemini::new();
+    let (settings, guide) = (it.settings(), it.guide());
+    let (at, shown) = (settings.display().to_string(), guide.display().to_string());
+    let (code, out) = it.run(&["connect", "gemini", "--dry-run"]);
+    let plan = format!(
+        "{at}: add the MCP entry\n{at}: add the SessionStart hook\n{shown}: add the atticdb guide\n"
+    );
+    assert_eq!((code, out), (Some(0), plan));
+    assert!(files(&it.dir.0.join("h/.gemini")).is_empty(), "the dry run wrote nothing");
+
+    let (code, out) = it.run(&["connect", "gemini"]);
+    let added = format!(
+        "MCP entry: added ({at})\nSessionStart hook: added ({at})\natticdb guide: added \
+         ({shown})\n{GEMINI_NEXT}\n"
+    );
+    assert_eq!((code, out), (Some(0), added));
+    assert_eq!(
+        it.read(),
+        json!({"mcpServers": {"atticdb": it.entry(true)},
+        "hooks": {"SessionStart": [it.group(None)]}})
+    );
+    assert_eq!(std::fs::read_to_string(&guide).unwrap(), gemini_block());
+
+    let before = files(&it.dir.0.join("h/.gemini"));
+    let (code, out) = it.run(&["connect", "gemini"]);
+    let unchanged = format!(
+        "MCP entry: unchanged ({at})\nSessionStart hook: unchanged ({at})\natticdb guide: \
+         unchanged ({shown})\n{GEMINI_NEXT}\n"
+    );
+    assert_eq!((code, out), (Some(0), unchanged));
+    assert_eq!(files(&it.dir.0.join("h/.gemini")), before, "nothing written");
+
+    // Hand-kept files keep every byte of the user's, with AtticDB's parts added last.
+    std::fs::write(&settings, GEMINI_SETTINGS).unwrap();
+    std::fs::write(&guide, GEMINI_GUIDE).unwrap();
+    let (code, out) = it.run(&["connect", "gemini"]);
+    assert_eq!(code, Some(0), "{out}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(lines[0].starts_with(&format!("MCP entry: added ({at}, backup: ")), "{out}");
+    assert!(lines[1].starts_with(&format!("SessionStart hook: added ({at}, backup: ")), "{out}");
+    assert!(lines[2].starts_with(&format!("atticdb guide: added ({shown}, backup: ")), "{out}");
+    assert_eq!(lines[3..], [GEMINI_NEXT], "{out}");
+    let root = it.read();
+    assert_eq!(root["theme"], "GitHub");
+    let github = json!({"command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"]});
+    assert_eq!(root["mcpServers"], json!({"github": github, "atticdb": it.entry(true)}));
+    let theirs: Value = serde_json::from_str(GEMINI_SETTINGS).unwrap();
+    let theirs = theirs["hooks"]["SessionStart"][0].clone();
+    assert_eq!(it.groups(), [theirs, it.group(None)]);
+    let text = std::fs::read_to_string(&guide).unwrap();
+    assert_eq!(text, format!("{GEMINI_GUIDE}\n{}", gemini_block()));
+}
+
+/// `--notes ask` leaves out `trust`, so Gemini CLI asks before each atticdb tool. Connecting
+/// with the default notes puts it back, in place.
+#[test]
+fn gemini_notes_ask_drops_trust() {
+    let it = Gemini::new();
+    let (code, out) = it.run(&["connect", "gemini", "--notes", "ask"]);
+    assert_eq!(code, Some(0), "{out}");
+    assert_eq!(it.read()["mcpServers"]["atticdb"], it.entry(false));
+    let (code, out) = it.run(&["connect", "gemini", "--notes", "ask"]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.starts_with("MCP entry: unchanged ("), "{out}");
+    let (code, out) = it.run(&["connect", "gemini"]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.starts_with("MCP entry: updated ("), "{out}");
+    assert_eq!(it.read()["mcpServers"]["atticdb"], it.entry(true));
+}
+
+/// `--no-hook` adds no SessionStart group. The entry and the guide still go in.
+#[test]
+fn gemini_no_hook() {
+    let it = Gemini::new();
+    let (code, out) = it.run(&["connect", "gemini", "--no-hook"]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(!out.contains("SessionStart hook"), "{out}");
+    assert_eq!(it.read(), json!({"mcpServers": {"atticdb": it.entry(true)}}));
+    assert_eq!(std::fs::read_to_string(it.guide()).unwrap(), gemini_block());
+}
+
+/// A user's own SessionStart group survives connect and disconnect, which give both files
+/// back byte for byte.
+#[test]
+fn gemini_keeps_user_hook_groups() {
+    let it = Gemini::new();
+    std::fs::write(it.settings(), GEMINI_SETTINGS).unwrap();
+    std::fs::write(it.guide(), GEMINI_GUIDE).unwrap();
+    let (code, out) = it.run(&["connect", "gemini"]);
+    assert_eq!(code, Some(0), "{out}");
+    let theirs: Value = serde_json::from_str(GEMINI_SETTINGS).unwrap();
+    let theirs = theirs["hooks"]["SessionStart"][0].clone();
+    assert_eq!(it.groups(), [theirs.clone(), it.group(None)]);
+    let (code, out) = it.run(&["disconnect", "gemini"]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.contains("\nSessionStart hook: removed ("), "{out}");
+    assert_eq!(std::fs::read_to_string(it.settings()).unwrap(), GEMINI_SETTINGS);
+    assert_eq!(std::fs::read_to_string(it.guide()).unwrap(), GEMINI_GUIDE);
+}
+
+/// The user's group in [`GEMINI_HAND_WIRED`], as its bytes stand.
+const GEMINI_USER_GROUP: &str = r#"      {
+        "matcher": "startup",
+        "hooks": [{"type": "command", "name": "branch", "command": "~/.gemini/hooks/branch.sh"}]
+      }"#;
+
+/// A settings.json wired by hand: an unquoted atticdb hook with another harness's flag,
+/// before the user's own group.
+fn gemini_hand_wired(command: &str) -> String {
+    format!(
+        "{{\n  \"hooks\": {{\n    \"SessionStart\": [\n      {{\n        \"hooks\": [\n          \
+         {{\n            \"type\": \"command\",\n            \"command\": {}\n          }}\n        \
+         ]\n      }},\n{GEMINI_USER_GROUP}\n    ]\n  }}\n}}\n",
+        json!(command)
+    )
+}
+
+/// A SessionStart group wired by hand to run an atticdb binary's `hook session-start` is
+/// AtticDB's, quoted or not, whatever flags follow. Connect replaces it where it stands, so
+/// Gemini CLI never gets 2 memory blocks. The user's group next to it keeps its bytes.
+/// Disconnect then removes it. A command that runs another program stays the user's.
+#[test]
+fn gemini_replaces_a_hand_wired_hook_in_place() {
+    let it = Gemini::new();
+    let at = it.settings().display().to_string();
+    let user: Value = serde_json::from_str(GEMINI_USER_GROUP).unwrap();
+    let commands = [
+        "/Users/sunny/.cargo/bin/atticdb hook session-start --harness claude-code",
+        "'/opt/my tools/atticdb' hook session-start",
+        "\"/usr/local/bin/atticdb.exe\" hook  session-start --harness gemini --home /h",
+        "/opt/atticdb hook session-start --harness claude-code --home '/x y'",
+    ];
+    for command in commands {
+        std::fs::write(it.settings(), gemini_hand_wired(command)).unwrap();
+        let (code, out) = it.run(&["connect", "gemini", "--dry-run"]);
+        assert_eq!(code, Some(0), "{command}: {out}");
+        assert!(out.contains(&format!("\n{at}: update the SessionStart hook\n")), "{out}");
+        let (code, out) = it.run(&["connect", "gemini"]);
+        assert_eq!(code, Some(0), "{command}: {out}");
+        let line = format!("\nSessionStart hook: updated ({at}, backup: ");
+        assert!(out.contains(&line), "{command}: {out}");
+        assert_eq!(it.groups(), [it.group(None), user.clone()], "{command}");
+        let text = std::fs::read_to_string(it.settings()).unwrap();
+        assert!(text.contains(&format!("}},\n{GEMINI_USER_GROUP}\n    ]")), "{text}");
+        let (code, out) = it.run(&["connect", "gemini"]);
+        assert_eq!(code, Some(0), "{command}: {out}");
+        assert!(out.contains(&format!("\nSessionStart hook: unchanged ({at})\n")), "{out}");
+        let (code, out) = it.run(&["disconnect", "gemini"]);
+        assert_eq!(code, Some(0), "{command}: {out}");
+        assert!(out.contains("\nSessionStart hook: removed ("), "{command}: {out}");
+        assert_eq!(it.groups(), std::slice::from_ref(&user), "{command}");
+    }
+
+    // Disconnect alone removes a hand-wired group too.
+    std::fs::write(it.settings(), gemini_hand_wired(commands[0])).unwrap();
+    let (code, out) = it.run(&["disconnect", "gemini"]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.contains("\nSessionStart hook: removed ("), "{out}");
+    assert_eq!(it.groups(), std::slice::from_ref(&user));
+
+    // Not atticdb's: another binary, a relative path, another hook verb, or a command that
+    // runs more than atticdb. The user's bytes stay, and AtticDB's group goes last.
+    for command in [
+        "/opt/bin/atticdb-wrapper hook session-start",
+        "atticdb hook session-start --harness gemini",
+        "/opt/bin/atticdb hook post-compact",
+        "/opt/atticdb hook session-start && /opt/other-hook",
+    ] {
+        let text = gemini_hand_wired(command);
+        std::fs::write(it.settings(), &text).unwrap();
+        let theirs: Value = serde_json::from_str(&text).unwrap();
+        let theirs = theirs["hooks"]["SessionStart"][0].clone();
+        let (code, out) = it.run(&["connect", "gemini"]);
+        assert_eq!(code, Some(0), "{command}: {out}");
+        assert!(out.contains("\nSessionStart hook: added ("), "{command}: {out}");
+        assert_eq!(it.groups(), [theirs, user.clone(), it.group(None)], "{command}");
+        let kept = &text[..text.rfind("\n    ]").unwrap()];
+        let after = std::fs::read_to_string(it.settings()).unwrap();
+        assert!(after.starts_with(kept), "{command}: {after}");
+        let (code, out) = it.run(&["disconnect", "gemini"]);
+        assert_eq!(code, Some(0), "{command}: {out}");
+        let after = std::fs::read_to_string(it.settings()).unwrap();
+        assert!(after.starts_with(kept), "{command}: disconnect keeps it: {after}");
+    }
+
+    // A hand-wired atticdb handler in a group with another hook is left for the user, with
+    // neutral words: it may not be older.
+    let mixed = json!({"hooks": {"SessionStart": [{"hooks": [
+        {"type": "command", "command": commands[0]},
+        {"type": "command", "command": "/opt/other-hook"}
+    ]}]}});
+    let text = serde_json::to_string_pretty(&mixed).unwrap();
+    std::fs::write(it.settings(), &text).unwrap();
+    let (code, out) = it.run(&["connect", "gemini"]);
+    assert_eq!(code, Some(1), "{out}");
+    let said = format!(
+        "SessionStart hook: skipped, {}: an atticdb hook is inside a group with other hooks. \
+         Update the atticdb handler inside that group by hand, to run: ",
+        it.settings().display()
+    );
+    assert!(out.contains(&said) && !out.contains("an older"), "{out}");
+    assert_eq!(it.read()["hooks"], mixed["hooks"], "the group stays");
+}
+
+/// A GEMINI.md that mentions AtticDB outside a block is the user's own guide. It stays as it
+/// is, and the guide part says so. The other parts still apply.
+#[test]
+fn gemini_guide_skips_user_guide() {
+    let it = Gemini::new();
+    let theirs = "# Memory\n\nUse AtticDB's memory_search before you ask me.\n";
+    std::fs::write(it.guide(), theirs).unwrap();
+    let shown = it.guide().display().to_string();
+    let (code, out) = it.run(&["connect", "gemini", "--dry-run"]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.contains(&format!("\n{shown}: keep the user's guide, which mentions atticdb\n")));
+    let (code, out) = it.run(&["connect", "gemini"]);
+    assert_eq!(code, Some(0), "{out}");
+    let kept = format!("\natticdb guide: kept, {shown} already mentions atticdb\n");
+    assert!(out.contains(&kept), "{out}");
+    assert_eq!(it.read()["mcpServers"]["atticdb"], it.entry(true));
+    assert_eq!(std::fs::read_to_string(it.guide()).unwrap(), theirs);
+    let (code, out) = it.run(&["disconnect", "gemini"]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.ends_with(&format!("\natticdb guide: not found ({shown})\n")), "{out}");
+    assert_eq!(std::fs::read_to_string(it.guide()).unwrap(), theirs);
+}
+
+/// Disconnect removes the entry, the hook group and the guide block. A rerun finds none.
+#[test]
+fn gemini_disconnect_removes_all_parts() {
+    let it = Gemini::new();
+    assert_eq!(it.run(&["connect", "gemini"]).0, Some(0));
+    let (at, shown) = (it.settings().display().to_string(), it.guide().display().to_string());
+    let (code, out) = it.run(&["disconnect", "gemini"]);
+    assert_eq!(code, Some(0), "{out}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(lines[0].starts_with(&format!("MCP entry: removed ({at}, backup: ")), "{out}");
+    assert!(lines[1].starts_with(&format!("SessionStart hook: removed ({at}, backup: ")), "{out}");
+    assert!(lines[2].starts_with(&format!("atticdb guide: removed ({shown}, backup: ")), "{out}");
+    assert_eq!(lines.len(), 3, "{out}");
+    // The emptied `mcpServers` and SessionStart array stay, as for the other apps.
+    assert_eq!(it.read(), json!({"mcpServers": {}, "hooks": {"SessionStart": []}}));
+    assert_eq!(std::fs::read_to_string(it.guide()).unwrap(), "");
+    let (code, out) = it.run(&["disconnect", "gemini"]);
+    let none = format!(
+        "MCP entry: not found ({at})\nSessionStart hook: not found ({at})\natticdb guide: not \
+         found ({shown})\n"
+    );
+    assert_eq!((code, out), (Some(0), none));
+}
+
+/// A settings.json with a comment is never rewritten. Its parts say what to add by hand, the
+/// guide still goes in, and the exit code is 1.
+#[test]
+fn gemini_leaves_non_strict_settings_alone() {
+    let it = Gemini::new();
+    let text = "{\n  // my theme\n  \"theme\": \"GitHub\"\n}\n";
+    std::fs::write(it.settings(), text).unwrap();
+    let (code, out) = it.run(&["connect", "gemini"]);
+    assert_eq!(code, Some(1), "{out}");
+    let entry = format!("Add \"atticdb\": {} to \"mcpServers\" by hand", it.entry(true));
+    let group = format!("Add this group to hooks.SessionStart by hand: {}", it.group(None));
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(lines[0].starts_with("MCP entry: skipped, ") && lines[0].ends_with(&entry), "{out}");
+    assert!(lines[1].starts_with("SessionStart hook: skipped, "), "{out}");
+    assert!(lines[1].ends_with(&group), "{out}");
+    assert!(lines[2].starts_with("atticdb guide: added ("), "{out}");
+    assert_eq!(std::fs::read_to_string(it.settings()).unwrap(), text);
+}
+
+/// `GEMINI_CLI_HOME` moves Gemini CLI's config dir to its `.gemini`, as Gemini CLI reads it.
+/// A relative one is refused. Under `ATTICDB_HOME`, the entry and the hook pass it on.
+#[test]
+fn gemini_follows_its_home_and_atticdb_home() {
+    let it = Gemini::new();
+    let (moved, home) = (it.dir.0.join("g"), it.dir.0.join("moved"));
+    let env = [("GEMINI_CLI_HOME", moved.as_path()), ("ATTICDB_HOME", home.as_path())];
+    let (code, out) = it.run_with(&["connect", "gemini"], &env);
+    assert_eq!(code, Some(0), "{out}");
+    let settings = moved.join(".gemini/settings.json");
+    assert!(out.starts_with(&format!("MCP entry: added ({})\n", settings.display())), "{out}");
+    let root: Value = serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
+    let mut entry = it.entry(true);
+    entry["env"] = json!({"ATTICDB_HOME": home});
+    assert_eq!(root["mcpServers"]["atticdb"], entry);
+    assert_eq!(root["hooks"]["SessionStart"], json!([it.group(Some(&home))]));
+    let guide = std::fs::read_to_string(moved.join(".gemini/GEMINI.md")).unwrap();
+    assert_eq!(guide, gemini_block());
+    assert!(files(&it.dir.0.join("h/.gemini")).is_empty(), "~/.gemini untouched");
+    let (code, out) = it.run_with(&["disconnect", "gemini"], &env);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(std::fs::read_to_string(moved.join(".gemini/GEMINI.md")).unwrap().is_empty());
+
+    for verb in ["connect", "disconnect"] {
+        let (code, out) = it.run_with(&[verb, "gemini"], &[("GEMINI_CLI_HOME", Path::new("g"))]);
+        assert_eq!(code, Some(2), "{verb}: {out}");
+        assert!(out.contains("GEMINI_CLI_HOME g must be an absolute path"), "{verb}: {out}");
+    }
+}

@@ -16,6 +16,9 @@ atticdb mcp                                       # no flags: the per-user home
 atticdb connect vscode                            # adds AtticDB to VS Code's MCP config
 atticdb connect claude-code                       # adds AtticDB to Claude Code, with its hook
 atticdb connect codex                             # adds AtticDB to Codex, with its hook
+atticdb connect gemini                            # adds AtticDB to Gemini CLI, with its hook
+atticdb connect antigravity                       # adds AtticDB to Antigravity's MCP config
+atticdb connect claude-desktop                    # adds AtticDB to Claude Desktop's MCP config
 atticdb studio                                    # a read-only page, unless --allow-forget
 atticdb export ./memory-md                        # memory as markdown, at 1 LSN
 atticdb doctor                                    # checks the install and writes nothing
@@ -93,19 +96,27 @@ atticdb setup --dry-run   # prints the plan and writes nothing
 atticdb setup --help      # the flags
 ```
 
-It looks for VS Code, Copilot CLI, Claude Code and Codex. Nothing runs to find them.
+It looks for VS Code, Copilot CLI, Claude Code, Codex, Gemini CLI, Antigravity and Claude Desktop.
+Nothing runs to find them.
 An app counts as found when its program is on `PATH`, or its config exists.
 For VS Code, Claude Code and Codex, the config is their config dir.
 For Copilot CLI, it is `mcp-config.json` or `config.json` in `~/.copilot`.
 The dir alone doesn't count, as connecting VS Code writes there too.
+For Gemini CLI, it is `settings.json` in its config dir. Gemini CLI writes it on first run.
+The bare `~/.gemini` doesn't count, as Antigravity keeps its files there too.
+For Antigravity, it is `~/.gemini/config/mcp_config.json`, or any `~/.gemini/antigravity*` dir. Its program is `agy`.
+Claude Desktop has no program to find, so only its config dir counts.
+Claude Desktop is never found on Linux, as it has no Linux app.
 
 It asks which apps to connect. Empty answers take the defaults in brackets.
-For Claude Code and Codex, it also asks 2 things.
+For Claude Code, Codex and Gemini CLI, it also asks 2 things.
 Should memory load at the start of each chat? Should notes be saved without asking?
 With Claude Code chosen, the first question also asks to save Claude Code's compaction summaries.
 A yes also adds the PostCompact hook, which saves each compaction summary. A summary can quote file contents, and redaction is best effort.
-Saving a rule always asks.
+Saving a rule always asks, except in Gemini CLI.
+There, a yes to the notes question sets `trust`, which covers every atticdb tool. The question says so when Gemini CLI is chosen.
 VS Code and Copilot CLI always get the hook. They ask before every write until you allow the tool.
+Antigravity and Claude Desktop get only the MCP entry, so the 2 questions don't apply to them.
 VS Code's Copilot chat reads the hook and instructions in `~/.copilot`. So VS Code gets those too, and the plan says so.
 AtticDB keeps an instructions file you wrote. It counts as in place.
 That is 1 that mentions AtticDB, or has AtticDB's file name without its marker line.
@@ -117,19 +128,22 @@ That mode runs no `claude` or `codex` command that changes anything.
 It checks an existing home as Apply would, so a home Apply refuses shows in the plan.
 Then it asks `Apply? [y/N]`.
 It connects Copilot CLI and VS Code first, then Claude Code, then Codex.
+Then it connects Gemini CLI, Antigravity and Claude Desktop, in that order.
 Each part prints 1 line, as in `atticdb connect`. An app that fails doesn't stop the others.
 A summary counts the apps connected, and those with skipped parts.
 
 Then it checks each app. A new plan must find every part in place.
 The hook must print JSON within 5 s, 1 s past its own stop. The store must answer `fact_list`.
+Antigravity and Claude Desktop have no hook, so only their parts and the store are checked.
 For Codex, `codex mcp get atticdb --json` must show the entry.
 Last, it prints what to do next.
 That can be: approve the AtticDB hook in Codex once, start new chat sessions, and reload VS Code.
+After their entry is added or updated, it also says to restart Antigravity or Claude Desktop.
 If `hooks = false` turns Codex's hooks off, it says memory won't load at chat start instead.
 
 Flags replace the questions. `--harness <list>` takes a comma list of app names.
-The names are `copilot`, `vscode`, `claude-code` and `codex`.
-`--no-hook` drops the hook, and Claude Code's PostCompact hook too. So Claude Code and Codex get no chat-start memory, and Claude Code saves no compaction summaries. VS Code and Copilot CLI keep their hook. `--notes ask|auto` picks how notes are saved.
+The names are `copilot`, `vscode`, `claude-code`, `codex`, `gemini`, `antigravity` and `claude-desktop`.
+`--no-hook` drops the hook, and Claude Code's PostCompact hook too. So Claude Code, Codex and Gemini CLI get no chat-start memory, and Claude Code saves no compaction summaries. VS Code and Copilot CLI keep their hook. `--notes ask|auto` picks how notes are saved.
 `--yes` takes every default and doesn't ask `Apply?`.
 Without a terminal on stdin, it needs `--yes` or `--dry-run`. Else it exits 2.
 The end of stdin exits 2. So do 3 answers it can't read.
@@ -166,8 +180,11 @@ Each check prints 1 line: `ok`, or the problem and what to do. They run in this 
 - **Server and store:** the store must answer `fact_list`. This reads as any AtticDB read does.
   So it may start the home's server, which writes its own files in `data/`.
 - **Each app:** the apps it finds, or those in `--harness`. An app that isn't found prints `not found`. That is not a failure.
+  Gemini CLI, Antigravity and Claude Desktop show only when named, or when their config holds an `atticdb` entry.
+  So an app found but never connected prints no line, and doctor stays green after an upgrade. Setup still offers it.
   - **parts:** a plan, as in `atticdb setup --dry-run`, must find every part in place. Else it lists each part that would change.
-    A missing Claude Code or Codex hook counts as left out on purpose, as with `--no-hook`. So do the rules `--notes ask` leaves out.
+    A missing Claude Code, Codex or Gemini CLI hook counts as left out on purpose, as with `--no-hook`. So do the rules `--notes ask` leaves out.
+    For Gemini CLI, that is the entry's `trust`.
     For Claude Code, that needs both hooks missing. A SessionStart hook without the PostCompact one lists `add the PostCompact hook (saves compaction summaries)`.
     A PostCompact hook that would change still shows when the SessionStart one is missing.
   - **binary:** it fails when an entry or hook runs another AtticDB binary, or one that no longer exists. That happens after an upgrade or a move.
@@ -464,6 +481,7 @@ With `--dry-run`, any `connect` prints 1 line per file and part saying what it w
 It also writes the session-start hook file, described below.
 `atticdb disconnect <vscode|copilot>` removes that entry. Every other key and server stays.
 Claude Code and Codex have their own parts. See [Claude Code](#claude-code) and [Codex](#codex) below.
+So do Gemini CLI, Antigravity and Claude Desktop. See [Gemini CLI](#gemini-cli) and [Antigravity and Claude Desktop](#antigravity-and-claude-desktop).
 
 VS Code 1.144 and later also read Copilot CLI's `mcp-config.json`. An entry in both files lists 2 atticdb servers, and notes split between them.
 So while Copilot CLI has an entry, `connect vscode` adds none to `mcp.json`, and removes an old one there.
@@ -535,7 +553,7 @@ Disconnecting both harnesses removes it, unless you edited it.
 `atticdb connect claude-code [--force] [--no-hook] [--notes ask|auto] [--dry-run]` creates the home, then adds 4 parts.
 `--no-hook` leaves out both hooks.
 `atticdb disconnect claude-code` removes them.
-`--no-hook` and `--notes` work only for `claude-code` and `codex`. `--notes` defaults to `auto`.
+`--no-hook` and `--notes` work only for `claude-code`, `codex` and `gemini`. `--notes` defaults to `auto`.
 The config dir is `$CLAUDE_CONFIG_DIR` when set, else `~/.claude`.
 A relative `CLAUDE_CONFIG_DIR` fails both verbs with exit 2 before any change. `claude` would inherit it and write under the current directory. An empty one counts as unset.
 
@@ -678,6 +696,58 @@ When the file ends up over 32 KiB, `connect` warns. Codex may cut its instructio
 
 Each part prints 1 line, and the exit code works as for Claude Code. Then open Codex.
 
+### Gemini CLI
+
+`atticdb connect gemini [--force] [--no-hook] [--notes ask|auto] [--dry-run]` creates the home, then adds 3 parts.
+`--no-hook` leaves out the hook. `atticdb disconnect gemini` removes all 3.
+The config dir is `$GEMINI_CLI_HOME/.gemini` when set, else `~/.gemini`.
+A relative `GEMINI_CLI_HOME` fails both verbs with exit 2 before any change. An empty one counts as unset.
+
+| Part | Where | What |
+|---|---|---|
+| MCP entry | `mcpServers.atticdb` in `<config dir>/settings.json` | `{"command": "<binary>", "args": ["mcp", "--agent", "gemini"], "trust": true}` |
+| SessionStart hook | `hooks.SessionStart` in `<config dir>/settings.json` | `{"hooks": [{"type": "command", "name": "atticdb", "command": "'<binary>' hook session-start --harness gemini", "timeout": 5000}]}` |
+| Guide | a block in `<config dir>/GEMINI.md` | Codex's guide block, with `disconnect gemini` in its begin line |
+
+`trust` skips Gemini CLI's confirmation before each atticdb tool call, `fact_set` included. `--notes ask` leaves it out.
+Gemini CLI reads the hook's `timeout` in milliseconds. The hook stops itself at 4 s.
+The group has no matcher, so it runs on startup, resume and `/clear`.
+Under `ATTICDB_HOME`, the entry gets `"env": {"ATTICDB_HOME": "<path>"}`. The hook command starts with `ATTICDB_HOME='<path>' `.
+On Windows the hook runs in PowerShell. See [Windows](#windows).
+An entry with connection flags is refused, as for Copilot CLI, unless `--force`.
+An older AtticDB entry is updated where it stands, so other servers keep their places and bytes.
+`settings.json` is edited as text, as Claude Code's is. The hook group is found by its content the same way.
+A group wired by hand counts as AtticDB's too. Its command runs an absolute path to `atticdb` or `atticdb.exe`, then `hook session-start`.
+The path may be quoted or not. Only `--` flags may follow, with the values of `--harness` and `--home`.
+A command with anything else, such as `&& other-hook`, stays yours. Connect replaces AtticDB's group where it stands, and says `updated`.
+So Gemini CLI never gets 2 memory blocks. `disconnect` removes it.
+If `hooksConfig.enabled` is false, or `hooksConfig.disabled` lists `atticdb`, Gemini CLI never runs the hook.
+Connect warns, setup says so in its next steps, and doctor warns on its hook line.
+The guide follows Codex's rules, with `GEMINI.md` in place of `AGENTS.md`. There is no override file and no size warning.
+A `GEMINI.md` that mentions AtticDB outside the block is your own guide. AtticDB leaves it alone and says `kept`.
+`disconnect` removes the entry, AtticDB's hook group and the guide block.
+`mcpServers` stays, even when empty. So a file that had none before connect keeps `"mcpServers": {}`. An emptied `SessionStart` array stays as `[]`.
+Each part prints 1 line, and the exit code works as for Claude Code. Then start a new Gemini CLI session.
+
+### Antigravity and Claude Desktop
+
+`atticdb connect <antigravity|claude-desktop> [--force] [--dry-run]` creates the home, then adds only the MCP entry.
+`atticdb disconnect <antigravity|claude-desktop>` removes it. Neither app gets a hook or a guide.
+
+| Name | File | Entry |
+|---|---|---|
+| `antigravity` | `~/.gemini/config/mcp_config.json`, which its app, CLI and IDE share. `GEMINI_CLI_HOME` doesn't move it | `mcpServers.atticdb`: `atticdb mcp --agent antigravity` |
+| `claude-desktop` | macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`. Windows: `%APPDATA%\Claude\claude_desktop_config.json`. Linux: none | `mcpServers.atticdb`: `atticdb mcp --agent claude-desktop` |
+
+Older Antigravity installs keep `~/.gemini/antigravity/mcp_config.json` instead.
+AtticDB uses that file only when it is a regular file and the shared one is missing.
+A migrated install makes it a symlink to the shared file. AtticDB never writes through it.
+Claude Desktop has no Linux app. On Linux, both verbs exit 1 and change nothing.
+The entry follows the Gemini CLI entry's rules above, without `trust`. Under `ATTICDB_HOME` it gets the same `env`.
+A missing file starts as `{}`. A file that isn't strict JSON is skipped, and its line says what to add by hand.
+`disconnect` removes only the `atticdb` key. `mcpServers` stays, even when empty.
+Both apps read their config only at start. So after an entry is added or updated, `connect` says `Restart <App> to load it.`
+
 ## `atticdb hook session-start`
 
 `atticdb hook session-start [--harness <name>] [--home <dir>]` is the session-start hook. It reads at most 1 MiB of JSON on stdin and uses only `cwd`.
@@ -688,12 +758,13 @@ The repo comes from `cwd` by the rule in `atticdb mcp` above, so a worktree gets
 It reads the home like `atticdb mcp` with no flags, and starts the server if needed. It ignores `ATTICDB_TOKEN`.
 Its reads share a 3 s budget from the hook's start. A read with under 2 s left fails at once.
 It lists facts under `user/` and under `repo/<repo>/`, 50 each, in key order.
-It reads the last 5 turns of session `<repo>` for agents `vscode-copilot`, `copilot`, `claude-code`, `codex` and `mcp`, then keeps the newest 5.
+It reads the last 5 turns of session `<repo>` for each app's agent and `mcp`. Then it keeps the newest 5.
+The app agents are `vscode-copilot`, `copilot`, `claude-code`, `codex`, `gemini`, `antigravity` and `claude-desktop`.
 `mcp` is the agent of the shell verbs, so a note from `atticdb append` shows too.
 A window cut short by its 8 MiB cap hides older turns, so then it may show fewer than 5.
 Forgotten notes and rules never show, and take no place among the 5. When an agent's newest notes are forgotten, the hook reads further back in its session. That takes at most 2 more reads, after all its other reads.
 It prints 1 line, `{"additionalContext": "<block>"}`. With nothing to show, or on any error, it prints `{}`.
-With `--harness claude-code` or `--harness codex`, the line is `{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "<block>"}}`.
+With `--harness claude-code`, `codex` or `gemini`, the line is `{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "<block>"}}`.
 `--harness vscode` or `--harness copilot` gives the first shape. Any other name, or `--harness` with no name, prints `{}` and says why on stderr. It still exits 0.
 At 4 s it prints `{}` and exits, whatever is blocking, stdin included. It always exits 0. Errors go to stderr.
 The stop cannot help if the harness stops reading the hook's output mid-line. That needs a stalled harness.
@@ -870,7 +941,8 @@ Durability is weaker than on Unix:
 - A rename uses `MOVEFILE_WRITE_THROUGH`, so it returns only once the move is on disk.
 - With a per-user disk quota, free space is what the quota leaves. So the free-space floor follows the quota.
 
-The apps: VS Code, Copilot CLI and Claude Code get every part. Codex gets only its MCP entry, until [#142](https://github.com/Clawdlinux/atticdb/issues/142).
+The apps: VS Code, Copilot CLI, Claude Code and Gemini CLI get every part. Codex gets only its MCP entry, until [#142](https://github.com/Clawdlinux/atticdb/issues/142).
+Antigravity and Claude Desktop get only their MCP entry, as on macOS.
 
 | App | Windows files | What differs |
 |---|---|---|
@@ -878,6 +950,9 @@ The apps: VS Code, Copilot CLI and Claude Code get every part. Codex gets only i
 | Copilot CLI | `mcp-config.json`, `hooks\atticdb.json` and `instructions\atticdb.instructions.md` in `%USERPROFILE%\.copilot`, or `%COPILOT_HOME%` | The hook's key is `powershell`: `& '<binary>' hook session-start` |
 | Claude Code | `%USERPROFILE%\.claude.json` and `%USERPROFILE%\.claude\settings.json` | The hook runs in exec form, below. `claude` may be `claude.exe` or npm's `claude.cmd` |
 | Codex | `%USERPROFILE%\.codex\config.toml` | Only the MCP entry. No hook and no `AGENTS.md` guide |
+| Gemini CLI | `settings.json` and `GEMINI.md` in `%USERPROFILE%\.gemini`, or `%GEMINI_CLI_HOME%\.gemini` | The hook command is PowerShell: `& '<binary>' hook session-start --harness gemini`. Under `ATTICDB_HOME` it ends with `--home '<path>'` |
+| Antigravity | `%USERPROFILE%\.gemini\config\mcp_config.json`, or the older `antigravity\mcp_config.json` as on macOS | Nothing |
+| Claude Desktop | `%APPDATA%\Claude\claude_desktop_config.json` | Nothing |
 
 The Copilot hook's binary path is single-quoted for PowerShell, so `$`, `&` and spaces stay as they are.
 PowerShell reads `'`, `‘`, `’`, `‚` and `‛` as single quotes, so each one inside is written twice.

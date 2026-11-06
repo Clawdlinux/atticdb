@@ -14,7 +14,8 @@ pub const USAGE: &str = "usage: atticdb doctor [--harness <list>]
 Checks this atticdb install and writes nothing: the binary, the home, the server and store,
 and each app. The store check may start the home's server.
 
-  --harness <list>  check these apps, a comma list of copilot, vscode, claude-code and codex
+  --harness <list>  check these apps, a comma list of copilot, vscode, claude-code, codex,
+                    gemini, antigravity and claude-desktop
 
 Exit 0 when every check is ok or only warns, 1 when a check failed, 2 for a usage error.";
 
@@ -27,8 +28,8 @@ fn not_set_up() -> String {
     )
 }
 
-/// The options a Claude Code or Codex install may have been connected with, the defaults
-/// first. Parts are in place when any of them plans no change.
+/// The options a Claude Code, Codex or Gemini CLI install may have been connected with, the
+/// defaults first. Parts are in place when any of them plans no change.
 const CHOSEN: [Options; 4] = [
     Options { force: false, hook: true, notes: Notes::Auto },
     Options { force: false, hook: true, notes: Notes::Ask },
@@ -61,7 +62,7 @@ impl Checks {
     }
 }
 
-/// Runs `atticdb doctor` on `harnesses`, else on all 4 apps. Returns the exit code: 1 when a
+/// Runs `atticdb doctor` on `harnesses`, else on every app. Returns the exit code: 1 when a
 /// check failed, else 0.
 pub fn run(harnesses: Option<Vec<Harness>>) -> u8 {
     let mut checks = Checks::default();
@@ -128,12 +129,21 @@ pub fn run(harnesses: Option<Vec<Harness>>) -> u8 {
             checks.failed = true;
         }
     }
+    let named = harnesses.is_some();
     for harness in harnesses.unwrap_or_else(|| ORDER.to_vec()) {
+        // The newer apps show only when connected or named. So an upgrade adds no lines, nor
+        // a failure for an app found but never connected.
+        if !named && NEWER.contains(&harness) && !connect::holds_entry(harness) {
+            continue;
+        }
         app(&mut checks, harness, &exe, &cwd);
     }
     sandboxes(Some(&dir));
     u8::from(checks.failed)
 }
+
+/// The apps doctor checks only when their config holds an atticdb entry, or they are named.
+const NEWER: [Harness; 3] = [Harness::Gemini, Harness::Antigravity, Harness::ClaudeDesktop];
 
 /// Checks `harness`, when it is found: its parts, the binary its entry and hook run, and
 /// the hook. `exe` is this binary.
@@ -181,7 +191,8 @@ fn app(
         println!("  note: {warning}");
     }
     if plan.hooks_off {
-        checks.warn("hook", HOOKS_OFF);
+        let off = if harness == Harness::Gemini { GEMINI_HOOKS_OFF } else { HOOKS_OFF };
+        checks.warn("hook", off);
     } else if plan.hook.is_some_and(connect::State::in_place) {
         let hook = cwd.clone().and_then(|cwd| check_hook(harness, &cwd));
         checks.line("hook", hook);
@@ -204,15 +215,21 @@ fn app(
 const HOOKS_OFF: &str = "Codex's hooks are off, so memory won't load at chat start. Turn them \
                          on in [features] in config.toml: remove hooks = false, or set hooks = true";
 
-/// The plan for `harness`. For Claude Code and Codex, the first of [`CHOSEN`] that changes
-/// nothing, else the defaults' plan. The hooks count as left out on purpose only when all of
-/// them are missing, so a hook that would change is never hidden.
+/// What doctor says when Gemini CLI's settings turn AtticDB's hook off.
+const GEMINI_HOOKS_OFF: &str = "Gemini CLI's hooks are off, so memory won't load at chat \
+                                start. In hooksConfig in settings.json, set enabled to true, \
+                                and remove \"atticdb\" from disabled";
+
+/// The plan for `harness`. For Claude Code, Codex and Gemini CLI, the first of [`CHOSEN`] that
+/// changes nothing, else the defaults' plan. The hooks count as left out on purpose only when
+/// all of them are missing, so a hook that would change is never hidden.
 fn plan(harness: Harness) -> Report {
     let in_place = |report: &Report| {
         report.stopped.is_none() && report.lines.iter().all(|line| line.state.in_place())
     };
     let first = connect::connect(harness, CHOSEN[0], Mode::Plan);
-    if in_place(&first) || !matches!(harness, Harness::ClaudeCode | Harness::Codex) {
+    let chosen = matches!(harness, Harness::ClaudeCode | Harness::Codex | Harness::Gemini);
+    if in_place(&first) || !chosen {
         return first;
     }
     // Claude Code's PostCompact hook must be missing too, so a stale one still shows.

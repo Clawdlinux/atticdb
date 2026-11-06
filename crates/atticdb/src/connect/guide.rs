@@ -1,26 +1,59 @@
-//! Codex's guide: AtticDB's block in the instructions file Codex reads from its config dir.
-//! Codex reads `AGENTS.override.md` there when it holds more than whitespace, else
-//! `AGENTS.md`, and only that 1 file. Codex 0.147 didn't pass MCP server instructions to the
-//! model in `codex exec`, so the guide goes there.
+//! The guide: AtticDB's block in the instructions file an app reads from its config dir. Codex
+//! and Gemini CLI get one, each by its [`Guide`]: [`CODEX`] and [`GEMINI`].
 //!
 //! The block is the MCP server's instructions between 2 marker lines, as HTML comments. A
 //! marker counts only as a whole line outside fenced code. A file that mentions AtticDB
 //! anywhere else outside fenced code is the user's own guide, so AtticDB doesn't write to it.
 
-use crate::connect::{add_or_update, planned, read_up_to, write, Line, Mode, State};
+use crate::connect::{add_or_update, planned, read_up_to, write, Harness, Line, Mode, State};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-/// The file Codex reads first, when it holds more than whitespace.
-const OVERRIDE: &str = "AGENTS.override.md";
-/// The file Codex reads otherwise.
-const AGENTS: &str = "AGENTS.md";
-/// The begin line AtticDB writes.
-const BEGIN_LINE: &str = "<!-- atticdb:begin v1. atticdb disconnect codex removes this block. -->";
-/// The begin line AtticDB writes after adding the line end the file lacked, so `disconnect`
-/// removes that line end too.
-const BEGIN_ADDED: &str = "<!-- atticdb:begin v1. atticdb disconnect codex removes this block \
-                           and the line end it added above. -->";
+/// An app's guide: the file it goes in, its markers, and the size the app may cut it at.
+pub(super) struct Guide {
+    /// The app. Its name goes in the advice to re-run `atticdb connect`.
+    harness: Harness,
+    /// The file the app reads in its config dir.
+    file: &'static str,
+    /// The file the app reads in place of `file` when it holds more than whitespace. Codex
+    /// only.
+    replaced_by: Option<&'static str>,
+    /// The begin line AtticDB writes. It names `atticdb disconnect <app>`.
+    begin: &'static str,
+    /// The begin line AtticDB writes after adding the line end the file lacked, so `disconnect`
+    /// removes that line end too.
+    begin_added: &'static str,
+    /// The size in bytes past which the app may cut its instructions, so the guide may not
+    /// reach the model. `None` when the app documents no limit.
+    limit: Option<usize>,
+}
+
+/// Codex's guide. Codex reads `AGENTS.override.md` in its config dir when it holds more than
+/// whitespace, else `AGENTS.md`, and only that 1 file. Codex 0.147 didn't pass MCP server
+/// instructions to the model in `codex exec`, so the guide goes there. The limit is Codex's
+/// default `project_doc_max_bytes`.
+pub(super) const CODEX: Guide = Guide {
+    harness: Harness::Codex,
+    file: "AGENTS.md",
+    replaced_by: Some("AGENTS.override.md"),
+    begin: "<!-- atticdb:begin v1. atticdb disconnect codex removes this block. -->",
+    begin_added: "<!-- atticdb:begin v1. atticdb disconnect codex removes this block and the \
+                  line end it added above. -->",
+    limit: Some(32 * 1024),
+};
+
+/// Gemini CLI's guide, in the global `GEMINI.md` of its config dir. Gemini CLI's docs give
+/// no size limit for its context files, so none is checked.
+pub(super) const GEMINI: Guide = Guide {
+    harness: Harness::Gemini,
+    file: "GEMINI.md",
+    replaced_by: None,
+    begin: "<!-- atticdb:begin v1. atticdb disconnect gemini removes this block. -->",
+    begin_added: "<!-- atticdb:begin v1. atticdb disconnect gemini removes this block and the \
+                  line end it added above. -->",
+    limit: None,
+};
+
 /// The end line of AtticDB's block.
 const END: &str = "<!-- atticdb:end -->";
 /// The block's heading.
@@ -29,26 +62,26 @@ const TITLE: &str = "## AtticDB memory";
 const PART: &str = "atticdb guide";
 /// The most of a file read.
 const MAX_READ: u64 = 1 << 20;
-/// Codex's default `project_doc_max_bytes`. Codex may cut its instructions there.
-const CODEX_LIMIT: usize = 32 * 1024;
 
-/// The file Codex reads in its config dir `dir`: `AGENTS.override.md` unless it is missing,
-/// holds only whitespace, or isn't UTF-8, as Codex then reads `AGENTS.md`. An override
-/// AtticDB can't read, such as a symlink, stays the target, so its part is skipped.
-fn target(dir: &Path) -> PathBuf {
+/// The file the app reads in its config dir `dir`. For Codex, `AGENTS.override.md` unless
+/// it is missing, holds only whitespace, or isn't UTF-8, as Codex then reads `AGENTS.md`.
+/// An override AtticDB can't read, such as a symlink, stays the target, so its part is
+/// skipped.
+fn target(guide: &Guide, dir: &Path) -> PathBuf {
+    let Some(replaced_by) = guide.replaced_by else { return dir.join(guide.file) };
     let empty =
         |bytes: &[u8]| std::str::from_utf8(bytes).map_or(true, |text| text.trim().is_empty());
-    match read_up_to(&dir.join(OVERRIDE), MAX_READ) {
-        Ok(None) => dir.join(AGENTS),
-        Ok(Some((bytes, _))) if empty(&bytes) => dir.join(AGENTS),
-        _ => dir.join(OVERRIDE),
+    match read_up_to(&dir.join(replaced_by), MAX_READ) {
+        Ok(None) => dir.join(guide.file),
+        Ok(Some((bytes, _))) if empty(&bytes) => dir.join(guide.file),
+        _ => dir.join(replaced_by),
     }
 }
 
 /// AtticDB's block with `eol` line ends. With `added`, its begin line says `connect` added
 /// the line end before it.
-fn block(added: bool, eol: &str) -> String {
-    let begin = if added { BEGIN_ADDED } else { BEGIN_LINE };
+fn block(guide: &Guide, added: bool, eol: &str) -> String {
+    let begin = if added { guide.begin_added } else { guide.begin };
     [begin, TITLE, crate::mcp::INSTRUCTIONS, END].map(|line| format!("{line}{eol}")).concat()
 }
 
@@ -113,14 +146,17 @@ fn plain(text: &str) -> (Vec<Row<'_>>, bool) {
 const BEGIN_START: &str = "<!-- atticdb:begin";
 
 /// AtticDB's block among the `rows` outside fenced code: from the start of its begin line to
-/// the end of its end line. Markers are lines that are exactly a begin line AtticDB writes, or
-/// [`END`]. A line that only looks like one, such as an indented marker, one with trailing
-/// spaces or another version's begin line, is an error, as is a pair that doesn't match up.
-fn find_block(rows: &[Row<'_>]) -> Result<Option<Range<usize>>, String> {
+/// the end of its end line. Markers are lines that are exactly a begin line AtticDB writes for
+/// `guide`'s app, or [`END`]. A line that only looks like one, such as an indented marker, one
+/// with trailing spaces or another version's or app's begin line, is an error, as is a pair
+/// that doesn't match up.
+fn find_block(guide: &Guide, rows: &[Row<'_>]) -> Result<Option<Range<usize>>, String> {
     let (mut begins, mut ends) = (Vec::new(), Vec::new());
     for row in rows {
         match row.text {
-            BEGIN_LINE | BEGIN_ADDED => begins.push(row.span.clone()),
+            text if text == guide.begin || text == guide.begin_added => {
+                begins.push(row.span.clone());
+            }
             END => ends.push(row.span.clone()),
             text if text.trim().starts_with(BEGIN_START) || text.trim() == END => {
                 return Err(
@@ -170,11 +206,11 @@ fn block_eol(block: &str) -> &'static str {
 /// follows the block, the line end `connect` added before it goes too, so the file is back
 /// as it was. Only the bytes `connect` inserted go: the block's own line end, after a line
 /// end of the file's.
-fn without(text: &str, block: &Range<usize>) -> String {
+fn without(guide: &Guide, text: &str, block: &Range<usize>) -> String {
     let (head, tail, ours) = (&text[..block.start], &text[block.end..], &text[block.clone()]);
     let eol = block_eol(ours);
     let mut head = head.strip_suffix(eol).filter(|shorter| shorter.ends_with('\n')).unwrap_or(head);
-    if ours.starts_with(BEGIN_ADDED) && tail.is_empty() {
+    if ours.starts_with(guide.begin_added) && tail.is_empty() {
         head = head.strip_suffix(eol).unwrap_or(head);
     }
     format!("{head}{tail}")
@@ -185,17 +221,18 @@ fn remove_by_hand(shown: impl std::fmt::Display) -> String {
     format!("Remove the atticdb marker lines, and the lines between them, from {shown} by hand")
 }
 
-/// Puts AtticDB's block in the file Codex reads in its config dir `dir`, after 1 blank line,
-/// or updates it in place. A file with CRLF line ends gets CRLF. A file without a final line
-/// end gets one, and the block says so. A missing file is created at mode 0600. A file that
-/// mentions AtticDB outside the block is kept as it is. In Plan mode, it writes nothing.
-/// Returns the part's line, and a warning when the file ends up over 32 KiB.
-pub(super) fn add(dir: &Path, mode: Mode) -> (Line, Option<String>) {
-    let path = target(dir);
+/// Puts AtticDB's block in the file the app reads in its config dir `dir`, after 1 blank
+/// line, or updates it in place. A file with CRLF line ends gets CRLF. A file without a final
+/// line end gets one, and the block says so. A missing file is created at mode 0600. A file
+/// that mentions AtticDB outside the block is kept as it is. In Plan mode, it writes nothing.
+/// Returns the part's line, and a warning when the file ends up over the app's limit.
+pub(super) fn add(guide: &Guide, dir: &Path, mode: Mode) -> (Line, Option<String>) {
+    let path = target(guide, dir);
+    let app = guide.harness.name();
     let shown = path.display();
     let skipped =
         |why: String| (Line::new(State::Skipped, format!("{PART}: skipped, {why}")), None);
-    let by_hand = format!("Add this to the end of {shown} by hand:\n{}", block(false, "\n"));
+    let by_hand = format!("Add this to the end of {shown} by hand:\n{}", block(guide, false, "\n"));
     let by_hand = by_hand.trim_end();
     let old = match read_up_to(&path, MAX_READ) {
         Ok(old) => old,
@@ -209,11 +246,11 @@ pub(super) fn add(dir: &Path, mode: Mode) -> (Line, Option<String>) {
         None => "",
     };
     let (rows, open) = plain(text);
-    let found = match find_block(&rows) {
+    let found = match find_block(guide, &rows) {
         Ok(found) => found,
         Err(why) => {
             return skipped(format!(
-                "{shown}: {why}. Nothing changed. {}, then re-run atticdb connect codex",
+                "{shown}: {why}. Nothing changed. {}, then re-run atticdb connect {app}",
                 remove_by_hand(&shown)
             ))
         }
@@ -229,7 +266,7 @@ pub(super) fn add(dir: &Path, mode: Mode) -> (Line, Option<String>) {
         Some(span) => {
             // The block keeps its own line ends, which may not be the file's first line's.
             let ours = &text[span.clone()];
-            let wanted = block(ours.starts_with(BEGIN_ADDED), block_eol(ours));
+            let wanted = block(guide, ours.starts_with(guide.begin_added), block_eol(ours));
             if text[span.clone()] == wanted {
                 (text.to_owned(), State::Unchanged)
             } else {
@@ -240,7 +277,7 @@ pub(super) fn add(dir: &Path, mode: Mode) -> (Line, Option<String>) {
         None if open => {
             return skipped(format!(
                 "{shown} has a code fence that never closes, so a block after it would be code. \
-                 Nothing changed. Close the fence, then re-run atticdb connect codex"
+                 Nothing changed. Close the fence, then re-run atticdb connect {app}"
             ))
         }
         None => {
@@ -251,7 +288,7 @@ pub(super) fn add(dir: &Path, mode: Mode) -> (Line, Option<String>) {
                 new.push_str(if added { eol } else { "" });
                 new.push_str(eol);
             }
-            new.push_str(&block(added, eol));
+            new.push_str(&block(guide, added, eol));
             (new, add_or_update(false))
         }
     };
@@ -262,11 +299,14 @@ pub(super) fn add(dir: &Path, mode: Mode) -> (Line, Option<String>) {
              Nothing changed. {by_hand}"
         ));
     }
-    let warning = (new.len() > CODEX_LIMIT).then(|| {
+    let over = guide.limit.filter(|limit| new.len() > *limit);
+    let warning = over.map(|limit| {
         format!(
-            "{shown} is {} bytes, over 32 KiB. Codex may cut its instructions there, so atticdb's \
+            "{shown} is {} bytes, over {} KiB. {} may cut its instructions there, so atticdb's \
              guide may not reach the model",
-            new.len()
+            new.len(),
+            limit / 1024,
+            guide.harness.title()
         )
     });
     let line = match (state, mode) {
@@ -285,14 +325,15 @@ pub(super) fn add(dir: &Path, mode: Mode) -> (Line, Option<String>) {
     (line, warning)
 }
 
-/// Removes AtticDB's block, and the blank line `connect` put before it, from both files Codex
-/// may read in its config dir `dir`. Every other byte stays. Returns 1 line per file that held
-/// AtticDB's markers, or 1 line for the file Codex reads when none did.
-pub(super) fn remove(dir: &Path) -> Vec<Line> {
-    let read_now = target(dir);
+/// Removes AtticDB's block, and the blank line `connect` put before it, from each file the
+/// app may read in its config dir `dir`: both for Codex. Every other byte stays. Returns 1
+/// line per file that held AtticDB's markers, or 1 line for the file the app reads when none
+/// did.
+pub(super) fn remove(guide: &Guide, dir: &Path) -> Vec<Line> {
+    let read_now = target(guide, dir);
     let mut lines = Vec::new();
-    for path in [dir.join(OVERRIDE), dir.join(AGENTS)] {
-        lines.extend(remove_from(&path, path == read_now));
+    for path in guide.replaced_by.into_iter().chain([guide.file]).map(|file| dir.join(file)) {
+        lines.extend(remove_from(guide, &path, path == read_now));
     }
     if lines.is_empty() {
         lines.push(Line::new(
@@ -304,8 +345,9 @@ pub(super) fn remove(dir: &Path) -> Vec<Line> {
 }
 
 /// Removes AtticDB's block from the file at `path`. `None` when it has no AtticDB markers. A
-/// file AtticDB can't read gets a line only when Codex reads it, as AtticDB never wrote there.
-fn remove_from(path: &Path, read_now: bool) -> Option<Line> {
+/// file AtticDB can't read gets a line only when the app reads it, as AtticDB never wrote
+/// there.
+fn remove_from(guide: &Guide, path: &Path, read_now: bool) -> Option<Line> {
     let shown = path.display();
     let unread = |why: String| {
         read_now.then(|| {
@@ -321,7 +363,7 @@ fn remove_from(path: &Path, read_now: bool) -> Option<Line> {
         Err(why) => return unread(why),
     };
     let Ok(text) = std::str::from_utf8(&old.0) else { return unread("is not UTF-8".into()) };
-    let block = match find_block(&plain(text).0) {
+    let block = match find_block(guide, &plain(text).0) {
         Ok(block) => block?,
         Err(why) => {
             let said = format!(
@@ -331,7 +373,7 @@ fn remove_from(path: &Path, read_now: bool) -> Option<Line> {
             return Some(Line::new(State::Skipped, said));
         }
     };
-    let new = without(text, &block);
+    let new = without(guide, text, &block);
     Some(match write(path, Some(&old), new.as_bytes()) {
         Ok(backup) => {
             let saved = backup.map(|backup| format!(", backup: {}", backup.display()));
@@ -347,11 +389,11 @@ fn remove_from(path: &Path, read_now: bool) -> Option<Line> {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
-    use super::{find_block, mentions, plain, BEGIN_LINE};
+    use super::{block, find_block, mentions, plain, without, CODEX, GEMINI};
 
     #[test]
     fn markers_and_mentions_count_only_outside_fenced_code() {
-        let block = format!("{BEGIN_LINE}\nx\n<!-- atticdb:end -->\n");
+        let block = format!("{}\nx\n<!-- atticdb:end -->\n", CODEX.begin);
         let rows = [
             (format!("a\n\n{block}"), true, false),
             (format!("```md\n{block}```\n"), false, false),
@@ -359,15 +401,32 @@ mod tests {
             (format!(" ```\n{block}\n   ```  \nAtticDB rules\n"), false, true),
             (format!("    ```\n{block}"), true, false),
             (format!("``` a`b\n{block}"), true, false),
-            (format!("x {BEGIN_LINE}\n"), false, true),
+            (format!("x {}\n", CODEX.begin), false, true),
         ];
         for (text, found, mentioned) in rows {
             let (rows, _) = plain(&text);
-            let block = find_block(&rows).unwrap();
+            let block = find_block(&CODEX, &rows).unwrap();
             assert_eq!(block.is_some(), found, "{text:?}");
             assert_eq!(mentions(&rows, block.as_ref()), mentioned, "{text:?}");
         }
         let (_, open) = plain("```\natticdb\n");
         assert!(open);
+    }
+
+    /// Each app's block names its own `atticdb disconnect`. Another app's begin line only looks
+    /// like a marker, so it is an error, not a block to replace or remove.
+    #[test]
+    fn each_app_finds_only_its_own_markers() {
+        for (ours, theirs, app) in [(&CODEX, &GEMINI, "codex"), (&GEMINI, &CODEX, "gemini")] {
+            let text = format!("a\n\n{}", block(ours, false, "\n"));
+            assert!(text.contains(&format!("atticdb disconnect {app} removes this block")));
+            let (rows, _) = plain(&text);
+            assert_eq!(find_block(ours, &rows).unwrap(), Some(3..text.len()), "{app}");
+            assert!(find_block(theirs, &rows).is_err(), "{app}");
+            let added = format!("a\n{}", block(ours, true, "\n"));
+            let (rows, _) = plain(&added);
+            let span = find_block(ours, &rows).unwrap().unwrap();
+            assert_eq!(without(ours, &added, &span), "a", "{app}");
+        }
     }
 }

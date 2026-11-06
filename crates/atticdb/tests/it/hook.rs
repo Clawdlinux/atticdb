@@ -519,3 +519,51 @@ fn session_start_shows_the_compact_note() {
     let block = out["additionalContext"].as_str().unwrap();
     assert!(block.contains("\n- Compaction summary (manual): a summary "), "{block}");
 }
+
+/// Notes saved by Gemini CLI, Antigravity and Claude Desktop show in Claude Code's block.
+#[test]
+fn session_start_shows_new_agents_notes() {
+    let dir = Dir::new();
+    let home = dir.0.join("h");
+    let repo = home.join("myrepo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let _holders = Holders(vec![data_dir(&home)]);
+    let agents = ["gemini", "antigravity", "claude-desktop"];
+    for agent in agents {
+        let note = format!("{agent} note");
+        seed(&home, &["append", "--agent", agent, "--session", "myrepo", "--content", &note]);
+    }
+    let args = ["hook", "session-start", "--harness", "claude-code"];
+    let (code, out, err) = atticdb(&home, &home, &args, &[], cwd(&repo).as_bytes(), 0);
+    assert_eq!(code, Some(0), "{err}");
+    let out: Value = serde_json::from_str(&out).unwrap();
+    let block = out["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+    for agent in agents {
+        assert!(block.contains(&format!("\n- {agent} note")), "{agent}: {block}");
+    }
+}
+
+/// `--harness gemini` prints the block in the `hookSpecificOutput` shape Gemini CLI reads,
+/// the same block Claude Code gets.
+#[test]
+fn session_start_gemini_shape() {
+    let dir = Dir::new();
+    let home = dir.0.join("h");
+    let repo = home.join("myrepo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let _holders = Holders(vec![data_dir(&home)]);
+    seed(&home, &["append", "--agent", "gemini", "--session", "myrepo", "--content", "a note"]);
+    let run = |harness: &str| {
+        let args = ["hook", "session-start", "--harness", harness];
+        let (code, out, err) = atticdb(&home, &home, &args, &[], cwd(&repo).as_bytes(), 0);
+        assert_eq!((code, err.as_str()), (Some(0), ""), "{harness}");
+        serde_json::from_str::<Value>(&out).unwrap()
+    };
+    let out = run("gemini");
+    let block = out["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+    assert!(block.contains("\n- a note"), "{block}");
+    let wanted = json!({"hookSpecificOutput":
+        {"hookEventName": "SessionStart", "additionalContext": block}});
+    assert_eq!(out, wanted);
+    assert_eq!(run("claude-code"), wanted);
+}

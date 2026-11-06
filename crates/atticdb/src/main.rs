@@ -24,8 +24,9 @@ const USAGE: &str = "usage:
   atticdb setup [--yes] [--harness <list>] [--no-hook] [--notes ask|auto] [--dry-run]
   atticdb doctor [--harness <list>]
   atticdb connect <vscode|copilot> [--force] [--dry-run]
-  atticdb connect <claude-code|codex> [--force] [--no-hook] [--notes ask|auto] [--dry-run]
-  atticdb disconnect <vscode|copilot|claude-code|codex>
+  atticdb connect <antigravity|claude-desktop> [--force] [--dry-run]
+  atticdb connect <claude-code|codex|gemini> [--force] [--no-hook] [--notes ask|auto] [--dry-run]
+  atticdb disconnect <vscode|copilot|claude-code|codex|gemini|antigravity|claude-desktop>
   atticdb hook <session-start|post-compact> [--harness <name>] [--home <dir>]
   atticdb studio [--url unix:///path|http://127.0.0.1:<port>] [--data-dir <dir>] [--config <path>]
                 [--tenant <name>] [--token-file <path>] [--no-open] [--allow-forget]
@@ -66,8 +67,9 @@ const USAGE: &str = "usage:
   Forgotten facts are left out.
   studio serves a read-only page on 127.0.0.1 and opens it. With --allow-forget it can also forget
   sessions and fact keys. It runs until Ctrl-C.
-  setup finds VS Code, Copilot CLI, Claude Code and Codex, asks which to connect, shows the
-  plan, then connects them and checks each. See atticdb setup --help.
+  setup finds VS Code, Copilot CLI, Claude Code, Codex, Gemini CLI, Antigravity and Claude
+  Desktop. It asks which to connect and shows the plan. Then it connects them and checks each.
+  See atticdb setup --help.
   doctor checks the install and writes nothing. See atticdb doctor --help.";
 
 /// Commands that use the home. A relative `ATTICDB_HOME` fails them with exit 2, so none falls
@@ -260,13 +262,15 @@ fn forget(args: &[String]) -> Option<u8> {
     flags(rest, &valued, &[]).map(|flags| atticdb::client::forget_command(verb, flags))
 }
 
-/// `atticdb connect`. `--no-hook` and `--notes` are for Claude Code and Codex only. Codex
-/// takes `--force`, but never edits an `atticdb` server it didn't write. `--dry-run` prints
-/// what would change and writes nothing.
+/// `atticdb connect`. `--no-hook` and `--notes` are for Claude Code, Codex and Gemini CLI
+/// only. Codex takes `--force`, but never edits an `atticdb` server it didn't write.
+/// `--dry-run` prints what would change and writes nothing.
 fn connect(harness: Harness, mut flags: HashMap<String, String>) -> Option<u8> {
     let force = flags.remove("--force").is_some();
     let mode = if flags.remove("--dry-run").is_some() { Mode::Plan } else { Mode::Apply };
-    if ![Harness::ClaudeCode, Harness::Codex].contains(&harness) && !flags.is_empty() {
+    if ![Harness::ClaudeCode, Harness::Codex, Harness::Gemini].contains(&harness)
+        && !flags.is_empty()
+    {
         return None;
     }
     let notes = notes(flags.remove("--notes"))?.unwrap_or(Notes::Auto);

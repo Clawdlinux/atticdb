@@ -1,0 +1,177 @@
+//! The apps that get only AtticDB's MCP entry: Antigravity and Claude Desktop. Each keeps its
+//! servers under `mcpServers` in 1 JSON file, and reads it only at start. Gemini CLI's entry
+//! goes in by the same code, from [`super::gemini`].
+//!
+//! People edit these files by hand, so [`crate::jsonedit`] edits them and changes only the
+//! bytes it must. A file that isn't strict JSON is never rewritten. Its line says what to do
+//! by hand. The entry follows Copilot CLI's rules: an older one is updated in place, and one
+//! with connection flags is replaced only with `--force`. Disconnect removes only the entry,
+//! so an emptied `mcpServers` stays as `{}`.
+
+use super::claude::{done, edit_file, split, Edit, Part};
+use super::{absolute_env, binary, check_flags, moved_home, Harness, Mode, Report, State};
+use crate::home::user_home;
+use crate::jsonedit;
+use serde_json::Value;
+use std::path::PathBuf;
+
+/// What a missing config starts as.
+pub(super) const EMPTY: &str = "{\n}\n";
+
+/// Why Claude Desktop can't be connected on this system.
+const NO_DESKTOP: &str = "Claude Desktop is only available on macOS and Windows";
+
+/// `~/.gemini`, which holds Antigravity's files. Gemini CLI's own config dir moves with
+/// `GEMINI_CLI_HOME`, by [`super::gemini::config_dir`].
+pub(super) fn gemini_dir() -> Result<PathBuf, String> {
+    Ok(user_home()?.join(".gemini"))
+}
+
+/// Antigravity's MCP config: `~/.gemini/config/mcp_config.json`, which its app, CLI and IDE
+/// share. An older install keeps `~/.gemini/antigravity/mcp_config.json` instead. That one is
+/// used only when it is a regular file and the shared one is missing. A migrated install
+/// makes it a symlink to the shared one, which is never written through.
+pub(super) fn antigravity_file() -> Result<PathBuf, String> {
+    let gemini = gemini_dir()?;
+    let config = gemini.join("config").join("mcp_config.json");
+    let legacy = gemini.join("antigravity").join("mcp_config.json");
+    let missing = |path: &PathBuf| std::fs::symlink_metadata(path).is_err();
+    let regular = std::fs::symlink_metadata(&legacy).is_ok_and(|meta| meta.is_file());
+    Ok(if regular && missing(&config) { legacy } else { config })
+}
+
+/// Whether Antigravity looks installed: its shared config exists, or `~/.gemini` holds a dir
+/// whose name starts with `antigravity`, such as `antigravity` or `antigravity-ide`.
+pub(super) fn antigravity_found() -> bool {
+    let Ok(gemini) = gemini_dir() else { return false };
+    if gemini.join("config").join("mcp_config.json").exists() {
+        return true;
+    }
+    let Ok(entries) = std::fs::read_dir(&gemini) else { return false };
+    entries.flatten().any(|entry| {
+        let named = entry.file_name().to_string_lossy().starts_with("antigravity");
+        named && entry.path().is_dir()
+    })
+}
+
+/// Claude Desktop's config dir: `~/Library/Application Support/Claude` on macOS, and
+/// `%APPDATA%\Claude` on Windows. Other systems have no Claude Desktop app.
+pub(super) fn desktop_dir() -> Result<PathBuf, String> {
+    if cfg!(target_os = "macos") {
+        Ok(user_home()?.join("Library/Application Support/Claude"))
+    } else if cfg!(windows) {
+        let appdata = absolute_env("APPDATA").ok_or("APPDATA must be set to an absolute path")?;
+        Ok(appdata.join("Claude"))
+    } else {
+        Err(NO_DESKTOP.into())
+    }
+}
+
+/// Adds `harness`'s MCP entry to its config, after creating the home. Under `ATTICDB_HOME`,
+/// the entry passes it on. An entry with connection flags is refused before anything
+/// changes, unless `force`. In Apply mode, an entry added or updated ends the report with
+/// `Restart <App> to load it.` In Plan mode, it writes nothing.
+pub(super) fn connect(harness: Harness, force: bool, mode: Mode) -> Report {
+    let Prepared { path, home, exe, warnings } = match prepare(harness, force, mode) {
+        Ok(prepared) => prepared,
+        Err(error) => return Report::stopped(1, error),
+    };
+    let entry = harness.entry(&exe, home.as_deref());
+    let set = |text: &str| set_entry(harness, text, &entry);
+    let part = Part { name: PART, by_hand: add_by_hand(harness, &entry), edit: &set, adds: None };
+    let lines = edit_file(Ok(path), EMPTY, &[part], mode);
+    let changed = |state: State| matches!(state, State::Added | State::Updated);
+    let restart = mode == Mode::Apply && lines.iter().any(|line| changed(line.state));
+    let next =
+        if restart { vec![format!("Restart {} to load it.", harness.title())] } else { Vec::new() };
+    Report { lines, warnings, next, ..Report::default() }
+}
+
+/// Removes `harness`'s MCP entry from its config, whatever it runs, as for Copilot CLI.
+/// Returns the exit code.
+pub(super) fn disconnect(harness: Harness) -> u8 {
+    let path = match harness.file() {
+        Ok(path) => path,
+        Err(why) => {
+            eprintln!("atticdb: {why}");
+            return 1;
+        }
+    };
+    let drop = |text: &str| drop_entry(harness, text);
+    let part = Part { name: PART, by_hand: drop_by_hand(harness), edit: &drop, adds: None };
+    let lines = edit_file(Ok(path), EMPTY, &[part], Mode::Apply);
+    Report { lines, ..Report::default() }.print()
+}
+
+/// What connecting `harness`'s entry needs, found before anything changes.
+pub(super) struct Prepared {
+    /// The config file.
+    pub(super) path: PathBuf,
+    /// The home the entry passes on, under `ATTICDB_HOME`.
+    pub(super) home: Option<String>,
+    /// This binary.
+    pub(super) exe: String,
+    /// Notes on the harnesses that use another home.
+    pub(super) warnings: Vec<String>,
+}
+
+/// Finds `harness`'s config and the home, after creating the home. An entry with connection
+/// flags is refused, unless `force`. In Plan mode, it creates nothing.
+pub(super) fn prepare(harness: Harness, force: bool, mode: Mode) -> Result<Prepared, String> {
+    let path = harness.file().map_err(|why| format!("{why}. Nothing changed"))?;
+    let home = moved_home(harness)?;
+    if !force {
+        check_flags(harness, &crate::home::dir()?.join("data"))?;
+    }
+    // Plan mode must not create the home.
+    match mode {
+        Mode::Apply => drop(crate::home::ensure()?),
+        Mode::Plan => crate::home::check_existing()?,
+    }
+    let exe = binary()?;
+    let warnings = split(harness, home.as_deref());
+    Ok(Prepared { path, home, exe, warnings })
+}
+
+/// The entry's part name in its line.
+pub(super) const PART: &str = "MCP entry";
+
+/// How to add `entry` to `harness`'s config by hand.
+pub(super) fn add_by_hand(harness: Harness, entry: &Value) -> String {
+    format!("Add \"atticdb\": {entry} to \"{}\" by hand", harness.section())
+}
+
+/// How to remove AtticDB's entry from `harness`'s config by hand.
+pub(super) fn drop_by_hand(harness: Harness) -> String {
+    format!("Remove \"atticdb\" from \"{}\" by hand", harness.section())
+}
+
+/// `text` with `entry` as `harness`'s AtticDB entry. One that differs is replaced where it
+/// stands, so the other servers keep their places and bytes. A new one goes last in the
+/// section, which is created when missing.
+pub(super) fn set_entry(harness: Harness, text: &str, entry: &Value) -> Edit {
+    let section = harness.section();
+    let (replaced, had) = jsonedit::replace_key(text, &[section], "atticdb", entry)?;
+    if !had {
+        let text = jsonedit::add_key(text, &[section], "atticdb", entry)?;
+        return done(text, State::Added, "added");
+    }
+    // `text` is strict JSON here, as `replace_key` parsed it.
+    let root: Value = serde_json::from_str(text).unwrap_or_default();
+    if root[section]["atticdb"] == *entry {
+        return done(text.to_owned(), State::Unchanged, "unchanged");
+    }
+    done(replaced, State::Updated, "updated")
+}
+
+/// `text` without `harness`'s AtticDB entry. Only the `atticdb` key goes, never the section.
+/// So a user's own empty section comes back byte for byte. A config that had no section
+/// before connect keeps an empty one.
+pub(super) fn drop_entry(harness: Harness, text: &str) -> Edit {
+    let (text, had) = jsonedit::remove_key(text, &[harness.section()], "atticdb")?;
+    if had {
+        done(text, State::Removed, "removed")
+    } else {
+        done(text, State::Unchanged, "not found")
+    }
+}

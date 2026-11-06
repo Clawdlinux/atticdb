@@ -13,8 +13,9 @@
 //! identical part added by hand.
 
 use super::{
-    absolute_env, add_or_update, binary, entry_exe, entry_home, home_words, moved_home, planned,
-    read, refuse_flags, save, write, Harness, Line, Mode, Report, State, COPILOT_SHARED,
+    absolute_env, add_or_update, binary, check_absolute_env, entry_exe, entry_home, home_words,
+    moved_home, planned, read, refuse_flags, save, write, Harness, Line, Mode, Report, State,
+    COPILOT_SHARED,
 };
 use crate::home::{user_home, HOME_ENV};
 use crate::jsonedit;
@@ -101,10 +102,10 @@ impl Event {
     }
 }
 
-/// Whether Claude Code or Codex asks before AtticDB saves a note.
+/// Whether Claude Code, Codex or Gemini CLI asks before AtticDB saves a note.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Notes {
-    /// The harness asks before each `memory_append`.
+    /// The harness asks before each `memory_append`. Gemini CLI asks before each atticdb tool.
     Ask,
     /// `memory_append` is allowed, so notes are saved without asking.
     Auto,
@@ -132,21 +133,10 @@ const MAX_STDOUT: usize = 1 << 20;
 /// How long a `claude` or `codex` command may run.
 const CHILD_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The variable that moves Claude Code's config dir.
+/// The variable that moves Claude Code's config dir. A relative one is refused: the `claude`
+/// child inherits it, so it would write `.claude.json` under the current directory, where
+/// AtticDB doesn't look.
 const CONFIG_ENV: &str = "CLAUDE_CONFIG_DIR";
-
-/// Refuses a relative `CLAUDE_CONFIG_DIR`. The `claude` child inherits it, so it would write
-/// `.claude.json` under the current directory, where AtticDB doesn't look. An empty one
-/// counts as unset.
-fn check_config_env() -> Result<(), String> {
-    match std::env::var_os(CONFIG_ENV) {
-        Some(dir) if !dir.is_empty() && !Path::new(&dir).is_absolute() => Err(format!(
-            "{CONFIG_ENV} {} must be an absolute path. Nothing changed",
-            Path::new(&dir).display()
-        )),
-        _ => Ok(()),
-    }
-}
 
 /// `$CLAUDE_CONFIG_DIR` when set and absolute, else `~/.claude`.
 pub(super) fn config_dir() -> Result<PathBuf, String> {
@@ -164,7 +154,7 @@ pub(crate) fn state_file() -> Result<PathBuf, String> {
 /// differs is refused before anything changes, unless `force`. It stops with exit code 2 for
 /// a relative `CLAUDE_CONFIG_DIR`. In Plan mode, it writes nothing and runs no `claude`.
 pub(super) fn connect(force: bool, hook: bool, notes: Notes, mode: Mode) -> Report {
-    if let Err(error) = check_config_env() {
+    if let Err(error) = check_absolute_env(CONFIG_ENV) {
         return Report::stopped(2, error);
     }
     let prepared = (|| {
@@ -234,7 +224,7 @@ pub(super) fn connect(force: bool, hook: bool, notes: Notes, mode: Mode) -> Repo
 /// hook, and AtticDB's allow rules. Returns the exit code: 2 for a relative
 /// `CLAUDE_CONFIG_DIR`.
 pub(super) fn disconnect() -> u8 {
-    if let Err(error) = check_config_env() {
+    if let Err(error) = check_absolute_env(CONFIG_ENV) {
         eprintln!("atticdb: {error}");
         return 2;
     }
@@ -693,13 +683,18 @@ fn exec_args(harness: Harness, event: Event, home: Option<&str>) -> Value {
 
 /// `harness`'s hook command for `event`: the quoted binary, after `ATTICDB_HOME='<home>' `
 /// when `home` is set. Claude's and Codex's command hooks have no env field, so the home goes
-/// in the command.
+/// in the command. Gemini CLI runs its hooks in PowerShell on Windows, so there its command is
+/// [`ps_hook_command`].
 pub(super) fn hook_command(
     harness: Harness,
     event: Event,
     exe: &str,
     home: Option<&str>,
 ) -> String {
+    #[cfg(windows)]
+    if harness == Harness::Gemini {
+        return ps_hook_command(harness, event, exe, home);
+    }
     let prefix = home.map(|home| format!("{HOME_ENV}={} ", quote(home))).unwrap_or_default();
     format!("{prefix}{}{}", quote(exe), hook_args(harness, event))
 }
@@ -718,6 +713,29 @@ fn hook_group(event: Event, exe: &str, home: Option<&str>) -> Value {
 fn hook_group(event: Event, exe: &str, home: Option<&str>) -> Value {
     let args = exec_args(Harness::ClaudeCode, event, home);
     json!({"hooks": [{"type": "command", "command": exe, "args": args, "timeout": 5}]})
+}
+
+/// `harness`'s hook command for `event` in PowerShell: the binary called with `&`, as a
+/// quoted path alone is a string there. The home goes in `--home`, as Claude Code's does on
+/// Windows.
+#[cfg(any(windows, test))]
+fn ps_hook_command(harness: Harness, event: Event, exe: &str, home: Option<&str>) -> String {
+    let home = home.map(|home| format!(" --home {}", super::ps_quote(home))).unwrap_or_default();
+    format!("& {}{}{home}", super::ps_quote(exe), hook_args(harness, event))
+}
+
+/// The binary path in `command` when it is a hook command [`ps_hook_command`] writes for
+/// `harness` and `event`, for any absolute binary path and any home.
+#[cfg(any(windows, test))]
+fn ps_command_exe(harness: Harness, event: Event, command: &str) -> Option<String> {
+    let (exe, rest) = super::ps_unquote(command.strip_prefix("& ")?)?;
+    let home = match rest.strip_prefix(&hook_args(harness, event))? {
+        "" => None,
+        rest => Some(super::ps_unquote(rest.strip_prefix(" --home ")?)?.0),
+    };
+    // Writing the command again for that binary and home must give the same text.
+    let again = ps_hook_command(harness, event, &exe, home.as_deref());
+    (Path::new(&exe).is_absolute() && again == command).then_some(exe)
 }
 
 /// Splits a single-quoted word, with `'\''` for each `'`, off the start of `text`. Returns
@@ -741,13 +759,85 @@ fn unquote(text: &str) -> Option<(String, &str)> {
 
 /// The binary that `handler` runs when it is a hook handler AtticDB writes for `harness` and
 /// `event`, by [`command_exe`]. On Windows, Claude Code's is in exec form, by [`exec_exe`].
+/// Gemini CLI's may also be wired by hand, by [`hand_wired_exe`].
 fn handler_exe(harness: Harness, event: Event, handler: &Value) -> Option<String> {
     let command = handler["command"].as_str().filter(|_| handler["type"] == "command")?;
     #[cfg(windows)]
     if harness == Harness::ClaudeCode {
         return exec_exe(event, handler, command);
     }
-    command_exe(harness, event, command)
+    let exe = command_exe(harness, event, command);
+    if harness == Harness::Gemini {
+        return exe.or_else(|| hand_wired_exe(event, command));
+    }
+    exe
+}
+
+/// The binary a SessionStart command wired by hand runs, when it is AtticDB's: an absolute
+/// path to a file named `atticdb` or `atticdb.exe`, then `hook session-start`. The path may
+/// be bare, or single- or double-quoted. An `ATTICDB_HOME=` prefix or PowerShell's `& ` may
+/// come first. After it come only flags that start with `--`, and the values of `--harness`
+/// and `--home`. Any other word, such as `&&`, `;` or `|`, makes it the user's, so a command
+/// that runs more than atticdb is never dropped. Only Gemini CLI reads hooks so, as people
+/// wired it by hand before `connect gemini` existed.
+fn hand_wired_exe(event: Event, command: &str) -> Option<String> {
+    if event != Event::SessionStart {
+        return None;
+    }
+    let mut rest = command.trim_start();
+    if let Some(after) = rest.strip_prefix(&format!("{HOME_ENV}=")) {
+        rest = first_word(after)?.1.trim_start();
+    }
+    rest = rest.strip_prefix("& ").unwrap_or(rest).trim_start();
+    let (exe, mut rest) = first_word(rest)?;
+    let path = Path::new(&exe);
+    let named = path.file_name().is_some_and(|name| name == "atticdb" || name == "atticdb.exe");
+    if !(path.is_absolute() && named) {
+        return None;
+    }
+    for want in ["hook", event.subcommand()] {
+        // Each word must start after a space, so `atticdbhook` isn't read.
+        let (word, after) = first_word(rest.strip_prefix(char::is_whitespace)?.trim_start())?;
+        (word == want).then_some(())?;
+        rest = after;
+    }
+    loop {
+        rest = rest.trim_start();
+        if rest.is_empty() {
+            return Some(exe);
+        }
+        let (flag, after) = first_word(rest)?;
+        rest = after;
+        if !flag.starts_with("--") {
+            return None;
+        }
+        if flag == "--harness" || flag == "--home" {
+            rest = first_word(rest.strip_prefix(char::is_whitespace)?.trim_start())?.1;
+        }
+        // The next word must start after a space, so `--home '/x';y` isn't read.
+        if !(rest.is_empty() || rest.starts_with(char::is_whitespace)) {
+            return None;
+        }
+    }
+}
+
+/// Splits the first word off `text`: single-quoted as `sh` writes it, double-quoted, or bare
+/// up to the first whitespace. Returns the word and the rest. A bare word that holds a shell
+/// operator or expansion, or a double-quoted one that holds an expansion, is refused. So
+/// `;`, `&`, `|`, `<`, `>`, `$`, backticks and parentheses never pass as part of a word.
+fn first_word(text: &str) -> Option<(String, &str)> {
+    if text.starts_with('\'') {
+        return unquote(text);
+    }
+    if let Some(inner) = text.strip_prefix('"') {
+        let end = inner.find('"')?;
+        let word = &inner[..end];
+        return (!word.contains(['$', '`'])).then(|| (word.to_owned(), &inner[end + 1..]));
+    }
+    let end = text.find(char::is_whitespace).unwrap_or(text.len());
+    let word = &text[..end];
+    let plain = !word.is_empty() && !word.contains([';', '&', '|', '<', '>', '$', '`', '(', ')']);
+    plain.then(|| (word.to_owned(), &text[end..]))
 }
 
 /// The binary `command` names when `handler` is Claude Code's hook for `event` in exec form,
@@ -784,8 +874,13 @@ fn handler_text(handler: &Value) -> String {
 
 /// The binary path in `command` when it is a hook command AtticDB writes for `harness` and
 /// `event`, for any absolute binary path and any home. The binary's file name doesn't count,
-/// as an install may name it `atticdb-0.1.0`.
+/// as an install may name it `atticdb-0.1.0`. On Windows Gemini CLI's is in PowerShell, by
+/// [`ps_command_exe`].
 fn command_exe(harness: Harness, event: Event, command: &str) -> Option<String> {
+    #[cfg(windows)]
+    if harness == Harness::Gemini {
+        return ps_command_exe(harness, event, command);
+    }
     let (home, rest) = match command.strip_prefix(&format!("{HOME_ENV}=")) {
         Some(rest) => {
             let (home, rest) = unquote(rest)?;
@@ -879,7 +974,7 @@ impl From<jsonedit::Error> for Refused {
 }
 
 /// A `Done` for `text` that did `state` and says `said`.
-fn done(text: String, state: State, said: &str) -> Edit {
+pub(super) fn done(text: String, state: State, said: &str) -> Edit {
     Ok(Done { text, said: said.into(), state, by_hand: false })
 }
 
@@ -896,17 +991,25 @@ fn mixed(harness: Harness, event: Event, text: &str) -> Vec<Value> {
     handlers.filter_map(ours).collect()
 }
 
-/// `text` with `group` in `hooks.<event>`, and without AtticDB's other groups there. When
+/// `text` with `group` in `hooks.<event>`, and without AtticDB's other groups there. For
+/// Gemini CLI, the first of those is replaced where it stands, by [`replace_stale`]. When
 /// AtticDB's handler already sits in a group with other hooks, no group is added. An older
-/// one there is refused, as it can't be updated without touching the other hooks.
+/// one there, or for Gemini CLI one wired by hand, is refused, as it can't be updated without
+/// touching the other hooks.
 pub(super) fn add_hook(harness: Harness, event: Event, text: &str, group: &Value) -> Edit {
     let stale = |old: &Value| our_group(harness, event, old) && old != group;
-    let (text, stale) = jsonedit::remove(text, &event.path(), stale)?;
+    let (text, stale) = if harness == Harness::Gemini {
+        replace_stale(text, event, group, stale)?
+    } else {
+        jsonedit::remove(text, &event.path(), stale)?
+    };
     let handler = &group["hooks"][0];
     let mixed = mixed(harness, event, &text);
     if mixed.iter().any(|other| *other != handler_key(handler)) {
+        // Gemini CLI's may be wired by hand, so not older. The others' words stay as they were.
+        let which = if harness == Harness::Gemini { "an" } else { "an older" };
         return Err(Refused {
-            why: "an older atticdb hook is inside a group with other hooks".into(),
+            why: format!("{which} atticdb hook is inside a group with other hooks"),
             by_hand: Some(format!(
                 "Update the atticdb handler inside that group by hand, to run: {}",
                 handler_text(handler)
@@ -925,6 +1028,27 @@ pub(super) fn add_hook(harness: Harness, event: Event, text: &str, group: &Value
     let text = jsonedit::append(&text, &event.path(), group)?;
     let state = if stale == 0 { State::Added } else { State::Updated };
     done(text, state, if stale == 0 { "added" } else { "updated" })
+}
+
+/// `text` with the first `stale` group in `hooks.<event>` replaced by `group` where it stands,
+/// and the other stale groups removed. When `group` is already there, the stale ones only go.
+/// Returns the text and how many stale groups there were. So Gemini CLI keeps the order a
+/// user gave a hand-wired hook.
+fn replace_stale(
+    text: &str,
+    event: Event,
+    group: &Value,
+    stale: impl Fn(&Value) -> bool,
+) -> Result<(String, usize), Refused> {
+    let root: Value = serde_json::from_str(text).unwrap_or_default();
+    let present = root["hooks"][event.name()].as_array().is_some_and(|all| all.contains(group));
+    let (text, replaced) = if present {
+        (text.to_owned(), false)
+    } else {
+        jsonedit::replace(text, &event.path(), &stale, group)?
+    };
+    let (text, removed) = jsonedit::remove(&text, &event.path(), &stale)?;
+    Ok((text, removed + usize::from(replaced)))
 }
 
 /// `text` with the allow rules for `notes`. With [`Notes::Ask`], the `memory_append` rule goes.
@@ -1188,5 +1312,85 @@ mod hook_tests {
         }
         let start = hook_command(Harness::ClaudeCode, Event::SessionStart, exe, None);
         assert_eq!(start, format!("{quoted} hook session-start --harness claude-code"));
+    }
+
+    /// Gemini CLI runs its hooks in PowerShell on Windows. There the command calls the quoted
+    /// binary with `&`, and passes the home in `--home`. It reads back for any binary and home,
+    /// and for no other harness or event.
+    #[test]
+    fn powershell_hook_command_reads_back_its_binary() {
+        use super::{ps_command_exe, ps_hook_command};
+        let exe = if cfg!(windows) { r"C:\it's\atticdb.exe" } else { "/opt/it's/atticdb" };
+        let (gemini, start) = (Harness::Gemini, Event::SessionStart);
+        let bare = ps_hook_command(gemini, start, exe, None);
+        let quoted = exe.replace('\'', "''");
+        assert_eq!(bare, format!("& '{quoted}' hook session-start --harness gemini"));
+        let homed = ps_hook_command(gemini, start, exe, Some("/h o'm"));
+        assert_eq!(homed, format!("{bare} --home '/h o''m'"));
+        for command in [&bare, &homed] {
+            assert_eq!(ps_command_exe(gemini, start, command).as_deref(), Some(exe), "{command}");
+            assert_eq!(ps_command_exe(Harness::Codex, start, command), None, "{command}");
+            assert_eq!(ps_command_exe(gemini, Event::PostCompact, command), None, "{command}");
+            assert_eq!(ps_command_exe(gemini, start, &format!("{command} x")), None);
+        }
+        let relative = ps_hook_command(gemini, start, "atticdb", None);
+        assert_eq!(ps_command_exe(gemini, start, &relative), None);
+    }
+
+    /// A Gemini CLI SessionStart command wired by hand counts as AtticDB's when it runs an
+    /// absolute path to a binary named `atticdb`, then `hook session-start`. The quoting and
+    /// the flags after it don't count. Claude Code and Codex never read it so.
+    #[cfg(unix)]
+    #[test]
+    fn hand_wired_gemini_hooks_read_back_their_binary() {
+        use super::{hand_wired_exe, handler_exe};
+        use serde_json::json;
+        let start = Event::SessionStart;
+        let ours = [
+            (
+                "/u/.cargo/bin/atticdb hook session-start --harness claude-code",
+                "/u/.cargo/bin/atticdb",
+            ),
+            ("'/opt/it'\\''s/atticdb' hook session-start", "/opt/it's/atticdb"),
+            ("\"/opt/a b/atticdb.exe\"  hook\tsession-start --home /x", "/opt/a b/atticdb.exe"),
+            ("& '/opt/atticdb' hook session-start --harness gemini", "/opt/atticdb"),
+            ("ATTICDB_HOME='/h o' /opt/atticdb hook session-start", "/opt/atticdb"),
+            ("/opt/atticdb hook session-start --harness claude-code --home '/x y'", "/opt/atticdb"),
+            ("/opt/atticdb hook session-start --home \"/x y\" --harness=gemini ", "/opt/atticdb"),
+        ];
+        for (command, exe) in ours {
+            assert_eq!(hand_wired_exe(start, command).as_deref(), Some(exe), "{command}");
+            let handler = json!({"type": "command", "command": command});
+            let read = |harness| handler_exe(harness, start, &handler);
+            assert_eq!(read(Harness::Gemini).as_deref(), Some(exe), "{command}");
+            assert_eq!(read(Harness::ClaudeCode), None, "{command}");
+            assert_eq!(read(Harness::Codex), None, "{command}");
+            assert_eq!(hand_wired_exe(Event::PostCompact, command), None, "{command}");
+        }
+        for command in [
+            "atticdb hook session-start",
+            "/opt/atticdb-0.1.0 hook session-start",
+            "/opt/atticdb hook session-started",
+            "/opt/atticdb hook post-compact",
+            "/opt/atticdb mcp",
+            "'/opt/atticdb hook session-start",
+            "/opt/atticdbhook session-start",
+            "",
+            // Only flags and their values may follow, so another command is never dropped.
+            "/opt/atticdb hook session-start && /opt/other-hook",
+            "/opt/atticdb hook session-start; /opt/other-hook",
+            "/opt/atticdb hook session-start --harness gemini | tee /tmp/log",
+            "/opt/atticdb hook session-start || true",
+            "/opt/atticdb hook session-start > /tmp/log",
+            "/opt/atticdb hook session-start 2>&1",
+            "/opt/atticdb hook session-start `echo x`",
+            "/opt/atticdb hook session-start --home /x;/opt/other-hook",
+            "/opt/atticdb hook session-start --home \"$HOME/x\"",
+            "/opt/atticdb hook session-start --harness gemini extra",
+            "/opt/atticdb hook session-start --home",
+            "ATTICDB_HOME=/x;/opt/other /opt/atticdb hook session-start",
+        ] {
+            assert_eq!(hand_wired_exe(start, command), None, "{command}");
+        }
     }
 }
