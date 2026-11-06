@@ -7,7 +7,7 @@
 
 AtticDB is local, durable memory for coding agents, written in Rust.
 It stores turn history per session and keyed facts. A write is acked only after it is synced to disk.
-It wires into Copilot CLI, VS Code, Claude Code and Codex with 1 command.
+It wires into Copilot CLI, VS Code, Claude Code, Codex, Gemini CLI, Antigravity and Claude Desktop with 1 command.
 
 Status: early. Fine for your laptop. Not for production yet.
 
@@ -52,7 +52,7 @@ atticdb setup             # asks which apps, then wires them
 atticdb doctor            # checks the install; it may start the server
 ```
 
-`setup` finds Copilot CLI, VS Code, Claude Code and Codex. It adds the MCP entry, a chat-start hook and the guide each app reads. Claude Code also gets a PostCompact hook. It saves each compaction summary as a note, with a pointer to the full transcript. Every edited file is backed up first. `atticdb disconnect <app>` removes exactly what it added. Codex runs a new hook only after you approve it once in Codex. [research/setup_eval/results](research/setup_eval/results/README.md) has the eval results.
+`setup` finds Copilot CLI, VS Code, Claude Code, Codex, Gemini CLI, Antigravity and Claude Desktop. It adds the MCP entry, a chat-start hook and the guide each app reads. Antigravity and Claude Desktop get only the MCP entry. Restart them to load it. Claude Code also gets a PostCompact hook. It saves each compaction summary as a note, with a pointer to the full transcript. Every edited file is backed up first. `atticdb disconnect <app>` removes exactly what it added. Codex runs a new hook only after you approve it once in Codex. [research/setup_eval/results](research/setup_eval/results/README.md) has the eval results.
 
 `atticdb doctor` prints 1 line per check, with what to do when one fails. [Set up](crates/atticdb/README.md#set-up) and [`atticdb doctor`](crates/atticdb/README.md#atticdb-doctor) give the details.
 
@@ -174,7 +174,7 @@ A forget hides turn content, meta, role and time, and fact values. These stay ob
 
 ## Uninstall
 
-1. Run `atticdb disconnect <app>` for each app you connected: `copilot`, `vscode`, `claude-code` or `codex`. It removes only what setup added.
+1. Run `atticdb disconnect <app>` for each app you connected: `copilot`, `vscode`, `claude-code`, `codex`, `gemini`, `antigravity` or `claude-desktop`. It removes only what setup added.
 2. Stop the background server. Its pid is in the `LOCK` file in the data folder. The data folder is `~/Library/Application Support/atticdb` on macOS and `~/.local/share/atticdb` on Linux.
 
    ```sh
@@ -194,7 +194,8 @@ If you set `ATTICDB_HOME`, that is the data folder. On Linux with `XDG_DATA_HOME
 
 ## Where to run it
 
-macOS, Linux and Windows x86_64. Release binaries cover macOS and Linux on x86_64 and arm64, and Windows on x86_64. The Linux ones are static, so any distro works. Then `atticdb setup` connects it to VS Code, Copilot CLI, Claude Code and Codex.
+macOS, Linux and Windows x86_64. Release binaries cover macOS and Linux on x86_64 and arm64, and Windows on x86_64. The Linux ones are static, so any distro works. Then `atticdb setup` connects it to VS Code, Copilot CLI, Claude Code, Codex, Gemini CLI, Antigravity and Claude Desktop.
+Claude Desktop runs only on macOS and Windows, so Linux can't connect it.
 On Windows, Codex gets only its MCP entry for now ([#142](https://github.com/Clawdlinux/atticdb/issues/142)). On Windows, Claude Code 2.1.139 or later is needed for the hook. Durability there is weaker, as Windows has no directory fsync. [Windows](crates/atticdb/README.md#windows) lists what differs.
 
 Keep the data directory on a local disk. Every ack waits for a sync, so that disk sets your write latency.
