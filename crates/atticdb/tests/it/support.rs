@@ -78,12 +78,14 @@ const HOME_VARS: [&str; 8] = [
 ];
 
 /// A command for `program`, the `atticdb` binary or anything that runs it, without
-/// [`HOME_VARS`]. Every spawn of AtticDB in these tests starts here.
+/// [`HOME_VARS`]. Every spawn of AtticDB in these tests starts here. The update check is off,
+/// so no test asks the real releases API. The `update` tests turn it back on.
 pub fn command(program: impl AsRef<OsStr>) -> Command {
     let mut command = Command::new(program);
     for var in HOME_VARS {
         command.env_remove(var);
     }
+    command.env("ATTICDB_NO_UPDATE_CHECK", "1");
     command
 }
 
@@ -616,7 +618,12 @@ impl Mcp {
         if let Some(token) = token {
             command.env("ATTICDB_TOKEN", token);
         }
-        let mut process = Process::start(&mut command);
+        Self::spawn(&mut command)
+    }
+
+    /// Starts `command`, an `atticdb mcp` with stdin piped.
+    pub fn spawn(command: &mut Command) -> Self {
+        let mut process = Process::start(command);
         let stdin = process.child.stdin.take();
         Self { process, stdin, read: 0, asked: 0, next_id: 0 }
     }
@@ -861,16 +868,23 @@ pub fn data_dir(home: &Path) -> PathBuf {
     home.join(data).join("atticdb/data")
 }
 
-/// A fake store on `socket`. `/healthz` answers at once with instance `X`. Any other request
-/// gets an empty read page after `delay`. With no `delay` it is never answered, and its
-/// connection stays open until the client closes it. Returns a count of those requests.
+/// A fake store on `socket`. `/healthz` answers at once with instance `X` and no version, as
+/// an older server does. Any other request gets an empty read page after `delay`. With no
+/// `delay` it is never answered, and its connection stays open until the client closes it.
+/// Returns a count of those requests.
 pub fn slow_store(socket: &Path, delay: Option<Duration>) -> Arc<AtomicUsize> {
+    fake_store(socket, delay, json!({"instance": "X"}))
+}
+
+/// [`slow_store`], with `health` as the `/healthz` body.
+pub fn fake_store(socket: &Path, delay: Option<Duration>, health: Value) -> Arc<AtomicUsize> {
+    let health = Arc::new(health.to_string());
     let listener = UnixListener::bind(socket).unwrap();
     let reads = Arc::new(AtomicUsize::new(0));
     let counted = reads.clone();
     std::thread::spawn(move || {
         for mut stream in listener.incoming().map_while(Result::ok) {
-            let counted = counted.clone();
+            let (counted, health) = (counted.clone(), health.clone());
             std::thread::spawn(move || {
                 let mut reader = BufReader::new(stream.try_clone().unwrap());
                 loop {
@@ -881,7 +895,7 @@ pub fn slow_store(socket: &Path, delay: Option<Duration>) -> Arc<AtomicUsize> {
                         }
                     }
                     let body = if head.starts_with("GET /healthz ") {
-                        r#"{"instance": "X"}"#
+                        health.as_str()
                     } else {
                         counted.fetch_add(1, Ordering::SeqCst);
                         let Some(delay) = delay else {

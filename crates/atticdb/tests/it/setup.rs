@@ -529,6 +529,56 @@ fn setup_store_check_waits_for_a_starting_server() {
     assert!(took >= Duration::from_secs(8), "answered only by the late server: {took:?}");
 }
 
+/// Doctor compares the version the server's `/healthz` gives with this binary's. A server on
+/// this version is ok. One on another version, or too old to send one, fails. Its line says
+/// to restart it, and names the pid in `LOCK`.
+#[test]
+fn doctor_compares_the_server_version() {
+    let dir = Dir::new();
+    let (home, empty) = (dir.0.join("h"), dir.0.join("empty"));
+    for made in [&home, &empty] {
+        std::fs::create_dir(made).unwrap();
+    }
+    let no_apps = OsString::from(&empty);
+    let data = data_dir(&home);
+    let _holders = Holders(vec![data.clone()]);
+    let version = atticdb::VERSION;
+    let doctor = || atticdb("doctor", &home, &dir.0, &no_apps, &[], &[], "");
+    // A read sets up the home and starts a server from this binary.
+    let list = ["list", "--prefix", "x"];
+    let (code, out, err) = atticdb("fact", &home, &dir.0, &no_apps, &[], &list, "");
+    assert_eq!(code, Some(0), "{out}{err}");
+    let (code, out, err) = doctor();
+    assert_eq!(code, Some(0), "{out}{err}");
+    let ok = format!("\nServer and store: ok\n  server version: {version}: ok\n");
+    assert!(out.contains(&ok), "{out}{err}");
+
+    // This process stands in for an older server. It holds the lock and names its socket.
+    assert!(support::kill_holder(&data));
+    let socket = data.join("old.sock");
+    let mut lock = File::create(data.join("LOCK")).unwrap();
+    lock.try_lock().unwrap();
+    let pid = std::process::id();
+    let holder = format!("pid={pid} instance=X unix={} tcp=none\n", socket.display());
+    lock.write_all(holder.as_bytes()).unwrap();
+    let advice = format!("this binary is {version}: stop pid");
+    let rows = [
+        ("older", json!({"status": "ok", "instance": "X", "version": "0.0.1"}), "0.0.1"),
+        ("no version", json!({"status": "ok", "instance": "X"}), "unknown"),
+    ];
+    for (case, health, said) in rows {
+        let _ = std::fs::remove_file(&socket);
+        support::fake_store(&socket, Some(Duration::ZERO), health);
+        let (code, out, err) = doctor();
+        assert_eq!(code, Some(1), "{case}: {out}{err}");
+        let next = "The next AtticDB call starts this binary's server.";
+        let line =
+            format!("\nServer and store: ok\n  server version: {said}, {advice} {pid}. {next}\n");
+        assert!(out.contains(&line), "{case}: {out}{err}");
+    }
+    drop(lock);
+}
+
 /// An AtticDB binary that doesn't exist.
 const OLD: &str = "/old/atticdb";
 /// What doctor says about a home that isn't set up, with `atticdb` as it names the binary.
@@ -835,7 +885,9 @@ fn doctor_checks_an_install_and_writes_nothing() {
                 assert!(lines[4].contains(" free, the floor is "), "{case}: {out}");
                 assert!(lines[5].starts_with("  filesystem: "), "{case}: {out}");
                 assert!(lines[5].ends_with(": ok"), "{case}: {out}");
-                assert_eq!(lines[6..8], ["  synced folder: ok", "Server and store: ok"]);
+                let server = format!("  server version: {version}: ok");
+                let wanted = ["  synced folder: ok", "Server and store: ok", &server];
+                assert_eq!(lines[6..9], wanted, "{case}: {out}");
             }
             "stale binary" => assert!(!out.contains("Copilot CLI"), "{case}: {out}"),
             "home 0755" => {

@@ -4,6 +4,7 @@
 
 use crate::connect::{self, Harness, Line, Mode, Notes, Options, Report, State};
 use crate::home::Lookup;
+use crate::launch::Found;
 use serde_json::{json, Value};
 use std::io::{BufRead, IsTerminal, Read, Write};
 #[cfg(unix)]
@@ -52,7 +53,14 @@ Exit 0 when every app connected and passed its checks, 1 when not, 2 for a usage
 const NEEDS_TERMINAL: &str = "atticdb setup needs a terminal, or --yes. See atticdb setup --help.";
 
 /// A testing aid: when it is `1`, stdin counts as a terminal, so tests can pipe the answers.
+/// `atticdb upgrade` reads it too.
 const INTERACTIVE_ENV: &str = "ATTICDB_SETUP_INTERACTIVE";
+
+/// Whether stdin is a terminal, or counts as one by [`INTERACTIVE_ENV`].
+pub(crate) fn terminal() -> bool {
+    std::io::stdin().is_terminal()
+        || std::env::var_os(INTERACTIVE_ENV).is_some_and(|value| value == "1")
+}
 
 /// How many answers a question takes before setup gives up.
 const TRIES: usize = 3;
@@ -134,8 +142,7 @@ pub(crate) fn title(harness: Harness) -> &'static str {
 /// skipped part and passed its checks, 1 when not, 2 for a usage error or no answer. An app
 /// that stopped gives its own code when that is higher. `--dry-run` exits as the plan would.
 pub fn run(flags: Flags) -> u8 {
-    let terminal = std::io::stdin().is_terminal()
-        || std::env::var_os(INTERACTIVE_ENV).is_some_and(|value| value == "1");
+    let terminal = terminal();
     if !terminal && !flags.yes && !flags.dry_run {
         eprintln!("{NEEDS_TERMINAL}");
         return 2;
@@ -220,7 +227,7 @@ impl<R: BufRead> Asker<R> {
 }
 
 /// `true` for y or yes, `false` for n or no, in any case.
-fn yes_no(answer: &str) -> Option<bool> {
+pub(crate) fn yes_no(answer: &str) -> Option<bool> {
     match answer.to_ascii_lowercase().as_str() {
         "y" | "yes" => Some(true),
         "n" | "no" => Some(false),
@@ -455,6 +462,10 @@ fn apply(chosen: &[(Harness, Options)]) -> u8 {
         println!("Then open a new chat and ask: what are this repo's rules?");
         println!("See what your agent gets at chat start: {atticdb} studio");
     }
+    // The update notice, if any, comes last and doesn't change the code.
+    if let Ok(dir) = crate::home::dir() {
+        crate::update::show(&dir);
+    }
     exit
 }
 
@@ -557,8 +568,18 @@ pub(crate) fn kill_group(child: &mut std::process::Child) {
 
 /// Reads `fact_list` from the home, as the hook does for a chat in `cwd`.
 pub(crate) fn check_store(cwd: &Path) -> Result<(), String> {
+    check_server(cwd).0
+}
+
+/// [`check_store`], and the server it found through `LOCK`, if any. That one may have answered
+/// even when the read failed.
+pub(crate) fn check_server(cwd: &Path) -> (Result<(), String>, Option<Found>) {
     let session = crate::home::repo(cwd).unwrap_or_else(|| "setup".into());
     let deadline = Instant::now() + STORE_TIMEOUT;
-    let mut home = crate::client::HomeReader::in_home(&session, deadline, &Lookup::ENV)?;
-    home.read("setup", "fact_list", &json!({"prefix": "user/", "limit": 1})).map(drop)
+    let mut home = match crate::client::HomeReader::in_home(&session, deadline, &Lookup::ENV) {
+        Ok(home) => home,
+        Err(why) => return (Err(why), None),
+    };
+    let read = home.read("setup", "fact_list", &json!({"prefix": "user/", "limit": 1}));
+    (read.map(drop), home.found().cloned())
 }

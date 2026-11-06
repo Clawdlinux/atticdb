@@ -343,7 +343,7 @@ fn startup_checks() {
         };
         let unix = Via::Unix(ctx.socket.clone());
         let healthy = |instance: &str, why: &str| {
-            let health = json!({"status": "ok", "instance": instance});
+            let health = json!({"status": "ok", "instance": instance, "version": atticdb::VERSION});
             assert_eq!(
                 unix.call(None, None, "GET", "/healthz", None),
                 (200, health),

@@ -193,6 +193,12 @@ impl HomeReader {
         self.run(agent, tool, args)
     }
 
+    /// The server discovery last trusted for this reader, if any. It is set by the first call
+    /// that connects. So it needs no request of its own.
+    pub(crate) fn found(&self) -> Option<&crate::launch::Found> {
+        self.client.launch.found()
+    }
+
     /// Appends 1 turn as `agent` by `memory_append`, which hides secrets first. Returns its
     /// `structuredContent`, or its error. The deadline is [`Self::read`]'s.
     pub(crate) fn append(&mut self, agent: &str, args: &Value) -> Result<Value, String> {

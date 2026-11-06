@@ -127,10 +127,14 @@ pub(crate) fn loopback_host(value: &[u8]) -> bool {
     matches!(host, "127.0.0.1" | "localhost" | "[::1]") && port_ok
 }
 
-/// `GET /healthz`. Read-only stays 200 on purpose: only a write can clear it.
+/// `GET /healthz`. Read-only stays 200 on purpose: only a write can clear it. `version` lets a
+/// client tell a server left on old code after the binary was replaced.
 pub fn health(engine: &Engine, instance: &str) -> Response {
     let (status, text) = health_status(engine);
-    Response::json(status, &json!({"status": text, "instance": instance}))
+    Response::json(
+        status,
+        &json!({"status": text, "instance": instance, "version": crate::VERSION}),
+    )
 }
 
 /// [`health`], plus a `proofs` array when there are `proofs`, from
@@ -138,7 +142,7 @@ pub fn health(engine: &Engine, instance: &str) -> Response {
 #[cfg(windows)]
 pub fn health_proved(engine: &Engine, instance: &str, proofs: Option<Vec<String>>) -> Response {
     let (status, text) = health_status(engine);
-    let mut body = json!({"status": text, "instance": instance});
+    let mut body = json!({"status": text, "instance": instance, "version": crate::VERSION});
     if let Some(proofs) = proofs {
         body["proofs"] = json!(proofs);
     }

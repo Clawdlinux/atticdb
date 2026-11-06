@@ -21,7 +21,8 @@ atticdb connect antigravity                       # adds AtticDB to Antigravity'
 atticdb connect claude-desktop                    # adds AtticDB to Claude Desktop's MCP config
 atticdb studio                                    # a read-only page, unless --allow-forget
 atticdb export ./memory-md                        # memory as markdown, at 1 LSN
-atticdb doctor                                    # checks the install and writes nothing
+atticdb doctor                                    # checks the install, writes only the update cache
+atticdb upgrade                                   # installs the latest release over this binary
 atticdb verify --data-dir ./data                  # checks a stopped data dir on a copy
 atticdb recover --truncate-at <lsn> --data-dir ./data
 ```
@@ -164,7 +165,7 @@ atticdb doctor                    # checks every app it finds
 atticdb doctor --harness codex    # checks only these apps, a comma list as in setup
 ```
 
-It checks the install and writes nothing.
+It checks the install. It writes nothing but the daily update check's cache.
 Each check prints 1 line: `ok`, or the problem and what to do. They run in this order.
 
 - **atticdb:** the version and the path of this binary.
@@ -179,6 +180,9 @@ Each check prints 1 line: `ok`, or the problem and what to do. They run in this 
 - **Synced folder:** it warns when the home is in iCloud Drive, in `~/Library/CloudStorage`, or in a `Dropbox`, `OneDrive` or `Google Drive` folder.
 - **Server and store:** the store must answer `fact_list`. This reads as any AtticDB read does.
   So it may start the home's server, which writes its own files in `data/`.
+  - **server version:** the version the server's `/healthz` gives must be this binary's.
+    Else it fails with `server version: <v>, this binary is <w>: stop pid <pid>. The next AtticDB call starts this binary's server.`
+    A server too old to send a version shows `unknown`. A server keeps running old code after its binary is replaced.
 - **Each app:** the apps it finds, or those in `--harness`. An app that isn't found prints `not found`. That is not a failure.
   Gemini CLI, Antigravity and Claude Desktop show only when named, or when their config holds an `atticdb` entry.
   So an app found but never connected prints no line, and doctor stays green after an upgrade. Setup still offers it.
@@ -199,6 +203,7 @@ Each check prints 1 line: `ok`, or the problem and what to do. They run in this 
 
   The fix for parts and binary is `atticdb setup --harness <name>` or `atticdb connect <name>`.
 - **Sandboxes:** a note that agents in a sandbox need read and write access to the home. Doctor runs outside any sandbox, so it can't check one.
+- **Update notice:** last, and only when a newer release is out. It never changes the exit code. See [Update check](#update-check).
 
 Copilot CLI's sandbox needs the home in its read and write paths, or AtticDB can't reach its memory there.
 In Copilot CLI, run `/sandbox`, and on the Filesystem tab add the home under User-configured paths as Read/Write: `~/Library/Application Support/atticdb` on macOS, `~/.local/share/atticdb` on Linux, or your `ATTICDB_HOME`.
@@ -208,6 +213,87 @@ In Copilot CLI, run `/sandbox`, and on the Filesystem tab add the home under Use
 | 0 | Every check is ok or warns. Apps that aren't found don't count |
 | 1 | A check failed, a part would change, or the home isn't set up |
 | 2 | A usage error, such as an unknown app name |
+
+## `atticdb upgrade`
+
+```sh
+atticdb upgrade                   # the latest release. Shows the plan, then asks
+atticdb upgrade --yes             # doesn't ask. Needed when stdin is not a terminal
+atticdb upgrade --version 0.3.0   # this release, with or without the v, even an older one
+```
+
+It installs a release over this binary with that release's own `install.sh`. The plan comes first:
+
+```
+Upgrade AtticDB:
+  from: 0.3.0
+  to: 0.4.0
+  notes: https://github.com/Clawdlinux/atticdb/releases/tag/v0.4.0
+  binary: /home/me/.local/bin/atticdb, the old one kept as /home/me/.local/bin/atticdb.prev
+If this release changes the store format, the previous binary can't open the store after the first write.
+Upgrade? [y/N]
+```
+
+Releases carry no store format version, so the warning always shows.
+An older `--version` shows this warning instead: `This is an older release. It may not open a store a newer release has written. Roll back with atticdb.prev.`
+Without `--version` it asks GitHub for the latest release now, past the cache and the off switches.
+When this binary is already the latest, it prints `AtticDB <v> is the latest.` and exits 0.
+A `+dev` source build counts as older than its own release.
+
+Then it does this:
+
+1. Downloads `<base>/download/v<to>/install.sh` to a temp file. `<base>` is `ATTICDB_DOWNLOAD_BASE`, or `https://github.com/Clawdlinux/atticdb/releases`.
+2. Copies this binary to `atticdb.prev` beside it. An earlier `atticdb.prev` waits as `atticdb.prev.old` until the end.
+3. Runs `/bin/sh install.sh` with `ATTICDB_VERSION=<to>` and `ATTICDB_INSTALL_DIR=<this binary's folder>`. It passes `ATTICDB_DOWNLOAD_BASE` too, when set. The installer checks the tarball against `SHA256SUMS`.
+4. Stops the home's server with SIGTERM, and waits up to 5 s for `LOCK` to free.
+5. Runs `atticdb doctor` from the new binary. That starts the new server. Doctor's exit code doesn't change upgrade's.
+
+The binary's real path, after links, must be named `atticdb`, as `install.sh` names it. Else it fails and changes nothing.
+When the installer fails, the binary is as it was, and an earlier `atticdb.prev` comes back.
+A successful upgrade replaces `atticdb.prev`, so it holds only the last binary.
+
+It signals only a server that proves it serves this home's `data/`.
+That server must answer on the socket in `LOCK`, owned by you, with the `LOCK` instance id. The pid is read from that `LOCK`.
+Pid 0, pid 1 and the upgrade's own pid are never signalled. Otherwise it prints why, and says to stop the server by hand.
+
+To roll back, put `atticdb.prev` back and stop the server. With the default install dir:
+
+```sh
+mv ~/.local/bin/atticdb.prev ~/.local/bin/atticdb
+```
+
+A binary under `.cargo/bin` gets `Installed by cargo. Run: cargo install --git https://github.com/Clawdlinux/atticdb atticdb --locked`.
+One under `/opt/homebrew/` or in a Homebrew `Cellar/` gets `Installed by Homebrew. Run: brew upgrade atticdb`.
+Neither runs anything, and both exit 1.
+
+On Windows it prints the manual steps and exits 1. Windows has no `install.sh`, and a running `atticdb.exe` can't be replaced.
+The steps match the top README's Install, plus a copy of `atticdb.exe` kept to roll back.
+
+| Exit code | Meaning |
+|---|---|
+| 0 | It upgraded, was already the latest, or the answer was no |
+| 1 | The check, the download or the installer failed, or the binary isn't named `atticdb`. Or cargo or Homebrew owns it, or it runs on Windows |
+| 2 | A usage error such as a bad `--version`, no terminal without `--yes`, or no answer |
+
+### Update check
+
+`atticdb doctor` and `atticdb setup` check for a new release at most once a day. Setup checks only when it applies a plan.
+The hook, `atticdb mcp`, `atticdb serve` and the other verbs never check.
+When a newer release is out, they print this last, and keep their exit code:
+
+```
+AtticDB 0.4.0 is out (you have 0.3.0). Run: atticdb upgrade
+```
+
+- **Request:** `curl -fsSL --max-time 3` to `https://api.github.com/repos/Clawdlinux/atticdb/releases/latest`. `ATTICDB_RELEASES_API` overrides the URL.
+  It sends no token and no data about you. It reads `tag_name` from at most 1 MiB of reply.
+  On Windows it runs `curl.exe` from `System32`, never one on `PATH`.
+- **Tag:** `x.y.z` with an optional `v`, at most 32 bytes. Each number has at most 9 digits, and no leading zero unless it is `0`. Any other tag counts as a failed check.
+- **Cache:** `<home>/update-check.json`, mode 0600, written through a temp file and a rename. It holds `{"checked": <unix seconds>, "latest": "<x.y.z>"}` for 24 h.
+  A failed check writes `{"checked": <unix seconds>}` alone. No check runs for 1 h after it.
+  A cache dated in the future is ignored. The check never creates the home.
+- **Off switches:** `ATTICDB_NO_UPDATE_CHECK` set to any value but empty or `0`. Or `CI` set to anything, even empty.
+  A `+dev` build still checks, but never prints the notice. `atticdb upgrade` ignores the off switches.
 
 ## `atticdb serve`
 
@@ -256,7 +342,7 @@ Send `Authorization: Bearer <token>`. The token picks the tenant. On TCP the `Ho
 | `GET /v1/records` | Optional `before=LSN`, `limit=N` (default 50, cap 1,000), `kind=turn` or `kind=fact`, and `max_bytes=B` | `{"records": [{"kind": "turn", "lsn", "commit_time_ns", "agent", "session", "seq", "role", "content", "meta"} or {"kind": "fact", "lsn", "commit_time_ns", "key", "agent", "deleted", "content", "meta"}], "next"}` |
 | `POST /v1/forget` | `{"idem_key"}` plus exactly 1 of `"session": {"agent", "session"}`, `"key"` or `"lsns": [n, ...]` (1 to 1,024). Optional `up_to_lsn` | `{"outcome": "committed", "deduplicated", "txn", "lsn", "cutoff"}` |
 | `GET /v1/export` | `?format=markdown`, optional `max_bytes=B` (64 KiB to 8 MiB, default 1 MiB). Later pages pass back `next` as `at`, then `after_key`, or `after_agent`, `after_session` and `after_seq`, then `skip` and `offset` | `{"format": "markdown", "at", "chunks": [{"path", "offset", "markdown"}], "next"}`. `next` is null on the last page |
-| `GET /healthz` | No token | `{"status": "ok" or "read_only", "instance"}`. 503 with `"poisoned"` |
+| `GET /healthz` | No token | `{"status": "ok" or "read_only", "instance", "version"}`. 503 with `"poisoned"` |
 | `GET /v1/stats` | Unix socket only, no token | One flat object: `instance`, `health`, `durable_lsn`, tenant and fact counts, writer groups, checkpoint and lock timings, tape-index memory. Counters cover this open |
 | `GET /metrics` | Unix socket only, no token | The same numbers in Prometheus text format 0.0.4: counters as `atticdb_<name>_total`, gauges as `atticdb_<name>`, `_ns` maxima as `_seconds`, `atticdb_read_only`, the `atticdb_append_ack_seconds` histogram of committed appends (50 µs to 1 s), and the `atticdb_turn_content_bytes` histogram of new turns (64 B to 4 MiB). `turn_repeats` counts new turns whose content matches one of about 4,096 recent hashes, a lower bound on exact repeats |
 

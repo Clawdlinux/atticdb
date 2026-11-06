@@ -98,6 +98,8 @@ pub struct Launch {
     /// Set when the last `connect` hit a start failure that a retry within the same
     /// call cannot fix. The next call tries again.
     stuck: bool,
+    /// The server discovery last trusted. `None` until then, and always with a `--url`.
+    found: Option<Found>,
     /// The token a discovered server must prove it knows, before it gets the token.
     #[cfg(windows)]
     token: Option<Token>,
@@ -124,6 +126,7 @@ impl Launch {
             backoff: FIRST_BACKOFF,
             refused,
             stuck: false,
+            found: None,
             #[cfg(windows)]
             token: None,
         }
@@ -174,8 +177,9 @@ impl Launch {
             #[cfg(windows)]
             let found = discover(&dir, deadline, self.token.as_ref());
             match found {
-                Ok(stream) => {
+                Ok((stream, found)) => {
                     (self.backoff, self.refused) = (FIRST_BACKOFF, String::new());
+                    self.found = Some(found);
                     return Ok((Box::new(stream), "localhost".into()));
                 }
                 // A server that is not up yet is the normal first run, so it stays quiet.
@@ -206,6 +210,11 @@ impl Launch {
     /// Whether the last `connect` failed in a way a retry within the same call cannot fix.
     pub fn stuck(&self) -> bool {
         self.stuck
+    }
+
+    /// The server discovery last trusted, if any.
+    pub(crate) fn found(&self) -> Option<&Found> {
+        self.found.as_ref()
     }
 
     /// `atticdb serve` on the Unix socket only, outliving this adapter. The token stays
@@ -341,6 +350,26 @@ pub(crate) fn connect_unix(path: &Path, deadline: Instant) -> io::Result<UnixStr
     Ok(UnixStream::from(socket))
 }
 
+/// What discovery learned about the server it trusted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Found {
+    /// The `version` its `/healthz` gave. `None` from a server too old to send one.
+    pub(crate) version: Option<String>,
+    /// The `pid` its `LOCK` names.
+    pub(crate) pid: Option<u32>,
+}
+
+impl Found {
+    /// From the `LOCK` text and the `/healthz` body. Other fields in either are ignored.
+    fn new(lock: &str, health: &Value) -> Self {
+        let pid = lock.strip_prefix("pid=").and_then(|rest| rest.split(' ').next());
+        Self {
+            version: health["version"].as_str().map(str::to_owned),
+            pid: pid.and_then(|pid| pid.trim_end().parse().ok()),
+        }
+    }
+}
+
 /// Why [`discover`] found no server to trust.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Refusal {
@@ -373,7 +402,7 @@ impl std::fmt::Display for Refusal {
 /// and answered `/healthz` on this connection with the instance id in `LOCK`. The token
 /// then goes over the same connection. Otherwise the reason, and no token was sent.
 #[cfg(unix)]
-pub(crate) fn discover(dir: &Path, deadline: Instant) -> Result<UnixStream, Refusal> {
+pub(crate) fn discover(dir: &Path, deadline: Instant) -> Result<(UnixStream, Found), Refusal> {
     const MISSING: &[ErrorKind] = &[ErrorKind::NotFound];
     let mut lock = String::new();
     crate::config::open_regular(OpenOptions::new().read(true), &dir.join("LOCK"))
@@ -435,7 +464,7 @@ pub(crate) fn discover(dir: &Path, deadline: Instant) -> Result<UnixStream, Refu
     let response = response.map_err(|error| Refusal::Untrusted(fail(&error)))?;
     let health: Value = serde_json::from_slice(&response.body).unwrap_or_default();
     if matches!(response.status, 200 | 503) && health["instance"] == instance {
-        Ok(stream)
+        Ok((stream, Found::new(&lock, &health)))
     } else {
         Err(Refusal::Untrusted(format!(
             "{} is not instance {instance} from LOCK",
@@ -450,7 +479,7 @@ pub(crate) fn discover(
     dir: &Path,
     deadline: Instant,
     token: Option<&Token>,
-) -> Result<TcpStream, Refusal> {
+) -> Result<(TcpStream, Found), Refusal> {
     let token =
         token.ok_or_else(|| Refusal::Untrusted("no token to check a server with".into()))?;
     discover_tcp(dir, deadline, token)
@@ -466,7 +495,7 @@ pub(crate) fn discover_tcp(
     dir: &Path,
     deadline: Instant,
     token: &Token,
-) -> Result<TcpStream, Refusal> {
+) -> Result<(TcpStream, Found), Refusal> {
     use std::net::{Ipv4Addr, Ipv6Addr};
     const MISSING: &[ErrorKind] = &[ErrorKind::NotFound];
     let mut lock = String::new();
@@ -522,7 +551,7 @@ pub(crate) fn discover_tcp(
     if !crate::auth::verify(token, &nonce_bytes, instance, &endpoint, &health["proofs"]) {
         return Err(Refusal::Untrusted(format!("{addr} gave no proof that it knows the token")));
     }
-    Ok(stream)
+    Ok((stream, Found::new(&lock, &health)))
 }
 
 #[cfg(all(test, unix))]
@@ -666,7 +695,7 @@ mod tcp_tests {
         std::fs::write(dir.join("LOCK"), format!("pid=1 instance=0123 tcp={tcp}\n")).unwrap();
     }
 
-    fn discover(dir: &Path) -> Result<std::net::TcpStream, Refusal> {
+    fn discover(dir: &Path) -> Result<(std::net::TcpStream, super::Found), Refusal> {
         discover_tcp(dir, Instant::now() + Duration::from_secs(10), &token())
     }
 
@@ -746,6 +775,22 @@ mod tcp_tests {
         (addr, thread)
     }
 
+    /// Discovery keeps the version `/healthz` gave and the pid in `LOCK`. It ignores other
+    /// fields, and a server too old to send a version gives `None`.
+    #[test]
+    fn found_reads_the_version_and_pid() {
+        use super::Found;
+        use serde_json::json;
+        let lock = "pid=42 instance=0123 unix=/a b/s tcp=none\n";
+        let health = json!({"status": "ok", "instance": "0123", "version": "1.2.0", "new": 1});
+        let wanted = Found { version: Some("1.2.0".into()), pid: Some(42) };
+        assert_eq!(Found::new(lock, &health), wanted);
+        let old = json!({"status": "ok", "instance": "0123"});
+        assert_eq!(Found::new("pid=42\n", &old), Found { version: None, pid: Some(42) });
+        let odd = json!({"version": 3});
+        assert_eq!(Found::new("instance=0123\n", &odd), Found { version: None, pid: None });
+    }
+
     #[test]
     fn a_missing_or_empty_lock_is_not_running() {
         let temp = Temp::new();
@@ -800,6 +845,9 @@ mod tcp_tests {
             lock(&temp.0, &addr);
             let stream = discover(&temp.0);
             assert!(stream.is_ok(), "{:?}", stream.err());
+            // The fake sends no version, as a server before it was added.
+            let found = stream.as_ref().map(|(_, found)| found.clone());
+            assert_eq!(found, Ok(super::Found { version: None, pid: Some(1) }), "{addr}");
             drop(stream);
             let seen = String::from_utf8(thread.join().unwrap()).unwrap();
             assert!(!seen.to_ascii_lowercase().contains("authorization"), "{seen}");
@@ -813,8 +861,8 @@ mod tcp_tests {
         assert_eq!(entry.len() as u64 + 1, super::MIN_TENANT_JSON);
         let most = crate::config::MAX_FILE_BYTES / super::MIN_TENANT_JSON;
         let proofs: Vec<String> = (0..most).map(|_| "0".repeat(64)).collect();
-        let body =
-            serde_json::json!({"status": "ok", "instance": "0".repeat(32), "proofs": proofs});
+        let body = serde_json::json!({"status": "ok", "instance": "0".repeat(32), "proofs": proofs,
+                "version": crate::VERSION});
         assert!(body.to_string().len() as u64 <= super::PROOF_BYTES);
     }
 }
