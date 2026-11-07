@@ -547,11 +547,6 @@ impl<S: StateMachine> WriterCore<S> {
                 "superblock interval and byte limit must be positive".into(),
             ));
         }
-        if opts.segment_size < (HEADER_LEN * 2 + 32) as u64
-            || usize::try_from(opts.segment_size).is_err()
-        {
-            return Err(Error::Configuration("segment cannot hold a transaction".into()));
-        }
         let versions = crate::dir::MANIFEST_VERSIONS;
         if !versions.contains(&opts.manifest_min) || opts.manifest_min > opts.manifest_new {
             return Err(Error::Configuration("invalid manifest versions".into()));
@@ -566,7 +561,8 @@ impl<S: StateMachine> WriterCore<S> {
         let free_space_floor = opts
             .free_space_floor
             .or_else(|| io.total_bytes(&dir.path).ok().map(default_free_space_floor));
-        // An existing directory keeps its stored size. `opts.segment_size` sizes only a new one.
+        // An existing directory keeps its stored size. `opts.segment_size` sizes only a new one,
+        // and `DataDir` refuses it there if it can't hold a transaction.
         let segment_size = dir.segment_size();
         let mut recovered = recover_with_budget(&mut dir, segment_size, opts.lsn_index_bytes)?;
         if recovered.report.durable_lsn > dir.superblock() {

@@ -548,6 +548,30 @@ fn new_directory_uses_the_configured_segment_size() {
     assert!(matches!(rejected, Err(WriteError { kind: Error::BatchTooLarge, .. })));
 }
 
+/// A configured size too small for a transaction refuses only a new directory. An existing
+/// store opens with its stored size.
+#[test]
+fn tiny_configured_size_refuses_only_a_new_directory() {
+    let tiny = |error: Option<Error>| matches!(error, Some(Error::Configuration(m)) if m == "segment cannot hold a transaction");
+    let disk = Arc::new(SimDisk::new(1));
+    assert!(tiny(WriterCore::open(disk.clone(), clock(), "db", opts(64)).err()));
+    assert!(tiny(Tape::open(disk.clone(), clock(), "db", opts(64)).err()));
+    assert!(!disk.exists(Path::new("db/MANIFEST")).unwrap(), "a refused new dir has no MANIFEST");
+    assert!(!disk.exists(&seg(1)).unwrap());
+    let (mut core, _) = open(disk.clone(), opts(32 * KIB));
+    commit(&mut core, hello()).unwrap();
+    drop(core);
+    let (mut core, report) = open(disk.clone(), opts(64));
+    assert_eq!(report.records, 1);
+    commit(&mut core, turn(20_000)).unwrap();
+    drop(core);
+    let (tape, report) = Tape::open(disk.clone(), clock(), "db", opts(64)).unwrap();
+    assert_eq!(report.records, 2);
+    drop(tape);
+    assert_eq!(DataDir::open(disk.clone(), "db", None, 64).unwrap().segment_size(), 32 * KIB);
+    assert!(lengths(&*disk).0.iter().all(|&len| len == 32 * KIB));
+}
+
 #[test]
 fn commit_time_survives_a_restart_with_a_backwards_clock() {
     let disk = Arc::new(SimDisk::new(1));

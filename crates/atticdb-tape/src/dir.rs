@@ -232,6 +232,9 @@ pub struct DataDir {
 /// refuse it at open, before they read any frame.
 pub const MANIFEST_VERSIONS: std::ops::RangeInclusive<u32> = 2..=3;
 
+/// The smallest segment a new directory accepts. It holds 1 transaction of 1 empty record.
+const MIN_SEGMENT_SIZE: u64 = (crate::frame::HEADER_LEN * 2 + 32) as u64;
+
 impl std::fmt::Debug for DataDir {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DataDir")
@@ -283,10 +286,8 @@ impl DataDir {
     ) -> Result<Self> {
         let path = path.to_owned();
         let guard = io.try_lock_exclusive(&path.join("LOCK"))?;
+        // A placeholder until the MANIFEST is read or the configured size is checked below.
         let segment_size = configured.unwrap_or(1);
-        if segment_size == 0 || usize::try_from(segment_size).is_err() {
-            return Err(Error::Configuration("invalid segment size".into()));
-        }
         let mut dir = Self {
             io,
             path,
@@ -339,8 +340,12 @@ impl DataDir {
             }
             dir.superblock = values[0];
         } else {
-            if configured.is_none() {
+            let Some(configured) = configured else {
                 return Err(corruption(0, 0, 0, "missing manifest"));
+            };
+            // Only a new directory takes the configured size, so only it is checked.
+            if configured < MIN_SEGMENT_SIZE || usize::try_from(configured).is_err() {
+                return Err(Error::Configuration("segment cannot hold a transaction".into()));
             }
             if dir.io.list(&dir.path)?.iter().any(|path| {
                 path.file_name()
