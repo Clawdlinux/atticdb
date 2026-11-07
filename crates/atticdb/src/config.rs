@@ -21,8 +21,12 @@ pub const MAX_TOKEN_BYTES: usize = 1024;
 /// Longest tenant name, in UTF-8 bytes. The engine's limit.
 pub const MAX_TENANT_BYTES: usize = 255;
 pub(crate) const MAX_FILE_BYTES: u64 = 1 << 20;
-const FIELDS: &str =
-    "data_dir, listen, unix_socket, unix_socket_group, compression, search_index_mib, tenants";
+/// Smallest `segment_mib`. A batch must fit in 1 segment, and 16 MiB is twice the 8 MiB body cap.
+pub const MIN_SEGMENT_MIB: u64 = 16;
+/// Largest `segment_mib`.
+pub const MAX_SEGMENT_MIB: u64 = 1024;
+const FIELDS: &str = "data_dir, listen, unix_socket, unix_socket_group, compression, \
+                      search_index_mib, segment_mib, tenants";
 
 /// A tenant's bearer token. `Debug` never shows it.
 #[derive(Clone, Eq, PartialEq)]
@@ -96,6 +100,9 @@ pub struct Config {
     pub compression: Option<atticdb_core::CompressionMode>,
     /// Memory budget of the search word index in MiB. 0 turns it off. 512 when absent.
     pub search_index_mib: Option<u64>,
+    /// Segment size in MiB for a new store, 16 to 1024. 64 when absent. An existing store
+    /// keeps the size it was made with.
+    pub segment_mib: Option<u64>,
     /// At least one tenant. Tokens are unique.
     pub tenants: Vec<Tenant>,
 }
@@ -121,9 +128,10 @@ pub fn read_token_file(path: &Path) -> Result<Token, String> {
         .map_err(|message| format!("token file {}: {message}", path.display()))
 }
 
-/// Writes a new mode 0600 configuration with one tenant and a random token.
-/// Never overwrites an existing file. Returns the token so the caller can print it once.
-pub fn init(path: &Path, tenant: &str) -> Result<Token, String> {
+/// Writes a new mode 0600 configuration with one tenant and a random token, and
+/// `segment_mib` when given. Never overwrites an existing file. Returns the token so the
+/// caller can print it once.
+pub fn init(path: &Path, tenant: &str, segment_mib: Option<u64>) -> Result<Token, String> {
     let fail = |message: String| format!("config {}: {message}", path.display());
     check_tenant_name(tenant).map_err(|message| fail(message.into()))?;
     // Windows ignores the mode, so the new token file gets its folder's access list.
@@ -133,7 +141,11 @@ pub fn init(path: &Path, tenant: &str) -> Result<Token, String> {
         .map_err(|error| fail(crate::platform::no_random(error)))
         .and_then(|hex| Token::new(hex).map_err(|message| fail(message.into())))?;
     let tenants = json!([{"name": tenant, "token": token.expose()}]);
-    let mut text = serde_json::to_string_pretty(&json!({ "tenants": tenants }))
+    let mut config = json!({ "tenants": tenants });
+    if let Some(mib) = segment_mib {
+        config["segment_mib"] = mib.into();
+    }
+    let mut text = serde_json::to_string_pretty(&config)
         .map_err(|_| fail("cannot encode the configuration".into()))?;
     text.push('\n');
     let mut file = OpenOptions::new()
@@ -247,6 +259,18 @@ fn parse(text: &str) -> Result<Config, String> {
                 Some(mib) => config.search_index_mib = Some(mib),
                 None => return Err("search_index_mib must be a whole number of MiB".into()),
             },
+            "segment_mib" => {
+                let range = MIN_SEGMENT_MIB..=MAX_SEGMENT_MIB;
+                match value.as_u64().filter(|mib| range.contains(mib)) {
+                    Some(mib) => config.segment_mib = Some(mib),
+                    None => {
+                        return Err(format!(
+                            "segment_mib must be a whole number of MiB from {MIN_SEGMENT_MIB} \
+                             to {MAX_SEGMENT_MIB}"
+                        ))
+                    }
+                }
+            }
             "unix_socket" => config.unix_socket = Some(non_empty(value, "unix_socket")?.into()),
             "unix_socket_group" => {
                 config.unix_socket_group = Some(non_empty(value, "unix_socket_group")?)
@@ -346,6 +370,22 @@ mod tests {
         for value in ["-1", "1.5", r#""64""#, "1048577"] {
             let error = parse(&format!(r#""search_index_mib": {value}, "#)).unwrap_err();
             assert!(error.contains("search_index_mib"), "{value}: {error}");
+        }
+    }
+
+    #[test]
+    fn segment_mib_range() {
+        let tenants = r#""tenants": [{"name": "a", "token": "tttttttttttttttttttttttttttttttt"}]"#;
+        let parse = |field: &str| super::parse(&format!("{{{field}{tenants}}}"));
+        assert_eq!(parse("").unwrap().segment_mib, None, "absent keeps the 64 MiB default");
+        for mib in [16, 64, 1024] {
+            let config = parse(&format!(r#""segment_mib": {mib}, "#)).unwrap();
+            assert_eq!(config.segment_mib, Some(mib), "{mib}");
+        }
+        for value in ["15", "1025", "0", r#""16""#, "-1", "16.5", "null"] {
+            let error = parse(&format!(r#""segment_mib": {value}, "#)).unwrap_err();
+            let named = error.contains("segment_mib") && error.contains("16 to 1024");
+            assert!(named, "{value}: the error names the key and the range: {error}");
         }
     }
 }

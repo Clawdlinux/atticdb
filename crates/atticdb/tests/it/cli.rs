@@ -80,3 +80,180 @@ fn verify_and_dump_open_any_stored_segment_size() {
         assert!(stdout.lines().any(|got| got.starts_with(line)), "{verb}: {stdout}");
     }
 }
+
+/// The segment size a home's store gets. New homes get 16 MiB. A store keeps the size it was
+/// made with, whatever the config says later.
+#[cfg(unix)]
+mod segments {
+    use super::bare;
+    use crate::portable::Dir;
+    use crate::support::{atticdb, data_dir, kill_holder, Holders};
+    use serde_json::Value;
+    use std::fmt::Write;
+    use std::os::unix::fs::DirBuilderExt;
+    use std::path::{Path, PathBuf};
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    /// A fresh `HOME` in `dir`, and its home's data directory.
+    fn new_home(dir: &Dir) -> (PathBuf, PathBuf) {
+        let home = dir.0.join("h");
+        std::fs::create_dir_all(&home).unwrap();
+        let data = data_dir(&home);
+        (home, data)
+    }
+
+    /// Runs a verb on the home, which must succeed. Returns stdout.
+    fn run(home: &Path, args: &[&str]) -> String {
+        let (code, out, err) = atticdb(home, home, args, &[], b"", 0);
+        assert_eq!(code, Some(0), "{args:?}: {err}");
+        out
+    }
+
+    /// The home's config, parsed.
+    fn config(data: &Path) -> Value {
+        let path = data.parent().unwrap().join("atticdb.json");
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+    }
+
+    /// Checks there are segments and a spare, each `size` bytes. A spare fill is skipped when
+    /// free space moves during it, as when parallel tests delete their stores. Only a later
+    /// superblock or a server start retries it, so this restarts the server until it is there.
+    fn assert_store_files(home: &Path, data: &Path, size: u64, case: &str) {
+        for _ in 0..20 {
+            if data.join("spare.zdb").exists() {
+                break;
+            }
+            assert!(kill_holder(data), "{case}: the server stops");
+            run(home, &["recent", "--n", "1"]);
+        }
+        assert!(data.join("spare.zdb").exists(), "{case}: no spare after 20 starts");
+        let mut files = Vec::new();
+        for entry in std::fs::read_dir(data).unwrap().map(Result::unwrap) {
+            let name = entry.file_name().into_string().unwrap();
+            if name == "spare.zdb" || (name.starts_with("seg-") && name.ends_with(".zdb")) {
+                files.push((name, entry.metadata().unwrap().len()));
+            }
+        }
+        assert!(files.iter().any(|(name, _)| name.starts_with("seg-")), "{case}: {files:?}");
+        for (name, len) in &files {
+            assert_eq!(*len, size, "{case}: {name}");
+        }
+    }
+
+    /// The first run makes a home whose config says 16, so its store gets 16 MiB files.
+    #[test]
+    fn new_home_uses_16_mib_segments() {
+        let dir = Dir::new();
+        let (home, data) = new_home(&dir);
+        let _holders = Holders(vec![data.clone()]);
+        run(&home, &["append", "--content", "hi"]);
+        assert_eq!(config(&data)["segment_mib"], 16, "the home's config sets 16");
+        assert_store_files(&home, &data, 16 << 20, "new home");
+    }
+
+    /// A home from before `segment_mib` has 64 MiB files. Setting 16 later changes nothing on
+    /// disk. The server keeps the stored size, serves the data and takes appends.
+    #[test]
+    fn existing_store_keeps_its_segment_size() {
+        let dir = Dir::new();
+        let (home, data) = new_home(&dir);
+        let home_dir = data.parent().unwrap();
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(home_dir).unwrap();
+        // `atticdb init` writes what every home got before: tenant `me` and no segment_mib.
+        let path = home_dir.join("atticdb.json");
+        let init = ["init", "--config", path.to_str().unwrap(), "--tenant", "me"];
+        let out = bare().args(init).env("HOME", &home).stdin(Stdio::null()).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(config(&data).get("segment_mib"), None, "an old home's config");
+        let _holders = Holders(vec![data.clone()]);
+        run(&home, &["append", "--content", "one"]);
+        assert_store_files(&home, &data, 64 << 20, "old home");
+
+        assert!(kill_holder(&data), "the server stops");
+        let mut edited = config(&data);
+        edited["segment_mib"] = 16.into();
+        std::fs::write(&path, edited.to_string()).unwrap();
+        run(&home, &["append", "--content", "two"]);
+        let recent: Value = serde_json::from_str(&run(&home, &["recent", "--n", "10"])).unwrap();
+        let turns = recent["turns"].as_array().unwrap();
+        let mut found: Vec<_> = turns.iter().filter_map(|turn| turn["content"].as_str()).collect();
+        found.sort_unstable();
+        assert_eq!(found, ["one", "two"], "{recent}");
+        assert_store_files(&home, &data, 64 << 20, "old home with segment_mib 16");
+    }
+
+    /// The largest body the server reads, 8 MiB, commits in a 16 MiB home. Each content
+    /// character is a 6-byte `\uXXXX` escape that the store keeps as 3 UTF-8 bytes. So the
+    /// turns hold about 4 MiB of text that compresses poorly, near the tape's 4 MiB batch cap.
+    #[test]
+    fn home_accepts_a_body_cap_batch() {
+        let dir = Dir::new();
+        let (home, data) = new_home(&dir);
+        let _holders = Holders(vec![data.clone()]);
+        run(&home, &["append", "--content", "hi"]);
+        assert_store_files(&home, &data, 16 << 20, "a 16 MiB home");
+        let target = (8 << 20) - (16 << 10);
+        let skeleton = |a: &str, b: &str| {
+            let turn = |content: &str| format!(r#"{{"role":"user","content":"{content}"}}"#);
+            let (a, b) = (turn(a), turn(b));
+            format!(r#"{{"agent":"a","session":"s","idem_key":"big","turns":[{a},{b}]}}"#)
+        };
+        let chars = (target - skeleton("", "").len()) / 6;
+        // xorshift64 over U+0800 to U+D7FF: 3 UTF-8 bytes each, no surrogates.
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut text = || {
+            let mut out = String::with_capacity(chars / 2 * 6);
+            for _ in 0..chars / 2 {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                write!(out, "\\u{:04x}", 0x800 + state % (0xd800 - 0x800)).unwrap();
+            }
+            out
+        };
+        let (first, second) = (text(), text());
+        let body = skeleton(&first, &second);
+        assert!(body.len() > (8 << 20) - (32 << 10) && body.len() <= 8 << 20, "{}", body.len());
+
+        let token = config(&data)["tenants"][0]["token"].as_str().unwrap().to_owned();
+        let auth = format!("Bearer {token}");
+        let headers = [("Host", "127.0.0.1"), ("Authorization", auth.as_str())];
+        let mut stream =
+            std::os::unix::net::UnixStream::connect(data.join("atticdb.sock")).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let response = atticdb::http::exchange(
+            &mut stream,
+            "POST",
+            "/v1/append",
+            &headers,
+            body.as_bytes(),
+            deadline,
+            1 << 20,
+        )
+        .unwrap();
+        let reply: Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!((response.status, &reply["outcome"]), (200, &"committed".into()), "{reply}");
+        assert_eq!(reply["seqs"], serde_json::json!([1, 2]), "{reply}");
+        assert_store_files(&home, &data, 16 << 20, "after the big batch");
+    }
+
+    /// `atticdb init`, for servers, writes exactly what it wrote before. With no segment_mib,
+    /// a server's new store keeps 64 MiB.
+    #[test]
+    fn init_output_is_unchanged() {
+        let dir = Dir::new();
+        let path = dir.0.join("c.json");
+        let init = ["init", "--config", path.to_str().unwrap(), "--tenant", "a"];
+        let out = bare().args(init).env("HOME", dir.0.join("h")).stdin(Stdio::null()).output();
+        let out = out.unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let token = String::from_utf8(out.stdout).unwrap();
+        let token = token.strip_suffix('\n').unwrap();
+        let want = format!(
+            "{{\n  \"tenants\": [\n    {{\n      \"name\": \"a\",\n      \"token\": \"{token}\"\n    \
+             }}\n  ]\n}}\n"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), want);
+    }
+}
