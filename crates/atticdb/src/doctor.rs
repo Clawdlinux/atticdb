@@ -9,6 +9,7 @@ use crate::setup::{check_hook, check_server, title, typed, ORDER};
 use atticdb_tape::{Io, StdIo};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// What `atticdb doctor --help` prints.
 pub const USAGE: &str = "usage: atticdb doctor [--harness <list>]
@@ -149,6 +150,7 @@ fn check(harnesses: Option<Vec<Harness>>) -> u8 {
     if let Some(found) = found {
         server_version(&mut checks, &found);
     }
+    println!("  {}", store(&dir.join("data")));
     let named = harnesses.is_some();
     for harness in harnesses.unwrap_or_else(|| ORDER.to_vec()) {
         // The newer apps show only when connected or named. So an upgrade adds no lines, nor
@@ -351,6 +353,52 @@ fn disk(checks: &mut Checks, dir: &Path) {
     }
 }
 
+/// The store line for the data dir `data`, by [`store_text`]. It reads the MANIFEST without
+/// the lock and opens no engine, so it works whether the server runs or not. It is
+/// informational and never a failure.
+fn store(data: &Path) -> String {
+    let manifest = std::fs::symlink_metadata(data.join("MANIFEST"));
+    if matches!(&manifest, Err(error) if error.kind() == ErrorKind::NotFound) {
+        return "store: not created yet".into();
+    }
+    match on_disk(data) {
+        Ok(bytes) => {
+            store_text(bytes, atticdb_tape::stored_segment_size(Arc::new(StdIo::new()), data))
+        }
+        Err(error) => format!("store: size on disk unknown ({error})"),
+    }
+}
+
+/// `store: <X> MB on disk, <S> MiB segments`, for `bytes` on disk and the `stored` segment
+/// size. A size that can't be read says why, briefly.
+fn store_text(bytes: u64, stored: atticdb_tape::Result<u64>) -> String {
+    const MIB: u64 = 1 << 20;
+    let segments = match stored {
+        Ok(size) if size % MIB == 0 => format!("{} MiB segments", size / MIB),
+        Ok(size) => format!("{size}-byte segments"),
+        Err(atticdb_tape::Error::CorruptionDetected { reason, .. }) => {
+            format!("segment size unknown ({reason})")
+        }
+        Err(atticdb_tape::Error::Io(_, message)) => format!("segment size unknown ({message})"),
+        Err(error) => format!("segment size unknown ({error})"),
+    };
+    format!("store: {:.1} MB on disk, {segments}", bytes as f64 / 1e6)
+}
+
+/// The sizes of the regular files directly in `data`, summed. It neither follows symlinks nor
+/// recurses. A file that goes while it counts, such as a spare being renamed, is skipped.
+fn on_disk(data: &Path) -> std::io::Result<u64> {
+    let mut bytes = 0u64;
+    for entry in std::fs::read_dir(data)? {
+        let Ok(entry) = entry else { continue };
+        match std::fs::symlink_metadata(entry.path()) {
+            Ok(meta) if meta.is_file() => bytes = bytes.saturating_add(meta.len()),
+            _ => {}
+        }
+    }
+    Ok(bytes)
+}
+
 /// Free space against the floor.
 #[derive(Debug, PartialEq, Eq)]
 enum Space {
@@ -459,6 +507,7 @@ fn sandboxes(dir: Option<&PathBuf>) {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
 
     /// A server on this binary's version is ok. Another version, or none, fails with the fix.
@@ -488,6 +537,63 @@ mod tests {
         for (found, what, result) in rows {
             assert_eq!(version_line(&found, "1.2.0"), (what.to_owned(), result), "{found:?}");
         }
+    }
+
+    /// The store line: MB with 1 decimal place, the segment size in MiB, or why it is unknown.
+    #[test]
+    fn store_lines() {
+        use atticdb_tape::Error;
+        let corrupt = |reason: &str| Error::CorruptionDetected {
+            lsn: 0,
+            segment: 0,
+            offset: 0,
+            reason: reason.into(),
+        };
+        let denied = Error::Io(ErrorKind::PermissionDenied, "Permission denied".into());
+        let rows = [
+            (35_651_871, Ok(16 << 20), "store: 35.7 MB on disk, 16 MiB segments"),
+            (0, Ok(64 << 20), "store: 0.0 MB on disk, 64 MiB segments"),
+            (1_049_999, Ok(65_536), "store: 1.0 MB on disk, 65536-byte segments"),
+            (
+                1_000_000,
+                Err(corrupt("invalid metadata length")),
+                "store: 1.0 MB on disk, segment size unknown (invalid metadata length)",
+            ),
+            (
+                1_000_000,
+                Err(denied),
+                "store: 1.0 MB on disk, segment size unknown (Permission denied)",
+            ),
+            (
+                1,
+                Err(Error::Poisoned),
+                "store: 0.0 MB on disk, segment size unknown (tape poisoned by a failed sync)",
+            ),
+        ];
+        for (bytes, stored, line) in rows {
+            assert_eq!(store_text(bytes, stored), line);
+        }
+    }
+
+    /// The store's size counts only the regular files directly in the data dir. It follows no
+    /// symlink and skips subdirectories. With no MANIFEST, the store isn't created yet.
+    #[test]
+    fn store_counts_regular_files_only() {
+        let dir = std::env::temp_dir().join(format!("atticdb-doctor-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (data, outside) = (dir.join("data"), dir.join("outside"));
+        std::fs::create_dir_all(data.join("sub")).unwrap();
+        std::fs::write(&outside, vec![0; 5_000_000]).unwrap();
+        std::fs::write(data.join("sub/inner"), vec![0; 5_000_000]).unwrap();
+        std::fs::write(data.join("small"), vec![0; 1_000]).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, data.join("link")).unwrap();
+        assert_eq!(on_disk(&data).unwrap(), 1_000);
+        assert_eq!(store(&data), "store: not created yet");
+        std::fs::write(data.join("MANIFEST"), "x").unwrap();
+        let line = "store: 0.0 MB on disk, segment size unknown (invalid metadata length)";
+        assert_eq!(store(&data), line);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Free space against a 100-byte floor, and filesystem names.

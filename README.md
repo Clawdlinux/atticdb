@@ -67,6 +67,7 @@ Then it stops the running server and runs `atticdb doctor` from the new binary, 
 It stops the server only after the server proves it serves this home's store. Else it says to stop it by hand.
 The plan always warns that a release may change the store format. Then the old binary can't open the store after the first write.
 With an older `--version`, the plan warns instead. The older binary may not open a store a newer release wrote.
+A home with 16 MiB segments is one: older releases refuse its config and its segments (D106).
 
 To roll back with the default install dir:
 
@@ -101,6 +102,11 @@ atticdb doctor            # checks the install; it may start the server
 `setup` finds Copilot CLI, VS Code, Claude Code, Codex, Gemini CLI, Antigravity and Claude Desktop. It adds the MCP entry, a chat-start hook and the guide each app reads. Antigravity and Claude Desktop get only the MCP entry. Restart them to load it. Claude Code also gets a PostCompact hook. It saves each compaction summary as a note, with a pointer to the full transcript. Every edited file is backed up first. `atticdb disconnect <app>` removes exactly what it added. Codex runs a new hook only after you approve it once in Codex. [research/setup_eval/results](research/setup_eval/results/README.md) has the eval results.
 
 `atticdb doctor` prints 1 line per check, with what to do when one fails. [Set up](crates/atticdb/README.md#set-up) and [`atticdb doctor`](crates/atticdb/README.md#atticdb-doctor) give the details.
+
+A new home reserves about 34 MiB: 2 segment files of 16 MiB and 2 MiB of index files.
+A home made before keeps its 64 MiB segments, about 130 MiB. Nothing migrates it.
+The config key `segment_mib`, 16 to 1024, sets the segment size of a new store only. Without it, a store gets 64 MiB.
+`atticdb doctor` shows the size as `store: <X> MB on disk, <S> MiB segments`. The [crate README](crates/atticdb/README.md) gives the details.
 
 ## Memory tree
 

@@ -27,7 +27,7 @@ atticdb verify --data-dir ./data                  # checks a stopped data dir on
 atticdb recover --truncate-at <lsn> --data-dir ./data
 ```
 
-The config is JSON: `{"data_dir", "listen", "unix_socket", "unix_socket_group", "compression", "search_index_mib", "tenants": [{"name", "token"}]}`.
+The config is JSON: `{"data_dir", "listen", "unix_socket", "unix_socket_group", "compression", "search_index_mib", "segment_mib", "tenants": [{"name", "token"}]}`.
 Flags override fields. It must be a regular file owned by you with no group or other bits.
 Tenant names are 1 to 255 bytes. Tokens are 32 to 1024 bytes of visible ASCII, so the `Authorization` header fits the 16 KiB request head. Duplicate names or tokens fail.
 
@@ -37,6 +37,17 @@ Tenant names are 1 to 255 bytes. Tokens are 32 to 1024 bytes of visible ASCII, s
 - `off`: new turns are stored plain. Compressed turns stay readable.
 
 `search_index_mib` is the memory budget of the word index behind `memory_search`, default 512. It holds about 9 to 14% of the turn text, so 512 MiB covers about 3.5 GiB of turns. Past the budget it stops growing and search walks the newer records, still correctly but slower. `0` turns it off. See [Search](#search).
+
+`segment_mib` is the size of a new store's segment files, 16 to 1024. Without it, a store gets 64 MiB.
+It applies only to a new store. An existing store keeps the size in its MANIFEST, and nothing migrates it.
+A store reserves 2 segment files, the one in use and a spare, plus 2 MiB of index files.
+- `atticdb setup` and a first run write `"segment_mib": 16` in a new home. So a new home reserves about 34 MiB (35.7 MB).
+- `atticdb init` writes no `segment_mib`, so a server keeps 64 MiB, about 130 MiB reserved.
+- A home made before this key keeps its 64 MiB segments.
+- Releases before this key reject a config that holds it. They also refuse a store whose segments aren't 64 MiB.
+  So an older `atticdb upgrade --version` can't open a new home. Its downgrade warning applies.
+
+`atticdb doctor` shows the store's size on disk and its segment size. See [`atticdb doctor`](#atticdb-doctor).
 
 `/v1/stats` shows `manifest_version` (3 once a directory may hold compressed turns), `compressing`, `compressed_turns`, the index's `search_index_lsn`, `search_index_bytes`, `search_index_terms` and `search_index_stopped`, and the hot cache's `hot_cache_bytes`, `hot_cache_hits`, `hot_cache_misses` and `hot_cache_dropped`.
 
@@ -183,6 +194,11 @@ Each check prints 1 line: `ok`, or the problem and what to do. They run in this 
   - **server version:** the version the server's `/healthz` gives must be this binary's.
     Else it fails with `server version: <v>, this binary is <w>: stop pid <pid>. The next AtticDB call starts this binary's server.`
     A server too old to send a version shows `unknown`. A server keeps running old code after its binary is replaced.
+  - **store:** `store: <X> MB on disk, <S> MiB segments`. It is information, never a failure. It shows even when the store check fails.
+    `<X>` sums the regular files directly in `data/`, in MB of 10^6 bytes. It follows no symlink and skips subdirectories.
+    `<S>` is the segment size in the MANIFEST. Doctor reads it without the lock, so it works whether the server runs or not.
+    A home with no store yet shows `store: not created yet`.
+    A MANIFEST it can't read shows `segment size unknown (<reason>)` in place of `<S> MiB segments`.
 - **Each app:** the apps it finds, or those in `--harness`. An app that isn't found prints `not found`. That is not a failure.
   Gemini CLI, Antigravity and Claude Desktop show only when named, or when their config holds an `atticdb` entry.
   So an app found but never connected prints no line, and doctor stays green after an upgrade. Setup still offers it.

@@ -579,6 +579,101 @@ fn doctor_compares_the_server_version() {
     drop(lock);
 }
 
+/// The regular files directly in `data`, summed, in MB with 1 decimal place.
+fn on_disk(data: &Path) -> String {
+    let mut bytes = 0;
+    for entry in std::fs::read_dir(data).unwrap() {
+        let meta = std::fs::symlink_metadata(entry.unwrap().path()).unwrap();
+        if meta.is_file() {
+            bytes += meta.len();
+        }
+    }
+    format!("{:.1} MB", bytes as f64 / 1e6)
+}
+
+/// Makes this process a stand-in server on this binary's version. It holds `data`'s lock and
+/// answers on a socket there. Returns the lock, which the caller drops to let it go.
+fn stand_in(data: &Path) -> File {
+    let socket = data.join("stand-in.sock");
+    let _ = std::fs::remove_file(&socket);
+    let mut lock = File::create(data.join("LOCK")).unwrap();
+    lock.try_lock().unwrap();
+    let pid = std::process::id();
+    let holder = format!("pid={pid} instance=X unix={} tcp=none\n", socket.display());
+    lock.write_all(holder.as_bytes()).unwrap();
+    let health = json!({"status": "ok", "instance": "X", "version": atticdb::VERSION});
+    support::fake_store(&socket, Some(Duration::ZERO), health);
+    lock
+}
+
+/// Under "Server and store", doctor shows the store's size on disk and its MANIFEST's segment
+/// size. It reads the MANIFEST without the lock, so it works while the server runs or when
+/// none can. A home with no store yet, or a bad MANIFEST, says so. The line never fails.
+#[test]
+fn doctor_shows_store_size() {
+    let dir = Dir::new();
+    let (home, empty) = (dir.0.join("h"), dir.0.join("empty"));
+    for made in [&home, &empty] {
+        std::fs::create_dir(made).unwrap();
+    }
+    let no_apps = OsString::from(&empty);
+    let data = data_dir(&home);
+    let config = data.parent().unwrap().join("atticdb.json");
+    let _holders = Holders(vec![data.clone()]);
+    let version = atticdb::VERSION;
+    let doctor = || atticdb("doctor", &home, &dir.0, &no_apps, &[], &[], "");
+    // A read sets up the home, with 16 MiB segments, and starts its server.
+    let list = ["list", "--prefix", "x"];
+    let (code, out, err) = atticdb("fact", &home, &dir.0, &no_apps, &[], &list, "");
+    assert_eq!(code, Some(0), "{out}{err}");
+
+    // The server is running and holds the lock. It fills its spare at open, before it
+    // answers, and again only after a write. So the files hold still while doctor runs.
+    let (code, out, err) = doctor();
+    assert_eq!(code, Some(0), "{out}{err}");
+    let size = on_disk(&data);
+    let line =
+        format!("  server version: {version}: ok\n  store: {size} on disk, 16 MiB segments\n");
+    assert!(out.contains(&format!("\nServer and store: ok\n{line}")), "{out}{err}");
+    // A 16 MiB segment, 2 MiB of index files, and the 16 MiB spare. The fill skips the spare
+    // when free space doesn't drop as it reserves, as when other tests free space at once.
+    let spare = data.join("spare.zdb").exists();
+    assert_eq!(size, if spare { "35.7 MB" } else { "18.9 MB" }, "{out}");
+
+    // No server runs, and the config stops doctor from starting one.
+    assert!(support::kill_holder(&data));
+    let saved = std::fs::read(&config).unwrap();
+    std::fs::write(&config, "{").unwrap();
+    let (code, out, err) = doctor();
+    assert_eq!(code, Some(1), "the config fails: {out}{err}");
+    assert!(!support::locked(&data), "no server started: {out}{err}");
+    assert!(out.contains("\nServer and store: config "), "{out}{err}");
+    let line = format!("\n  store: {} on disk, 16 MiB segments\n", on_disk(&data));
+    assert!(out.contains(&line), "{out}{err}");
+    std::fs::write(&config, saved).unwrap();
+
+    // A bad MANIFEST, while a stand-in server holds the lock. Doctor still passes.
+    let manifest = data.join("MANIFEST");
+    std::fs::write(&manifest, "not a manifest").unwrap();
+    let lock = stand_in(&data);
+    let (code, out, err) = doctor();
+    assert_eq!(code, Some(0), "{out}{err}");
+    let unknown = "segment size unknown (invalid metadata length)";
+    let line = format!("\n  store: {} on disk, {unknown}\n", on_disk(&data));
+    assert!(out.contains(&line), "{out}{err}");
+    drop(lock);
+
+    // A home whose store isn't created yet.
+    std::fs::rename(&data, data.with_extension("old")).unwrap();
+    std::fs::DirBuilder::new().mode(0o700).create(&data).unwrap();
+    let lock = stand_in(&data);
+    let (code, out, err) = doctor();
+    assert_eq!(code, Some(0), "{out}{err}");
+    let line = format!("\n  server version: {version}: ok\n  store: not created yet\n");
+    assert!(out.contains(&line), "{out}{err}");
+    drop(lock);
+}
+
 /// An AtticDB binary that doesn't exist.
 const OLD: &str = "/old/atticdb";
 /// What doctor says about a home that isn't set up, with `atticdb` as it names the binary.

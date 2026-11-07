@@ -449,6 +449,31 @@ fn lengths(io: &dyn Io) -> (Vec<u64>, Option<u64>) {
     (segments.into_iter().map(|(_, len)| len).collect(), spare)
 }
 
+/// `stored_segment_size` reads the MANIFEST's size while a writer holds the lock, and after.
+/// It writes nothing and leaves no file open. A missing or bad MANIFEST is an error.
+#[test]
+fn stored_segment_size_reads_the_manifest_without_the_lock() {
+    let disk = Arc::new(HookIo::sim(1));
+    let missing = atticdb_tape::stored_segment_size(disk.clone(), Path::new("db"));
+    assert!(matches!(missing, Err(Error::Io(ErrorKind::NotFound, _))), "{missing:?}");
+    let (mut core, _) = open(disk.clone(), opts(64 * KIB));
+    commit(&mut core, turn(4000)).unwrap();
+    let manifest = read(&*disk, "db/MANIFEST");
+    let open_files = disk.open_files();
+    let stored = atticdb_tape::stored_segment_size(disk.clone(), Path::new("db"));
+    assert_eq!(stored.unwrap(), 64 * KIB, "while the writer holds the lock");
+    assert_eq!(disk.open_files(), open_files, "closes the MANIFEST");
+    drop(core);
+    let stored = atticdb_tape::stored_segment_size(disk.clone(), Path::new("db"));
+    assert_eq!(stored.unwrap(), 64 * KIB, "after the writer closed");
+    assert_eq!(read(&*disk, "db/MANIFEST"), manifest, "writes nothing");
+    let file = disk.open(Path::new("db/MANIFEST")).unwrap();
+    disk.write_at(file, 0, b"NOTMANIF").unwrap();
+    disk.close(file).unwrap();
+    let bad = atticdb_tape::stored_segment_size(disk.clone(), Path::new("db"));
+    assert!(matches!(bad, Err(Error::CorruptionDetected { .. })), "{bad:?}");
+}
+
 /// A configured size that differs from the stored one never fails an open. The stored size
 /// wins for recovery, rolls and the spare, and the MANIFEST keeps it.
 #[test]
