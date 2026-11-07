@@ -15,6 +15,7 @@ It is stdlib only, and no answering model is involved.
   - `tokens@k`: the bytes of the top-k turn contents divided by 4, averaged. This is "≈ tokens (bytes/4)".
 - Latency is the median and p95 wall time of the search call, in ms.
   - Ingestion and server start are excluded.
+  - p50 and p95 cover only questions where the arm ran a search. An arm with no content words runs none.
   - Arms 1 to 3 go over the Unix socket. FTS5 runs in process, so it skips the IPC cost.
 - Full context is the average bytes/4 of a whole conversation's turn contents.
 

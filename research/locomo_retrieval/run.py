@@ -344,6 +344,7 @@ def summary_markdown(rows: list[Mapping], meta: Mapping) -> str:
                          f"{_pct(c[f'hit@{k}'])} | {c[f'tokens@{k}']:,.0f} |")
     lines += ["", "## Latency", "",
               "Wall time of the search call only, in ms. Ingestion and server start are excluded.",
+              "p50 and p95 cover only questions where the arm ran a search.",
               "Arms 1 to 3 go over the Unix socket. FTS5 runs in process. Random runs no search.",
               "", "| arm | searches | p50 | p95 |", "|---|---|---|---|"]
     for arm in ARMS:
