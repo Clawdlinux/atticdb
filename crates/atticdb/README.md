@@ -197,6 +197,8 @@ Each check prints 1 line: `ok`, or the problem and what to do. They run in this 
   - **store:** `store: <X> MB on disk, <S> MiB segments`. It is information, never a failure. It shows even when the store check fails.
     `<X>` sums the regular files directly in `data/`, in MB of 10^6 bytes. It follows no symlink and skips subdirectories.
     `<S>` is the segment size in the MANIFEST. Doctor reads it without the lock, so it works whether the server runs or not.
+    On Windows, while a server holds the lock, doctor leaves the MANIFEST unopened. It shows `segment size not read while the server runs`.
+    The server replaces the MANIFEST by a rename, which fails there while another process has the file open.
     A home with no store yet shows `store: not created yet`.
     A MANIFEST it can't read shows `segment size unknown (<reason>)` in place of `<S> MiB segments`.
 - **Each app:** the apps it finds, or those in `--harness`. An app that isn't found prints `not found`. That is not a failure.
@@ -251,7 +253,7 @@ Upgrade? [y/N]
 ```
 
 Releases carry no store format version, so the warning always shows.
-An older `--version` shows this warning instead: `This is an older release. It may not open a store a newer release has written. Roll back with atticdb.prev.`
+An older `--version` shows this warning instead: `This is an older release. It may not open a store a newer release has written. Roll back with atticdb.prev. Releases before segment_mib refuse a home made by this release.`
 Without `--version` it asks GitHub for the latest release now, past the cache and the off switches.
 When this binary is already the latest, it prints `AtticDB <v> is the latest.` and exits 0.
 A `+dev` source build counts as older than its own release.

@@ -353,50 +353,65 @@ fn disk(checks: &mut Checks, dir: &Path) {
     }
 }
 
-/// The store line for the data dir `data`, by [`store_text`]. It reads the MANIFEST without
-/// the lock and opens no engine, so it works whether the server runs or not. It is
-/// informational and never a failure.
+/// The store line for the data dir `data`, by [`store_with`]. On Windows, a running server
+/// replaces the MANIFEST by a rename, which fails while another process has it open. So
+/// there doctor leaves the MANIFEST alone while a server holds the lock.
 fn store(data: &Path) -> String {
-    let manifest = std::fs::symlink_metadata(data.join("MANIFEST"));
-    if matches!(&manifest, Err(error) if error.kind() == ErrorKind::NotFound) {
+    store_with(data, cfg!(windows) && crate::serve::lock_holder(data).is_some())
+}
+
+/// The store line for the data dir `data`, by [`store_text`]. It reads the MANIFEST without
+/// the lock and opens no engine, so it works whether the server runs or not. With
+/// `skip_manifest` it doesn't open the MANIFEST at all. It is informational, never a failure.
+fn store_with(data: &Path, skip_manifest: bool) -> String {
+    let (bytes, manifest) = match on_disk(data) {
+        Ok(found) => found,
+        Err(error) => return format!("store: size on disk unknown ({error})"),
+    };
+    if !manifest {
         return "store: not created yet".into();
     }
-    match on_disk(data) {
-        Ok(bytes) => {
-            store_text(bytes, atticdb_tape::stored_segment_size(Arc::new(StdIo::new()), data))
-        }
-        Err(error) => format!("store: size on disk unknown ({error})"),
-    }
+    let stored =
+        (!skip_manifest).then(|| atticdb_tape::stored_segment_size(Arc::new(StdIo::new()), data));
+    store_text(bytes, stored)
 }
 
 /// `store: <X> MB on disk, <S> MiB segments`, for `bytes` on disk and the `stored` segment
-/// size. A size that can't be read says why, briefly.
-fn store_text(bytes: u64, stored: atticdb_tape::Result<u64>) -> String {
+/// size. A size that can't be read says why, briefly. `None` is a MANIFEST left unread
+/// while the server runs.
+fn store_text(bytes: u64, stored: Option<atticdb_tape::Result<u64>>) -> String {
     const MIB: u64 = 1 << 20;
     let segments = match stored {
-        Ok(size) if size % MIB == 0 => format!("{} MiB segments", size / MIB),
-        Ok(size) => format!("{size}-byte segments"),
-        Err(atticdb_tape::Error::CorruptionDetected { reason, .. }) => {
+        None => "segment size not read while the server runs".into(),
+        Some(Ok(size)) if size % MIB == 0 => format!("{} MiB segments", size / MIB),
+        Some(Ok(size)) => format!("{size}-byte segments"),
+        Some(Err(atticdb_tape::Error::CorruptionDetected { reason, .. })) => {
             format!("segment size unknown ({reason})")
         }
-        Err(atticdb_tape::Error::Io(_, message)) => format!("segment size unknown ({message})"),
-        Err(error) => format!("segment size unknown ({error})"),
+        Some(Err(atticdb_tape::Error::Io(_, message))) => {
+            format!("segment size unknown ({message})")
+        }
+        Some(Err(error)) => format!("segment size unknown ({error})"),
     };
     format!("store: {:.1} MB on disk, {segments}", bytes as f64 / 1e6)
 }
 
-/// The sizes of the regular files directly in `data`, summed. It neither follows symlinks nor
-/// recurses. A file that goes while it counts, such as a spare being renamed, is skipped.
-fn on_disk(data: &Path) -> std::io::Result<u64> {
-    let mut bytes = 0u64;
+/// The sizes of the regular files directly in `data`, summed, and whether a MANIFEST is
+/// there. It neither follows symlinks nor recurses. A file that goes while it counts, such
+/// as a spare being renamed, is skipped. It reads the listing's metadata, which on Windows
+/// opens no file, so it can't block a server's rename.
+fn on_disk(data: &Path) -> std::io::Result<(u64, bool)> {
+    let (mut bytes, mut manifest) = (0u64, false);
     for entry in std::fs::read_dir(data)? {
         let Ok(entry) = entry else { continue };
-        match std::fs::symlink_metadata(entry.path()) {
+        manifest |= entry.file_name() == "MANIFEST";
+        // Like `symlink_metadata`, this doesn't follow a symlink.
+        match entry.metadata() {
             Ok(meta) if meta.is_file() => bytes = bytes.saturating_add(meta.len()),
             _ => {}
         }
     }
-    Ok(bytes)
+    Ok((bytes, manifest))
 }
 
 /// Free space against the floor.
@@ -551,22 +566,27 @@ mod tests {
         };
         let denied = Error::Io(ErrorKind::PermissionDenied, "Permission denied".into());
         let rows = [
-            (35_651_871, Ok(16 << 20), "store: 35.7 MB on disk, 16 MiB segments"),
-            (0, Ok(64 << 20), "store: 0.0 MB on disk, 64 MiB segments"),
-            (1_049_999, Ok(65_536), "store: 1.0 MB on disk, 65536-byte segments"),
+            (35_651_871, Some(Ok(16 << 20)), "store: 35.7 MB on disk, 16 MiB segments"),
+            (0, Some(Ok(64 << 20)), "store: 0.0 MB on disk, 64 MiB segments"),
+            (1_049_999, Some(Ok(65_536)), "store: 1.0 MB on disk, 65536-byte segments"),
+            (
+                35_651_871,
+                None,
+                "store: 35.7 MB on disk, segment size not read while the server runs",
+            ),
             (
                 1_000_000,
-                Err(corrupt("invalid metadata length")),
+                Some(Err(corrupt("invalid metadata length"))),
                 "store: 1.0 MB on disk, segment size unknown (invalid metadata length)",
             ),
             (
                 1_000_000,
-                Err(denied),
+                Some(Err(denied)),
                 "store: 1.0 MB on disk, segment size unknown (Permission denied)",
             ),
             (
                 1,
-                Err(Error::Poisoned),
+                Some(Err(Error::Poisoned)),
                 "store: 0.0 MB on disk, segment size unknown (tape poisoned by a failed sync)",
             ),
         ];
@@ -577,6 +597,7 @@ mod tests {
 
     /// The store's size counts only the regular files directly in the data dir. It follows no
     /// symlink and skips subdirectories. With no MANIFEST, the store isn't created yet.
+    /// `skip_manifest`, as on Windows while a server runs, leaves the MANIFEST unread.
     #[test]
     fn store_counts_regular_files_only() {
         let dir = std::env::temp_dir().join(format!("atticdb-doctor-{}", std::process::id()));
@@ -588,11 +609,16 @@ mod tests {
         std::fs::write(data.join("small"), vec![0; 1_000]).unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(&outside, data.join("link")).unwrap();
-        assert_eq!(on_disk(&data).unwrap(), 1_000);
+        assert_eq!(on_disk(&data).unwrap(), (1_000, false));
         assert_eq!(store(&data), "store: not created yet");
+        assert_eq!(store_with(&data, true), "store: not created yet");
         std::fs::write(data.join("MANIFEST"), "x").unwrap();
+        assert_eq!(on_disk(&data).unwrap(), (1_001, true));
         let line = "store: 0.0 MB on disk, segment size unknown (invalid metadata length)";
         assert_eq!(store(&data), line);
+        assert_eq!(store_with(&data, false), line);
+        let line = "store: 0.0 MB on disk, segment size not read while the server runs";
+        assert_eq!(store_with(&data, true), line);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

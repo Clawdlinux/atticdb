@@ -70,7 +70,8 @@ mod unix {
                            can't open the store after the first write.";
     /// Shown instead of [`WARNING`] when the release is older than this binary.
     const DOWNGRADE: &str = "This is an older release. It may not open a store a newer \
-                             release has written. Roll back with atticdb.prev.";
+                             release has written. Roll back with atticdb.prev. Releases \
+                             before segment_mib refuse a home made by this release.";
     /// What it says when it can't ask.
     const NEEDS_TERMINAL: &str = "atticdb upgrade needs a terminal, or --yes.";
     /// The 1 line for a failed check.

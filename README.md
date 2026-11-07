@@ -67,7 +67,7 @@ Then it stops the running server and runs `atticdb doctor` from the new binary, 
 It stops the server only after the server proves it serves this home's store. Else it says to stop it by hand.
 The plan always warns that a release may change the store format. Then the old binary can't open the store after the first write.
 With an older `--version`, the plan warns instead. The older binary may not open a store a newer release wrote.
-A home with 16 MiB segments is one: older releases refuse its config and its segments (D106).
+A home with 16 MiB segments is one: releases before `segment_mib` refuse its config and its segments (D106).
 
 To roll back with the default install dir:
 

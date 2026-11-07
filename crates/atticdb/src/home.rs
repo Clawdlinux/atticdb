@@ -20,7 +20,7 @@ pub(crate) const CONFIG: &str = "atticdb.json";
 /// The variable that moves the home. Empty counts as unset.
 pub const HOME_ENV: &str = "ATTICDB_HOME";
 /// The segment size a new home's config sets, the smallest allowed. A home holds one user's
-/// memory, so its 2 preallocated files take about 34 MB instead of 134 MB.
+/// memory, so its 2 preallocated files take about 34 MiB (35.7 MB) instead of 130 MiB.
 const SEGMENT_MIB: u64 = crate::config::MIN_SEGMENT_MIB;
 /// Most bytes read from a `.git` or `commondir` file. A longer one names no real path.
 const MAX_GIT_FILE: u64 = 8 << 10;
