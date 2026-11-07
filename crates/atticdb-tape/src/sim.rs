@@ -433,6 +433,57 @@ impl Rng {
     }
 }
 
+/// Options for each reopen of a store, with a configured segment size drawn per reopen.
+///
+/// The draws use their own RNG, so each seed keeps its schedule. A reopen must keep the
+/// size the store was created with.
+struct Reopens {
+    base: Options,
+    rng: Rng,
+}
+
+impl Reopens {
+    fn new(seed: u64, base: &Options) -> Self {
+        Self { base: base.clone(), rng: Rng::new(seed ^ 0xA5A5_5A5A_A5A5_5A5A) }
+    }
+
+    /// The store's creation size.
+    fn created(&self) -> u64 {
+        self.base.segment_size
+    }
+
+    /// The creation options with a configured segment size drawn for 1 reopen.
+    fn opts(&mut self) -> Options {
+        let sizes = [self.created(), 128, 1024, 64 * 1024, DEFAULT_SEGMENT_SIZE];
+        Options { segment_size: sizes[self.rng.below(sizes.len())], ..self.base.clone() }
+    }
+
+    /// Asserts that a reopened store kept its creation size in the MANIFEST and on every
+    /// segment and spare. It checks a crash image, so the live disk is left untouched.
+    fn check(&self, disk: &SimDisk) {
+        let image = Arc::new(disk.crash().unwrap());
+        let db = Path::new("db");
+        let mut segments = 0;
+        for path in image.list(db).unwrap() {
+            let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+            if name.starts_with("seg-") || name == "spare.zdb" {
+                let file = image.open(&path).unwrap();
+                assert_eq!(image.len(file).unwrap(), self.created(), "{name}");
+                image.close(file).unwrap();
+                segments += usize::from(name.starts_with("seg-"));
+            }
+        }
+        assert!(segments > 0, "an open store has an active segment");
+        let manifest = db.join("MANIFEST");
+        let versions = crate::dir::MANIFEST_VERSIONS;
+        let (_, values) = crate::dir::read_any(image.clone(), &manifest, b"ZDBMANIF", versions)
+            .unwrap_or_else(|error| panic!("read MANIFEST: {error:?}"));
+        assert_eq!(values.first(), Some(&self.created()), "stored segment size");
+        let dir = DataDir::open(image, db, None, DEFAULT_SEGMENT_SIZE).unwrap();
+        assert_eq!(dir.segment_size(), self.created());
+    }
+}
+
 /// Counters that the [`CrashIo`] hook checks on every call.
 #[derive(Debug, Default)]
 struct Faults {
@@ -715,7 +766,7 @@ fn capacity_faults(
     mut core: WriterCore<RecordingStateMachine>,
     io: &mut CrashIo,
     clock: &Arc<SimClock>,
-    opts: &Options,
+    reopens: &mut Reopens,
     oracle: &mut Oracle,
     rng: &mut Rng,
     plan: &CapacityPlan,
@@ -768,7 +819,7 @@ fn capacity_faults(
         *expected,
         "acknowledged record must remain readable with no free space"
     );
-    if boundary > 256 && opts.lsn_index_bytes == 12 * 1024 {
+    if boundary > 256 && reopens.base.lsn_index_bytes == 12 * 1024 {
         assert!(core.index_stats().unwrap().page_reloads > reloads, "sampled a cold index page");
     }
     assert_eq!(io.disk.available_bytes(Path::new("db")).unwrap(), 0);
@@ -832,18 +883,22 @@ fn capacity_faults(
     let image = io.faults.image.lock().unwrap().take();
     drop(core);
     if image.is_some() {
-        let (tape, _) = recording_tape(Arc::new(crashed.clone()), clock.clone(), opts.clone());
+        let (tape, _) = recording_tape(Arc::new(crashed.clone()), clock.clone(), reopens.opts());
+        reopens.check(&crashed);
         // Do not promote later survivors into acknowledgements for the earlier image.
         after_reply.unwrap().verify(&tape);
         drop(tape);
     }
     let next = image.unwrap_or(crashed);
-    let (tape, _) = recording_tape(Arc::new(next.clone()), clock.clone(), opts.clone());
+    let (tape, _) = recording_tape(Arc::new(next.clone()), clock.clone(), reopens.opts());
+    reopens.check(&next);
     oracle.verify(&tape);
     drop(tape);
     next.set_capacity(SimDisk::DEFAULT_CAPACITY).unwrap();
     *io = CrashIo::new(next);
-    recording_core(io.hooks.clone(), clock.clone(), opts.clone())
+    let reopened = recording_core(io.hooks.clone(), clock.clone(), reopens.opts());
+    reopens.check(&io.disk);
+    reopened
 }
 
 /// Runs 1 capacity fault phase and 2 or 3 crash generations, retaining acknowledged and uncertain transactions.
@@ -874,10 +929,13 @@ fn run_seed_with_capacity(seed: u64, plan: &CapacityPlan) {
     let clock = Arc::new(SimClock::default());
     let mut disk = SimDisk::new(seed);
     let mut oracle = Oracle::default();
+    let mut reopens = Reopens::new(seed, &opts);
     for generation in 0..generations {
         let mut io = CrashIo::new(disk);
-        let (mut core, mut published) =
-            recording_core(io.hooks.clone(), clock.clone(), opts.clone());
+        // Generation 0 creates the store. Every later open is a reopen.
+        let first = if generation == 0 { opts.clone() } else { reopens.opts() };
+        let (mut core, mut published) = recording_core(io.hooks.clone(), clock.clone(), first);
+        reopens.check(&io.disk);
         probe(&mut core, &mut oracle, &mut rng);
         published.verify(core.durable_lsn());
         clock.advance(1_000_000_000);
@@ -897,10 +955,12 @@ fn run_seed_with_capacity(seed: u64, plan: &CapacityPlan) {
             assert!(core.is_poisoned());
             drop(core);
             // Process restart preserves failed page-cache bytes. No crash image is taken here.
-            let (tape, _) = recording_tape(io.hooks.clone(), clock.clone(), opts.clone());
+            let (tape, _) = recording_tape(io.hooks.clone(), clock.clone(), reopens.opts());
+            reopens.check(&io.disk);
             oracle.verify(&tape);
             drop(tape);
-            (core, published) = recording_core(io.hooks.clone(), clock.clone(), opts.clone());
+            (core, published) = recording_core(io.hooks.clone(), clock.clone(), reopens.opts());
+            reopens.check(&io.disk);
             probe(&mut core, &mut oracle, &mut rng);
             published.verify(core.durable_lsn());
             if rng.below(2) == 0 {
@@ -910,7 +970,7 @@ fn run_seed_with_capacity(seed: u64, plan: &CapacityPlan) {
         }
         if generation == capacity_generation {
             (core, published) =
-                capacity_faults(core, &mut io, &clock, &opts, &mut oracle, &mut rng, plan);
+                capacity_faults(core, &mut io, &clock, &mut reopens, &mut oracle, &mut rng, plan);
         }
         let steps = 4 + rng.below(9);
         let cut_step = rng.below(steps);
@@ -954,12 +1014,14 @@ fn run_seed_with_capacity(seed: u64, plan: &CapacityPlan) {
         disk = io.faults.image.lock().unwrap().take().unwrap_or_else(|| io.disk.crash().unwrap());
         drop(core);
         if seed.is_multiple_of(11) && generation + 1 == generations {
-            let dir = DataDir::open(Arc::new(disk.clone()), "db", None, opts.segment_size).unwrap();
+            let size = reopens.opts().segment_size;
+            let dir = DataDir::open(Arc::new(disk.clone()), "db", None, size).unwrap();
+            assert_eq!(dir.segment_size(), reopens.created(), "configured={size}");
             assert!(dir.superblock() > 0);
             damage_durable(&disk, &dir, &mut rng);
             drop(dir);
             assert!(matches!(
-                Tape::open(Arc::new(disk), clock, "db", opts),
+                Tape::open(Arc::new(disk), clock, "db", reopens.opts()),
                 Err(Error::CorruptionDetected { .. })
             ));
             return;
@@ -967,23 +1029,29 @@ fn run_seed_with_capacity(seed: u64, plan: &CapacityPlan) {
         if rng.below(4) == 0 {
             let recovery_io = CrashIo::new(disk.clone());
             recovery_io.faults.cut.store(1 + rng.below(25), Ordering::SeqCst);
-            let (tape, _) = recording_tape(recovery_io.hooks.clone(), clock.clone(), opts.clone());
+            let (tape, _) =
+                recording_tape(recovery_io.hooks.clone(), clock.clone(), reopens.opts());
+            reopens.check(&recovery_io.disk);
             drop(tape);
             let image = recovery_io.faults.image.lock().unwrap().take();
             if let Some(image) = image {
                 disk = image;
             }
         }
-        let (tape, report) = recording_tape(Arc::new(disk.clone()), clock.clone(), opts.clone());
+        let (tape, report) = recording_tape(Arc::new(disk.clone()), clock.clone(), reopens.opts());
+        reopens.check(&disk);
         oracle.verify(&tape);
         assert_eq!(report.records as u64, tape.durable_lsn());
         drop(tape);
     }
-    let (mut core, published) = recording_core(Arc::new(disk.clone()), clock.clone(), opts.clone());
+    let (mut core, published) =
+        recording_core(Arc::new(disk.clone()), clock.clone(), reopens.opts());
+    reopens.check(&disk);
     probe(&mut core, &mut oracle, &mut rng);
     published.verify(core.durable_lsn());
     drop(core);
-    let (tape, _) = recording_tape(Arc::new(disk), clock, opts);
+    let (tape, _) = recording_tape(Arc::new(disk.clone()), clock, reopens.opts());
+    reopens.check(&disk);
     oracle.verify(&tape);
 }
 
