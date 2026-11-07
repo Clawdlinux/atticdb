@@ -7,6 +7,7 @@ It covers the shapes the loader must handle:
 - category as an int or a string
 - evidence as a list or a string, with duplicates
 - category 5 without an answer, and questions with empty evidence
+- evidence joined by ";", "," or a space, zero-padded ids and unknown ids
 """
 
 from __future__ import annotations
@@ -57,6 +58,17 @@ CONV_A = {
          "evidence": ["D10:1"], "category": 5},
         {"question": "Would Orla enjoy a ceramics fair?", "answer": "Likely yes",
          "evidence": [], "category": 3},
+        # Malformed evidence that normalization repairs or drops.
+        {"question": "What hobbies did Orla and Bram start?", "answer": "pottery and chess",
+         "evidence": ["D1:1; D2:1"], "category": 1},
+        {"question": "When does Bram's club meet, and where?", "answer": "Thursdays, the library",
+         "evidence": "['D1:2 D2:1']", "category": 2},
+        {"question": "What cone did the kiln reach?", "answer": "six",
+         "evidence": ["D10:01"], "category": 4},
+        {"question": "What day does the chess club meet?", "answer": "Thursday",
+         "evidence": ["D2:1", "D9:9"], "category": 4},
+        {"question": "Does Orla sell her bowls?", "answer": "unknown",
+         "evidence": ["D7:1", "D:1:2"], "category": 3},
     ],
 }
 
@@ -76,6 +88,8 @@ CONV_B = {
          "evidence": "['D1:1', 'D1:2']", "category": "3"},
         {"question": "Did Ezra adopt a cat?", "evidence": "[]", "category": "5"},
         {"question": "How old is Pickle?", "answer": "unknown", "evidence": "[]", "category": 1},
+        {"question": "Who named the greyhound?", "answer": "Tamsin",
+         "evidence": ["D1:2,D1:1"], "category": 4},
     ],
 }
 

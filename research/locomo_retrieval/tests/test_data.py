@@ -40,17 +40,27 @@ def test_turn_content_is_speaker_then_text():
 
 def test_only_categories_1_to_4_with_evidence_are_kept(path):
     a, b = data.load(path)
-    assert [(q.index, q.category) for q in a.questions] == [(0, 4), (1, 2), (2, 1)]
-    assert [(q.index, q.category) for q in b.questions] == [(0, 3)]
+    assert [(q.index, q.category) for q in a.questions] == [(0, 4), (1, 2), (2, 1), (5, 1), (6, 2), (7, 4), (8, 4)]
+    assert [(q.index, q.category) for q in b.questions] == [(0, 3), (3, 4)]
 
 
 def test_evidence_parses_from_list_and_string(path):
     a, b = data.load(path)
     assert a.questions[0] == Question(0, 4, "Where did Orla sign up for a pottery workshop?", ("D1:1",))
     assert a.questions[1].evidence == ("D2:1",)
-    # Duplicates are kept as given. Scoring dedupes them.
-    assert a.questions[2].evidence == ("D2:2", "D10:2", "D2:2")
     assert b.questions[0].evidence == ("D1:1", "D1:2")
+
+
+def test_evidence_is_normalized_at_load(path):
+    a, b = data.load(path)
+    ev = {q.index: q.evidence for q in a.questions}
+    assert ev[2] == ("D2:2", "D10:2")  # Duplicate removed, order kept.
+    assert ev[5] == ("D1:1", "D2:1")  # ";"-joined.
+    assert ev[6] == ("D1:2", "D2:1")  # Space-joined, inside a string.
+    assert ev[7] == ("D10:1",)  # Zero-padded.
+    assert ev[8] == ("D2:1",)  # Unknown D9:9 dropped.
+    assert 9 not in ev  # Every id unknown: unscorable.
+    assert b.questions[1].evidence == ("D1:2", "D1:1")  # ","-joined.
 
 
 def test_category_is_an_int(path):
@@ -59,9 +69,36 @@ def test_category_is_an_int(path):
             assert type(q.category) is int
 
 
-def test_excluded_counts_category_5_and_empty_evidence(path):
+EXCLUDED = {"category_5": 2, "empty_evidence": 2, "unscorable_evidence": 1,
+            "normalized_questions": 6, "dropped_ids": 3}
+
+
+def test_excluded_counts_exclusions_and_normalization(path):
     # A category 5 question with empty evidence counts as category 5 only.
-    assert data.excluded(path) == {"category_5": 2, "empty_evidence": 2}
+    # dropped_ids includes the 2 from the unscorable question.
+    assert data.excluded(path) == EXCLUDED
+
+
+@pytest.mark.parametrize("ids, want, dropped", [
+    (("D1:1",), ("D1:1",), 0),
+    (("D1:1; D2:1",), ("D1:1", "D2:1"), 0),
+    (("D1:1,D2:1",), ("D1:1", "D2:1"), 0),
+    (("D1:1 \tD2:1 ",), ("D1:1", "D2:1"), 0),
+    (("D01:001", "D1:1"), ("D1:1",), 0),
+    (("D2:1", "D1:1", "D2:1"), ("D2:1", "D1:1"), 0),
+    (("D9:9", "D", "D:1:1", "d1:1", "D1:1"), ("D1:1",), 4),
+    (("; ,",), (), 0),
+])
+def test_normalize_evidence(ids, want, dropped):
+    assert data.normalize_evidence(ids, {"D1:1", "D2:1"}) == (want, dropped)
+
+
+def test_question_with_only_separators_is_unscorable(tmp_path):
+    raw = fixture.samples()
+    raw[1]["qa"][0]["evidence"] = ["; ,"]
+    path = fixture.write(tmp_path / "sep.json", raw)
+    assert [q.index for q in data.load(path)[1].questions] == [3]
+    assert data.excluded(path)["unscorable_evidence"] == 2
 
 
 def test_bad_evidence_string_raises(tmp_path):
@@ -110,8 +147,8 @@ def test_parse_never_reads_answer():
     raw = fixture.samples()
     for sample in raw:
         sample["qa"] = [_NoAnswer(q) for q in sample["qa"]]
-    assert sum(len(c.questions) for c in data.parse(raw)) == 4
-    assert data.count_excluded(raw) == {"category_5": 2, "empty_evidence": 2}
+    assert sum(len(c.questions) for c in data.parse(raw)) == 9
+    assert data.count_excluded(raw) == EXCLUDED
 
 
 # ---- fetch ----

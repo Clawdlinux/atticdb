@@ -26,10 +26,18 @@
 - **Dataset:** `https://raw.githubusercontent.com/snap-research/locomo/main/data/locomo10.json`, with SHA-256 `79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4`.
   - A mismatch stops the run. Cache it under `--cache-dir`, default `~/.cache/atticdb-locomo`.
   - It is CC BY-NC 4.0. Never commit it or any part of it, including tests, fixtures and results. Results hold only ids, numbers and the arm's query text. Tests use a hand-written fixture.
-- **Questions:** categories 1 to 4 only, 1,540 questions. Category 5, adversarial with no answer, is excluded and its count is reported.
+- **Questions:** 1,540 questions in categories 1 to 4. 4 have no evidence and are excluded and counted, so 1,536 are scored.
+  - Category 5, adversarial with no answer, is excluded and its count is reported.
   - Questions with an empty `evidence` list are excluded and counted.
-  - LoCoMo's category names, as Living Brain also uses them: 1 multi-hop (282), 2 temporal (321), 3 open-domain (96), 4 single-hop (841).
+  - LoCoMo's category names, as Living Brain also uses them: 1 multi-hop (282), 2 temporal (321), 3 open-domain (96, 92 scored), 4 single-hop (841).
   - `evidence` is a string like `"['D1:3']"` or a list. Parse both with `ast.literal_eval`. Any parse failure stops the run.
+  - Evidence is then normalized once at load, the same for every arm, without reading answers:
+    - Split each entry on `;`, `,` and whitespace, and strip each piece.
+    - Rewrite `D<int>:<int>` without leading zeros, so `D30:05` becomes `D30:5`.
+    - Drop ids the conversation has no turn for. Remove duplicates, keeping order.
+    - A question with no valid id left is excluded and counted as `unscorable_evidence`.
+    - Report `category_5`, `empty_evidence`, `unscorable_evidence`, `normalized_questions` and `dropped_ids`.
+    - On the real file: 10 questions normalized, 4 ids dropped, 0 unscorable.
 - **Corpus:**
   - Each turn becomes 1 AtticDB note with content `"<speaker>: <text>"`, agent `locomo`, session `<sample_id>`, and meta `{"dia_id": <dia_id>}`.
   - Turns go in in session order, then turn order. Session dates are not added to the content.
@@ -134,7 +142,7 @@
 
 - [ ] Build `atticdb` from main in release mode.
 - [ ] Run all 10 conversations with seed 0.
-- [ ] Check the summary by hand: the question count is 1,540 minus the empty-evidence ones, every arm has rows for every question, and random recall@k is close to k / turns.
+- [ ] Check the summary by hand: 1,536 questions are scored (1,540 minus 4 with empty evidence, and 0 unscorable), every arm has rows for every question, and random recall@k is close to k / turns.
 - [ ] Commit `research/locomo_retrieval/results/2026-11-07.md` with numbers only, plus a short "what this says" section that cites the CSV columns. Don't commit `results.csv`, because its `query` column holds question words.
 - [ ] Open the PR.
 

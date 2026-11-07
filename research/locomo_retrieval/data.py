@@ -2,6 +2,13 @@
 
 The harness never reads a qa item's `answer`. Category 5 items often lack one.
 Only categories 1 to 4 with non-empty evidence are kept. The rest are counted.
+
+Evidence normalization is fixed, runs once at load, and is the same for every arm:
+- Split each raw entry on ";", "," and whitespace, and strip each piece.
+- Rewrite `D<int>:<int>` without leading zeros, so "D30:05" becomes "D30:5".
+- Drop ids the conversation has no turn for, and count them in `dropped_ids`.
+- Remove duplicates, keeping the first.
+A question left with no valid id is excluded as `unscorable_evidence`.
 """
 
 from __future__ import annotations
@@ -14,7 +21,7 @@ import re
 import tempfile
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -26,6 +33,10 @@ CATEGORY_NAMES = {1: "multi-hop", 2: "temporal", 3: "open-domain", 4: "single-ho
 ADVERSARIAL = 5
 
 _SESSION = re.compile(r"session_(\d+)")
+_SPLIT = re.compile(r"[;,\s]+")
+_DIA_ID = re.compile(r"D(\d+):(\d+)")
+
+COUNT_KEYS = ("category_5", "empty_evidence", "unscorable_evidence", "normalized_questions", "dropped_ids")
 
 
 @dataclass(frozen=True)
@@ -45,7 +56,7 @@ class Question:
     index: int  # Position in the sample's `qa` list, before any filter.
     category: int
     question: str
-    evidence: tuple[str, ...]  # As given, duplicates included.
+    evidence: tuple[str, ...]  # Normalized: valid, unique, in order.
 
 
 @dataclass(frozen=True)
@@ -102,44 +113,69 @@ def _turns(sample_id: str, conversation: Mapping) -> list[Turn]:
     return turns
 
 
-def _classify(sample_id: str, index: int, qa: Mapping) -> Question | str:
-    """A kept Question, or the reason it's excluded: "category_5" or "empty_evidence".
-
-    Category comes first, so a category 5 item's evidence is never parsed.
-    """
-    cat = _category(sample_id, index, qa["category"])
-    if cat == ADVERSARIAL:
-        return "category_5"
-    evidence = _evidence(sample_id, index, qa["evidence"])
-    if not evidence:
-        return "empty_evidence"
-    return Question(index, cat, str(qa["question"]), evidence)
+def normalize_evidence(ids: Iterable[str], known: Collection[str]) -> tuple[tuple[str, ...], int]:
+    """(the valid ids in first-seen order, the count of unknown ids dropped)."""
+    out: dict[str, None] = {}
+    dropped = 0
+    for entry in ids:
+        for piece in _SPLIT.split(entry.strip()):
+            if not piece:
+                continue
+            if m := _DIA_ID.fullmatch(piece):
+                piece = f"D{int(m.group(1))}:{int(m.group(2))}"
+            if piece in known:
+                out.setdefault(piece, None)
+            else:
+                dropped += 1
+    return tuple(out), dropped
 
 
 def _sample_id(sample: Mapping) -> str:
     return str(sample["sample_id"])
 
 
-def parse(samples: Iterable[Mapping]) -> list[Conversation]:
-    """Conversations from already-decoded LoCoMo JSON, with only the kept questions."""
-    out = []
+def _scan(samples: Iterable[Mapping]) -> tuple[list[Conversation], dict[str, int]]:
+    """The conversations with their kept questions, and the counts.
+
+    Category comes first, so a category 5 item's evidence is never parsed.
+    `normalized_questions` counts kept questions whose evidence changed.
+    `dropped_ids` counts unknown ids in all category 1 to 4 questions, unscorable ones included.
+    """
+    counts = dict.fromkeys(COUNT_KEYS, 0)
+    convs = []
     for sample in samples:
         sid = _sample_id(sample)
-        kept = [q for i, qa in enumerate(sample["qa"]) if isinstance(q := _classify(sid, i, qa), Question)]
-        out.append(Conversation(sid, _turns(sid, sample["conversation"]), kept))
-    return out
+        turns = _turns(sid, sample["conversation"])
+        known = {t.dia_id for t in turns}
+        kept = []
+        for i, qa in enumerate(sample["qa"]):
+            cat = _category(sid, i, qa["category"])
+            if cat == ADVERSARIAL:
+                counts["category_5"] += 1
+                continue
+            raw = _evidence(sid, i, qa["evidence"])
+            if not raw:
+                counts["empty_evidence"] += 1
+                continue
+            evidence, dropped = normalize_evidence(raw, known)
+            counts["dropped_ids"] += dropped
+            if not evidence:
+                counts["unscorable_evidence"] += 1
+                continue
+            counts["normalized_questions"] += evidence != raw
+            kept.append(Question(i, cat, str(qa["question"]), evidence))
+        convs.append(Conversation(sid, turns, kept))
+    return convs, counts
+
+
+def parse(samples: Iterable[Mapping]) -> list[Conversation]:
+    """Conversations from already-decoded LoCoMo JSON, with only the kept questions."""
+    return _scan(samples)[0]
 
 
 def count_excluded(samples: Iterable[Mapping]) -> dict[str, int]:
-    """How many questions are dropped, by reason, over all samples."""
-    counts = {"category_5": 0, "empty_evidence": 0}
-    for sample in samples:
-        sid = _sample_id(sample)
-        for i, qa in enumerate(sample["qa"]):
-            reason = _classify(sid, i, qa)
-            if isinstance(reason, str):
-                counts[reason] += 1
-    return counts
+    """The exclusion and normalization counts over all samples. Keys are COUNT_KEYS."""
+    return _scan(samples)[1]
 
 
 def _read(path: str | os.PathLike) -> list:
@@ -153,7 +189,7 @@ def load(path: str | os.PathLike) -> list[Conversation]:
 
 
 def excluded(path: str | os.PathLike) -> dict[str, int]:
-    """Count the questions load() drops: category 5, and empty evidence."""
+    """What load() drops and repairs. Keys are COUNT_KEYS."""
     return count_excluded(_read(path))
 
 
