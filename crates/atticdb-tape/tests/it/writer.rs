@@ -1,8 +1,8 @@
 use crate::support::*;
-use atticdb_tape::sim::{PreparedBatch, SimClock, WriterCore};
+use atticdb_tape::sim::{DataDir, PreparedBatch, SimClock, WriterCore};
 use atticdb_tape::{
     Clock, Committed, Digest, Durability, Error, FileId, Frame, Header, HookIo, Io, Kind,
-    LockGuard, Op, Outcome, RecoveryReport, SimDisk, StdIo, SystemClock, Tape,
+    LockGuard, Op, Outcome, RecordInput, RecoveryReport, SimDisk, StdIo, SystemClock, Tape,
     TapeOptions as Options, WriteError, WriteResult,
 };
 use std::io::ErrorKind;
@@ -427,21 +427,174 @@ fn real_files_reopen_with_multiple_tenants_and_rebuilt_chain_heads() {
     assert_eq!(reopen().1.records, 5);
 }
 
-#[test]
-fn segment_size_mismatch_is_rejected_without_mutation() {
-    for wrong in [512, 2048] {
-        let io = Arc::new(HookIo::sim(0));
-        let (mut core, _) = open(io.clone(), opts(1024));
-        commit(&mut core, hello()).unwrap();
-        drop(core);
-        let (before, events) = (files(&*io), io.record());
-        let result = WriterCore::open(io.clone(), clock(), "db", opts(wrong));
-        assert!(matches!(result, Err(Error::Configuration(_))), "size={wrong}");
-        assert!(events.lock().unwrap().is_empty(), "size={wrong}: mismatch must not write or sync");
-        assert_eq!(files(&*io), before, "size={wrong}");
-        assert_eq!(io.open_files(), 0, "size={wrong}");
-        assert_eq!(open(io, opts(1024)).1.records, 1, "size={wrong}");
+const KIB: u64 = 1024;
+
+/// One turn for tenant 1 with `len` bytes of payload.
+fn turn(len: usize) -> Vec<RecordInput> {
+    vec![record(Kind::Turn, 1, vec![7; len])]
+}
+
+/// The length of each segment in `db` in id order, and the spare's length if there is one.
+fn lengths(io: &dyn Io) -> (Vec<u64>, Option<u64>) {
+    let (mut segments, mut spare) = (Vec::new(), None);
+    for (path, bytes) in files(io) {
+        let name = path.file_name().unwrap().to_str().unwrap().to_owned();
+        if name.starts_with("seg-") {
+            segments.push((name, bytes.len() as u64));
+        } else if name == "spare.zdb" {
+            spare = Some(bytes.len() as u64);
+        }
     }
+    segments.sort();
+    (segments.into_iter().map(|(_, len)| len).collect(), spare)
+}
+
+/// `stored_segment_size` reads the MANIFEST's size while a writer holds the lock, and after.
+/// It writes nothing and leaves no file open. A missing or bad MANIFEST is an error.
+#[test]
+fn stored_segment_size_reads_the_manifest_without_the_lock() {
+    let disk = Arc::new(HookIo::sim(1));
+    let missing = atticdb_tape::stored_segment_size(disk.clone(), Path::new("db"));
+    assert!(matches!(missing, Err(Error::Io(ErrorKind::NotFound, _))), "{missing:?}");
+    let (mut core, _) = open(disk.clone(), opts(64 * KIB));
+    commit(&mut core, turn(4000)).unwrap();
+    let manifest = read(&*disk, "db/MANIFEST");
+    let open_files = disk.open_files();
+    let stored = atticdb_tape::stored_segment_size(disk.clone(), Path::new("db"));
+    assert_eq!(stored.unwrap(), 64 * KIB, "while the writer holds the lock");
+    assert_eq!(disk.open_files(), open_files, "closes the MANIFEST");
+    drop(core);
+    let stored = atticdb_tape::stored_segment_size(disk.clone(), Path::new("db"));
+    assert_eq!(stored.unwrap(), 64 * KIB, "after the writer closed");
+    assert_eq!(read(&*disk, "db/MANIFEST"), manifest, "writes nothing");
+    let file = disk.open(Path::new("db/MANIFEST")).unwrap();
+    disk.write_at(file, 0, b"NOTMANIF").unwrap();
+    disk.close(file).unwrap();
+    let bad = atticdb_tape::stored_segment_size(disk.clone(), Path::new("db"));
+    assert!(matches!(bad, Err(Error::CorruptionDetected { .. })), "{bad:?}");
+}
+
+/// A configured size that differs from the stored one never fails an open. The stored size
+/// wins for recovery, rolls and the spare, and the MANIFEST keeps it.
+#[test]
+fn existing_store_keeps_its_segment_size() {
+    for configured in [512, 32 * KIB, 128 * KIB, Options::default().segment_size] {
+        let disk = Arc::new(SimDisk::new(1));
+        let (mut core, _) = open(disk.clone(), opts(64 * KIB));
+        // 12 turns of 4000 bytes overflow a 32 KiB segment but fit one of 64 KiB.
+        for _ in 0..12 {
+            commit(&mut core, turn(4000)).unwrap();
+        }
+        drop(core);
+        let manifest = read(&*disk, "db/MANIFEST");
+        let (mut core, report) = open(disk.clone(), opts(configured));
+        assert_eq!(read(&*disk, "db/MANIFEST"), manifest, "configured={configured}: no rewrite");
+        assert_eq!(report.records, 12, "configured={configured}");
+        for lsn in 1..=12 {
+            assert_eq!(core.read(lsn).unwrap().unwrap().payload, [7; 4000], "lsn={lsn}");
+        }
+        // Each 40000 byte turn rolls to a new segment. It fits only a 64 KiB segment.
+        for _ in 0..2 {
+            commit(&mut core, turn(40_000)).unwrap();
+        }
+        core.maintain().unwrap();
+        let want = (vec![64 * KIB; 3], Some(64 * KIB));
+        assert_eq!(lengths(&*disk), want, "configured={configured}");
+        drop(core);
+        let dir = DataDir::open(disk.clone(), "db", None, configured).unwrap();
+        assert_eq!(dir.segment_size(), 64 * KIB, "configured={configured}");
+        drop(dir);
+        // Open removed the old spare. `Tape::open` fills a new one from the stored size.
+        assert_eq!(lengths(&*disk).1, None, "configured={configured}");
+        let (tape, report) = Tape::open(disk.clone(), clock(), "db", opts(configured)).unwrap();
+        assert_eq!(report.records, 14, "configured={configured}");
+        assert_eq!(lengths(&*disk), want, "configured={configured}");
+        assert_eq!(tape.read(14).unwrap().unwrap().payload, [7; 40_000]);
+    }
+}
+
+/// Crash images reopen with a smaller configured size. Recovery, new rolls and the refilled
+/// spare all use the stored 64 KiB.
+#[test]
+fn crash_recovery_and_the_spare_use_the_stored_segment_size() {
+    for seed in 0..10 {
+        let io = Arc::new(HookIo::sim(seed));
+        io.inner.set_sector_size(if seed % 2 == 1 { 4 } else { 512 }).unwrap();
+        let (mut core, _) = open(io.clone(), opts(64 * KIB));
+        commit(&mut core, turn(40_000)).unwrap();
+        core.maintain().unwrap();
+        let images = io.capture();
+        // Both turns roll, the first onto the spare.
+        let replies: Vec<_> = (0..2).map(|_| submit(&mut core, turn(40_000))).collect();
+        core.step();
+        for reply in replies {
+            reply.recv().unwrap().unwrap();
+        }
+        core.maintain().unwrap();
+        let images = images.lock().unwrap().clone();
+        assert!(!images.is_empty(), "seed={seed}");
+        for (event, image) in images {
+            let image = Arc::new(image);
+            let case = format!("seed={seed}, crash after {event}");
+            let (mut reopened, _) = open(image.clone(), opts(32 * KIB));
+            let durable = reopened.durable_lsn();
+            assert!((1..=3).contains(&durable), "{case}");
+            for lsn in 1..=durable {
+                assert_eq!(reopened.read(lsn).unwrap().unwrap().payload, [7; 40_000], "{case}");
+            }
+            let committed = commit(&mut reopened, turn(40_000)).unwrap();
+            let next = durable + 1;
+            let appended =
+                matches!(committed, Committed::Durable { first_lsn, .. } if first_lsn == next);
+            assert!(appended, "{case}: {committed:?}");
+            reopened.maintain().unwrap();
+            let (segments, spare) = lengths(&*image);
+            assert!(segments.iter().all(|&len| len == 64 * KIB), "{case}: {segments:?}");
+            assert_eq!(spare, Some(64 * KIB), "{case}");
+        }
+    }
+}
+
+/// A new directory takes the configured size, and later opens keep it.
+#[test]
+fn new_directory_uses_the_configured_segment_size() {
+    let disk = Arc::new(SimDisk::new(1));
+    let (mut core, _) = open(disk.clone(), opts(32 * KIB));
+    commit(&mut core, turn(20_000)).unwrap();
+    commit(&mut core, turn(20_000)).unwrap();
+    core.maintain().unwrap();
+    assert_eq!(lengths(&*disk), (vec![32 * KIB; 2], Some(32 * KIB)));
+    drop(core);
+    let dir = DataDir::open(disk.clone(), "db", None, 64 * KIB).unwrap();
+    assert_eq!(dir.segment_size(), 32 * KIB);
+    drop(dir);
+    let (mut core, _) = open(disk.clone(), opts(64 * KIB));
+    let rejected = commit(&mut core, turn(40_000));
+    assert!(matches!(rejected, Err(WriteError { kind: Error::BatchTooLarge, .. })));
+}
+
+/// A configured size too small for a transaction refuses only a new directory. An existing
+/// store opens with its stored size.
+#[test]
+fn tiny_configured_size_refuses_only_a_new_directory() {
+    let tiny = |error: Option<Error>| matches!(error, Some(Error::Configuration(m)) if m == "segment cannot hold a transaction");
+    let disk = Arc::new(SimDisk::new(1));
+    assert!(tiny(WriterCore::open(disk.clone(), clock(), "db", opts(64)).err()));
+    assert!(tiny(Tape::open(disk.clone(), clock(), "db", opts(64)).err()));
+    assert!(!disk.exists(Path::new("db/MANIFEST")).unwrap(), "a refused new dir has no MANIFEST");
+    assert!(!disk.exists(&seg(1)).unwrap());
+    let (mut core, _) = open(disk.clone(), opts(32 * KIB));
+    commit(&mut core, hello()).unwrap();
+    drop(core);
+    let (mut core, report) = open(disk.clone(), opts(64));
+    assert_eq!(report.records, 1);
+    commit(&mut core, turn(20_000)).unwrap();
+    drop(core);
+    let (tape, report) = Tape::open(disk.clone(), clock(), "db", opts(64)).unwrap();
+    assert_eq!(report.records, 2);
+    drop(tape);
+    assert_eq!(DataDir::open(disk.clone(), "db", None, 64).unwrap().segment_size(), 32 * KIB);
+    assert!(lengths(&*disk).0.iter().all(|&len| len == 32 * KIB));
 }
 
 #[test]

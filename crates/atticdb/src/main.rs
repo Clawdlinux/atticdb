@@ -330,7 +330,7 @@ fn report<T>(result: Result<T, impl std::fmt::Display>) -> Result<T, u8> {
 
 fn init(mut flags: HashMap<String, String>) -> Option<u8> {
     let (config, tenant) = (flags.remove("--config")?, flags.remove("--tenant")?);
-    Some(match report(atticdb::config::init(Path::new(&config), &tenant)) {
+    Some(match report(atticdb::config::init(Path::new(&config), &tenant, None)) {
         Ok(token) => {
             println!("{}", token.expose());
             0

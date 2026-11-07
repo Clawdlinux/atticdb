@@ -232,6 +232,35 @@ pub struct DataDir {
 /// refuse it at open, before they read any frame.
 pub const MANIFEST_VERSIONS: std::ops::RangeInclusive<u32> = 2..=3;
 
+/// A parsed MANIFEST.
+struct Manifest {
+    version: u32,
+    segment_size: u64,
+    segments: Vec<u64>,
+}
+
+/// Reads and checks the MANIFEST in the data directory `path`. Takes no lock.
+fn read_manifest(io: Arc<dyn Io>, path: &Path) -> Result<Manifest> {
+    let (version, values) = read_any(io, &path.join("MANIFEST"), b"ZDBMANIF", MANIFEST_VERSIONS)?;
+    let (stored, segments) =
+        values.split_first().ok_or_else(|| corruption(0, 0, 0, "missing segment size"))?;
+    if *stored == 0 || usize::try_from(*stored).is_err() {
+        return Err(corruption(0, 0, 0, "invalid stored segment size"));
+    }
+    Ok(Manifest { version, segment_size: *stored, segments: segments.to_vec() })
+}
+
+/// Returns the segment size stored in the MANIFEST of the data directory `path`. It neither
+/// takes the lock nor writes, so it works while a server holds the directory. A missing
+/// MANIFEST is an [`Error::Io`] of kind `NotFound`. A bad one is
+/// [`Error::CorruptionDetected`].
+pub fn stored_segment_size(io: Arc<dyn Io>, path: &Path) -> Result<u64> {
+    read_manifest(io, path).map(|manifest| manifest.segment_size)
+}
+
+/// The smallest segment a new directory accepts. It holds 1 transaction of 1 empty record.
+const MIN_SEGMENT_SIZE: u64 = (crate::frame::HEADER_LEN * 2 + 32) as u64;
+
 impl std::fmt::Debug for DataDir {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DataDir")
@@ -244,6 +273,7 @@ impl std::fmt::Debug for DataDir {
 
 impl DataDir {
     /// Takes the lock before reading or initializing metadata. Real directories must already exist.
+    /// `segment_size` sizes a new directory. An existing one keeps its stored size.
     /// Only the sims and tests open a directory this way. The writer uses `open_versioned`.
     #[cfg(any(test, feature = "sim"))]
     pub fn open(
@@ -282,10 +312,8 @@ impl DataDir {
     ) -> Result<Self> {
         let path = path.to_owned();
         let guard = io.try_lock_exclusive(&path.join("LOCK"))?;
+        // A placeholder until the MANIFEST is read or the configured size is checked below.
         let segment_size = configured.unwrap_or(1);
-        if segment_size == 0 || usize::try_from(segment_size).is_err() {
-            return Err(Error::Configuration("invalid segment size".into()));
-        }
         let mut dir = Self {
             io,
             path,
@@ -296,23 +324,11 @@ impl DataDir {
             _lock: guard,
         };
         if dir.io.exists(&dir.path.join("MANIFEST"))? {
-            let (version, values) = read_any(
-                dir.io.clone(),
-                &dir.path.join("MANIFEST"),
-                b"ZDBMANIF",
-                MANIFEST_VERSIONS,
-            )?;
-            dir.manifest_version = version;
-            let (stored, segments) =
-                values.split_first().ok_or_else(|| corruption(0, 0, 0, "missing segment size"))?;
-            if *stored == 0 || usize::try_from(*stored).is_err() {
-                return Err(corruption(0, 0, 0, "invalid stored segment size"));
-            }
-            dir.segment_size = *stored;
-            if let Some(size) = configured {
-                dir.check_segment_size(size)?;
-            }
-            dir.segments = segments.to_vec();
+            let manifest = read_manifest(dir.io.clone(), &dir.path)?;
+            dir.manifest_version = manifest.version;
+            // The stored size wins over a configured one, which only sizes a new directory.
+            dir.segment_size = manifest.segment_size;
+            dir.segments = manifest.segments;
             if dir.segments.windows(2).any(|ids| ids[0] >= ids[1]) {
                 return Err(corruption(0, 0, 0, "unordered manifest"));
             }
@@ -340,8 +356,12 @@ impl DataDir {
             }
             dir.superblock = values[0];
         } else {
-            if configured.is_none() {
+            let Some(configured) = configured else {
                 return Err(corruption(0, 0, 0, "missing manifest"));
+            };
+            // Only a new directory takes the configured size, so only it is checked.
+            if configured < MIN_SEGMENT_SIZE || usize::try_from(configured).is_err() {
+                return Err(Error::Configuration("segment cannot hold a transaction".into()));
             }
             if dir.io.list(&dir.path)?.iter().any(|path| {
                 path.file_name()
@@ -390,6 +410,8 @@ impl DataDir {
         self.install_manifest(&segments).inspect_err(|_| self.manifest_version = old)
     }
 
+    /// Asserts that a size passed to recovery or the segment writer is the stored one. Callers
+    /// pass [`DataDir::segment_size`], so a mismatch is a bug, never a user setting.
     pub(crate) fn check_segment_size(&self, configured: u64) -> Result<()> {
         if configured != self.segment_size {
             return Err(Error::Configuration(format!(

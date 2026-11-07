@@ -427,6 +427,10 @@ fn try_start(config: Config, exit_on_poison: bool, log_requests: bool) -> Result
     if let Some(mib) = config.search_index_mib {
         options.search_index_bytes = (mib as usize).saturating_mul(1 << 20);
     }
+    // Only a new store takes it. An existing one keeps the size in its MANIFEST.
+    if let Some(mib) = config.segment_mib {
+        options.tape.segment_size = mib << 20;
+    }
     #[cfg(unix)]
     let address = format!("instance={instance} unix={} tcp={tcp_text}", socket.display());
     #[cfg(not(unix))]
@@ -465,7 +469,14 @@ fn try_start(config: Config, exit_on_poison: bool, log_requests: bool) -> Result
 pub(crate) fn lock_holder(dir: &Path) -> Option<String> {
     let mut options = std::fs::OpenOptions::new();
     let mut file = crate::config::open_regular(options.read(true), &dir.join("LOCK")).ok()?;
-    let held = matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock));
+    let held = match file.try_lock() {
+        // Unlock before closing: Windows may release a closed handle's lock late.
+        Ok(()) => {
+            let _ = file.unlock();
+            false
+        }
+        Err(e) => matches!(e, std::fs::TryLockError::WouldBlock),
+    };
     let mut holder = String::new();
     (held && file.read_to_string(&mut holder).is_ok()).then_some(holder)
 }

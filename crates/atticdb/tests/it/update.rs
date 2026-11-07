@@ -401,7 +401,8 @@ const WARNING: &str = "If this release changes the store format, the previous bi
                        the store after the first write.";
 /// The warning instead of [`WARNING`] for an older release.
 const DOWNGRADE: &str = "This is an older release. It may not open a store a newer release has \
-                         written. Roll back with atticdb.prev.";
+                         written. Roll back with atticdb.prev. Releases before segment_mib \
+                         refuse a home made by this release.";
 /// What `upgrade` says when stdin is not a terminal and there is no `--yes`.
 const NEEDS_TERMINAL: &str = "atticdb upgrade needs a terminal, or --yes.\n";
 
