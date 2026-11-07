@@ -93,7 +93,7 @@ The arms, the stopword list and k were fixed in the plan before any run.
 Notes on arms 1 to 3:
 - AtticDB search returns turns holding every query word, newest first.
 - It matches each whitespace-separated word as a lowercase substring.
-  - So punctuation counts. A question ending in `"?"` needs a turn holding its last word plus `"?"`.
+  - Every word must be present, filler words included. So a whole question almost never matches.
   - Arm 1 shows what happens when an agent passes the question as it is.
 - A content word is a lowercase `[a-z0-9]+` token of 3 or more characters, not in `words.STOPWORDS`.
 - "Rarest" means the fewest turns in the conversation hold it. Ties break alphabetically.
@@ -119,8 +119,9 @@ Living Brain's LoCoMo page reports 92.2% with GPT-5: https://docs.livingbrain.co
 - These numbers are retrieval recall. No model answers anything here.
 - So the 2 are different measures. Never put them side by side as scores.
 
-What can be compared:
-- Context size. Living Brain reports about 9.4K memory tokens per question. Compare it with `tokens@k` and full context.
-- Latency. Living Brain reports a 592 ms median retrieval. Compare it with this run's p50.
-  - Latency depends on the machine, so read it with the machine line in `summary.md`.
-- High recall at small k is what any answering model needs first. Low recall caps what it can answer.
+What can't be compared:
+- Latency. Their 592 ms covers search plus page reads in a hosted service. This run's p50 is a local substring scan.
+- Context size. Their 9.4K tokens buy 92% QA accuracy. `tokens@k` here is for a far lower hit rate.
+- Token units. Living Brain counts about 26K tokens for full context. This harness's bytes/4 gives about 19.2K for the same conversations.
+
+High recall at small k is what any answering model needs first. Low recall caps what it can answer.
