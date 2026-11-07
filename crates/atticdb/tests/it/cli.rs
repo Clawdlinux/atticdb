@@ -55,3 +55,28 @@ fn first_run_is_quiet() {
     assert!(err.contains("atticdb: started server pid "), "{err}");
     assert!(!err.contains("no trusted server"), "{err}");
 }
+
+/// `verify` and `dump` open the tape with the default options. A store made with another
+/// segment size still opens, since the stored size wins.
+#[test]
+fn verify_and_dump_open_any_stored_segment_size() {
+    use atticdb_core::{Engine, EngineOptions, NewTurn, Role, Scope};
+    let dir = Dir::new();
+    let data = dir.0.join("data");
+    let tape = atticdb_tape::TapeOptions { segment_size: 1 << 20, ..Default::default() };
+    let engine = Engine::open(&data, EngineOptions { tape, ..EngineOptions::default() }).unwrap();
+    let scope = Scope { tenant: "a".into(), agent: "a".into(), session: "s".into() };
+    let turn = NewTurn { role: Role::User, content: b"hi".to_vec(), meta: b"{}".to_vec() };
+    engine.append(&scope, vec![turn], None).unwrap();
+    drop(engine);
+    let data = data.to_str().unwrap();
+    for (verb, line) in [("verify", "health=ok"), ("dump", "lsn=1 ")] {
+        let mut command = bare();
+        command.args([verb, "--data-dir", data]).current_dir(&dir.0).env("HOME", dir.0.join("h"));
+        let out = command.stdin(Stdio::null()).output().unwrap();
+        let (stdout, stderr) =
+            (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert_eq!(out.status.code(), Some(0), "{verb}: {stdout}{stderr}");
+        assert!(stdout.lines().any(|got| got.starts_with(line)), "{verb}: {stdout}");
+    }
+}

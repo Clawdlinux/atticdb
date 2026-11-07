@@ -244,6 +244,7 @@ impl std::fmt::Debug for DataDir {
 
 impl DataDir {
     /// Takes the lock before reading or initializing metadata. Real directories must already exist.
+    /// `segment_size` sizes a new directory. An existing one keeps its stored size.
     /// Only the sims and tests open a directory this way. The writer uses `open_versioned`.
     #[cfg(any(test, feature = "sim"))]
     pub fn open(
@@ -308,10 +309,8 @@ impl DataDir {
             if *stored == 0 || usize::try_from(*stored).is_err() {
                 return Err(corruption(0, 0, 0, "invalid stored segment size"));
             }
+            // The stored size wins over a configured one, which only sizes a new directory.
             dir.segment_size = *stored;
-            if let Some(size) = configured {
-                dir.check_segment_size(size)?;
-            }
             dir.segments = segments.to_vec();
             if dir.segments.windows(2).any(|ids| ids[0] >= ids[1]) {
                 return Err(corruption(0, 0, 0, "unordered manifest"));
@@ -390,6 +389,8 @@ impl DataDir {
         self.install_manifest(&segments).inspect_err(|_| self.manifest_version = old)
     }
 
+    /// Asserts that a size passed to recovery or the segment writer is the stored one. Callers
+    /// pass [`DataDir::segment_size`], so a mismatch is a bug, never a user setting.
     pub(crate) fn check_segment_size(&self, configured: u64) -> Result<()> {
         if configured != self.segment_size {
             return Err(Error::Configuration(format!(
