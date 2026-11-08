@@ -177,7 +177,9 @@ The sweep left both layouts at the top of its range. So we ran more cells at 5% 
 | per-process | 8,000 | 81.905 | 81.790 | 39584.2 | 56000 | 160.5 | no |
 | per-process | 8,000 (repeat) | 65.244 | 58.767 | 39590.1 | 56000 | 159.6 | no |
 
-**shared at N=8,000 failed on a constant, not on load.** `serve` accepts at most 256 open connections (`MAX_CONNECTIONS` in `serve.rs`). The 257th gets 503 `busy` and a closed socket. 5% of 8,000 is 400 clients, each holding 1 connection. A client hit `BrokenPipeError` and the run wrote no row. With this client model, shared stops at 256 / 5% = 5,120 tenants.
+**shared at N=8,000 failed on a constant, not on load.** `serve` accepts at most 256 open connections (`MAX_CONNECTIONS` in `serve.rs`). The 257th gets 503 `busy` and a closed socket. 5% of 8,000 is 400 clients, each holding 1 connection. A client hit `BrokenPipeError` and the run wrote no row. With this bench's client, shared stops at 256 / 5% = 5,120 tenants. Evidence: `bench/tenants-l8s-v3-failures.txt`.
+
+The cap binds only clients that keep a connection open, like this bench or a future pooling proxy. Agents don't. `atticdb mcp` connects once per call (`request()` in `client.rs`). `http::exchange` sends `Connection: close`. So an agent holds a connection only for its sub-millisecond request.
 
 To see what shared does past that cap, we built a second binary on the VM only. It changes `MAX_CONNECTIONS` from 256 to 2048 and nothing else. It isn't committed. Raw rows: `bench/tenants-l8s-v3-cap2048.tsv`.
 
@@ -186,7 +188,7 @@ To see what shared does past that cap, we built a second binary on the VM only. 
 | shared, cap 2048 | 8,000 | 0.696 | 0.635 | 473.0 | 825 | 407 |
 | shared, cap 2048 | 16,000 | 0.725 | 0.663 | 901.7 | 1642 | 807 |
 
-**per-process at N=8,000 failed on CPU.** It reproduced: p99 82 ms, then 62 to 65 ms. `vmstat` showed 0% idle and a run queue of 1,000 to 3,900 during load. At N=6,000 it had about 10% idle. shared at 16,000 with 800 clients kept 46% idle. Clients run on the same 8 vCPU in both layouts. So the extra CPU comes from 8,000 `serve` processes and 56,000 threads. Which of their threads burn it is not measured.
+**per-process at N=8,000 failed on CPU.** It reproduced: p99 82 ms, then 62 to 65 ms. `vmstat` showed 0% idle and a run queue of 1,000 to 3,900 during load. At N=6,000 it had about 10% idle. shared at 16,000 with 800 clients kept 46% idle. Clients run on the same 8 vCPU in both layouts. So the extra CPU comes from 8,000 `serve` processes and 56,000 threads. Which of their threads burn it is not measured. The vmstat lines are in `bench/tenants-l8s-v3-failures.txt`.
 
 ### Verdict
 
@@ -195,12 +197,16 @@ Pass bar: p99 at most 50 ms for both append and fact. VM cost: $0.792/hr x 730 h
 | layout | largest passing N at 5% | cost per tenant per month | what stops it |
 |---|---|---|---|
 | per-process | 6,000 | $0.096 | CPU at 8,000 |
-| shared, as shipped | 5,000 | $0.116 | 256-connection cap, 5,120 at 5% |
-| shared, cap 2048 | 16,000 or more | $0.036 or less | not reached |
+| shared, as shipped | 5,000 | $0.116 | 256-connection cap, 5,120 at 5%, keep-alive clients only |
+| shared, cap 2048 (VM-only build, not committed) | 16,000 or more | $0.036 or less | not reached |
 
 At 1% and 20% active, both layouts passed every N up to 1,000. Neither was run past 1,000 at those shares.
 
-**The 2x rule switches us to shared.** per-process costs at least 2.67x shared per tenant, once shared's connection cap is raised. As shipped, shared stops at 5,120 tenants and per-process is cheaper. But that cap is 1 constant that bounds request memory. It isn't a limit of the layout. A hosted shared `serve` needs it raised, or a proxy that pools connections. Raising it to 2048 raises the worst-case body memory from 2 GiB to 16 GiB.
+**The 2x rule switches us to shared, provisionally.** per-process costs more than 2x shared per tenant. shared passed 16,000 and per-process failed 8,000. The ratio is 2.67x at the largest tested passing N.
+
+The 16,000 cell needed the cap raised, because this bench keeps 1 connection open per active tenant. Agents using `atticdb mcp` connect per call, so the cap doesn't bind them. A pooling proxy would need the cap raised. Raising it to 2048 raises the worst-case body memory from 2 GiB to 16 GiB.
+
+What the bench did not measure: a per-call client. Each `atticdb mcp` call pays a connect, and `serve` spawns 1 thread per connection. That cost is not in these numbers. Phase 1 re-measures shared with a per-call client before we commit to it. If that shows 2x or less, we go back to process per tenant.
 
 Both numbers are tiny next to any price. Neither layout hits RAM or disk first on this VM. per-process at 6,000 used 29 GiB RSS and about 200 GiB of NVMe.
 

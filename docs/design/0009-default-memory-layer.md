@@ -92,9 +92,10 @@ The output is a results doc giving the tenants per VM that hold p99 under a set 
 **0c result** (2026-11-08, zdb-g1, Standard_L8s_v3 on local NVMe, details in `bench/TENANTS.md`):
 - From N=1 to 1,000, every cell held p99 under 1.1 ms for both ops. That held at 1, 5 and 20% active.
 - Past 1,000, at 5% active, process per tenant passed 6,000. It failed 8,000 on CPU, at p99 62 to 82 ms.
-- Shared passed 16,000 at p99 0.73 ms, with `serve`'s 256-connection cap raised to 2048.
-- As shipped, that cap stops shared at 5,120 tenants at 5% active. Each active client holds 1 connection.
-- Cost per tenant per month, at $0.792/hr x 730 hr: $0.096 per process, $0.036 or less shared. Disk and egress are excluded.
+- Shared passed 16,000 at p99 0.73 ms, with `serve`'s 256-connection cap raised to 2048 (VM-only build, not committed).
+- The cap binds only clients that keep a connection open, like the bench or a future pooling proxy. The bench held 1 per active tenant, so as shipped shared stopped at 5,120. `atticdb mcp` connects per call and sends `Connection: close`, so agents don't hit it.
+- Cost per tenant per month, at $0.792/hr x 730 hr: $0.096 per process, $0.036 or less shared (as shipped: $0.116). Disk and egress are excluded.
+- Not measured: a per-call client. Each `atticdb mcp` call pays a connect, and `serve` spawns 1 thread per connection.
 - The run cost $1.19 for 1.50 VM hours.
 
 **My call, before 0c:** process per tenant.
@@ -104,7 +105,9 @@ The output is a results doc giving the tenants per VM that hold p99 under a set 
 
 If 0c shows it costs more than 2x the shared layout per tenant, we switch to shared.
 
-**After 0c: shared.** Process per tenant costs at least 2.67x shared per tenant, so the 2x rule switches us. The gap is about 6 cents per tenant per month. Phase 1 must raise the connection cap for hosted `serve`, or pool connections in its proxy. We lose the 3 points above, so Phase 1 has to cover per-tenant delete, export, backup and isolation inside 1 store.
+**After 0c: shared, provisional.** Process per tenant costs more than 2x shared per tenant. Shared passed 16,000 and per-process failed 8,000. The ratio is 2.67x at the largest tested passing N. So the 2x rule switches the default. The gap is about 6 cents per tenant per month.
+
+It stays provisional until Phase 1 re-measures shared with a per-call client, like `atticdb mcp`. If that shows 2x or less, we go back to process per tenant. We lose the 3 points above. Phase 1 has to cover per-tenant delete, export, backup and isolation inside 1 store.
 
 ## Phase 1: hosted personal tenant
 

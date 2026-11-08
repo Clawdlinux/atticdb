@@ -1,0 +1,41 @@
+# Failure evidence for bench/tenants-l8s-v3-extra.tsv
+# Excerpts from the VM logs of the 2026-11-08 run on zdb-g1. Both cells: 5% active, think 50 ms, 120 s.
+
+## shared N=8000 (stock binary): no row written
+# sweep log:
+cell shared 8000 5 rc=1 start=2026-11-08T06:27:28Z end=2026-11-08T06:29:33Z
+# client traceback (tenants.py stderr):
+  File "/home/azureuser/adb/bench/tenants.py", line 149, in client
+    conn.sendall(data)
+BrokenPipeError: [Errno 32] Broken pipe
+# parent:
+  File "/home/azureuser/adb/bench/tenants.py", line 319, in run_bench
+    results = pending.get(args.duration + 120)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/multiprocessing/pool.py", line 774, in get
+    raise self._value
+BrokenPipeError: [Errno 32] Broken pipe
+
+## per-process N=8000: p99 over 50 ms in both runs
+# sweep logs:
+cell per-process 8000 5 rc=0 start=2026-11-08T06:35:43Z end=2026-11-08T06:40:33Z
+cell per-process 8000 5 rerun rc=0 start=2026-11-08T06:53:35Z end=2026-11-08T06:58:27Z
+# vmstat -t 5 during load of the repeat run. id=0 and r in the thousands: CPU saturated.
+procs -----------memory---------- ---swap-- -----io---- -system-- -------cpu------- -----timestamp-----
+ r  b   swpd   free   buff  cache   si   so    bi    bo   in   cs us sy id wa st gu                 UTC
+695  0      0 474780 700560 56786232    0    0   173  5471 129663 603451 43 49  8  0  0  0 2026-11-08 06:56:15
+2811  0      0 590184 704452 56330268    0    0  1362 36698 122667 540895 50 50  0  0  0  0 2026-11-08 06:56:30
+3897  0      0 502472 706660 56355128    0    0  1405 32175 122889 548409 50 50  0  0  0  0 2026-11-08 06:56:45
+2182  0      0 408784 709084 56382512    0    0  1384 33511 122418 550601 50 50  0  0  0  0 2026-11-08 06:57:00
+2630  0      0 519132 710620 56214560    0    0  1462 24379 123488 560909 50 50  0  0  0  0 2026-11-08 06:57:15
+2094  0      0 441924 712876 56238512    0    0  1376 29405 122062 546079 51 49  0  0  0  0 2026-11-08 06:57:30
+1392  0      0 541436 714884 56072720    0    0  1388 32142 121705 549202 50 50  0  0  0  0 2026-11-08 06:57:45
+2339  0      0 448188 718380 56104744    0    0  1408 33430 122092 548607 50 50  0  0  0  0 2026-11-08 06:58:00
+# For contrast, per-process N=6000 during load (about 10% idle):
+64  0      0 542656 586924 58247920    0    0  1723 25967 134947 541648 48 41 12  0  0  0 2026-11-08 06:45:00
+26  0      0 679992 589152 58078652    0    0  1742 25986 139027 544175 48 42 10  0  0  0 2026-11-08 06:45:15
+45  0      0 571700 589264 58105780    0    0  1734 26290 140960 545846 48 42 10  0  0  0 2026-11-08 06:45:30
+# and shared N=16000 (cap 2048 build, 800 clients) during load (about 46% idle):
+ 1  0      0 60978232 622012 1362180    0    0     0 53234 120297 230566 37 15 46  1  0  0 2026-11-08 06:51:00
+ 8  0      0 60745336 624616 1469856    0    0     0 51954 119678 230134 38 16 45  1  0  0 2026-11-08 06:51:15
+ 6  0      0 60482092 626772 1579960    0    0     0 57932 119371 229643 38 15 45  1  0  0 2026-11-08 06:51:30
