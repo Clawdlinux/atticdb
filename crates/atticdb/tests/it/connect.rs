@@ -632,7 +632,7 @@ fn connect_claude_code_adds_its_parts() {
     let compact = json!({"hooks": [{"type": "command", "command": compact, "timeout": 5}]});
     let reads =
         ["mcp__atticdb__memory_search", "mcp__atticdb__memory_recent", "mcp__atticdb__fact_get"];
-    let reads = [&reads[..], &["mcp__atticdb__fact_list"]].concat();
+    let reads = [&reads[..], &["mcp__atticdb__fact_list", "mcp__atticdb__fact_history"]].concat();
     let append = "mcp__atticdb__memory_append";
     let run =
         |home: &Path, config: Option<&Path>, path: &Path, env: &[(&str, &Path)], args: &[&str]| {

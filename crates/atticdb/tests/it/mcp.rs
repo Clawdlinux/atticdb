@@ -204,7 +204,8 @@ fn tool_calls_over_stdio() {
     let names: Vec<&str> =
         tools.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
     let five = ["memory_append", "memory_recent", "fact_set", "fact_get", "fact_list"];
-    assert_eq!(names, [&five[..], &["memory_search", "file_ref", "file_get"]].concat());
+    let rest = ["memory_search", "file_ref", "file_get", "fact_history"];
+    assert_eq!(names, [&five[..], &rest[..]].concat());
     assert_eq!(tools[5]["inputSchema"]["required"], json!(["query"]));
     // VS Code runs read-only tools without a confirmation prompt.
     let read_only: Vec<bool> = tools
@@ -213,7 +214,10 @@ fn tool_calls_over_stdio() {
         .iter()
         .map(|t| t["annotations"]["readOnlyHint"] == true)
         .collect();
-    assert_eq!(read_only, [false, true, false, true, true, true, false, true]);
+    assert_eq!(read_only, [false, true, false, true, true, true, false, true, true]);
+    let history = &tools[8]["inputSchema"];
+    assert_eq!(history["required"], json!(["key"]));
+    assert_eq!(history["properties"]["max_bytes"]["default"], 65536);
     assert_eq!(tools[6]["inputSchema"]["required"], json!(["path", "about"]));
     assert_eq!(tools[6]["annotations"]["destructiveHint"], false, "file_ref keeps versions");
     assert_eq!(tools[2]["annotations"]["destructiveHint"], true, "fact_set replaces and deletes");
@@ -221,6 +225,9 @@ fn tool_calls_over_stdio() {
     let described = |i: usize| tools[i]["description"].as_str().unwrap();
     assert!(described(0).contains("what changed and why, with its evidence"), "{}", described(0));
     assert!(described(2).contains("Put the reason and its evidence"), "{}", described(2));
+    let refusal = "If the key changed since you last read it, or you haven't read it yet, \
+                   nothing is written. You get its current value: merge and set again.";
+    assert!(described(2).contains(refusal), "{}", described(2));
     let (set, get, list) =
         (&tools[2]["inputSchema"], &tools[3]["inputSchema"], &tools[4]["inputSchema"]);
     assert_eq!((&set["required"], &get["required"]), (&json!(["key"]), &json!(["key"])));
@@ -889,6 +896,199 @@ fn file_refs_keep_versions() {
     let page = mcp.call("fact_list", json!({"prefix": "file/"}));
     assert_eq!(page["structuredContent"]["facts"].as_array().unwrap().len(), 2, "nothing else");
     assert_eq!(mcp.close().0.code(), Some(0));
+}
+
+/// A server, its store flags, and 2 adapters on it as agents `a` and `b`.
+fn two_writers(dir: &Dir) -> (support::Running, Vec<String>, Mcp, Mcp) {
+    let running = support::serve(support::sim_engine(&SimDisk::new(4), |_| {}), dir, 8);
+    let url = format!("http://{}", running.server.tcp_addr().unwrap());
+    let flags = vec!["--url".into(), url, "--token-file".into(), private_file(dir, "t", TOKEN_A)];
+    let start = |agent: &str| {
+        let args: Vec<&str> = flags.iter().map(String::as_str).collect();
+        let mut mcp = Mcp::start(&dir.0, &[&args[..], &["--agent", agent]].concat(), None);
+        mcp.handshake();
+        mcp
+    };
+    let (a, b) = (start("a"), start("b"));
+    (running, flags, a, b)
+}
+
+fn committed(result: &Value, case: &str) {
+    assert_eq!(result["structuredContent"]["committed"], true, "{case}: {result}");
+}
+
+/// Checks a `fact_set` refused because the key changed: the reason, then the current value.
+/// Checks a conflict error. A `by` line's time reads as `<t>` in `current`. Returns that time.
+fn conflicted(result: &Value, current: &[&str], case: &str) -> Option<String> {
+    assert_eq!(result["isError"], true, "{case}: {result}");
+    let first = "conflict: this fact changed, or you haven't read it in this chat yet. Nothing \
+                 was written. Its current value is below. Merge it with your change and call \
+                 fact_set again.";
+    let mut time = None;
+    let lines: Vec<String> = text(result)
+        .lines()
+        .map(|line| match line.starts_with("by ") {
+            true => {
+                let (line, at) = timed(line);
+                time = Some(at);
+                line
+            }
+            false => line.to_owned(),
+        })
+        .collect();
+    assert_eq!(lines, [&[first][..], current].concat(), "{case}");
+    time
+}
+
+/// `line` with the UTC time after its first ` at ` put as `<t>`, and that time.
+fn timed(line: &str) -> (String, String) {
+    let (head, tail) = line.split_once(" at ").unwrap_or_else(|| panic!("no time: {line}"));
+    let time = tail.get(..20).unwrap_or_else(|| panic!("short time: {line}"));
+    let shape = time.bytes().enumerate().all(|(i, b)| match i {
+        4 | 7 => b == b'-',
+        10 => b == b'T',
+        13 | 16 => b == b':',
+        19 => b == b'Z',
+        _ => b.is_ascii_digit(),
+    });
+    assert!(shape, "not a UTC time: {line}");
+    (format!("{head} at <t>{}", &tail[20..]), time.to_owned())
+}
+
+/// An adapter writes a key only at the LSN it last saw, 0 for a key it never read.
+#[test]
+fn fact_set_never_overwrites_a_value_it_has_not_seen() {
+    let dir = Dir::new();
+    let (_running, _, mut a, mut b) = two_writers(&dir);
+    let set = |mcp: &mut Mcp, content: &str| {
+        mcp.call("fact_set", json!({"key": "repo/k", "content": content}))
+    };
+    committed(&set(&mut a, "one"), "a sets an absent key");
+    conflicted(&set(&mut b, "two"), &["one", "by a at <t>"], "b never read it");
+    committed(&set(&mut b, "two"), "b saw a's value in the conflict");
+    conflicted(&set(&mut a, "three"), &["two", "by b at <t>"], "b changed it after a's write");
+    assert_eq!(text(&a.call("fact_get", json!({"key": "repo/k"}))), "two");
+    committed(&set(&mut a, "three"), "a read b's value");
+    let delete = a.call("fact_set", json!({"key": "repo/k", "delete": true}));
+    committed(&delete, "a deletes its own value");
+    committed(&set(&mut a, "four"), "a saw the key go");
+    assert_eq!(text(&b.call("fact_get", json!({"key": "repo/k"}))), "four");
+    // b last saw four. A delete by a leaves no current value.
+    committed(&a.call("fact_set", json!({"key": "repo/k", "delete": true})), "a deletes four");
+    conflicted(&set(&mut b, "five"), &["no current value"], "a deleted it");
+    committed(&set(&mut b, "five"), "b saw the delete");
+    // A listed key counts as read.
+    a.call("fact_list", json!({"prefix": "repo/"}));
+    committed(&set(&mut a, "six"), "a listed it");
+    for mcp in [&mut a, &mut b] {
+        let (status, _) = mcp.close();
+        assert_eq!(status.code(), Some(0), "{}", mcp.process.stderr());
+        assert!(!mcp.process.stdout().contains("if_lsn"), "the model never sees if_lsn");
+    }
+}
+
+/// The shell verbs keep no LSNs, so they overwrite whatever is there.
+#[test]
+fn shell_fact_set_stays_last_write_wins() {
+    let dir = Dir::new();
+    let (_running, flags, mut a, _) = two_writers(&dir);
+    committed(&a.call("fact_set", json!({"key": "repo/k", "content": "one"})), "mcp a");
+    let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
+    let shell = |verb: &[&str]| {
+        let mut process = Process::spawn(&dir.0, &[verb, &flags[..]].concat());
+        let (status, out) = process.wait();
+        assert_eq!(status.code(), Some(0), "{verb:?}: {out}");
+        serde_json::from_str::<Value>(&process.stdout()).unwrap()
+    };
+    for content in ["two", "three"] {
+        let set = shell(&["fact", "set", "--key", "repo/k", "--content", content]);
+        assert_eq!(set["committed"], true, "shell sets {content}");
+    }
+    let got = shell(&["fact", "get", "--key", "repo/k"]);
+    assert_eq!(got["fact"]["content"], "three");
+}
+
+/// `file_ref` reads its key before it writes, so another writer's ref never blocks it.
+#[test]
+fn file_ref_after_another_writer_still_saves() {
+    let dir = Dir::new();
+    let (_running, _, mut a, mut b) = two_writers(&dir);
+    let file = dir.0.join("shot.png");
+    std::fs::write(&file, b"image").unwrap();
+    let key = format!("file{}", std::fs::canonicalize(&file).unwrap().to_str().unwrap());
+    committed(&b.call("fact_set", json!({"key": key, "content": "by b"})), "b sets the ref");
+    let saved = a.call("file_ref", json!({"path": file, "about": "login page"}));
+    committed(&saved, "a saves over b's ref");
+    assert_eq!(saved["structuredContent"]["unchanged"], false, "{saved}");
+}
+
+/// `fact_history` lists a key's revisions newest first, with who wrote each. It is no read
+/// of the current value, so `fact_set` still refuses a key known only from its history.
+#[test]
+fn fact_history_shows_who_changed_a_fact() {
+    let dir = Dir::new();
+    let (_running, flags, mut a, mut b) = two_writers(&dir);
+    let one = fact_written(&a.call("fact_set", json!({"key": "repo/h", "content": "one"})), "1");
+    let two = fact_written(&a.call("fact_set", json!({"key": "repo/h", "content": "two"})), "2");
+    b.call("fact_history", json!({"key": "repo/h"}));
+    let set_two = conflicted(
+        &b.call("fact_set", json!({"key": "repo/h", "content": "b"})),
+        &["two", "by a at <t>"],
+        "history is no read",
+    );
+    let gone = fact_written(&a.call("fact_set", json!({"key": "repo/h", "delete": true})), "del");
+    let history = b.call("fact_history", json!({"key": "repo/h"}));
+    let (lines, times): (Vec<String>, Vec<String>) = text(&history).lines().map(timed).unzip();
+    assert_eq!(
+        lines,
+        [
+            format!("lsn {gone} at <t> by a: (deleted)"),
+            format!("lsn {two} at <t> by a: two"),
+            format!("lsn {one} at <t> by a: one"),
+        ]
+    );
+    assert!(times.windows(2).all(|pair| pair[0] >= pair[1]), "newest first: {times:?}");
+    assert_eq!(set_two.as_ref(), Some(&times[1]), "the conflict and history agree on the time");
+    let structured = &history["structuredContent"];
+    let revisions = structured["revisions"].as_array().unwrap();
+    let field = |name: &str| revisions.iter().map(|r| r[name].clone()).collect::<Vec<_>>();
+    assert_eq!(field("lsn"), [json!(gone), json!(two), json!(one)], "newest first");
+    assert_eq!(field("deleted"), [json!(true), json!(false), json!(false)]);
+    assert_eq!(field("content"), [json!(""), json!("two"), json!("one")]);
+    assert_eq!(field("agent"), [json!("a"), json!("a"), json!("a")]);
+    assert_eq!(structured["truncated"], false);
+
+    let none = b.call("fact_history", json!({"key": "repo/none"}));
+    assert_eq!(none["isError"], Value::Null, "{none}");
+    assert_eq!(text(&none), "no revisions");
+    assert_eq!(none["structuredContent"], json!({"revisions": [], "truncated": false}));
+
+    let cut = b.call("fact_history", json!({"key": "repo/h", "max_bytes": 1}));
+    assert_eq!(cut["structuredContent"]["truncated"], true, "{cut}");
+    let lines: Vec<&str> = text(&cut).lines().collect();
+    assert_eq!(lines.last(), Some(&"more: older revisions were cut; raise max_bytes"));
+
+    let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
+    let lsns = one.to_string();
+    let mut forget =
+        Process::spawn(&dir.0, &[&["forget", "lsns", "--lsns", &lsns], &flags[..]].concat());
+    let (status, out) = forget.wait();
+    assert_eq!(status.code(), Some(0), "{out}");
+    let history = b.call("fact_history", json!({"key": "repo/h"}));
+    let lines: Vec<&str> = text(&history).lines().collect();
+    assert_eq!(lines.last(), Some(&format!("lsn {one} (forgotten)").as_str()), "{history}");
+    let oldest = &history["structuredContent"]["revisions"][2];
+    assert_eq!(oldest, &json!({"lsn": one, "redacted": true}));
+
+    let mut shell =
+        Process::spawn(&dir.0, &[&["fact", "history", "--key", "repo/h"], &flags[..]].concat());
+    let (status, out) = shell.wait();
+    assert_eq!(status.code(), Some(0), "{out}");
+    let printed: Value = serde_json::from_str(&shell.stdout()).unwrap();
+    assert_eq!(printed["revisions"][0]["lsn"], gone, "the shell verb prints the same JSON");
+    for mcp in [&mut a, &mut b] {
+        assert_eq!(mcp.close().0.code(), Some(0), "{}", mcp.process.stderr());
+    }
 }
 
 /// Adapters find or start one server, and send the token only to a server they trust.
