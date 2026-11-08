@@ -55,3 +55,20 @@ def test_ps_thread_count_drops_the_header():
         "me 13 ?? 0.0 S 31T 0:00.01 0:00.00 atticdb\n"
     )
     assert tenants.count_ps_threads(text) == 3
+
+
+def test_latency_columns_split_by_op_and_keep_the_combined_pair():
+    samples = [("append", v / 1000) for v in (1, 2, 3, 4, 100)]
+    samples += [("fact", v / 1000) for v in (5, 6, 7, 8, 9)]
+    assert tenants.latency_columns(samples) == [
+        "5.000", "100.000", "3.000", "100.000", "7.000", "9.000"]
+
+
+def test_latency_columns_mark_an_op_without_samples():
+    assert tenants.latency_columns([("append", 0.002)]) == [
+        "2.000", "2.000", "2.000", "2.000", "-", "-"]
+
+
+def test_needed_mib_scales_per_process_and_floors_shared():
+    assert tenants.needed_mib("per-process", 1000) == 35000
+    assert tenants.needed_mib("shared", 1000) == tenants.SHARED_FLOOR_MIB

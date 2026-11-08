@@ -4,7 +4,9 @@ Usage: tenants.py --layout per-process|shared --tenants N --active-pct P --durat
                   --think-ms T --out <tsv>
 The binary comes from ATTICDB_BIN. Run directories go under TENANTS_BASE, default bench/.tb.
 Unix socket paths must stay under 104 bytes on macOS, so keep TENANTS_BASE short.
-Appends 1 row to <tsv>, with a header when the file is new. See bench/TENANTS.md.
+On a VM, point TENANTS_BASE at the data disk. per-process needs about 35 MiB per tenant.
+Appends 1 row to <tsv>, with a header when the file is new. p50_ms and p99_ms cover all
+ops. The _append_ms and _fact_ms columns split them by op. See bench/TENANTS.md.
 """
 
 import argparse
@@ -17,13 +19,19 @@ import resource
 import shutil
 import signal
 import socket
+import statistics
 import subprocess
 import sys
 import time
 
-COLUMNS = ("layout tenants active_pct ops p50_ms p99_ms rss_mib_idle rss_mib_load fds threads "
-           "disk_mib_per_tenant cold_start_ms").split()
+COLUMNS = ("layout tenants active_pct ops p50_ms p99_ms p50_append_ms p99_append_ms p50_fact_ms "
+           "p99_fact_ms rss_mib_idle rss_mib_load fds threads disk_mib_per_tenant "
+           "cold_start_ms").split()
 SEGMENT_MIB = 16
+# A fresh per-process data dir is about 34 MiB. shared has 1 tape for every tenant.
+MIB_PER_PROCESS_TENANT = 35
+SHARED_FLOOR_MIB = 256
+COLD_STARTS = 5
 SIZE = 256
 FACT_KEYS = 16
 SEED = 1
@@ -49,6 +57,21 @@ def percentile(samples, q):
     ordered = sorted(samples)
     rank = max(1, math.ceil(q * len(ordered) / 100))
     return ordered[rank - 1]
+
+
+def latency_columns(samples):
+    """samples are (op, seconds). Returns p50 and p99 in ms for all ops, append, then fact.
+    An op with no samples gets `-`."""
+    out = []
+    for op in (None, "append", "fact"):
+        values = [s for o, s in samples if op is None or o == op]
+        for q in (50, 99):
+            out.append(f"{percentile(values, q) * 1000:.3f}" if values else "-")
+    return out
+
+
+def needed_mib(layout, n):
+    return n * MIB_PER_PROCESS_TENANT if layout == "per-process" else SHARED_FLOOR_MIB
 
 
 def count_lsof_fds(text):
@@ -100,7 +123,7 @@ def answers(path, token):
 
 
 def client(path, token, index, run, deadline, think_ms):
-    """1 request in flight. Returns round trip seconds per op. Think time is outside them."""
+    """1 request in flight. Returns (op, round trip seconds) per op. Think time is outside."""
     rng = random.Random(SEED * 1_000_003 + index)
     content = "x" * SIZE
     samples, buf, i = [], b"", 0
@@ -114,18 +137,18 @@ def client(path, token, index, run, deadline, think_ms):
                 return samples
             idem = f"{run}-{index}-{i}"
             if i % 2 == 0:
-                target = "/v1/append"
+                op, target = "append", "/v1/append"
                 body = {"agent": "bench", "session": f"s{index}", "idem_key": idem,
                         "turns": [{"role": "user", "content": content}]}
             else:
-                target = "/v1/facts/put"
+                op, target = "fact", "/v1/facts/put"
                 body = {"key": f"k{rng.randrange(FACT_KEYS)}", "content": content,
                         "agent": "bench", "idem_key": idem}
             data = http("POST", target, token, json.dumps(body).encode())
             sent = time.perf_counter()
             conn.sendall(data)
             status, reply, buf = read_http(conn, buf)
-            samples.append(time.perf_counter() - sent)
+            samples.append((op, time.perf_counter() - sent))
             if status != 200:
                 raise RuntimeError(f"tenant {index} {target}: {status} {reply[:200]!r}")
             i += 1
@@ -212,7 +235,16 @@ def sample(servers):
 
 
 def disk_kib(dirs):
-    return sum(int(line.split()[0]) for line in tool(["du", "-sk", *dirs]).splitlines())
+    """Sums `du -sk` over dirs. Warns on stderr for a dir that du could not size."""
+    done = subprocess.run(["du", "-sk", *dirs], capture_output=True, text=True,
+                          timeout=TOOL_TIMEOUT)
+    sized = dict(line.split("\t", 1)[::-1] for line in done.stdout.splitlines())
+    missing = [d for d in dirs if d not in sized]
+    if done.returncode or missing:
+        print(f"tenants.py: warning: du exited {done.returncode}, no size for "
+              f"{len(missing)} of {len(dirs)} dirs {missing[:3]}: {done.stderr.strip()[:500]}",
+              file=sys.stderr)
+    return sum(int(kib) for kib in sized.values())
 
 
 def raise_fd_limit():
@@ -221,8 +253,42 @@ def raise_fd_limit():
     if soft != resource.RLIM_INFINITY and soft < want:
         try:
             resource.setrlimit(resource.RLIMIT_NOFILE, (want, hard))
-        except (ValueError, OSError):
-            pass
+        except (ValueError, OSError) as error:
+            print(f"tenants.py: warning: cannot raise the fd limit from {soft} to {want}: "
+                  f"{error}", file=sys.stderr)
+
+
+def check_space(base, layout, n):
+    need = needed_mib(layout, n)
+    free = shutil.disk_usage(base).free / 2**20
+    if free < need:
+        raise SystemExit(f"TENANTS_BASE {base} has {free:.0f} MiB free. {layout} at N={n} "
+                         f"needs about {need} MiB. Point TENANTS_BASE at a bigger disk.")
+
+
+def cold_start_ms(server, binary):
+    """Stops the server, spawns it on its existing dir and times the first 200."""
+    server.stop()
+    started = time.perf_counter()
+    server.start(binary)
+    while not answers(server.sock, server.tenants[0][1]):
+        server.check_alive()
+        if time.perf_counter() > started + 60:
+            raise RuntimeError("restarted serve not ready after 60 s")
+        time.sleep(0.001)
+    return (time.perf_counter() - started) * 1000
+
+
+def ignore_signals():
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+
+def stop_on_signal(signum, _frame):
+    """Unwinds into the teardown, which stops every serve this run started. Repeats are
+    ignored, so a second signal cannot cut the teardown short."""
+    ignore_signals()
+    sys.exit(128 + signum)
 
 
 def run_bench(args, binary, run_dir):
@@ -257,27 +323,20 @@ def run_bench(args, binary, run_dir):
 
         cold = "-"
         if args.layout == "per-process":
-            server = servers[0]
-            server.stop()
-            started = time.perf_counter()
-            server.start(binary)
-            limit = started + 60
-            while not answers(server.sock, server.tenants[0][1]):
-                server.check_alive()
-                if time.perf_counter() > limit:
-                    raise RuntimeError("restarted serve not ready after 60 s")
-                time.sleep(0.001)
-            cold = f"{(time.perf_counter() - started) * 1000:.1f}"
+            times = [cold_start_ms(servers[0], binary) for _ in range(COLD_STARTS)]
+            cold = f"{statistics.median(times):.1f}"
         disk = disk_kib([s.data for s in servers]) / 1024 / args.tenants
     finally:
+        # A signal must not cut the teardown short and leave servers running.
+        ignore_signals()
         for server in servers:
             if server.proc and server.proc.poll() is None:
                 server.proc.terminate()
         for server in servers:
             server.stop(timeout=15)
-    ms = lambda q: f"{percentile(samples, q) * 1000:.3f}"
-    return [args.layout, args.tenants, f"{args.active_pct:g}", len(samples), ms(50), ms(99),
-            f"{rss_idle:.1f}", f"{rss_load:.1f}", fds, threads, f"{disk:.2f}", cold]
+    return [args.layout, args.tenants, f"{args.active_pct:g}", len(samples),
+            *latency_columns(samples), f"{rss_idle:.1f}", f"{rss_load:.1f}", fds, threads,
+            f"{disk:.2f}", cold]
 
 
 def main():
@@ -295,13 +354,18 @@ def main():
     if not binary or not os.access(binary, os.X_OK):
         parser.error("set ATTICDB_BIN to an atticdb binary")
     binary = os.path.abspath(binary)
+    if os.path.exists(args.out) and os.path.getsize(args.out):
+        with open(args.out) as out:
+            if out.readline().rstrip("\n").split("\t") != COLUMNS:
+                parser.error(f"{args.out} has other columns. Use a new --out file.")
     raise_fd_limit()
-    # SIGTERM unwinds like Ctrl-C, so teardown still stops every serve this run started.
-    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+    signal.signal(signal.SIGTERM, stop_on_signal)
+    signal.signal(signal.SIGINT, stop_on_signal)
     base = os.environ.get("TENANTS_BASE") or os.path.join(os.path.dirname(os.path.abspath(__file__)), ".tb")
     run_dir = os.path.join(base, os.urandom(4).hex())
     os.makedirs(run_dir, mode=0o700)
     try:
+        check_space(base, args.layout, args.tenants)
         row = run_bench(args, binary, run_dir)
     finally:
         shutil.rmtree(run_dir, ignore_errors=True)
