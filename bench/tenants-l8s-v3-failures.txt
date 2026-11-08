@@ -20,7 +20,7 @@ BrokenPipeError: [Errno 32] Broken pipe
 # sweep logs:
 cell per-process 8000 5 rc=0 start=2026-11-08T06:35:43Z end=2026-11-08T06:40:33Z
 cell per-process 8000 5 rerun rc=0 start=2026-11-08T06:53:35Z end=2026-11-08T06:58:27Z
-# vmstat -t 5 during load of the repeat run. id=0 and r in the thousands: CPU saturated.
+# vmstat -t 5 during load of the repeat run. The first sample (06:56:15) is the ramp. From 06:56:30 on, id=0 and r is in the thousands: CPU saturated.
 procs -----------memory---------- ---swap-- -----io---- -system-- -------cpu------- -----timestamp-----
  r  b   swpd   free   buff  cache   si   so    bi    bo   in   cs us sy id wa st gu                 UTC
 695  0      0 474780 700560 56786232    0    0   173  5471 129663 603451 43 49  8  0  0  0 2026-11-08 06:56:15

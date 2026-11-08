@@ -179,7 +179,7 @@ The sweep left both layouts at the top of its range. So we ran more cells at 5% 
 
 **shared at N=8,000 failed on a constant, not on load.** `serve` accepts at most 256 open connections (`MAX_CONNECTIONS` in `serve.rs`). The 257th gets 503 `busy` and a closed socket. 5% of 8,000 is 400 clients, each holding 1 connection. A client hit `BrokenPipeError` and the run wrote no row. With this bench's client, shared stops at 256 / 5% = 5,120 tenants. Evidence: `bench/tenants-l8s-v3-failures.txt`.
 
-The cap binds only clients that keep a connection open, like this bench or a future pooling proxy. Agents don't. `atticdb mcp` connects once per call (`request()` in `client.rs`). `http::exchange` sends `Connection: close`. So an agent holds a connection only for its sub-millisecond request.
+The cap binds only clients that keep a connection open. That includes this bench, the shipped Python client and a future pooling proxy. The Python client keeps 1 read connection per thread (`_kept` in `clients/python/atticdb_client.py`). `serve` keeps an idle connection for 30 s. So a Python-client agent that reads every 30 s or less holds 1 connection the whole time. `atticdb mcp` doesn't. It connects once per call (`request()` in `client.rs`), and `http::exchange` sends `Connection: close`. So it holds a connection only for the request. How long that takes per call was not measured.
 
 To see what shared does past that cap, we built a second binary on the VM only. It changes `MAX_CONNECTIONS` from 256 to 2048 and nothing else. It isn't committed. Raw rows: `bench/tenants-l8s-v3-cap2048.tsv`.
 
@@ -204,7 +204,7 @@ At 1% and 20% active, both layouts passed every N up to 1,000. Neither was run p
 
 **The 2x rule switches us to shared, provisionally.** per-process costs more than 2x shared per tenant. shared passed 16,000 and per-process failed 8,000. The ratio is 2.67x at the largest tested passing N.
 
-The 16,000 cell needed the cap raised, because this bench keeps 1 connection open per active tenant. Agents using `atticdb mcp` connect per call, so the cap doesn't bind them. A pooling proxy would need the cap raised. Raising it to 2048 raises the worst-case body memory from 2 GiB to 16 GiB.
+The 16,000 cell needed the cap raised, because this bench keeps 1 connection open per active tenant. Agents using `atticdb mcp` connect per call, so the cap doesn't bind them. Python-client agents and a pooling proxy keep connections open, so they would need the cap raised. Raising it to 2048 raises the worst-case body memory from 2 GiB to 16 GiB.
 
 What the bench did not measure: a per-call client. Each `atticdb mcp` call pays a connect, and `serve` spawns 1 thread per connection. That cost is not in these numbers. Phase 1 re-measures shared with a per-call client before we commit to it. If that shows 2x or less, we go back to process per tenant.
 
