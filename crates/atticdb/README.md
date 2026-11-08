@@ -418,6 +418,7 @@ Branch on `outcome`, never on the status alone. One call is one `idem_key`, reus
 ## `atticdb mcp`
 
 `atticdb mcp` gives the model `memory_append`, `memory_recent`, `fact_set`, `fact_get`, `fact_list`, `memory_search`, `file_ref` and `file_get`. It has no forget tool. The instructions say the user runs `atticdb forget` or uses studio. Search finds turns and current facts by words, across every session, newest first. It starts the server if none is running.
+Its `fact_set` writes a key only if the key is unchanged since this chat last read or wrote it. A key it never read must be absent. Otherwise nothing is written, and the model gets the current value to merge. `atticdb fact set` always overwrites.
 The model can read and write any session in the tenant. Don't give it to a model you don't trust with the whole tenant.
 The server's instructions tell the model when to read memory and what to save. Claude Code and Codex read them.
 

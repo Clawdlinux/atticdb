@@ -891,6 +891,102 @@ fn file_refs_keep_versions() {
     assert_eq!(mcp.close().0.code(), Some(0));
 }
 
+/// A server, its store flags, and 2 adapters on it as agents `a` and `b`.
+fn two_writers(dir: &Dir) -> (support::Running, Vec<String>, Mcp, Mcp) {
+    let running = support::serve(support::sim_engine(&SimDisk::new(4), |_| {}), dir, 8);
+    let url = format!("http://{}", running.server.tcp_addr().unwrap());
+    let flags = vec!["--url".into(), url, "--token-file".into(), private_file(dir, "t", TOKEN_A)];
+    let start = |agent: &str| {
+        let args: Vec<&str> = flags.iter().map(String::as_str).collect();
+        let mut mcp = Mcp::start(&dir.0, &[&args[..], &["--agent", agent]].concat(), None);
+        mcp.handshake();
+        mcp
+    };
+    let (a, b) = (start("a"), start("b"));
+    (running, flags, a, b)
+}
+
+fn committed(result: &Value, case: &str) {
+    assert_eq!(result["structuredContent"]["committed"], true, "{case}: {result}");
+}
+
+/// Checks a `fact_set` refused because the key changed: the reason, then the current value.
+fn conflicted(result: &Value, current: &[&str], case: &str) {
+    assert_eq!(result["isError"], true, "{case}: {result}");
+    let first = "conflict: this fact changed, or you haven't read it in this chat yet. Nothing \
+                 was written. Its current value is below. Merge it with your change and call \
+                 fact_set again.";
+    let lines: Vec<&str> = text(result).lines().collect();
+    assert_eq!(lines, [&[first][..], current].concat(), "{case}");
+}
+
+/// An adapter writes a key only at the LSN it last saw, 0 for a key it never read.
+#[test]
+fn fact_set_never_overwrites_a_value_it_has_not_seen() {
+    let dir = Dir::new();
+    let (_running, _, mut a, mut b) = two_writers(&dir);
+    let set = |mcp: &mut Mcp, content: &str| {
+        mcp.call("fact_set", json!({"key": "repo/k", "content": content}))
+    };
+    committed(&set(&mut a, "one"), "a sets an absent key");
+    conflicted(&set(&mut b, "two"), &["one", "by a"], "b never read it");
+    committed(&set(&mut b, "two"), "b saw a's value in the conflict");
+    conflicted(&set(&mut a, "three"), &["two", "by b"], "b changed it after a's write");
+    assert_eq!(text(&a.call("fact_get", json!({"key": "repo/k"}))), "two");
+    committed(&set(&mut a, "three"), "a read b's value");
+    let delete = a.call("fact_set", json!({"key": "repo/k", "delete": true}));
+    committed(&delete, "a deletes its own value");
+    committed(&set(&mut a, "four"), "a saw the key go");
+    assert_eq!(text(&b.call("fact_get", json!({"key": "repo/k"}))), "four");
+    // b last saw four. A delete by a leaves no current value.
+    committed(&a.call("fact_set", json!({"key": "repo/k", "delete": true})), "a deletes four");
+    conflicted(&set(&mut b, "five"), &["no current value"], "a deleted it");
+    committed(&set(&mut b, "five"), "b saw the delete");
+    // A listed key counts as read.
+    a.call("fact_list", json!({"prefix": "repo/"}));
+    committed(&set(&mut a, "six"), "a listed it");
+    for mcp in [&mut a, &mut b] {
+        let (status, _) = mcp.close();
+        assert_eq!(status.code(), Some(0), "{}", mcp.process.stderr());
+        assert!(!mcp.process.stdout().contains("if_lsn"), "the model never sees if_lsn");
+    }
+}
+
+/// The shell verbs keep no LSNs, so they overwrite whatever is there.
+#[test]
+fn shell_fact_set_stays_last_write_wins() {
+    let dir = Dir::new();
+    let (_running, flags, mut a, _) = two_writers(&dir);
+    committed(&a.call("fact_set", json!({"key": "repo/k", "content": "one"})), "mcp a");
+    let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
+    let shell = |verb: &[&str]| {
+        let mut process = Process::spawn(&dir.0, &[verb, &flags[..]].concat());
+        let (status, out) = process.wait();
+        assert_eq!(status.code(), Some(0), "{verb:?}: {out}");
+        serde_json::from_str::<Value>(&process.stdout()).unwrap()
+    };
+    for content in ["two", "three"] {
+        let set = shell(&["fact", "set", "--key", "repo/k", "--content", content]);
+        assert_eq!(set["committed"], true, "shell sets {content}");
+    }
+    let got = shell(&["fact", "get", "--key", "repo/k"]);
+    assert_eq!(got["fact"]["content"], "three");
+}
+
+/// `file_ref` reads its key before it writes, so another writer's ref never blocks it.
+#[test]
+fn file_ref_after_another_writer_still_saves() {
+    let dir = Dir::new();
+    let (_running, _, mut a, mut b) = two_writers(&dir);
+    let file = dir.0.join("shot.png");
+    std::fs::write(&file, b"image").unwrap();
+    let key = format!("file{}", std::fs::canonicalize(&file).unwrap().to_str().unwrap());
+    committed(&b.call("fact_set", json!({"key": key, "content": "by b"})), "b sets the ref");
+    let saved = a.call("file_ref", json!({"path": file, "about": "login page"}));
+    committed(&saved, "a saves over b's ref");
+    assert_eq!(saved["structuredContent"]["unchanged"], false, "{saved}");
+}
+
 /// Adapters find or start one server, and send the token only to a server they trust.
 #[test]
 fn launch_race_starts_one_server() {

@@ -106,8 +106,10 @@ pub fn start(flags: HashMap<String, String>) -> u8 {
 impl Adapter {
     fn new(flags: HashMap<String, String>) -> Result<Self, String> {
         let session_flag = flags.contains_key("--session");
+        let mut client = Client::new(flags)?;
+        client.guard_facts();
         Ok(Self {
-            client: Client::new(flags)?,
+            client,
             session_flag,
             roots: false,
             asked: 0,
@@ -304,7 +306,9 @@ fn tool_schemas() -> Value {
                 For example: Retry 3 times, not 5: 5 retries hit the gateway's 10/min limit \
                 (PAY-310). It replaces the key's current value, so a \
                 correction supersedes the old rule. Pass delete: true to remove the key. Every \
-                agent using this memory shares the same keys.",
+                agent using this memory shares the same keys. If the key changed since you last \
+                read it, or you haven't read it yet, nothing is written and you get its current \
+                value: merge and set again.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

@@ -27,6 +27,10 @@ const MAX_BACKOFF: Duration = Duration::from_secs(2);
 const MIN_ATTEMPT: Duration = Duration::from_secs(2);
 /// What `atticdb search` prints on stderr when it finds nothing.
 const NO_HITS: &str = "No hits. Search matches every word. Try 1 or 2 words.";
+/// The first line of a `fact_set` refused because the key changed. The current value follows.
+const CONFLICT: &str = "conflict: this fact changed, or you haven't read it in this chat yet. \
+    Nothing was written. Its current value is below. Merge it with your change and call \
+    fact_set again.";
 /// What `atticdb forget` prints after its receipt line. Its usage says it too.
 const FORGET_HIDES: &str =
     "Content is hidden from normal AtticDB reads. It stays on disk until purge ships (#159).";
@@ -42,6 +46,9 @@ pub(crate) struct Client {
     token: Token,
     retry_deadline: Duration,
     launch: Launch,
+    /// The LSN of each fact key this connection last read or wrote, 0 for no value. `None`
+    /// keeps `fact_set` last-write-wins, as the shell verbs need. See [`Client::guard_facts`].
+    seen: Option<HashMap<String, u64>>,
 }
 
 /// Runs one tool from a shell, with arguments from `--<name>` flags. Prints the tool's
@@ -412,7 +419,21 @@ impl Client {
             token,
             retry_deadline,
             launch,
+            seen: None,
         })
+    }
+
+    /// Makes `fact_set` write a key only at the LSN this connection last saw, 0 for a key it
+    /// never read. A changed key is a conflict that shows the current value (D107).
+    pub(crate) fn guard_facts(&mut self) {
+        self.seen = Some(HashMap::new());
+    }
+
+    /// Records `lsn` as the last seen revision of `key`, when facts are guarded.
+    fn remember(&mut self, key: &str, lsn: &Value) {
+        if let Some(seen) = &mut self.seen {
+            seen.insert(key.to_owned(), lsn.as_u64().unwrap_or(0));
+        }
     }
 
     /// Runs the operation `name` with the arguments `args`. Returns its tool result:
@@ -468,22 +489,55 @@ impl Client {
                 meta @ Value::Object(_) if !delete => body["meta"] = meta.clone(),
                 _ => return Err("meta must be an object, and only with content".into()),
             }
-            Ok((body, delete))
+            Ok((key, body, delete))
         })();
-        match body {
-            Ok((body, true)) => self.write("/v1/facts/delete", body),
-            Ok((mut body, false)) => {
-                let hidden = redact(&mut body);
-                reported(self.write("/v1/facts/put", body), hidden)
-            }
-            Err(message) => tool_error(message),
+        let (key, mut body, delete) = match body {
+            Ok(body) => body,
+            Err(message) => return tool_error(message),
+        };
+        if let Some(seen) = &self.seen {
+            body["if_lsn"] = json!(seen.get(&key).copied().unwrap_or(0));
         }
+        let hidden = if delete { Counts::new() } else { redact(&mut body) };
+        let target = if delete { "/v1/facts/delete" } else { "/v1/facts/put" };
+        let (result, conflict) = self.write_checked(target, body);
+        if conflict {
+            return self.conflict(&key);
+        }
+        if result["structuredContent"]["committed"] == true {
+            let lsn = if delete { json!(0) } else { result["structuredContent"]["lsn"].clone() };
+            self.remember(&key, &lsn);
+        }
+        reported(result, hidden)
+    }
+
+    /// The error for a `fact_set` refused because `key` changed. Reading the key records its
+    /// new LSN, so setting it again writes.
+    fn conflict(&mut self, key: &str) -> Value {
+        let mut text = vec![CONFLICT.to_owned()];
+        let current = self.fact_get(&json!({"key": key}));
+        if current["isError"] == true {
+            let error = current["content"][0]["text"].as_str().unwrap_or_default();
+            text.push(format!("The current value could not be read: {error}"));
+        } else {
+            text.push(current["content"][0]["text"].as_str().unwrap_or_default().to_owned());
+            let fact = &current["structuredContent"]["fact"];
+            if let Some(agent) = fact["agent"].as_str() {
+                text.push(format!("by {agent}"));
+            }
+        }
+        tool_error(text.join("\n"))
     }
 
     fn fact_get(&mut self, args: &Value) -> Value {
         match string(args, "key").and_then(|key| key.ok_or("key is required".into())) {
             Ok(key) => {
-                self.read("fact_get", &format!("/v1/facts/get?key={}", encode(&key)), "fact", fact)
+                let target = format!("/v1/facts/get?key={}", encode(&key));
+                let result = self.read("fact_get", &target, "fact", fact);
+                if result["isError"] != true {
+                    self.remember(&key, &result["structuredContent"]["fact"]["lsn"]);
+                }
+                result
             }
             Err(message) => tool_error(message),
         }
@@ -503,10 +557,14 @@ impl Client {
             }
             Ok::<_, String>(target)
         })();
-        match target {
+        let result = match target {
             Ok(target) => self.read("fact_list", &target, "facts", facts),
-            Err(message) => tool_error(message),
+            Err(message) => return tool_error(message),
+        };
+        for fact in result["structuredContent"]["facts"].as_array().into_iter().flatten() {
+            self.remember(fact["key"].as_str().unwrap_or_default(), &fact["lsn"]);
         }
+        result
     }
 
     /// Saves a reference to a local file as the fact `file<absolute path>`: `about` as content,
@@ -659,13 +717,18 @@ impl Client {
     }
 
     /// Posts a write under one new retry key, judged by the outcome rule across attempts.
-    fn write(&mut self, target: &str, mut body: Value) -> Value {
+    fn write(&mut self, target: &str, body: Value) -> Value {
+        self.write_checked(target, body).0
+    }
+
+    /// [`Client::write`], and whether the write was refused as a `conflict` with its `if_lsn`.
+    fn write_checked(&mut self, target: &str, mut body: Value) -> (Value, bool) {
         match crate::random_hex(16) {
             Ok(key) => body["idem_key"] = json!(key),
-            Err(error) => return tool_error(crate::platform::no_random(error)),
+            Err(error) => return (tool_error(crate::platform::no_random(error)), false),
         }
-        let (mut merge, mut reasons) = (Merge::default(), Vec::new());
-        self.retry("POST", target, body.to_string().as_bytes(), |reply| {
+        let (mut merge, mut reasons, mut conflict) = (Merge::default(), Vec::new(), false);
+        let result = self.retry("POST", target, body.to_string().as_bytes(), |reply| {
             let (attempt, detail) = match &reply {
                 Ok(reply) => match reply["outcome"].as_str().and_then(outcome::parse) {
                     Some(outcome) => (Attempt::Answered(outcome), describe(reply)),
@@ -676,10 +739,15 @@ impl Client {
             let detail = note(&mut reasons, detail);
             match (merge.record(attempt), reply) {
                 (Some(Outcome::Committed), Ok(reply)) => Ok(committed(&reply, target)),
-                (Some(outcome), _) => Ok(failed(outcome, &detail)),
+                (Some(outcome), reply) => {
+                    let refused = reply.is_ok_and(|reply| reply["error"] == "conflict");
+                    conflict = outcome == Outcome::NotCommitted && refused;
+                    Ok(failed(outcome, &detail))
+                }
                 (None, _) => Err(failed(merge.finish(), &detail)),
             }
-        })
+        });
+        (result, conflict)
     }
 
     fn recent(&mut self, args: &Value) -> Value {
