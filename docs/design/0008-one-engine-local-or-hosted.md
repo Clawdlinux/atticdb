@@ -16,7 +16,7 @@ hosted:  agent -> atticdb mcp -> https + token    -> atticdb serve -> VM disk
 ```
 
 - **Same data model everywhere.** `user/` rules, `repo/<repo>/<area>/` decisions, `agent/<agent>/` app notes, `team/` reserved, append-only notes, and file refs.
-- **Same 8 MCP tools.** An agent can't tell where the store runs.
+- **Same MCP tools.** An agent can't tell where the store runs.
 - **Tenants are the unit of hosting.** 1 tenant per person or team. Tenants and tokens exist today (`atticdb.json`).
 - **Scale out by placing tenants, not by splitting 1 tenant.** Each tenant's store lives on 1 VM with a block disk. Research r6: Azure VMs with Premium SSD v2, about $60/mo for 10 tenants. Container Apps and ACI can't attach block disks.
 
