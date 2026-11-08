@@ -1,6 +1,7 @@
-//! The client side of the server's HTTP memory API. It runs 8 operations:
+//! The client side of the server's HTTP memory API. It runs 9 operations:
 //! `memory_append`, `memory_recent`, `memory_search`, `fact_set`, `fact_get`, `fact_list`,
-//! and the file refs `file_ref` and `file_get`, which are facts under `file<path>`.
+//! `fact_history`, and the file refs `file_ref` and `file_get`, which are facts under
+//! `file<path>`.
 //! Each one checks its arguments, hides secrets in writes, sends the request with retries,
 //! and shapes the result. The MCP adapter, the shell verbs and the session-start hook use it.
 //! The studio uses it only to find the store and token, then sends its own reads.
@@ -446,6 +447,7 @@ impl Client {
             "fact_set" => self.fact_set(args),
             "fact_get" => self.fact_get(args),
             "fact_list" => self.fact_list(args),
+            "fact_history" => self.fact_history(args),
             "file_ref" => self.file_ref(args),
             "file_get" => self.file_get(args),
             _ => return None,
@@ -539,6 +541,20 @@ impl Client {
                 }
                 result
             }
+            Err(message) => tool_error(message),
+        }
+    }
+
+    /// Reads a key's kept revisions, newest first, with who wrote each. It records no LSN:
+    /// history is not the current value.
+    fn fact_history(&mut self, args: &Value) -> Value {
+        let target = (|| {
+            let key = string(args, "key")?.ok_or("key is required")?;
+            let max_bytes = number(args, "max_bytes", 64 << 10)?;
+            Ok::<_, String>(format!("/v1/facts/history?key={}&max_bytes={max_bytes}", encode(&key)))
+        })();
+        match target {
+            Ok(target) => self.read("fact_history", &target, "revisions", history),
             Err(message) => tool_error(message),
         }
     }
@@ -972,6 +988,34 @@ fn facts(reply: &Value) -> Value {
         text.push(format!("more: call again with after={next}"));
     }
     answer(text.join("\n"), json!({"facts": facts, "next": reply["next"]}))
+}
+
+fn history(reply: &Value) -> Value {
+    let revisions = reply["revisions"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let mut text: Vec<String> = revisions
+        .iter()
+        .map(|revision| {
+            let lsn = &revision["lsn"];
+            if revision["redacted"] == true {
+                return format!("lsn {lsn} (forgotten)");
+            }
+            let agent = revision["agent"].as_str().unwrap_or_default();
+            let content = if revision["deleted"] == true {
+                "(deleted)"
+            } else {
+                revision["content"].as_str().unwrap_or_default()
+            };
+            format!("lsn {lsn} by {agent}: {content}")
+        })
+        .collect();
+    if text.is_empty() {
+        text.push("no revisions".into());
+    }
+    let truncated = reply["truncated"] == true;
+    if truncated {
+        text.push("more: older revisions were cut; raise max_bytes".into());
+    }
+    answer(text.join("\n"), json!({"revisions": revisions, "truncated": truncated}))
 }
 
 fn hits(reply: &Value) -> Value {

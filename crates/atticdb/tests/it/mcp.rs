@@ -204,7 +204,8 @@ fn tool_calls_over_stdio() {
     let names: Vec<&str> =
         tools.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
     let five = ["memory_append", "memory_recent", "fact_set", "fact_get", "fact_list"];
-    assert_eq!(names, [&five[..], &["memory_search", "file_ref", "file_get"]].concat());
+    let rest = ["memory_search", "file_ref", "file_get", "fact_history"];
+    assert_eq!(names, [&five[..], &rest[..]].concat());
     assert_eq!(tools[5]["inputSchema"]["required"], json!(["query"]));
     // VS Code runs read-only tools without a confirmation prompt.
     let read_only: Vec<bool> = tools
@@ -213,7 +214,10 @@ fn tool_calls_over_stdio() {
         .iter()
         .map(|t| t["annotations"]["readOnlyHint"] == true)
         .collect();
-    assert_eq!(read_only, [false, true, false, true, true, true, false, true]);
+    assert_eq!(read_only, [false, true, false, true, true, true, false, true, true]);
+    let history = &tools[8]["inputSchema"];
+    assert_eq!(history["required"], json!(["key"]));
+    assert_eq!(history["properties"]["max_bytes"]["default"], 65536);
     assert_eq!(tools[6]["inputSchema"]["required"], json!(["path", "about"]));
     assert_eq!(tools[6]["annotations"]["destructiveHint"], false, "file_ref keeps versions");
     assert_eq!(tools[2]["annotations"]["destructiveHint"], true, "fact_set replaces and deletes");
@@ -985,6 +989,68 @@ fn file_ref_after_another_writer_still_saves() {
     let saved = a.call("file_ref", json!({"path": file, "about": "login page"}));
     committed(&saved, "a saves over b's ref");
     assert_eq!(saved["structuredContent"]["unchanged"], false, "{saved}");
+}
+
+/// `fact_history` lists a key's revisions newest first, with who wrote each. It is no read
+/// of the current value, so `fact_set` still refuses a key known only from its history.
+#[test]
+fn fact_history_shows_who_changed_a_fact() {
+    let dir = Dir::new();
+    let (_running, flags, mut a, mut b) = two_writers(&dir);
+    let one = fact_written(&a.call("fact_set", json!({"key": "repo/h", "content": "one"})), "1");
+    let two = fact_written(&a.call("fact_set", json!({"key": "repo/h", "content": "two"})), "2");
+    b.call("fact_history", json!({"key": "repo/h"}));
+    conflicted(
+        &b.call("fact_set", json!({"key": "repo/h", "content": "b"})),
+        &["two", "by a"],
+        "history is no read",
+    );
+    let gone = fact_written(&a.call("fact_set", json!({"key": "repo/h", "delete": true})), "del");
+    let history = b.call("fact_history", json!({"key": "repo/h"}));
+    assert_eq!(
+        text(&history),
+        format!("lsn {gone} by a: (deleted)\nlsn {two} by a: two\nlsn {one} by a: one")
+    );
+    let structured = &history["structuredContent"];
+    let revisions = structured["revisions"].as_array().unwrap();
+    let field = |name: &str| revisions.iter().map(|r| r[name].clone()).collect::<Vec<_>>();
+    assert_eq!(field("lsn"), [json!(gone), json!(two), json!(one)], "newest first");
+    assert_eq!(field("deleted"), [json!(true), json!(false), json!(false)]);
+    assert_eq!(field("content"), [json!(""), json!("two"), json!("one")]);
+    assert_eq!(field("agent"), [json!("a"), json!("a"), json!("a")]);
+    assert_eq!(structured["truncated"], false);
+
+    let none = b.call("fact_history", json!({"key": "repo/none"}));
+    assert_eq!(none["isError"], Value::Null, "{none}");
+    assert_eq!(text(&none), "no revisions");
+    assert_eq!(none["structuredContent"], json!({"revisions": [], "truncated": false}));
+
+    let cut = b.call("fact_history", json!({"key": "repo/h", "max_bytes": 1}));
+    assert_eq!(cut["structuredContent"]["truncated"], true, "{cut}");
+    let lines: Vec<&str> = text(&cut).lines().collect();
+    assert_eq!(lines.last(), Some(&"more: older revisions were cut; raise max_bytes"));
+
+    let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
+    let lsns = one.to_string();
+    let mut forget =
+        Process::spawn(&dir.0, &[&["forget", "lsns", "--lsns", &lsns], &flags[..]].concat());
+    let (status, out) = forget.wait();
+    assert_eq!(status.code(), Some(0), "{out}");
+    let history = b.call("fact_history", json!({"key": "repo/h"}));
+    let lines: Vec<&str> = text(&history).lines().collect();
+    assert_eq!(lines.last(), Some(&format!("lsn {one} (forgotten)").as_str()), "{history}");
+    let oldest = &history["structuredContent"]["revisions"][2];
+    assert_eq!(oldest, &json!({"lsn": one, "redacted": true}));
+
+    let mut shell =
+        Process::spawn(&dir.0, &[&["fact", "history", "--key", "repo/h"], &flags[..]].concat());
+    let (status, out) = shell.wait();
+    assert_eq!(status.code(), Some(0), "{out}");
+    let printed: Value = serde_json::from_str(&shell.stdout()).unwrap();
+    assert_eq!(printed["revisions"][0]["lsn"], gone, "the shell verb prints the same JSON");
+    for mcp in [&mut a, &mut b] {
+        assert_eq!(mcp.close().0.code(), Some(0), "{}", mcp.process.stderr());
+    }
 }
 
 /// Adapters find or start one server, and send the token only to a server they trust.

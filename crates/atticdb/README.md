@@ -417,8 +417,9 @@ Branch on `outcome`, never on the status alone. One call is one `idem_key`, reus
 
 ## `atticdb mcp`
 
-`atticdb mcp` gives the model `memory_append`, `memory_recent`, `fact_set`, `fact_get`, `fact_list`, `memory_search`, `file_ref` and `file_get`. It has no forget tool. The instructions say the user runs `atticdb forget` or uses studio. Search finds turns and current facts by words, across every session, newest first. It starts the server if none is running.
+`atticdb mcp` gives the model `memory_append`, `memory_recent`, `fact_set`, `fact_get`, `fact_list`, `fact_history`, `memory_search`, `file_ref` and `file_get`. It has no forget tool. The instructions say the user runs `atticdb forget` or uses studio. Search finds turns and current facts by words, across every session, newest first. It starts the server if none is running.
 Its `fact_set` writes a key only if the key is unchanged since this chat last read or wrote it. A key it never read must be absent. Otherwise nothing is written, and the model gets the current value to merge. `atticdb fact set` always overwrites.
+`fact_history` lists a key's kept revisions, newest first, with who set or deleted each. Reading it doesn't count as reading the key.
 The model can read and write any session in the tenant. Don't give it to a model you don't trust with the whole tenant.
 The server's instructions tell the model when to read memory and what to save. Claude Code and Codex read them.
 
@@ -497,7 +498,7 @@ It is best effort. A secret that was changed, split or encoded gets through, so 
 
 ## Shell verbs
 
-The same 8 tools run from a shell, with `atticdb mcp`'s connection flags. Each prints 1 JSON line. `fact set --delete` deletes.
+The same 9 tools run from a shell, with `atticdb mcp`'s connection flags. Each prints 1 JSON line. `fact set --delete` deletes.
 
 ```sh
 export ATTICDB_TOKEN=$TOKEN
@@ -507,6 +508,7 @@ atticdb recent $Z --n 10                              # {"truncated":false,"turn
 atticdb fact set $Z --key repo/payments/retry-rule --content "Retry 3 times, then fail."
 atticdb fact get $Z --key repo/payments/retry-rule    # {"fact":{"agent":"planner","content":...}}
 atticdb fact list $Z --prefix repo/ --limit 50        # {"facts":[...],"next":null}
+atticdb fact history $Z --key repo/payments/retry-rule # {"revisions":[...],"truncated":false}
 atticdb search $Z --query "retry rule"                # {"hits":[...],"next":null}
 atticdb file save $Z --path shots/login.png --about "login page, dark mode"
 atticdb file get $Z --path shots/login.png --versions # {"ref":{...,"status":"ok"},"versions":[...],"on_disk":7}

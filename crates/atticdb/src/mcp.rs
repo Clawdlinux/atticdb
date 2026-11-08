@@ -1,6 +1,6 @@
-//! `atticdb mcp`: an MCP server on stdio with 8 tools, `memory_append`, `memory_recent`,
-//! `fact_set`, `fact_get`, `fact_list`, `memory_search`, `file_ref` and `file_get`, backed by a
-//! AtticDB server. Each tool call goes to [`crate::client`].
+//! `atticdb mcp`: an MCP server on stdio with 9 tools, `memory_append`, `memory_recent`,
+//! `fact_set`, `fact_get`, `fact_list`, `memory_search`, `file_ref`, `file_get` and
+//! `fact_history`, backed by a AtticDB server. Each tool call goes to [`crate::client`].
 //!
 //! Newline-delimited JSON-RPC 2.0 on stdin and stdout, logs on stderr. One request at a
 //! time, so when stdin closes the call in progress has finished. The model never sees
@@ -245,7 +245,7 @@ pub const INSTRUCTIONS: &str = "AtticDB is this user's long-term memory. A chat 
     atticdb search --query '<words>'.";
 
 /// Title and whether the tool only reads. VS Code runs read-only tools without asking.
-const ANNOTATIONS: [(&str, &str, bool); 8] = [
+const ANNOTATIONS: [(&str, &str, bool); 9] = [
     ("memory_append", "Save a turn", false),
     ("memory_recent", "Read recent turns", true),
     ("fact_set", "Save or delete a fact", false),
@@ -254,6 +254,7 @@ const ANNOTATIONS: [(&str, &str, bool); 8] = [
     ("memory_search", "Search memory", true),
     ("file_ref", "Save a file reference", false),
     ("file_get", "Read a file reference", true),
+    ("fact_history", "Read a fact's history", true),
 ];
 
 fn tools() -> Value {
@@ -388,6 +389,19 @@ fn tool_schemas() -> Value {
                     "versions": {"type": "boolean", "default": false},
                 },
                 "required": ["path"],
+            },
+        },
+        {
+            "name": "fact_history",
+            "description": "List the kept revisions of one key, newest first: who set or \
+                deleted it, and when. Use it to see who changed a fact.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string"},
+                    "max_bytes": {"type": "integer", "minimum": 0, "default": 65536},
+                },
+                "required": ["key"],
             },
         },
     ]})
