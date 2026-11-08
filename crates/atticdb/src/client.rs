@@ -525,7 +525,7 @@ impl Client {
             text.push(current["content"][0]["text"].as_str().unwrap_or_default().to_owned());
             let fact = &current["structuredContent"]["fact"];
             if let Some(agent) = fact["agent"].as_str() {
-                text.push(format!("by {agent}"));
+                text.push(format!("by {agent}{}", at(&fact["commit_time_ns"])));
             }
         }
         tool_error(text.join("\n"))
@@ -1005,7 +1005,7 @@ fn history(reply: &Value) -> Value {
             } else {
                 revision["content"].as_str().unwrap_or_default()
             };
-            format!("lsn {lsn} by {agent}: {content}")
+            format!("lsn {lsn}{} by {agent}: {content}", at(&revision["commit_time_ns"]))
         })
         .collect();
     if text.is_empty() {
@@ -1016,6 +1016,11 @@ fn history(reply: &Value) -> Value {
         text.push("more: older revisions were cut; raise max_bytes".into());
     }
     answer(text.join("\n"), json!({"revisions": revisions, "truncated": truncated}))
+}
+
+/// ` at <UTC time>` for a commit time in ns, or nothing without one.
+fn at(ns: &Value) -> String {
+    ns.as_u64().map(|ns| format!(" at {}", crate::export::utc(ns))).unwrap_or_default()
 }
 
 fn hits(reply: &Value) -> Value {

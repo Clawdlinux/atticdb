@@ -38,6 +38,8 @@ SEED = 1
 IDLE_SECONDS = 5
 # macOS sun_path is 104 bytes with the NUL. Linux allows 108.
 MAX_SOCKET_BYTES = 103
+# serve binds <dir>/.zs.<8 hex>/s first, then links it to <dir>/s.
+STAGING_EXTRA_BYTES = len("/.zs.01234567")
 TOOL_TIMEOUT = 120
 LINUX = sys.platform.startswith("linux")
 
@@ -82,6 +84,18 @@ def count_lsof_fds(text):
 def count_ps_threads(text):
     """`ps -M` prints a header, then 1 line per thread."""
     return max(0, len([line for line in text.splitlines() if line.strip()]) - 1)
+
+
+def staged_socket_bytes(sock):
+    """Bytes in the staging path serve binds for `sock`. serve makes `sock` absolute."""
+    return len(os.fsencode(os.path.abspath(sock))) + STAGING_EXTRA_BYTES
+
+
+def check_socket(sock):
+    staged = staged_socket_bytes(sock)
+    if staged > MAX_SOCKET_BYTES:
+        raise SystemExit(f"socket path {sock} needs {staged} bytes while serve binds it, over "
+                         f"{MAX_SOCKET_BYTES}. Set a shorter TENANTS_BASE.")
 
 
 def http(method, target, token, body=b""):
@@ -160,9 +174,7 @@ class Server:
         self.config, self.data = f"{root}/c.json", f"{root}/d"
         self.sock, self.log = f"{root}/s", f"{root}/log"
         self.proc = None
-        if len(self.sock.encode()) > MAX_SOCKET_BYTES:
-            raise SystemExit(f"socket path {self.sock} is over {MAX_SOCKET_BYTES} bytes. "
-                             "Set a shorter TENANTS_BASE.")
+        check_socket(self.sock)
         os.makedirs(root, mode=0o700)
         fd = os.open(self.config, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         os.fchmod(fd, 0o600)

@@ -72,3 +72,22 @@ def test_latency_columns_mark_an_op_without_samples():
 def test_needed_mib_scales_per_process_and_floors_shared():
     assert tenants.needed_mib("per-process", 1000) == 35000
     assert tenants.needed_mib("shared", 1000) == tenants.SHARED_FLOOR_MIB
+
+
+def test_staged_socket_bytes_count_the_staging_dir_serve_binds_first():
+    # serve binds <dir>/.zs.<8 hex>/s, then links it to <dir>/s.
+    assert tenants.staged_socket_bytes("/b/x/s") == len("/b/x/.zs.0123abcd/s")
+    assert tenants.staged_socket_bytes("/b/x/s") == len("/b/x/s") + 13
+
+
+def test_check_socket_refuses_a_staged_path_over_the_limit():
+    fits = "/" + "a" * (tenants.MAX_SOCKET_BYTES - 13 - 3) + "/s"
+    assert tenants.staged_socket_bytes(fits) == tenants.MAX_SOCKET_BYTES
+    tenants.check_socket(fits)
+    over = "/a" + fits
+    try:
+        tenants.check_socket(over)
+    except SystemExit as error:
+        assert "TENANTS_BASE" in str(error)
+    else:
+        raise AssertionError("a staged path over the limit passed")

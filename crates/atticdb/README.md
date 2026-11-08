@@ -418,8 +418,8 @@ Branch on `outcome`, never on the status alone. One call is one `idem_key`, reus
 ## `atticdb mcp`
 
 `atticdb mcp` gives the model `memory_append`, `memory_recent`, `fact_set`, `fact_get`, `fact_list`, `fact_history`, `memory_search`, `file_ref` and `file_get`. It has no forget tool. The instructions say the user runs `atticdb forget` or uses studio. Search finds turns and current facts by words, across every session, newest first. It starts the server if none is running.
-Its `fact_set` writes a key only if the key is unchanged since this chat last read or wrote it. A key it never read must be absent. Otherwise nothing is written, and the model gets the current value to merge. `atticdb fact set` always overwrites.
-`fact_history` lists a key's kept revisions, newest first, with who set or deleted each. Reading it doesn't count as reading the key.
+Its `fact_set` writes a key only if it's unchanged since this `atticdb mcp` process last read or wrote it. VS Code and Claude Desktop share 1 process across chats. A key it never read must be absent. Otherwise nothing is written, and the model gets the current value to merge. Under the value, a line says who set it and when: `by <agent> at <UTC time>`. `atticdb fact set` always overwrites.
+`fact_history` lists a key's kept revisions, newest first, with who set or deleted each and when. A line reads `lsn <lsn> at <UTC time> by <agent>: <content>`. A delete shows `(deleted)`, a forgotten revision `lsn <lsn> (forgotten)`. Reading it doesn't count as reading the key.
 The model can read and write any session in the tenant. Don't give it to a model you don't trust with the whole tenant.
 The server's instructions tell the model when to read memory and what to save. Claude Code and Codex read them.
 
@@ -669,7 +669,7 @@ A relative `CLAUDE_CONFIG_DIR` fails both verbs with exit 2 before any change. `
 | MCP entry | the user MCP servers in `.claude.json` | `claude mcp add -s user atticdb -- <binary> mcp --agent claude-code` |
 | SessionStart hook | `hooks.SessionStart` in `<config dir>/settings.json` | `{"hooks": [{"type": "command", "command": "'<binary>' hook session-start --harness claude-code", "timeout": 5}]}` |
 | PostCompact hook | `hooks.PostCompact` in `<config dir>/settings.json` | `{"hooks": [{"type": "command", "command": "'<binary>' hook post-compact --harness claude-code", "timeout": 5}]}` |
-| Allow rules | `permissions.allow` in `<config dir>/settings.json` | `mcp__atticdb__memory_search`, `mcp__atticdb__memory_recent`, `mcp__atticdb__fact_get`, `mcp__atticdb__fact_list`, and `mcp__atticdb__memory_append` unless `--notes ask` |
+| Allow rules | `permissions.allow` in `<config dir>/settings.json` | `mcp__atticdb__memory_search`, `mcp__atticdb__memory_recent`, `mcp__atticdb__fact_get`, `mcp__atticdb__fact_list`, `mcp__atticdb__fact_history`, and `mcp__atticdb__memory_append` unless `--notes ask` |
 
 `.claude.json` is in `$CLAUDE_CONFIG_DIR` when set, else in `~`.
 Claude rewrites it itself, so `connect` only reads it. It changes the entry only through `claude mcp add` and `claude mcp remove`.

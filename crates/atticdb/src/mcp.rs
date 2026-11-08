@@ -308,7 +308,7 @@ fn tool_schemas() -> Value {
                 (PAY-310). It replaces the key's current value, so a \
                 correction supersedes the old rule. Pass delete: true to remove the key. Every \
                 agent using this memory shares the same keys. If the key changed since you last \
-                read it, or you haven't read it yet, nothing is written and you get its current \
+                read it, or you haven't read it yet, nothing is written. You get its current \
                 value: merge and set again.",
             "inputSchema": {
                 "type": "object",

@@ -225,6 +225,9 @@ fn tool_calls_over_stdio() {
     let described = |i: usize| tools[i]["description"].as_str().unwrap();
     assert!(described(0).contains("what changed and why, with its evidence"), "{}", described(0));
     assert!(described(2).contains("Put the reason and its evidence"), "{}", described(2));
+    let refusal = "If the key changed since you last read it, or you haven't read it yet, \
+                   nothing is written. You get its current value: merge and set again.";
+    assert!(described(2).contains(refusal), "{}", described(2));
     let (set, get, list) =
         (&tools[2]["inputSchema"], &tools[3]["inputSchema"], &tools[4]["inputSchema"]);
     assert_eq!((&set["required"], &get["required"]), (&json!(["key"]), &json!(["key"])));
@@ -915,13 +918,41 @@ fn committed(result: &Value, case: &str) {
 }
 
 /// Checks a `fact_set` refused because the key changed: the reason, then the current value.
-fn conflicted(result: &Value, current: &[&str], case: &str) {
+/// Checks a conflict error. A `by` line's time reads as `<t>` in `current`. Returns that time.
+fn conflicted(result: &Value, current: &[&str], case: &str) -> Option<String> {
     assert_eq!(result["isError"], true, "{case}: {result}");
     let first = "conflict: this fact changed, or you haven't read it in this chat yet. Nothing \
                  was written. Its current value is below. Merge it with your change and call \
                  fact_set again.";
-    let lines: Vec<&str> = text(result).lines().collect();
+    let mut time = None;
+    let lines: Vec<String> = text(result)
+        .lines()
+        .map(|line| match line.starts_with("by ") {
+            true => {
+                let (line, at) = timed(line);
+                time = Some(at);
+                line
+            }
+            false => line.to_owned(),
+        })
+        .collect();
     assert_eq!(lines, [&[first][..], current].concat(), "{case}");
+    time
+}
+
+/// `line` with the UTC time after its first ` at ` put as `<t>`, and that time.
+fn timed(line: &str) -> (String, String) {
+    let (head, tail) = line.split_once(" at ").unwrap_or_else(|| panic!("no time: {line}"));
+    let time = tail.get(..20).unwrap_or_else(|| panic!("short time: {line}"));
+    let shape = time.bytes().enumerate().all(|(i, b)| match i {
+        4 | 7 => b == b'-',
+        10 => b == b'T',
+        13 | 16 => b == b':',
+        19 => b == b'Z',
+        _ => b.is_ascii_digit(),
+    });
+    assert!(shape, "not a UTC time: {line}");
+    (format!("{head} at <t>{}", &tail[20..]), time.to_owned())
 }
 
 /// An adapter writes a key only at the LSN it last saw, 0 for a key it never read.
@@ -933,9 +964,9 @@ fn fact_set_never_overwrites_a_value_it_has_not_seen() {
         mcp.call("fact_set", json!({"key": "repo/k", "content": content}))
     };
     committed(&set(&mut a, "one"), "a sets an absent key");
-    conflicted(&set(&mut b, "two"), &["one", "by a"], "b never read it");
+    conflicted(&set(&mut b, "two"), &["one", "by a at <t>"], "b never read it");
     committed(&set(&mut b, "two"), "b saw a's value in the conflict");
-    conflicted(&set(&mut a, "three"), &["two", "by b"], "b changed it after a's write");
+    conflicted(&set(&mut a, "three"), &["two", "by b at <t>"], "b changed it after a's write");
     assert_eq!(text(&a.call("fact_get", json!({"key": "repo/k"}))), "two");
     committed(&set(&mut a, "three"), "a read b's value");
     let delete = a.call("fact_set", json!({"key": "repo/k", "delete": true}));
@@ -1000,17 +1031,24 @@ fn fact_history_shows_who_changed_a_fact() {
     let one = fact_written(&a.call("fact_set", json!({"key": "repo/h", "content": "one"})), "1");
     let two = fact_written(&a.call("fact_set", json!({"key": "repo/h", "content": "two"})), "2");
     b.call("fact_history", json!({"key": "repo/h"}));
-    conflicted(
+    let set_two = conflicted(
         &b.call("fact_set", json!({"key": "repo/h", "content": "b"})),
-        &["two", "by a"],
+        &["two", "by a at <t>"],
         "history is no read",
     );
     let gone = fact_written(&a.call("fact_set", json!({"key": "repo/h", "delete": true})), "del");
     let history = b.call("fact_history", json!({"key": "repo/h"}));
+    let (lines, times): (Vec<String>, Vec<String>) = text(&history).lines().map(timed).unzip();
     assert_eq!(
-        text(&history),
-        format!("lsn {gone} by a: (deleted)\nlsn {two} by a: two\nlsn {one} by a: one")
+        lines,
+        [
+            format!("lsn {gone} at <t> by a: (deleted)"),
+            format!("lsn {two} at <t> by a: two"),
+            format!("lsn {one} at <t> by a: one"),
+        ]
     );
+    assert!(times.windows(2).all(|pair| pair[0] >= pair[1]), "newest first: {times:?}");
+    assert_eq!(set_two.as_ref(), Some(&times[1]), "the conflict and history agree on the time");
     let structured = &history["structuredContent"];
     let revisions = structured["revisions"].as_array().unwrap();
     let field = |name: &str| revisions.iter().map(|r| r[name].clone()).collect::<Vec<_>>();

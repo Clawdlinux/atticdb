@@ -88,7 +88,7 @@ Every sample checks that each `serve` is still alive. A dead server fails the ru
 
 ## Socket paths
 
-macOS limits a Unix socket path to 104 bytes. Linux allows 108. The socket is `$TENANTS_BASE/<8 hex>/t<i>/s`. The script refuses a path over 103 bytes. On the Mac the default base gave about 60 bytes at N=100.
+macOS limits a Unix socket path to 104 bytes. Linux allows 108. The socket is `$TENANTS_BASE/<8 hex>/t<i>/s`, or `.../x/s` for shared. `serve` first binds it at `<dir>/.zs.<8 hex>/s`, then links it to `<dir>/s`. That staging path is 13 bytes longer. The script refuses a staging path over 103 bytes. On the Mac the default base gave about 60 bytes at N=100, so about 73 staged.
 
 ## Limits
 
@@ -253,7 +253,7 @@ Command: the sweep above with `ATTICDB_BIN=target/release/atticdb` and the defau
 What the shape shows:
 
 - Every cell held p99 under 20 ms, for both ops. The 50 ms bar from design 0009 was never close.
-- append and fact p99 stayed within 1.3 ms of each other in every cell.
+- append and fact p99 stayed within 1.4 ms of each other in every cell.
 - An idle `serve` costs about 3 to 4 MiB RSS, 8 fds and 7 threads.
 - per-process scales that cost by N. At N=100 it held 286 to 367 MiB idle against 3.7 MiB shared.
 - shared adds about 2 fds and 1 thread per open connection. That matches 1 thread per connection.

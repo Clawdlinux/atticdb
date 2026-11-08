@@ -112,11 +112,12 @@ pub enum Notes {
 }
 
 /// The read tools Claude Code may call without asking.
-const READS: [&str; 4] = [
+const READS: [&str; 5] = [
     "mcp__atticdb__memory_search",
     "mcp__atticdb__memory_recent",
     "mcp__atticdb__fact_get",
     "mcp__atticdb__fact_list",
+    "mcp__atticdb__fact_history",
 ];
 /// The rule that saves notes without asking.
 const APPEND: &str = "mcp__atticdb__memory_append";

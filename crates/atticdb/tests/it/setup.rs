@@ -477,7 +477,7 @@ fn setup_asks_and_stops_without_answers() {
         assert!(out.ends_with(&next), "{case}: {out}");
         let settings = read(&home.join(".claude/settings.json"));
         let allow = settings["permissions"]["allow"].as_array().unwrap().clone();
-        assert_eq!(allow.len(), 4, "{case}: reads only, notes ask: {allow:?}");
+        assert_eq!(allow.len(), 5, "{case}: reads only, notes ask: {allow:?}");
         assert!(!allow.contains(&json!("mcp__atticdb__memory_append")), "{case}");
         assert_eq!(settings["hooks"]["SessionStart"].as_array().unwrap().len(), 1, "{case}");
         assert_eq!(
