@@ -89,12 +89,22 @@ For each layout, at N = 1, 10, 100 and 1,000 tenants, measure:
 
 The output is a results doc giving the tenants per VM that hold p99 under a set bound, and the cost per tenant per month. First run locally to shape the harness, then 1 Azure run. The VM size is set in the plan, and spend is reported.
 
-**My call, to be confirmed by 0c:** process per tenant.
+**0c result** (2026-11-08, zdb-g1, Standard_L8s_v3 on local NVMe, details in `bench/TENANTS.md`):
+- From N=1 to 1,000, every cell held p99 under 1.1 ms for both ops. That held at 1, 5 and 20% active.
+- Past 1,000, at 5% active, process per tenant passed 6,000. It failed 8,000 on CPU, at p99 62 to 82 ms.
+- Shared passed 16,000 at p99 0.73 ms, with `serve`'s 256-connection cap raised to 2048.
+- As shipped, that cap stops shared at 5,120 tenants at 5% active. Each active client holds 1 connection.
+- Cost per tenant per month, at $0.792/hr x 730 hr: $0.096 per process, $0.036 or less shared. Disk and egress are excluded.
+- The run cost $1.19 for 1.50 VM hours.
+
+**My call, before 0c:** process per tenant.
 - Delete, export and backup of 1 tenant become operations on 1 directory.
 - One tenant's poisoned engine or full disk can't stop the others.
 - 0008's backup ships sealed segments per tenant.
 
 If 0c shows it costs more than 2x the shared layout per tenant, we switch to shared.
+
+**After 0c: shared.** Process per tenant costs at least 2.67x shared per tenant, so the 2x rule switches us. The gap is about 6 cents per tenant per month. Phase 1 must raise the connection cap for hosted `serve`, or pool connections in its proxy. We lose the 3 points above, so Phase 1 has to cover per-tenant delete, export, backup and isolation inside 1 store.
 
 ## Phase 1: hosted personal tenant
 

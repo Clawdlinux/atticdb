@@ -1,0 +1,3 @@
+layout	tenants	active_pct	ops	p50_ms	p99_ms	p50_append_ms	p99_append_ms	p50_fact_ms	p99_fact_ms	rss_mib_idle	rss_mib_load	fds	threads	disk_mib_per_tenant	cold_start_ms
+shared	8000	5	950120	0.211	0.665	0.228	0.696	0.192	0.635	11.5	473.0	825	407	0.05	-
+shared	16000	5	1887368	0.285	0.696	0.303	0.725	0.265	0.663	18.3	901.7	1642	807	0.05	-
