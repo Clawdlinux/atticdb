@@ -393,7 +393,7 @@ fn tool_schemas() -> Value {
         },
         {
             "name": "fact_history",
-            "description": "List the kept revisions of one key, newest first: who set or \
+            "description": "List the revisions of one key, newest first: who set or \
                 deleted it, and when. Use it to see who changed a fact. When more revisions \
                 exist, call again with before set to next.",
             "inputSchema": {

@@ -1013,12 +1013,16 @@ fn history(reply: &Value) -> Value {
             format!("lsn {lsn}{} by {agent}: {content}", at(&revision["commit_time_ns"]))
         })
         .collect();
-    if text.is_empty() {
-        text.push("no revisions".into());
-    }
     let (truncated, next) = (reply["truncated"] == true, &reply["next"]);
+    if text.is_empty() {
+        let empty = if next.is_u64() { "no revisions in this range" } else { "no revisions" };
+        text.push(empty.into());
+    }
     if next.is_u64() {
         text.push(format!("more: call fact_history again with before={next}"));
+    } else if truncated {
+        // An older server sends no `next`. Only a bigger budget shows more there.
+        text.push("more: older revisions were cut; raise max_bytes".into());
     }
     answer(text.join("\n"), json!({"revisions": revisions, "truncated": truncated, "next": next}))
 }
@@ -1224,4 +1228,31 @@ fn jitter(backoff: Duration) -> Duration {
     let random = std::collections::hash_map::RandomState::new().build_hasher().finish();
     let half = backoff / 2;
     half + Duration::from_nanos(random % (half.as_nanos() as u64 + 1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rendered(reply: Value) -> String {
+        history(&reply)["content"][0]["text"].as_str().unwrap_or_default().to_owned()
+    }
+
+    #[test]
+    fn an_empty_page_with_next_says_the_range_is_empty() {
+        let text = rendered(json!({"revisions": [], "truncated": true, "next": 5}));
+        assert_eq!(text, "no revisions in this range\nmore: call fact_history again with before=5");
+        assert_eq!(
+            rendered(json!({"revisions": [], "truncated": false, "next": null})),
+            "no revisions"
+        );
+    }
+
+    #[test]
+    fn an_older_server_without_next_gets_the_old_hint() {
+        let reply =
+            json!({"revisions": [{"lsn": 9, "agent": "a", "content": "x"}], "truncated": true});
+        let text = rendered(reply);
+        assert_eq!(text, "lsn 9 by a: x\nmore: older revisions were cut; raise max_bytes");
+    }
 }

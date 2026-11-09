@@ -117,7 +117,8 @@ pub struct Revision {
 pub struct FactHistory {
     /// Whole revisions, newest first.
     pub revisions: Vec<Revision>,
-    /// True when older revisions exist than the ones returned.
+    /// More may exist. Equals `next.is_some()`. From the index, it's set when older revisions
+    /// exist or the budget cut the reply.
     pub truncated: bool,
     /// Pass it to `fact_history_before` for the next page. Set exactly when `truncated` is.
     pub next: Option<u64>,
