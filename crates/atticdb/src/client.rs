@@ -545,13 +545,18 @@ impl Client {
         }
     }
 
-    /// Reads a key's kept revisions, newest first, with who wrote each. It records no LSN:
-    /// history is not the current value.
+    /// Reads a key's revisions, newest first, with who wrote each. `before` pages past the
+    /// kept ones. It records no LSN: history is not the current value.
     fn fact_history(&mut self, args: &Value) -> Value {
         let target = (|| {
             let key = string(args, "key")?.ok_or("key is required")?;
             let max_bytes = number(args, "max_bytes", 64 << 10)?;
-            Ok::<_, String>(format!("/v1/facts/history?key={}&max_bytes={max_bytes}", encode(&key)))
+            let mut target =
+                format!("/v1/facts/history?key={}&max_bytes={max_bytes}", encode(&key));
+            if !args["before"].is_null() {
+                target += &format!("&before={}", number(args, "before", 0)?);
+            }
+            Ok::<_, String>(target)
         })();
         match target {
             Ok(target) => self.read("fact_history", &target, "revisions", history),
@@ -1011,11 +1016,11 @@ fn history(reply: &Value) -> Value {
     if text.is_empty() {
         text.push("no revisions".into());
     }
-    let truncated = reply["truncated"] == true;
-    if truncated {
-        text.push("more: older revisions were cut; raise max_bytes".into());
+    let (truncated, next) = (reply["truncated"] == true, &reply["next"]);
+    if next.is_u64() {
+        text.push(format!("more: call fact_history again with before={next}"));
     }
-    answer(text.join("\n"), json!({"revisions": revisions, "truncated": truncated}))
+    answer(text.join("\n"), json!({"revisions": revisions, "truncated": truncated, "next": next}))
 }
 
 /// ` at <UTC time>` for a commit time in ns, or nothing without one.

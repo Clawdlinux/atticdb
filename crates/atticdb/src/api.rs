@@ -650,13 +650,15 @@ pub fn export(engine: &Engine, tenant: &str, target: &str) -> Response {
     }
 }
 
-/// `GET /v1/facts/get?key=`, `GET /v1/facts/history?key=&max_bytes=` and
-/// `GET /v1/facts/list?prefix=&after=&limit=&max_bytes=`.
+/// `GET /v1/facts/get?key=`, `GET /v1/facts/history?key=&max_bytes=&before=` and
+/// `GET /v1/facts/list?prefix=&after=&limit=&max_bytes=`. Pass history's `next` as `before`
+/// for older revisions.
 pub fn fact_read(engine: &Engine, tenant: &str, route: Route, target: &str) -> Response {
     let answer = (|| {
         let (mut params, list) = (params(target)?, route == Route::FactList);
         let key = if list { None } else { params.remove("key") };
         let max_bytes = if route == Route::FactGet { None } else { params.remove("max_bytes") };
+        let before = if route == Route::FactHistory { params.remove("before") } else { None };
         let [prefix, after, limit] = match list {
             true => ["prefix", "after", "limit"].map(|name| params.remove(name)),
             false => [None, None, None],
@@ -672,10 +674,21 @@ pub fn fact_read(engine: &Engine, tenant: &str, route: Route, target: &str) -> R
             Route::FactGet => {
                 send(engine.fact_get(tenant, &key?), |fact| json!({"fact": fact.map(fact_json)}))
             }
-            Route::FactHistory => send(engine.fact_history(tenant, &key?, max_bytes), |history| {
-                let revisions: Vec<_> = history.revisions.into_iter().map(revision_json).collect();
-                json!({"revisions": revisions, "truncated": history.truncated})
-            }),
+            Route::FactHistory => {
+                let (key, before) = (key?, number(before, "before")?);
+                let history = match before {
+                    Some(before) => {
+                        engine.fact_history_before(tenant, &key, before, max_bytes, SEARCH_VISITS)
+                    }
+                    None => engine.fact_history(tenant, &key, max_bytes),
+                };
+                send(history, |history| {
+                    let revisions: Vec<_> =
+                        history.revisions.into_iter().map(revision_json).collect();
+                    json!({"revisions": revisions, "truncated": history.truncated,
+                           "next": history.next})
+                })
+            }
             _ => {
                 let limit = number(limit, "limit")?;
                 let limit = limit.map_or(100, |limit| cap(limit, MAX_WINDOW_TURNS));

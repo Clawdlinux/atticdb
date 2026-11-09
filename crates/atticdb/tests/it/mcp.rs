@@ -1061,12 +1061,15 @@ fn fact_history_shows_who_changed_a_fact() {
     let none = b.call("fact_history", json!({"key": "repo/none"}));
     assert_eq!(none["isError"], Value::Null, "{none}");
     assert_eq!(text(&none), "no revisions");
-    assert_eq!(none["structuredContent"], json!({"revisions": [], "truncated": false}));
+    let nothing = json!({"revisions": [], "truncated": false, "next": null});
+    assert_eq!(none["structuredContent"], nothing);
 
     let cut = b.call("fact_history", json!({"key": "repo/h", "max_bytes": 1}));
     assert_eq!(cut["structuredContent"]["truncated"], true, "{cut}");
+    assert_eq!(cut["structuredContent"]["next"], gone, "{cut}");
     let lines: Vec<&str> = text(&cut).lines().collect();
-    assert_eq!(lines.last(), Some(&"more: older revisions were cut; raise max_bytes"));
+    let hint = format!("more: call fact_history again with before={gone}");
+    assert_eq!(lines.last(), Some(&hint.as_str()));
 
     let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
     let lsns = one.to_string();
@@ -1089,6 +1092,41 @@ fn fact_history_shows_who_changed_a_fact() {
     for mcp in [&mut a, &mut b] {
         assert_eq!(mcp.close().0.code(), Some(0), "{}", mcp.process.stderr());
     }
+}
+
+/// `fact_history` past the 16 revisions the index keeps: the text names `before`, and the
+/// shell verb takes `--before`.
+#[test]
+fn fact_history_pages_past_the_index_cap() {
+    let dir = Dir::new();
+    let (_running, flags, mut a, _) = two_writers(&dir);
+    for n in 1..=20 {
+        let set = a.call("fact_set", json!({"key": "repo/p", "content": n.to_string()}));
+        fact_written(&set, &format!("set {n}"));
+    }
+    let first = a.call("fact_history", json!({"key": "repo/p"}));
+    let next = first["structuredContent"]["next"].as_u64().unwrap_or_else(|| panic!("{first}"));
+    let lines: Vec<&str> = text(&first).lines().collect();
+    let hint = format!("more: call fact_history again with before={next}");
+    assert_eq!(lines.last(), Some(&hint.as_str()), "{first}");
+    assert_eq!(first["structuredContent"]["revisions"].as_array().unwrap().len(), 16);
+    let older = a.call("fact_history", json!({"key": "repo/p", "before": next}));
+    let revisions = older["structuredContent"]["revisions"].as_array().unwrap();
+    let contents: Vec<&Value> = revisions.iter().map(|r| &r["content"]).collect();
+    assert_eq!(contents, [&json!("4"), &json!("3"), &json!("2"), &json!("1")], "{older}");
+    assert!(!text(&older).contains("more:"), "the last page: {older}");
+    assert_eq!(older["structuredContent"]["next"], Value::Null);
+
+    let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
+    let verb =
+        ["fact", "history", "--key", "repo/p", "--before", &next.to_string()].map(str::to_owned);
+    let verb: Vec<&str> = verb.iter().map(String::as_str).collect();
+    let mut shell = Process::spawn(&dir.0, &[&verb[..], &flags[..]].concat());
+    let (status, out) = shell.wait();
+    assert_eq!(status.code(), Some(0), "{out}");
+    let printed: Value = serde_json::from_str(&shell.stdout()).unwrap();
+    assert_eq!(printed["revisions"].as_array().unwrap().len(), 4, "{printed}");
+    assert_eq!(a.close().0.code(), Some(0), "{}", a.process.stderr());
 }
 
 /// Adapters find or start one server, and send the token only to a server they trust.
