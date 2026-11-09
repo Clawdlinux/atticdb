@@ -119,6 +119,8 @@ pub struct FactHistory {
     pub revisions: Vec<Revision>,
     /// True when older revisions exist than the ones returned.
     pub truncated: bool,
+    /// Pass it to `fact_history_before` for the next page. Set exactly when `truncated` is.
+    pub next: Option<u64>,
 }
 /// A key-ordered listing of current facts under a byte prefix.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1322,6 +1324,7 @@ impl Engine {
     }
 
     /// Returns up to `fact_history` revisions, newest first, within `max_bytes` but at least one.
+    /// When older revisions exist or the budget cut the reply, `next` is the oldest LSN returned.
     pub fn fact_history(&self, tenant: &str, key: &str, max_bytes: usize) -> Result<FactHistory> {
         let (id, newest, truncated) = {
             let Some((state, snapshot, id)) = self.fact_snapshot(tenant)? else {
@@ -1359,7 +1362,37 @@ impl Engine {
                 redacted: false,
             });
         }
-        Ok(FactHistory { revisions, truncated: cut || truncated })
+        let truncated = cut || truncated;
+        let next = revisions.last().map(|rev| rev.lsn).filter(|_| truncated);
+        Ok(FactHistory { revisions, truncated, next })
+    }
+
+    /// Walks a key's revisions below `before`, newest first, past the index cap. It reads the
+    /// tape through `newest_first`, so `next` and `visits` work as in `records`. A page holds
+    /// up to `fact_history` revisions and can be empty with `next` set.
+    pub fn fact_history_before(
+        &self,
+        tenant: &str,
+        key: &str,
+        before: u64,
+        max_bytes: usize,
+        visits: usize,
+    ) -> Result<FactHistory> {
+        let limit = lock(&self.state)?.facts.history;
+        let walk = Walk { before: Some(before), limit, max_bytes, visits };
+        let wanted = |header: &Header| header.kind == Kind::Fact;
+        let (revisions, next) = self.newest_first(tenant, walk, wanted, |frame| {
+            let corrupt = |_| EngineError::rejected(ErrorKind::CorruptIndex);
+            // The key is in the payload, so other keys are skipped here, not in `wanted`.
+            let (found, _, _) = crate::fact::header(&frame.payload).map_err(corrupt)?;
+            if found != key {
+                return Ok(None);
+            }
+            let rev = self.fact_revision(frame, found)?;
+            let size = key.len() + rev.agent.len() + rev.content.len() + rev.meta.len();
+            Ok(Some((rev, size)))
+        })?;
+        Ok(FactHistory { revisions, truncated: next.is_some(), next })
     }
 
     /// Lists current facts under a prefix in key order, visiting at most 1,024 keys per call.
@@ -1559,25 +1592,8 @@ impl Engine {
                 }
                 Kind::Fact => {
                     let (key, _, _) = crate::fact::header(&frame.payload).map_err(corrupt)?;
-                    let fact_key = (frame.header.tenant_id, key);
-                    if lock(&self.state)?.forgets.hides_fact(&fact_key, lsn) {
-                        Record::Fact { key: fact_key.1, revision: Revision::redacted(lsn) }
-                    } else {
-                        let fact = crate::fact::decode(&frame.payload).map_err(corrupt)?;
-                        let Fact { key, content, meta, agent, tombstone, .. } = fact;
-                        let (deleted, redacted) = (tombstone, false);
-                        let commit_time_ns = frame.header.commit_time_ns;
-                        let revision = Revision {
-                            lsn,
-                            commit_time_ns,
-                            agent,
-                            deleted,
-                            content,
-                            meta,
-                            redacted,
-                        };
-                        Record::Fact { key, revision }
-                    }
+                    let revision = self.fact_revision(frame, key.clone())?;
+                    Record::Fact { key, revision }
                 }
                 _ => return Ok(None),
             };
@@ -1596,8 +1612,31 @@ impl Engine {
         Ok(RecordPage { records, next })
     }
 
-    /// The newest-first walk `search` and `records` share, so the two cannot drift. It reads
-    /// the tenant's records below `before` at the snapshot other readers use.
+    /// Builds a fact frame's revision for `records` and `fact_history_before`. A forgotten
+    /// revision is a placeholder with its LSN and gets no full decode.
+    fn fact_revision(&self, frame: &Frame, key: String) -> Result<Revision> {
+        let lsn = frame.header.lsn;
+        if lock(&self.state)?.forgets.hides_fact(&(frame.header.tenant_id, key), lsn) {
+            return Ok(Revision::redacted(lsn));
+        }
+        let fact = crate::fact::decode(&frame.payload)
+            .map_err(|_| EngineError::rejected(ErrorKind::CorruptIndex))?;
+        let Fact { content, meta, agent, tombstone, .. } = fact;
+        let commit_time_ns = frame.header.commit_time_ns;
+        Ok(Revision {
+            lsn,
+            commit_time_ns,
+            agent,
+            deleted: tombstone,
+            content,
+            meta,
+            redacted: false,
+        })
+    }
+
+    /// The newest-first walk `search`, `records` and `fact_history_before` share, so they
+    /// cannot drift. It reads the tenant's records below `before` at the snapshot other
+    /// readers use.
     ///
     /// `wanted` filters frames by header. A frame of another tenant, or one `wanted` rejects,
     /// costs a 40-byte header read and gets no CRC check. So a flipped bit in a wanted frame's
