@@ -80,7 +80,7 @@ curl -s --unix-socket data/atticdb.sock -H "Authorization: Bearer $TOKEN" \
   'http://localhost/v1/window?agent=planner&session=run-1&last=10'
 ```
 
-That appends over TCP and reads over the Unix socket. A repeated `idem_key` returns `"deduplicated": true`. Facts live at `/v1/facts/put`, `get`, `list` and `delete`. Each key holds 1 current value, and a later put replaces it. With `"if_lsn": <lsn>`, a put writes only if the current value still has that LSN. A mismatch is 409 `conflict`.
+That appends over TCP and reads over the Unix socket. A repeated `idem_key` returns `"deduplicated": true`. Facts live at `/v1/facts/put`, `get`, `list`, `history` and `delete`. Each key holds 1 current value, and a later put replaces it. With `"if_lsn": <lsn>`, a put writes only if the current value still has that LSN. A mismatch is 409 `conflict`.
 
 ## Keys
 
@@ -358,6 +358,11 @@ Send `Authorization: Bearer <token>`. The token picks the tenant. On TCP the `Ho
 | `GET /v1/search` | `?q=` words, plus optional `limit=N` (default 10, cap 100), `before=LSN` and `max_bytes=B` | `{"hits": [{"kind": "turn", "agent", "session", "seq", "lsn", "commit_time_ns", "role", "content", "meta"} or {"kind": "fact", "key", "lsn", "commit_time_ns", "agent", "content", "meta"}], "next"}` |
 | `GET /v1/sessions` | Optional `limit=N` (default 100, cap 1,000), and `after_agent=` with `after_session=` | `{"sessions": [{"agent", "session", "turns", "forgotten_up_to"}], "next": {"agent", "session"} or null, "total": {"sessions", "turns"}, "as_of_lsn"}` |
 | `GET /v1/records` | Optional `before=LSN`, `limit=N` (default 50, cap 1,000), `kind=turn` or `kind=fact`, and `max_bytes=B` | `{"records": [{"kind": "turn", "lsn", "commit_time_ns", "agent", "session", "seq", "role", "content", "meta"} or {"kind": "fact", "lsn", "commit_time_ns", "key", "agent", "deleted", "content", "meta"}], "next"}` |
+| `POST /v1/facts/put` | `{"key", "content", "idem_key"}`, plus optional `"meta"`, `"agent"` and `"if_lsn"` | `{"outcome": "committed", "deduplicated", "txn", "lsn"}` |
+| `GET /v1/facts/get` | `?key=` | `{"fact": {"key", "lsn", "commit_time_ns", "agent", "content", "meta"} or null}` |
+| `GET /v1/facts/list` | Optional `prefix=` (default empty, every key), `after=KEY`, `limit=N` (default 100, cap 1,000) and `max_bytes=B` | `{"facts": [{"key", "lsn", "commit_time_ns", "agent", "content", "meta"}], "next"}`. Pass `next` as `after` |
+| `GET /v1/facts/history` | `?key=`, plus optional `max_bytes=B` and `before=LSN` | `{"revisions": [{"lsn", "commit_time_ns", "agent", "deleted", "content", "meta"}], "truncated", "next"}`, newest first. A forgotten revision is `{"lsn", "redacted": true}`. Pass `next` as `before` for older revisions. A page can be empty with `next` set |
+| `POST /v1/facts/delete` | `{"key", "idem_key"}`, plus optional `"agent"` and `"if_lsn"` | `{"outcome": "committed", "deduplicated", "txn", "lsn"}` |
 | `POST /v1/forget` | `{"idem_key"}` plus exactly 1 of `"session": {"agent", "session"}`, `"key"` or `"lsns": [n, ...]` (1 to 1,024). Optional `up_to_lsn` | `{"outcome": "committed", "deduplicated", "txn", "lsn", "cutoff"}` |
 | `GET /v1/export` | `?format=markdown`, optional `max_bytes=B` (64 KiB to 8 MiB, default 1 MiB). Later pages pass back `next` as `at`, then `after_key`, or `after_agent`, `after_session` and `after_seq`, then `skip` and `offset` | `{"format": "markdown", "at", "chunks": [{"path", "offset", "markdown"}], "next"}`. `next` is null on the last page |
 | `GET /healthz` | No token | `{"status": "ok" or "read_only", "instance", "version"}`. 503 with `"poisoned"` |
@@ -419,7 +424,7 @@ Branch on `outcome`, never on the status alone. One call is one `idem_key`, reus
 
 `atticdb mcp` gives the model `memory_append`, `memory_recent`, `fact_set`, `fact_get`, `fact_list`, `fact_history`, `memory_search`, `file_ref` and `file_get`. It has no forget tool. The instructions say the user runs `atticdb forget` or uses studio. Search finds turns and current facts by words, across every session, newest first. It starts the server if none is running.
 Its `fact_set` writes a key only if it's unchanged since this `atticdb mcp` process last read or wrote it. VS Code and Claude Desktop share 1 process across chats. A key it never read must be absent. Otherwise nothing is written, and the model gets the current value to merge. Under the value, a line says who set it and when: `by <agent> at <UTC time>`. `atticdb fact set` always overwrites.
-`fact_history` lists a key's kept revisions, newest first, with who set or deleted each and when. A line reads `lsn <lsn> at <UTC time> by <agent>: <content>`. A delete shows `(deleted)`, a forgotten revision `lsn <lsn> (forgotten)`. Reading it doesn't count as reading the key.
+`fact_history` lists a key's revisions, newest first, with who set or deleted each and when. A line reads `lsn <lsn> at <UTC time> by <agent>: <content>`. A delete shows `(deleted)`, a forgotten revision `lsn <lsn> (forgotten)`. When older revisions exist, the last line is `more: call fact_history again with before=<lsn>`. A page can be empty and still have more. Then it reads `no revisions in this range`. An older server sends no `next`, so the hint is `more: older revisions were cut; raise max_bytes`. `before` pages past the 16 revisions the index keeps. Reading it doesn't count as reading the key.
 The model can read and write any session in the tenant. Don't give it to a model you don't trust with the whole tenant.
 The server's instructions tell the model when to read memory and what to save. Claude Code and Codex read them.
 
@@ -508,7 +513,7 @@ atticdb recent $Z --n 10                              # {"truncated":false,"turn
 atticdb fact set $Z --key repo/payments/retry-rule --content "Retry 3 times, then fail."
 atticdb fact get $Z --key repo/payments/retry-rule    # {"fact":{"agent":"planner","content":...}}
 atticdb fact list $Z --prefix repo/ --limit 50        # {"facts":[...],"next":null}
-atticdb fact history $Z --key repo/payments/retry-rule # {"revisions":[...],"truncated":false}
+atticdb fact history $Z --key repo/payments/retry-rule # {"next":null,"revisions":[...],"truncated":false}
 atticdb search $Z --query "retry rule"                # {"hits":[...],"next":null}
 atticdb file save $Z --path shots/login.png --about "login page, dark mode"
 atticdb file get $Z --path shots/login.png --versions # {"ref":{...,"status":"ok"},"versions":[...],"on_disk":7}

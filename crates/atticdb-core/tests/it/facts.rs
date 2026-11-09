@@ -1,7 +1,7 @@
-use crate::support::{new_fact, open, options, query};
+use crate::support::{new_fact, open, options, query, turn};
 use atticdb_core::{
     forget::Selector, Engine, EngineError, EngineOptions, ErrorKind, ExportEntry, ExportQuery,
-    FactHistory, FactPage, FactWritten, Outcome, StoredFact,
+    FactHistory, FactPage, FactWritten, NewFact, Outcome, Revision, Scope, StoredFact,
 };
 use atticdb_tape::sim::SimClock;
 use atticdb_tape::{Io, SimDisk};
@@ -396,4 +396,101 @@ fn concurrent_groups_pick_one_conditional_winner_and_bound_revisions() {
         let metrics = engine.metrics().unwrap();
         assert!(metrics.fact_revisions <= metrics.facts * 3, "round {round}: {metrics:?}");
     }
+}
+
+/// A fact for key `k` whose content is `v{i}`, space-padded to `width` bytes.
+fn padded(i: usize, width: usize) -> NewFact {
+    let content = format!("{:<width$}", format!("v{i}")).into_bytes();
+    NewFact { key: "k".into(), content, meta: vec![], agent: "a".into() }
+}
+
+/// Each revision as (lsn, trimmed content).
+fn revisions(history: &FactHistory) -> Vec<(u64, String)> {
+    let text = |rev: &Revision| String::from_utf8_lossy(&rev.content).trim_end().to_owned();
+    history.revisions.iter().map(|rev| (rev.lsn, text(rev))).collect()
+}
+
+/// Puts `k` 20 times, calling `between` before each put. Returns the LSNs, oldest first.
+fn twenty(engine: &Engine, width: usize, mut between: impl FnMut(usize)) -> Vec<u64> {
+    (0..20)
+        .map(|i| {
+            between(i);
+            engine.fact_put("t", padded(i, width), None, None).unwrap().lsn
+        })
+        .collect()
+}
+
+#[test]
+fn history_pages_past_the_index_cap() {
+    let engine = open(Arc::new(SimDisk::new(70)), options());
+    let s = Scope { tenant: "t".into(), agent: "a".into(), session: "s".into() };
+    let lsns = twenty(&engine, 2, |i| {
+        engine.append(&s, vec![turn(i as u64)], None).unwrap();
+        engine.fact_put("t", new_fact("other", i as u64, "a"), None, None).unwrap();
+        if i < 3 {
+            engine.fact_put("u", new_fact("k", i as u64, "a"), None, None).unwrap();
+        }
+    });
+    let first = engine.fact_history("t", "k", usize::MAX).unwrap();
+    let newest: Vec<_> = (4..20).rev().map(|i| (lsns[i], format!("v{i}"))).collect();
+    assert_eq!(revisions(&first), newest, "the index holds the 16 newest");
+    assert!(first.truncated);
+    assert_eq!(first.next, Some(lsns[4]), "next is the oldest returned LSN");
+
+    let rest = engine.fact_history_before("t", "k", lsns[4], usize::MAX, usize::MAX).unwrap();
+    let oldest: Vec<_> = (0..4).rev().map(|i| (lsns[i], format!("v{i}"))).collect();
+    assert_eq!(revisions(&rest), oldest, "other keys and tenant u never show");
+    assert_eq!((rest.next, rest.truncated), (None, false));
+    let all: Vec<_> = first.revisions.iter().chain(&rest.revisions).map(|r| r.lsn).collect();
+    assert_eq!(all, lsns.iter().rev().copied().collect::<Vec<_>>(), "20 LSNs, newest first");
+}
+
+#[test]
+fn history_at_the_cap_offers_no_next_page() {
+    let engine = open(Arc::new(SimDisk::new(71)), options());
+    for i in 0..16 {
+        engine.fact_put("t", padded(i, 2), None, None).unwrap();
+    }
+    let history = engine.fact_history("t", "k", usize::MAX).unwrap();
+    assert_eq!(history.revisions.len(), 16);
+    assert_eq!((history.truncated, history.next), (false, None), "no empty page is offered");
+}
+
+#[test]
+fn history_walk_respects_visits_and_forgets() {
+    let engine = open(Arc::new(SimDisk::new(72)), options());
+    let s = Scope { tenant: "t".into(), agent: "a".into(), session: "s".into() };
+    let lsns = twenty(&engine, 2, |i| {
+        let turns = (0..50).map(|j| turn((i * 50 + j) as u64)).collect();
+        engine.append(&s, turns, None).unwrap();
+    });
+    engine.forget("t", Selector::Lsns(vec![lsns[2]]), None, None).unwrap();
+    let first = engine.fact_history("t", "k", usize::MAX).unwrap();
+    let rejected = engine.fact_history_before("t", "k", lsns[4], usize::MAX, 0).unwrap_err();
+    assert!(matches!(rejected.kind, ErrorKind::InvalidInput), "{rejected}");
+
+    let (mut pages, mut before, mut seen) = (Vec::new(), first.next, Vec::new());
+    while let Some(lsn) = before {
+        let page = engine.fact_history_before("t", "k", lsn, usize::MAX, 10).unwrap();
+        assert_eq!(page.truncated, page.next.is_some());
+        seen.extend(page.revisions.iter().map(|rev| (rev.lsn, rev.redacted)));
+        before = page.next;
+        pages.push(page);
+    }
+    assert!(pages.iter().any(|page| page.revisions.is_empty() && page.next.is_some()));
+    let expected = [(lsns[3], false), (lsns[2], true), (lsns[1], false), (lsns[0], false)];
+    assert_eq!(seen, expected, "the forgotten revision is a placeholder, not skipped");
+}
+
+#[test]
+fn history_walk_budget_cut_resumes_at_the_cut_revision() {
+    let engine = open(Arc::new(SimDisk::new(73)), options());
+    let lsns = twenty(&engine, 100, |_| {});
+    let first = engine.fact_history("t", "k", usize::MAX).unwrap();
+    let before = first.next.unwrap();
+    let cut = engine.fact_history_before("t", "k", before, 150, usize::MAX).unwrap();
+    assert_eq!(revisions(&cut), [(lsns[3], "v3".to_owned())]);
+    assert_eq!((cut.next, cut.truncated), (Some(lsns[2] + 1), true));
+    let next = engine.fact_history_before("t", "k", cut.next.unwrap(), 150, usize::MAX).unwrap();
+    assert_eq!(revisions(&next)[0], (lsns[2], "v2".to_owned()), "the cut revision comes first");
 }

@@ -36,7 +36,7 @@ const USAGE: &str = "usage:
   atticdb search <connect> --query <words> [--limit <n>] [--before <lsn>] [--max-bytes <n>]
   atticdb fact set <connect> --key <key> (--content <text> | --delete)
   atticdb fact get <connect> --key <key>
-  atticdb fact history <connect> --key <key> [--max-bytes <n>]
+  atticdb fact history <connect> --key <key> [--before <lsn>] [--max-bytes <n>]
   atticdb fact list <connect> --prefix <prefix> [--after <key>] [--limit <n>] [--max-bytes <n>]
   atticdb tree [<prefix>] <connect> [--depth <n>] [--content] [--json]
   atticdb file save <connect> --path <file> --about <text>
@@ -175,7 +175,7 @@ fn main() -> ExitCode {
                 }
                 Some(("get", rest)) => tool(rest, "fact_get", &["--key"], &[]),
                 Some(("history", rest)) => {
-                    tool(rest, "fact_history", &["--key", "--max-bytes"], &[])
+                    tool(rest, "fact_history", &["--key", "--before", "--max-bytes"], &[])
                 }
                 Some(("list", rest)) => {
                     let valued = ["--prefix", "--after", "--limit", "--max-bytes"];

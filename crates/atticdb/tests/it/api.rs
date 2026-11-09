@@ -476,6 +476,56 @@ fn keys(page: &Value) -> Vec<&str> {
     page["facts"].as_array().unwrap().iter().map(|fact| fact["key"].as_str().unwrap()).collect()
 }
 
+/// `next` pages a key's history past the 16 revisions the index keeps. `before` takes it.
+#[test]
+fn fact_history_pages_with_before() {
+    let dir = Dir::new();
+    let running = serve(sim_engine(&SimDisk::new(5), |_| {}), &dir, MAX_CONNECTIONS);
+    let unix = &running.vias[1];
+    let put = |key: &str, n: usize| {
+        let (status, put) = unix.a(
+            "POST",
+            "/v1/facts/put",
+            Some(&fact_body(key, &n.to_string(), &format!("{key}{n}"))),
+        );
+        assert_eq!(status, 200, "{put}");
+        put["lsn"].as_u64().unwrap()
+    };
+    let mut written: Vec<u64> = (1..=20).map(|n| put("k", n)).collect();
+    written.reverse();
+    let (mut seen, mut target, mut pages) = (Vec::new(), "/v1/facts/history?key=k".to_owned(), 0);
+    loop {
+        let (status, page) = unix.a("GET", &target, None);
+        assert_eq!(status, 200, "{page}");
+        let revisions = page["revisions"].as_array().unwrap();
+        seen.extend(revisions.iter().map(|r| r["lsn"].as_u64().unwrap()));
+        assert_eq!(page["truncated"], page["next"].is_u64(), "{page}");
+        pages += 1;
+        match page["next"].as_u64() {
+            Some(next) => target = format!("/v1/facts/history?key=k&before={next}"),
+            None => break,
+        }
+        assert!(pages < 20, "paging ends");
+    }
+    assert_eq!(seen, written, "every revision, newest first, once");
+    assert!(pages > 1, "the first page stops at the index cap");
+
+    for n in 1..=3 {
+        put("three", n);
+    }
+    let (status, page) = unix.a("GET", "/v1/facts/history?key=three", None);
+    assert_eq!((status, &page["next"], &page["truncated"]), (200, &Value::Null, &json!(false)));
+    for target in [
+        "/v1/facts/history?key=k&before=x",
+        "/v1/facts/get?key=k&before=1",
+        "/v1/facts/list?before=1",
+    ] {
+        let (status, rejected) = unix.a("GET", target, None);
+        assert_eq!((status, &rejected["error"]), (400, &json!("invalid_input")), "{target}");
+    }
+    running.server.shutdown();
+}
+
 #[test]
 fn auth_and_host_rules() {
     let dir = Dir::new();
