@@ -84,12 +84,13 @@ fn help_all() {
     assert!(err.is_empty(), "{err}");
 }
 
-/// `--help` or `-h` after a command prints its usage lines on stdout and exits 0.
+/// `--help` or `-h` right after a command, or after its verb, prints its usage lines on
+/// stdout and exits 0.
 #[test]
 fn command_help() {
     for (args, command) in [
         (&["search", "--help"][..], "search"),
-        (&["search", "--query", "q", "-h"], "search"),
+        (&["fact", "set", "--help"], "fact"),
         (&["connect", "--help"], "connect"),
         (&["fact", "get", "-h"], "fact"),
         (&["--version", "--help"], "--version"),
@@ -110,6 +111,30 @@ fn command_help() {
         assert_eq!(code, Some(0), "{args:?}: {err}");
         assert!(out.starts_with(start) && out.contains("\n\n"), "{args:?}: {out}");
     }
+}
+
+/// `-h` or `--help` anywhere but first is a normal argument, so a flag value is written as is.
+#[cfg(unix)]
+#[test]
+fn help_tokens_as_values_are_written() {
+    let dir = Dir::new();
+    let home = dir.0.join("h");
+    std::fs::create_dir_all(&home).unwrap();
+    let _holders = Holders(vec![data_dir(&home)]);
+    let run = |args: &[&str]| {
+        let (code, out, err) = atticdb(&home, &home, args, &[], b"", 0);
+        assert_eq!(code, Some(0), "{args:?}: {err}");
+        assert!(!out.starts_with("usage:"), "{args:?}: {out}");
+        serde_json::from_str::<serde_json::Value>(&out).unwrap_or_else(|e| panic!("{out}: {e}"))
+    };
+    let printed = run(&["append", "--content", "-h"]);
+    assert_eq!(printed["committed"], true, "{printed}");
+    let printed = run(&["recent", "--n", "1"]);
+    assert_eq!(printed.pointer("/turns/0/content"), Some(&"-h".into()), "{printed}");
+    let printed = run(&["fact", "set", "--key", "k", "--content", "--help"]);
+    assert_eq!(printed["committed"], true, "{printed}");
+    let printed = run(&["fact", "get", "--key", "k"]);
+    assert_eq!(printed.pointer("/fact/content"), Some(&"--help".into()), "{printed}");
 }
 
 /// A usage error prints a short error on stderr and exits 2. Stdout stays empty.
