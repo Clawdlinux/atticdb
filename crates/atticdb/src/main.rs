@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use atticdb::cli::USAGE;
+use atticdb::cli;
 use atticdb::config::{Config, Listen};
 use atticdb::connect::{Harness, Mode, Notes, Options};
 use atticdb::launch::Url;
@@ -37,7 +37,13 @@ fn main() -> ExitCode {
         }
     }
     let code = match args.split_first() {
+        None => help(),
         Some((command, rest)) => match command.as_str() {
+            "--help" | "-h" | "help" if rest.is_empty() => help(),
+            "help" if rest == ["--all"] => {
+                println!("{}", cli::USAGE);
+                Some(0)
+            }
             "--version" | "-V" if rest.is_empty() => {
                 println!("atticdb {}", atticdb::VERSION);
                 Some(0)
@@ -137,12 +143,17 @@ fn main() -> ExitCode {
             }),
             _ => None,
         },
-        None => None,
     };
     ExitCode::from(code.unwrap_or_else(|| {
-        eprintln!("{USAGE}");
+        eprint!("{}", cli::error(cli::style_for(&std::io::stderr()), &args));
         2
     }))
+}
+
+/// Prints the help screen on stdout.
+fn help() -> Option<u8> {
+    print!("{}", cli::help(cli::style_for(&std::io::stdout()), atticdb::VERSION));
+    Some(0)
 }
 
 /// `atticdb hook <session-start|post-compact> [--harness <name>] [--home <dir>]`. A hook must

@@ -40,6 +40,61 @@ fn version_flag() {
     }
 }
 
+/// Runs `atticdb args` with no terminal, a fresh `HOME` and no home. Returns the exit code,
+/// stdout and stderr. It also checks that no home was created.
+fn run_bare(args: &[&str]) -> (Option<i32>, String, String) {
+    let dir = Dir::new();
+    let mut command = bare();
+    command.args(args).current_dir(&dir.0).env("HOME", dir.0.join("h"));
+    let out = command.stdin(Stdio::null()).output().unwrap();
+    assert!(!dir.0.join("h").exists(), "{args:?}: no home");
+    let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
+    (out.status.code(), text(&out.stdout), text(&out.stderr))
+}
+
+/// No args, `--help`, `-h` and `help` print the help screen on stdout and exit 0. With no
+/// terminal it has no color.
+#[test]
+fn help_screen() {
+    for args in [&[][..], &["--help"], &["-h"], &["help"]] {
+        let (code, out, err) = run_bare(args);
+        assert_eq!(code, Some(0), "{args:?}: {err}");
+        assert_eq!(out, atticdb::cli::help(atticdb::cli::Style::Plain, atticdb::VERSION));
+        assert!(out.contains("Get started") && !out.contains('\x1b'), "{args:?}: {out}");
+        assert!(err.is_empty(), "{args:?}: {err}");
+    }
+}
+
+/// `help --all` prints every command and flag on stdout and exits 0.
+#[test]
+fn help_all() {
+    let (code, out, err) = run_bare(&["help", "--all"]);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out, format!("{}\n", atticdb::cli::USAGE));
+    assert!(err.is_empty(), "{err}");
+}
+
+/// A usage error prints a short error on stderr and exits 2. Stdout stays empty.
+#[test]
+fn usage_errors() {
+    let (code, out, err) = run_bare(&["connect", "claude-desktp"]);
+    assert_eq!(code, Some(2), "{err}");
+    assert_eq!(err.lines().next(), Some("error: unknown app \"claude-desktp\""), "{err}");
+    assert!(err.contains("claude-desktop") && !err.contains('\x1b'), "{err}");
+    assert!(out.is_empty(), "{out}");
+
+    for (args, first) in [
+        (&["bogus"][..], "error: unknown command \"bogus\""),
+        (&["help", "bogus"], "error: unknown command \"help\""),
+    ] {
+        let (code, out, err) = run_bare(args);
+        assert_eq!(code, Some(2), "{args:?}: {err}");
+        assert_eq!(err.lines().next(), Some(first), "{args:?}: {err}");
+        assert!(err.ends_with("  more:  atticdb --help\n"), "{args:?}: {err}");
+        assert!(out.is_empty(), "{args:?}: {out}");
+    }
+}
+
 /// A first `append` on a fresh home starts a server and succeeds. Waiting for it is the
 /// normal path, so stderr has no "no trusted server" line. `portable` covers Windows.
 #[cfg(unix)]

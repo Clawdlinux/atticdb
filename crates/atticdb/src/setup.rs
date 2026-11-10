@@ -147,6 +147,10 @@ pub fn run(flags: Flags) -> u8 {
         eprintln!("{NEEDS_TERMINAL}");
         return 2;
     }
+    let stdout = std::io::stdout();
+    if stdout.is_terminal() {
+        print!("{}", crate::cli::header(crate::cli::style_for(&stdout), crate::VERSION));
+    }
     // Without a terminal, `--dry-run` takes the defaults, so it never waits on stdin.
     let ask = terminal && !flags.yes;
     let stdin = std::io::stdin();
