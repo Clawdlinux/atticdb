@@ -670,7 +670,6 @@ fn upgrade_keeps_binary_when_installer_fails() {
     let lock = std::fs::read_to_string(data.join("LOCK")).unwrap();
     let exe = setup.copy_binary("bin2");
     let old = std::fs::read(&exe).unwrap();
-    let ino = std::fs::metadata(&exe).unwrap().ino();
     let (dir, prev) = (exe.parent().unwrap(), exe.with_file_name("atticdb.prev"));
     let earlier: &[u8] = b"#!/bin/sh\necho the earlier rollback\n";
     for (mode, kept_prev) in [
@@ -680,6 +679,8 @@ fn upgrade_keeps_binary_when_installer_fails() {
         (Stub::SwapThenFail, true),
     ] {
         let case = format!("{mode:?}, earlier .prev: {kept_prev}");
+        // Read per case: a freed inode number can be reused by a later file on ext4.
+        let ino = std::fs::metadata(&exe).unwrap().ino();
         if kept_prev {
             std::fs::write(&prev, earlier).unwrap();
         }
@@ -694,6 +695,14 @@ fn upgrade_keeps_binary_when_installer_fails() {
         assert!(err.ends_with(&kept), "{case}: {err}");
         assert!(!out.contains("Installed"), "{case}: {out}");
         assert_eq!(std::fs::read(&exe).unwrap(), old, "{case}");
+        let now = std::fs::metadata(&exe).unwrap();
+        // A swap is undone by renaming the copy back, so it is another file with the same
+        // bytes and mode. Without a swap the binary is never touched.
+        match mode {
+            Stub::SwapThenFail => assert_ne!(now.ino(), ino, "{case}"),
+            _ => assert_eq!(now.ino(), ino, "{case}"),
+        }
+        assert_eq!(now.mode() & 0o777, 0o755, "{case}");
         if kept_prev {
             assert_eq!(std::fs::read(&prev).unwrap(), earlier, "{case}");
             assert_eq!(names(dir), ["atticdb", "atticdb.prev", "installer.env"], "{case}");
@@ -706,9 +715,6 @@ fn upgrade_keeps_binary_when_installer_fails() {
         assert_eq!(std::fs::read_to_string(data.join("LOCK")).unwrap(), lock, "{case}");
         std::fs::remove_file(dir.join("installer.env")).unwrap();
     }
-    // Restored by a rename, so not the same file, but the same bytes and mode.
-    assert_ne!(std::fs::metadata(&exe).unwrap().ino(), ino);
-    assert_eq!(std::fs::metadata(&exe).unwrap().mode() & 0o777, 0o755);
 }
 
 /// Without a terminal on stdin and without `--yes`, it refuses with exit 2 before any request.
