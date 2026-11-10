@@ -108,7 +108,7 @@ atticdb setup --dry-run   # prints the plan and writes nothing
 atticdb setup --help      # the flags
 ```
 
-`atticdb --help` lists the commands, and `atticdb help --all` prints every flag. Set `NO_COLOR=1` to turn color off.
+`atticdb --help` lists the commands. `atticdb <command> --help` prints that command's flags. `atticdb help --all` prints every flag. Set `NO_COLOR=1` to turn color off.
 
 It looks for VS Code, Copilot CLI, Claude Code, Codex, Gemini CLI, Antigravity and Claude Desktop.
 Nothing runs to find them.

@@ -52,11 +52,21 @@ fn run_bare(args: &[&str]) -> (Option<i32>, String, String) {
     (out.status.code(), text(&out.stdout), text(&out.stderr))
 }
 
-/// No args, `--help`, `-h` and `help` print the help screen on stdout and exit 0. With no
-/// terminal it has no color.
+/// No args, `--help`, `-h` and `help` print the help screen on stdout and exit 0, whatever
+/// follows them. With no terminal it has no color.
 #[test]
 fn help_screen() {
-    for args in [&[][..], &["--help"], &["-h"], &["help"]] {
+    let cases = [
+        &[][..],
+        &["--help"],
+        &["-h"],
+        &["help"],
+        &["help", "setup"],
+        &["help", "bogus"],
+        &["--help", "extra"],
+        &["-h", "x", "y"],
+    ];
+    for args in cases {
         let (code, out, err) = run_bare(args);
         assert_eq!(code, Some(0), "{args:?}: {err}");
         assert_eq!(out, atticdb::cli::help(atticdb::cli::Style::Plain, atticdb::VERSION));
@@ -74,6 +84,34 @@ fn help_all() {
     assert!(err.is_empty(), "{err}");
 }
 
+/// `--help` or `-h` after a command prints its usage lines on stdout and exits 0.
+#[test]
+fn command_help() {
+    for (args, command) in [
+        (&["search", "--help"][..], "search"),
+        (&["search", "--query", "q", "-h"], "search"),
+        (&["connect", "--help"], "connect"),
+        (&["fact", "get", "-h"], "fact"),
+        (&["--version", "--help"], "--version"),
+    ] {
+        let (code, out, err) = run_bare(args);
+        assert_eq!(code, Some(0), "{args:?}: {err}");
+        assert_eq!(Some(out.as_str()), atticdb::cli::command_usage(command).as_deref());
+        assert!(out.starts_with(&format!("usage: atticdb {command}")), "{args:?}: {out}");
+        assert!(err.is_empty(), "{args:?}: {err}");
+    }
+    let (_, out, _) = run_bare(&["connect", "--help"]);
+    assert!(out.ends_with("  claude-desktop\n") && out.contains("apps:  vscode"), "{out}");
+    for (args, start) in [
+        (&["setup", "-h"][..], "usage: atticdb setup"),
+        (&["doctor", "-h"], "usage: atticdb doctor"),
+    ] {
+        let (code, out, err) = run_bare(args);
+        assert_eq!(code, Some(0), "{args:?}: {err}");
+        assert!(out.starts_with(start) && out.contains("\n\n"), "{args:?}: {out}");
+    }
+}
+
 /// A usage error prints a short error on stderr and exits 2. Stdout stays empty.
 #[test]
 fn usage_errors() {
@@ -85,7 +123,7 @@ fn usage_errors() {
 
     for (args, first) in [
         (&["bogus"][..], "error: unknown command \"bogus\""),
-        (&["help", "bogus"], "error: unknown command \"help\""),
+        (&["bogus", "--help"], "error: unknown command \"bogus\""),
     ] {
         let (code, out, err) = run_bare(args);
         assert_eq!(code, Some(2), "{args:?}: {err}");

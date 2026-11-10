@@ -207,7 +207,8 @@ pub fn help(style: Style, version: &str) -> String {
 }
 
 /// The `USAGE` lines starting with `prefix`, plus their more indented continuation lines.
-/// The prefix is `atticdb <command>`, or `<connect>:` for the shared flags block.
+/// The prefix is `atticdb <command>`, or `<connect>:` for the shared flags block. A line ending
+/// in `.` is prose, so it's skipped.
 fn usage_lines(prefix: &str) -> Vec<&'static str> {
     let indent = |line: &str| line.len() - line.trim_start().len();
     let mut lines = Vec::new();
@@ -218,13 +219,43 @@ fn usage_lines(prefix: &str) -> Vec<&'static str> {
             lines.push(line);
             continue;
         }
-        inside =
-            text.strip_prefix(prefix).is_some_and(|rest| rest.is_empty() || rest.starts_with(' '));
+        inside = !text.ends_with('.')
+            && text
+                .strip_prefix(prefix)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '));
         if inside {
             lines.push(line);
         }
     }
     lines
+}
+
+/// The `USAGE` lines of `command`, as `--version`, `-V` or a command name. `lead` starts the
+/// first line and indents the rest. `None` when `command` isn't one.
+fn command_lines(command: &str, lead: &str) -> Option<String> {
+    let command = if command == "-V" { "--version" } else { command };
+    if command.contains(char::is_whitespace) {
+        return None;
+    }
+    let lines = usage_lines(&format!("atticdb {command}"));
+    let indent = " ".repeat(lead.len());
+    let mut out = String::new();
+    for (index, line) in lines.iter().enumerate() {
+        out += &format!("{}{}\n", if index == 0 { lead } else { &indent }, &line[2..]);
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// The apps line for `connect` and `disconnect`, after `lead`.
+fn apps_line(lead: &str) -> String {
+    format!("{lead}apps:  {}\n", APPS.join("  "))
+}
+
+/// What `atticdb <command> --help` prints: the command's usage lines. `connect` adds the
+/// apps line. `None` when `command` isn't one.
+pub fn command_usage(command: &str) -> Option<String> {
+    let out = command_lines(command, "usage: ")?;
+    Some(if command == "connect" { out + &apps_line("") } else { out })
 }
 
 /// Every `--flag` named in `lines`.
@@ -253,35 +284,30 @@ pub fn error(style: Style, args: &[String]) -> String {
         );
     };
     let command = if typed == "-V" { "--version" } else { typed.as_str() };
-    let lines = match command.contains(char::is_whitespace) {
-        true => Vec::new(),
-        false => usage_lines(&format!("atticdb {command}")),
-    };
+    let usage = command_lines(command, "  usage: ").unwrap_or_default();
+    let lines: Vec<&str> = usage.lines().collect();
     let mut extra = String::new();
+    // Debug quoting escapes control bytes, so argv can't send escapes to the terminal.
     let what = if lines.is_empty() {
-        format!("unknown command \"{typed}\"")
+        format!("unknown command {typed:?}")
     } else if let Some(app) = rest
         .first()
         .filter(|app| matches!(command, "connect" | "disconnect") && !APPS.contains(&app.as_str()))
     {
-        extra = format!("  apps:  {}\n", APPS.join("  "));
-        format!("unknown app \"{app}\"")
+        extra = apps_line("  ");
+        format!("unknown app {app:?}")
     } else {
         let mut known = flags_in(&lines);
-        if lines.iter().any(|line| line.contains("<connect>")) {
+        if usage.contains("<connect>") {
             known.extend(flags_in(&usage_lines("<connect>:")));
         }
         match rest.iter().find(|arg| arg.starts_with("--") && !known.contains(arg)) {
-            Some(flag) => format!("unknown flag \"{flag}\""),
-            None => format!("missing or invalid arguments for \"{typed}\""),
+            Some(flag) => format!("unknown flag {flag:?}"),
+            None => format!("missing or invalid arguments for {typed:?}"),
         }
     };
-    let mut out = format!("{} {what}\n{extra}", paint(style, &format!("{BOLD}{RED}"), "error:"));
-    for (index, line) in lines.iter().enumerate() {
-        let lead = if index == 0 { "  usage: " } else { "         " };
-        out += &format!("{lead}{}\n", &line[2..]);
-    }
-    out + MORE
+    let error = paint(style, &format!("{BOLD}{RED}"), "error:");
+    format!("{error} {what}\n{extra}{usage}{MORE}")
 }
 
 #[cfg(test)]
@@ -474,6 +500,54 @@ mod tests {
         let text = error(Style::Ansi256, &args(&["bogus"]));
         assert!(text.starts_with("\x1b[1m\x1b[31merror:\x1b[0m"), "{text:?}");
         assert_eq!(strip(&text), error(Style::Plain, &args(&["bogus"])));
+    }
+
+    #[test]
+    fn control_bytes_in_args_are_escaped() {
+        let typed = "x\u{1b}]0;pwned\u{7}";
+        for list in [
+            vec![typed],
+            vec!["connect", typed],
+            vec!["search", typed],
+            vec!["search", "--query", typed],
+        ] {
+            let text = error(Style::Plain, &args(&list));
+            assert!(!text.contains(['\u{1b}', '\u{7}']), "{list:?}: {text:?}");
+        }
+        let text = error(Style::Plain, &args(&[typed]));
+        assert_eq!(text.lines().next(), Some(r#"error: unknown command "x\u{1b}]0;pwned\u{7}""#));
+    }
+
+    #[test]
+    fn prose_lines_are_not_usage_lines() {
+        let text = error(Style::Plain, &args(&["doctor", "--harnes", "x"]));
+        let usage: Vec<&str> = text.lines().filter(|line| line.starts_with("  usage:")).collect();
+        assert_eq!(usage, ["  usage: atticdb doctor [--harness <list>]"], "{text}");
+        assert!(!text.lines().any(|line| line.ends_with('.')), "{text}");
+    }
+
+    #[test]
+    fn command_usage_lists_the_command_lines() {
+        assert_eq!(
+            command_usage("search").as_deref(),
+            Some(
+                "usage: atticdb search <connect> --query <words> [--limit <n>] [--before <lsn>] \
+                 [--max-bytes <n>]\n"
+            )
+        );
+        let serve = command_usage("serve").unwrap_or_default();
+        let lines: Vec<&str> = serve.lines().collect();
+        assert!(lines[0].starts_with("usage: atticdb serve --config <path>"), "{serve}");
+        assert_eq!(lines[1].len() - lines[1].trim_start().len(), 15 + 5, "{serve}");
+        let connect = command_usage("connect").unwrap_or_default();
+        assert!(connect.starts_with("usage: atticdb connect <vscode|copilot>"), "{connect}");
+        assert_eq!(connect.lines().filter(|line| line.contains("atticdb connect")).count(), 3);
+        let apps =
+            "apps:  vscode  copilot  claude-code  codex  gemini  antigravity  claude-desktop";
+        assert!(connect.ends_with(&format!("{apps}\n")), "{connect}");
+        assert_eq!(command_usage("-V").as_deref(), Some("usage: atticdb --version | -V\n"));
+        assert_eq!(command_usage("bogus"), None);
+        assert_eq!(command_usage("connect <vscode|copilot>"), None);
     }
 
     #[test]

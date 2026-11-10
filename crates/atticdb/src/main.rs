@@ -36,13 +36,21 @@ fn main() -> ExitCode {
             return ExitCode::from(usage(&error));
         }
     }
+    let wants_help = |rest: &[String]| rest.iter().any(|arg| arg == "--help" || arg == "-h");
     let code = match args.split_first() {
         None => help(),
         Some((command, rest)) => match command.as_str() {
-            "--help" | "-h" | "help" if rest.is_empty() => help(),
             "help" if rest == ["--all"] => {
                 println!("{}", cli::USAGE);
                 Some(0)
+            }
+            "--help" | "-h" | "help" => help(),
+            // `mcp` and `hook` are run by apps, so they keep their own parsing.
+            name if !matches!(name, "mcp" | "hook" | "setup" | "doctor") && wants_help(rest) => {
+                cli::command_usage(name).map(|text| {
+                    print!("{text}");
+                    0
+                })
             }
             "--version" | "-V" if rest.is_empty() => {
                 println!("atticdb {}", atticdb::VERSION);
@@ -80,13 +88,13 @@ fn main() -> ExitCode {
                     flags(rest, &["--notes"], &["--force", "--no-hook", "--dry-run"])?,
                 )
             }),
-            "setup" if rest.iter().any(|arg| arg == "--help") => {
+            "setup" if wants_help(rest) => {
                 println!("{}", atticdb::setup::USAGE);
                 Some(0)
             }
             "setup" => flags(rest, &["--harness", "--notes"], &["--yes", "--no-hook", "--dry-run"])
                 .and_then(setup),
-            "doctor" if rest.iter().any(|arg| arg == "--help") => {
+            "doctor" if wants_help(rest) => {
                 println!("{}", atticdb::doctor::USAGE);
                 Some(0)
             }
