@@ -99,6 +99,8 @@ atticdb setup             # asks which apps, then wires them
 atticdb doctor            # checks the install; it may start the server
 ```
 
+`atticdb --help` lists the commands. `atticdb <command> --help` prints that command's flags. `atticdb help --all` prints every flag. Set `NO_COLOR=1` to turn color off.
+
 `setup` finds Copilot CLI, VS Code, Claude Code, Codex, Gemini CLI, Antigravity and Claude Desktop. It adds the MCP entry, a chat-start hook and the guide each app reads. Antigravity and Claude Desktop get only the MCP entry. Restart them to load it. Claude Code also gets a PostCompact hook. It saves each compaction summary as a note, with a pointer to the full transcript. Every edited file is backed up first. `atticdb disconnect <app>` removes exactly what it added. Codex runs a new hook only after you approve it once in Codex. [research/setup_eval/results](research/setup_eval/results/README.md) has the eval results.
 
 `atticdb doctor` prints 1 line per check, with what to do when one fails. [Set up](crates/atticdb/README.md#set-up) and [`atticdb doctor`](crates/atticdb/README.md#atticdb-doctor) give the details.

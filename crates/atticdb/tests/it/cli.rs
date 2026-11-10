@@ -40,6 +40,124 @@ fn version_flag() {
     }
 }
 
+/// Runs `atticdb args` with no terminal, a fresh `HOME` and no home. Returns the exit code,
+/// stdout and stderr. It also checks that no home was created.
+fn run_bare(args: &[&str]) -> (Option<i32>, String, String) {
+    let dir = Dir::new();
+    let mut command = bare();
+    command.args(args).current_dir(&dir.0).env("HOME", dir.0.join("h"));
+    let out = command.stdin(Stdio::null()).output().unwrap();
+    assert!(!dir.0.join("h").exists(), "{args:?}: no home");
+    let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
+    (out.status.code(), text(&out.stdout), text(&out.stderr))
+}
+
+/// No args, `--help`, `-h` and `help` print the help screen on stdout and exit 0, whatever
+/// follows them. With no terminal it has no color.
+#[test]
+fn help_screen() {
+    let cases = [
+        &[][..],
+        &["--help"],
+        &["-h"],
+        &["help"],
+        &["help", "setup"],
+        &["help", "bogus"],
+        &["--help", "extra"],
+        &["-h", "x", "y"],
+    ];
+    for args in cases {
+        let (code, out, err) = run_bare(args);
+        assert_eq!(code, Some(0), "{args:?}: {err}");
+        assert_eq!(out, atticdb::cli::help(atticdb::cli::Style::Plain, atticdb::VERSION));
+        assert!(out.contains("Get started") && !out.contains('\x1b'), "{args:?}: {out}");
+        assert!(err.is_empty(), "{args:?}: {err}");
+    }
+}
+
+/// `help --all` prints every command and flag on stdout and exits 0.
+#[test]
+fn help_all() {
+    let (code, out, err) = run_bare(&["help", "--all"]);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out, format!("{}\n", atticdb::cli::USAGE));
+    assert!(err.is_empty(), "{err}");
+}
+
+/// `--help` or `-h` right after a command, or after its verb, prints its usage lines on
+/// stdout and exits 0.
+#[test]
+fn command_help() {
+    for (args, command) in [
+        (&["search", "--help"][..], "search"),
+        (&["fact", "set", "--help"], "fact"),
+        (&["connect", "--help"], "connect"),
+        (&["fact", "get", "-h"], "fact"),
+        (&["--version", "--help"], "--version"),
+    ] {
+        let (code, out, err) = run_bare(args);
+        assert_eq!(code, Some(0), "{args:?}: {err}");
+        assert_eq!(Some(out.as_str()), atticdb::cli::command_usage(command).as_deref());
+        assert!(out.starts_with(&format!("usage: atticdb {command}")), "{args:?}: {out}");
+        assert!(err.is_empty(), "{args:?}: {err}");
+    }
+    let (_, out, _) = run_bare(&["connect", "--help"]);
+    assert!(out.ends_with("  claude-desktop\n") && out.contains("apps:  vscode"), "{out}");
+    for (args, start) in [
+        (&["setup", "-h"][..], "usage: atticdb setup"),
+        (&["doctor", "-h"], "usage: atticdb doctor"),
+    ] {
+        let (code, out, err) = run_bare(args);
+        assert_eq!(code, Some(0), "{args:?}: {err}");
+        assert!(out.starts_with(start) && out.contains("\n\n"), "{args:?}: {out}");
+    }
+}
+
+/// `-h` or `--help` anywhere but first is a normal argument, so a flag value is written as is.
+#[cfg(unix)]
+#[test]
+fn help_tokens_as_values_are_written() {
+    let dir = Dir::new();
+    let home = dir.0.join("h");
+    std::fs::create_dir_all(&home).unwrap();
+    let _holders = Holders(vec![data_dir(&home)]);
+    let run = |args: &[&str]| {
+        let (code, out, err) = atticdb(&home, &home, args, &[], b"", 0);
+        assert_eq!(code, Some(0), "{args:?}: {err}");
+        assert!(!out.starts_with("usage:"), "{args:?}: {out}");
+        serde_json::from_str::<serde_json::Value>(&out).unwrap_or_else(|e| panic!("{out}: {e}"))
+    };
+    let printed = run(&["append", "--content", "-h"]);
+    assert_eq!(printed["committed"], true, "{printed}");
+    let printed = run(&["recent", "--n", "1"]);
+    assert_eq!(printed.pointer("/turns/0/content"), Some(&"-h".into()), "{printed}");
+    let printed = run(&["fact", "set", "--key", "k", "--content", "--help"]);
+    assert_eq!(printed["committed"], true, "{printed}");
+    let printed = run(&["fact", "get", "--key", "k"]);
+    assert_eq!(printed.pointer("/fact/content"), Some(&"--help".into()), "{printed}");
+}
+
+/// A usage error prints a short error on stderr and exits 2. Stdout stays empty.
+#[test]
+fn usage_errors() {
+    let (code, out, err) = run_bare(&["connect", "claude-desktp"]);
+    assert_eq!(code, Some(2), "{err}");
+    assert_eq!(err.lines().next(), Some("error: unknown app \"claude-desktp\""), "{err}");
+    assert!(err.contains("claude-desktop") && !err.contains('\x1b'), "{err}");
+    assert!(out.is_empty(), "{out}");
+
+    for (args, first) in [
+        (&["bogus"][..], "error: unknown command \"bogus\""),
+        (&["bogus", "--help"], "error: unknown command \"bogus\""),
+    ] {
+        let (code, out, err) = run_bare(args);
+        assert_eq!(code, Some(2), "{args:?}: {err}");
+        assert_eq!(err.lines().next(), Some(first), "{args:?}: {err}");
+        assert!(err.ends_with("  more:  atticdb --help\n"), "{args:?}: {err}");
+        assert!(out.is_empty(), "{args:?}: {out}");
+    }
+}
+
 /// A first `append` on a fresh home starts a server and succeeds. Waiting for it is the
 /// normal path, so stderr has no "no trusted server" line. `portable` covers Windows.
 #[cfg(unix)]

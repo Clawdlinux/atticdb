@@ -2,81 +2,13 @@
 
 #![forbid(unsafe_code)]
 
+use atticdb::cli;
 use atticdb::config::{Config, Listen};
 use atticdb::connect::{Harness, Mode, Notes, Options};
 use atticdb::launch::Url;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-
-const USAGE: &str = "usage:
-  atticdb --version | -V
-  atticdb init --config <path> --tenant <name>
-  atticdb serve --config <path> [--data-dir <dir>] [--listen <addr>|none] [--unix-socket <path>]
-               [--unix-socket-group <gid or name>] [--exit-on-poison] [--log-requests]
-  atticdb recover --truncate-at <lsn> --data-dir <dir>
-  atticdb stats --url unix:///path | --data-dir <dir>
-  atticdb load --url unix:///path|http://127.0.0.1:<port> [--token-file <path>] [--writers <n>]
-              [--turns <n>] [--batch <n>] [--size <bytes>] [--think <ms>]
-  atticdb verify --data-dir <dir> [--scratch <dir>]
-  atticdb dump --data-dir <dir> [--scratch <dir>] [--from <lsn>] [--limit <n>]
-  atticdb mcp <connect>
-  atticdb setup [--yes] [--harness <list>] [--no-hook] [--notes ask|auto] [--dry-run]
-  atticdb doctor [--harness <list>]
-  atticdb upgrade [--yes] [--version <v>]
-  atticdb connect <vscode|copilot> [--force] [--dry-run]
-  atticdb connect <antigravity|claude-desktop> [--force] [--dry-run]
-  atticdb connect <claude-code|codex|gemini> [--force] [--no-hook] [--notes ask|auto] [--dry-run]
-  atticdb disconnect <vscode|copilot|claude-code|codex|gemini|antigravity|claude-desktop>
-  atticdb hook <session-start|post-compact> [--harness <name>] [--home <dir>]
-  atticdb studio [--url unix:///path|http://127.0.0.1:<port>] [--data-dir <dir>] [--config <path>]
-                [--tenant <name>] [--token-file <path>] [--no-open] [--allow-forget]
-  atticdb append <connect> --content <text> [--role user|assistant|tool]
-  atticdb recent <connect> [--n <n>] [--max-bytes <n>]
-  atticdb search <connect> --query <words> [--limit <n>] [--before <lsn>] [--max-bytes <n>]
-  atticdb fact set <connect> --key <key> (--content <text> | --delete)
-  atticdb fact get <connect> --key <key>
-  atticdb fact history <connect> --key <key> [--before <lsn>] [--max-bytes <n>]
-  atticdb fact list <connect> --prefix <prefix> [--after <key>] [--limit <n>] [--max-bytes <n>]
-  atticdb tree [<prefix>] <connect> [--depth <n>] [--content] [--json]
-  atticdb file save <connect> --path <file> --about <text>
-  atticdb file get <connect> --path <file or folder> [--versions]
-  atticdb forget session <connect> --agent <a> --session <s> [--up-to-lsn <n>]
-  atticdb forget key <connect> --key <key> [--up-to-lsn <n>]
-  atticdb forget file <connect> --path <file> [--up-to-lsn <n>]
-  atticdb forget lsns <connect> --lsns <n,n,...> [--up-to-lsn <n>]
-  atticdb export <dir> [--url <url>] [--data-dir <dir>] [--config <path>] [--tenant <name>]
-                 [--token-file <path>] [--max-bytes <n>]
-  <connect>: [--url unix:///path|http://127.0.0.1:<port>] [--data-dir <dir>] [--config <path>]
-             [--tenant <name>] [--token-file <path>] [--agent <name>] [--session <name>]
-             [--retry-deadline <n>s|<n>ms]
-  The token comes from --token-file, ATTICDB_TOKEN, or the config entry for --tenant.
-  With no --url, --data-dir, --config, --tenant or --token-file, the home is used and
-  ATTICDB_TOKEN is ignored. ATTICDB_HOME, when set, is the home. It must be an absolute path.
-  --agent defaults to mcp. --session defaults to the repo of the current directory, named
-  after the folder holding .git. A worktree takes its main repo's name.
-  append, recent, search, fact and file print one JSON line. They exit 1 when nothing was written,
-  3 when a write may or may not be saved.
-  tree prints fact keys as a tree of / segments, with counts and the newest change date.
-  With no <prefix>, --depth defaults to 2. --content adds each value's first line. --json
-  prints 1 JSON line. Deleted and forgotten keys never show.
-  forget hides records up to --up-to-lsn, or up to the forget itself. It exits like append.
-  Content is hidden from normal AtticDB reads. It stays on disk until purge ships (#159).
-  What stays visible: https://github.com/Clawdlinux/atticdb#what-a-forget-leaves-visible
-  forget session needs --agent and --session. The other forget verbs take neither.
-  export writes sessions/<agent>/<session>.md at 1 LSN into <dir>, which must not exist.
-  It writes facts.md only when at least 1 fact is left. Forgotten turns show as placeholders.
-  Forgotten facts are left out.
-  studio serves a read-only page on 127.0.0.1 and opens it. With --allow-forget it can also forget
-  sessions and fact keys. It runs until Ctrl-C.
-  setup finds VS Code, Copilot CLI, Claude Code, Codex, Gemini CLI, Antigravity and Claude
-  Desktop. It asks which to connect and shows the plan. Then it connects them and checks each.
-  See atticdb setup --help.
-  doctor checks the install. It writes nothing but the daily update check's cache. See
-  atticdb doctor --help.
-  upgrade installs the latest release, or --version, over this binary with the release's
-  install.sh. It keeps the old binary as atticdb.prev. Then it stops the server and runs
-  doctor. It asks first, unless --yes. Without a terminal on stdin, it needs --yes.";
 
 /// Commands that use the home. A relative `ATTICDB_HOME` fails them with exit 2, so none falls
 /// back to the default home. The hooks exit 0 for it, as for any error.
@@ -104,8 +36,26 @@ fn main() -> ExitCode {
             return ExitCode::from(usage(&error));
         }
     }
+    let is_help = |arg: Option<&String>| arg.is_some_and(|arg| arg == "--help" || arg == "-h");
     let code = match args.split_first() {
+        None => help(),
         Some((command, rest)) => match command.as_str() {
+            "help" if rest == ["--all"] => {
+                println!("{}", cli::USAGE);
+                Some(0)
+            }
+            "--help" | "-h" | "help" => help(),
+            // `mcp` and `hook` are run by apps, so they keep their own parsing.
+            // Help only comes first, or right after a verb. Elsewhere `-h` is a value to write.
+            name if !matches!(name, "mcp" | "hook" | "setup" | "doctor")
+                && (is_help(rest.first())
+                    || matches!(name, "fact" | "file" | "forget") && is_help(rest.get(1))) =>
+            {
+                cli::command_usage(name).map(|text| {
+                    print!("{text}");
+                    0
+                })
+            }
             "--version" | "-V" if rest.is_empty() => {
                 println!("atticdb {}", atticdb::VERSION);
                 Some(0)
@@ -142,13 +92,13 @@ fn main() -> ExitCode {
                     flags(rest, &["--notes"], &["--force", "--no-hook", "--dry-run"])?,
                 )
             }),
-            "setup" if rest.iter().any(|arg| arg == "--help") => {
+            "setup" if rest.iter().any(|arg| is_help(Some(arg))) => {
                 println!("{}", atticdb::setup::USAGE);
                 Some(0)
             }
             "setup" => flags(rest, &["--harness", "--notes"], &["--yes", "--no-hook", "--dry-run"])
                 .and_then(setup),
-            "doctor" if rest.iter().any(|arg| arg == "--help") => {
+            "doctor" if rest.iter().any(|arg| is_help(Some(arg))) => {
                 println!("{}", atticdb::doctor::USAGE);
                 Some(0)
             }
@@ -205,12 +155,17 @@ fn main() -> ExitCode {
             }),
             _ => None,
         },
-        None => None,
     };
     ExitCode::from(code.unwrap_or_else(|| {
-        eprintln!("{USAGE}");
+        eprint!("{}", cli::error(cli::style_for(&std::io::stderr()), &args));
         2
     }))
+}
+
+/// Prints the help screen on stdout.
+fn help() -> Option<u8> {
+    print!("{}", cli::help(cli::style_for(&std::io::stdout()), atticdb::VERSION));
+    Some(0)
 }
 
 /// `atticdb hook <session-start|post-compact> [--harness <name>] [--home <dir>]`. A hook must
