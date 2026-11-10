@@ -221,8 +221,9 @@ jobs:
           jq -se '
             (map(.id) == [1, 2, 3, 4]) and
             (.[0].result.serverInfo.name == "atticdb") and
-            ([.[1].result.tools[].name] | sort ==
-              ["fact_get", "fact_list", "fact_set", "memory_append", "memory_recent", "memory_search"]) and
+            # The core tools must be listed. Newer releases may add more.
+            (["fact_get", "fact_list", "fact_set", "memory_append", "memory_recent", "memory_search"]
+              - [.[1].result.tools[].name] | length == 0) and
             (.[2].result.isError != true) and
             (.[2].result.content[0].text | contains("smoke note")) and
             (any(.[2].result.structuredContent.hits[]; .content == "smoke note")) and
@@ -518,8 +519,10 @@ jobs:
           $replies = @($out -split "\r?\n" | Where-Object { $_.Trim() } | ForEach-Object { $_ | ConvertFrom-Json })
           check ((($replies | ForEach-Object { $_.id }) -join ',') -eq '1,2,3,4') 'the replies are not ids 1 to 4'
           check ($replies[0].result.serverInfo.name -eq 'atticdb') 'initialize did not name atticdb'
-          $tools = ($replies[1].result.tools | ForEach-Object { $_.name } | Sort-Object) -join ','
-          check ($tools -eq 'fact_get,fact_list,fact_set,memory_append,memory_recent,memory_search') "tools/list gave $tools"
+          # The core tools must be listed. Newer releases may add more.
+          $names = @($replies[1].result.tools | ForEach-Object { $_.name })
+          $missing = @(@('fact_get', 'fact_list', 'fact_set', 'memory_append', 'memory_recent', 'memory_search') | Where-Object { $names -notcontains $_ })
+          check ($missing.Count -eq 0) "tools/list lacks $($missing -join ',') (gave $($names -join ','))"
           $search = $replies[2].result
           check ($search.isError -ne $true -and $search.content[0].text -like '*smoke note*') 'memory_search did not find the note'
           check ([bool]($search.structuredContent.hits | Where-Object { $_.content -eq 'smoke note' })) 'memory_search has no hit'
