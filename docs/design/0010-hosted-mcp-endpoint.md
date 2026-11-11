@@ -1,6 +1,6 @@
 # 0010: A hosted MCP endpoint
 
-Status: proposed, 2026-11-10. This is Phase 1 of [0009](0009-default-memory-layer.md). The owner picked approach B below.
+Status: accepted, built in <PR>, 2026-11-11. Proposed 2026-11-10. This is Phase 1 of [0009](0009-default-memory-layer.md). The owner picked approach B below.
 
 ## Why
 

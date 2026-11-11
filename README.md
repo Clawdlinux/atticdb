@@ -256,6 +256,91 @@ On Windows, Codex gets only its MCP entry for now ([#142](https://github.com/Cla
 Keep the data directory on a local disk. Every ack waits for a sync, so that disk sets your write latency.
 [Where to keep the data directory](crates/atticdb/README.md#where-to-keep-the-data-directory) lists the disks we tested and the ones to avoid.
 
+## Hosted
+
+`atticdb serve` also answers MCP at `POST /mcp`. Agents on any machine can share 1 store with a URL and a token.
+Nothing gets installed where the agent runs. [docs/hosting.md](docs/hosting.md) stands one up on 1 VM behind Caddy.
+Whoever runs the server gives you `<host>` and `<token>`. The token picks your tenant.
+
+- The hosted server lists 7 tools. `file_ref` and `file_get` are local only, since they read files on the machine that runs them.
+- Remote agents get no chat-start block. That hook runs a local binary. The instructions tell the agent to call `fact_list` with prefix `user/` and with `repo/<repo>/` instead.
+- The server can't see your repo. So the agent passes `session`, set to the repo's main folder name, on `memory_append` and `memory_recent`.
+- Notes name the app that wrote them. The name comes from the app's MCP `clientInfo.name`.
+- The entries below are named `atticdb-hosted`, so they don't replace the local `atticdb` entry from `atticdb setup`. Keep 1 of the 2 in each app, or the model sees 2 memories.
+- Keep `<token>` out of repos and shared config files.
+
+Copilot CLI, in `~/.copilot/mcp-config.json`. Docs: [Adding MCP servers for Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-mcp-servers).
+
+```json
+{
+  "mcpServers": {
+    "atticdb-hosted": {
+      "type": "http",
+      "url": "https://<host>/mcp",
+      "headers": {"Authorization": "Bearer <token>"},
+      "tools": ["*"]
+    }
+  }
+}
+```
+
+Or from a terminal:
+
+```sh
+copilot mcp add --transport http --header "Authorization: Bearer <token>" atticdb-hosted https://<host>/mcp
+```
+
+VS Code, in `mcp.json`. Run **MCP: Open User Configuration** to open it. VS Code asks for the token once and keeps it in its secret store. Docs: [MCP configuration reference](https://code.visualstudio.com/docs/agents/reference/mcp-configuration).
+
+```json
+{
+  "inputs": [
+    {"type": "promptString", "id": "atticdb-token", "description": "AtticDB token", "password": true}
+  ],
+  "servers": {
+    "atticdb-hosted": {
+      "type": "http",
+      "url": "https://<host>/mcp",
+      "headers": {"Authorization": "Bearer ${input:atticdb-token}"}
+    }
+  }
+}
+```
+
+Claude Code. `--scope user` makes it apply in every project.
+
+```sh
+# Docs: https://code.claude.com/docs/en/mcp
+claude mcp add --transport http --scope user atticdb-hosted https://<host>/mcp \
+  --header "Authorization: Bearer <token>"
+```
+
+Codex, in `~/.codex/config.toml`. Codex reads the token from the variable you name. Set it in the shell that starts Codex.
+Don't use `ATTICDB_TOKEN`: the local `atticdb` commands read that one.
+
+```toml
+# Docs: https://developers.openai.com/codex/mcp
+[mcp_servers.atticdb-hosted]
+url = "https://<host>/mcp"
+bearer_token_env_var = "ATTICDB_HOSTED_TOKEN"
+```
+
+Gemini CLI, in `~/.gemini/settings.json`. `httpUrl` picks Streamable HTTP. Docs: [MCP servers with Gemini CLI](https://geminicli.com/docs/tools/mcp-server/).
+
+```json
+{
+  "mcpServers": {
+    "atticdb-hosted": {
+      "httpUrl": "https://<host>/mcp",
+      "headers": {"Authorization": "Bearer <token>"}
+    }
+  }
+}
+```
+
+Claude's web, Desktop and mobile Connectors need OAuth. The hosted server has bearer tokens only for now ([0010](docs/design/0010-hosted-mcp-endpoint.md)).
+[Hosted MCP](crates/atticdb/README.md#hosted-mcp-post-mcp) has the protocol details.
+
 ## Tell us what you need
 
 AtticDB does a few things on purpose. We add features when people ask for them.
@@ -273,6 +358,7 @@ AtticDB does a few things on purpose. We add features when people ask for them.
 - [atticdb-core](crates/atticdb-core/README.md) and [atticdb-tape](crates/atticdb-tape/README.md): engine, formats, recovery and limits.
 - [Overview](docs/overview.md): how it works, benchmark numbers and the build steps.
 - [Sandboxed agents](docs/deploy/sandboxes.md): who holds memory, and how sandboxed code can reach it.
+- [Hosting](docs/hosting.md): 1 VM, Caddy and `atticdb serve`, so remote agents reach 1 store at `POST /mcp`.
 - [Python client](clients/python/README.md), [TESTING.md](TESTING.md) and the [decision log](docs/design/0002-decision-log.md).
 - Benchmarks: [head-to-head tables](bench/H2H.md) and [macOS engine runs](bench/RESULTS.md). History: [0001 (historical)](docs/design/0001-architecture.md).
 

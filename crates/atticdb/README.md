@@ -325,7 +325,7 @@ AtticDB 0.4.0 is out (you have 0.3.0). Run: atticdb upgrade
 - The socket is bound in a per-start `<parent>/.zs.<8 hex>` directory, then hard-linked into place under a `flock` on `<socket>.lock`. Servers on other data directories that share the path take turns.
 - A crash during that step can leave a `.zs.*` directory behind. The `.lock` file always stays. Both are harmless. A killed server also leaves its socket file. The next start on that path removes it.
 - `LOCK` and `GET /healthz` carry a per-start instance id.
-- At most 256 connections. Past that, a new connection gets 503 `busy`. A request body grows only as its bytes arrive, up to 8 MiB, and is dropped once parsed. At most 2 JSON trees exist at once, request parses and window builds together, and a tree can be about 16x its body. Window bodies being written total at most 256 MiB. A window that waits 5 s for that budget gets 503 `busy`. Memory stays under about 256 x 8 MiB = 2 GiB of raw bodies or turns, plus 2 trees of about 16 x 8 MiB, plus 256 MiB + 2 x 49 MiB of window bodies, in the worst case.
+- At most 256 connections. Past that, a new connection gets 503 `busy`. A request body grows only as its bytes arrive, up to 8 MiB, and is dropped once parsed. At most 4 JSON trees exist at once. 2 are for request parses and window builds, and 2 for `/mcp` messages. A tree can be about 16x its body. Window bodies being written total at most 256 MiB. A window that waits 5 s for that budget gets 503 `busy`. Memory stays under about 256 x 8 MiB = 2 GiB of raw bodies or turns, plus 4 trees of about 16 x 8 MiB, plus 256 MiB + 2 x 49 MiB of window bodies, in the worst case.
 - `--exit-on-poison`: when the engine is poisoned, stop accepting, finish responses in flight, remove the socket path if it is still the one this server installed, and exit 70. A fresh start recovers. Without it, a poisoned server serves reads and 503 `poisoned` until you restart it.
 - Logs: startup, shutdown and 5xx answers on stderr, one line each with method, path, status, tenant and latency. `--log-requests` adds a line for every request. Never headers, bodies or query strings.
 - Stop it with a signal. Every acknowledged write is already synced, so `kill` is safe.
@@ -367,6 +367,7 @@ Send `Authorization: Bearer <token>`. The token picks the tenant. On TCP the `Ho
 | `POST /v1/facts/delete` | `{"key", "idem_key"}`, plus optional `"agent"` and `"if_lsn"` | `{"outcome": "committed", "deduplicated", "txn", "lsn"}` |
 | `POST /v1/forget` | `{"idem_key"}` plus exactly 1 of `"session": {"agent", "session"}`, `"key"` or `"lsns": [n, ...]` (1 to 1,024). Optional `up_to_lsn` | `{"outcome": "committed", "deduplicated", "txn", "lsn", "cutoff"}` |
 | `GET /v1/export` | `?format=markdown`, optional `max_bytes=B` (64 KiB to 8 MiB, default 1 MiB). Later pages pass back `next` as `at`, then `after_key`, or `after_agent`, `after_session` and `after_seq`, then `skip` and `offset` | `{"format": "markdown", "at", "chunks": [{"path", "offset", "markdown"}], "next"}`. `next` is null on the last page |
+| `POST /mcp` | 1 JSON-RPC message, MCP Streamable HTTP. Every message after `initialize` sends `Mcp-Session-Id`. Optional `MCP-Protocol-Version` | 1 JSON-RPC response. `initialize` also sets `Mcp-Session-Id`. A notification or a response gets 202 with no body. See [Hosted MCP](#hosted-mcp-post-mcp) |
 | `GET /healthz` | No token | `{"status": "ok" or "read_only", "instance", "version"}`. 503 with `"poisoned"` |
 | `GET /v1/stats` | Unix socket only, no token | One flat object: `instance`, `health`, `durable_lsn`, tenant and fact counts, writer groups, checkpoint and lock timings, tape-index memory. Counters cover this open |
 | `GET /metrics` | Unix socket only, no token | The same numbers in Prometheus text format 0.0.4: counters as `atticdb_<name>_total`, gauges as `atticdb_<name>`, `_ns` maxima as `_seconds`, `atticdb_read_only`, the `atticdb_append_ack_seconds` histogram of committed appends (50 µs to 1 s), and the `atticdb_turn_content_bytes` histogram of new turns (64 B to 4 MiB). `turn_repeats` counts new turns whose content matches one of about 4,096 recent hashes, a lower bound on exact repeats |
@@ -502,6 +503,43 @@ It looks for these:
 - private key blocks, `Bearer` tokens, and passwords in URLs.
 
 It is best effort. A secret that was changed, split or encoded gets through, so don't save secrets.
+
+## Hosted MCP: `POST /mcp`
+
+`atticdb serve` answers MCP at `POST /mcp`, using Streamable HTTP. Agents on other machines reach 1 tenant with a URL and a token. The [README](../../README.md#hosted) has a snippet per app, and [hosting.md](../../docs/hosting.md) is the runbook (D109).
+
+It runs the same tool code as `atticdb mcp`, in the server's process. The differences:
+
+- **Tools:** 7. `file_ref` and `file_get` read files on the machine that runs them, so they're local only. A call to either gets JSON-RPC `-32602` "unknown tool".
+- **Session name:** there are no roots, so the default session is `default`. The instructions ask the model to pass `session`, set to the repo's main folder name, on `memory_append` and `memory_recent`.
+- **Agent:** the app's `clientInfo.name` from `initialize`. It's lowercased, every character outside `a-z`, `0-9` and `-` becomes `-`, and it's cut to 64 characters. Empty or missing gives `mcp`. For example, `Visual Studio Code` gives `visual-studio-code`.
+- **Chat-start block:** none. The hook runs a local binary. The instructions already say to call `fact_list` when no block arrived.
+- **`fact_set`:** conditional on what this MCP session last read or wrote (D107). A new session has read nothing.
+- **Retries:** none. A call runs in-process once, so the 30 s retry deadline doesn't apply. The handler's outcome is final.
+- **Secrets:** redaction runs on the server. The patterns still match. Env var values come from the server's environment, not the agent's.
+
+The protocol:
+
+- 1 JSON-RPC object per POST. Bad JSON gets 400 with `-32700`. A batch or any non-object gets 400 with `-32600`.
+- `initialize` without `Mcp-Session-Id` makes a session. The reply sets `Mcp-Session-Id` to 64 hex characters. Every later message sends it back.
+- A request gets 200 with `Content-Type: application/json` and 1 response. A notification or a response gets 202 with no body. There's no SSE stream.
+- `MCP-Protocol-Version` may be `2025-11-25`, `2025-06-18`, `2025-03-26` or `2024-11-05`. It may be missing.
+- Calls on 1 session run one at a time. The server handles at most 2 `/mcp` messages at once, and the rest wait their turn.
+
+Errors from `/mcp` itself have JSON-RPC error bodies. 401, 405 and 501 come first, with the `outcome` bodies above.
+
+| Status | When |
+|---|---|
+| 400 | A message other than `initialize` without `Mcp-Session-Id`, or an unknown `MCP-Protocol-Version` |
+| 401 | No token or a bad one, as on every route |
+| 403 | An `Origin` that starts with `http://` or `https://`. No `Origin`, `null` and other schemes, such as `vscode-file://`, are allowed |
+| 404 | A session id that's unknown, expired, or made with another tenant's token. Start a new session |
+| 405 | `GET` or `DELETE` |
+| 501 | A chunked body. Send `Content-Length` |
+
+Sessions live in memory only. At most 64 per tenant and 4,096 in all. A session idle for 1 h is dropped. When a cap is hit, the least recently used one goes. A restart drops them all, and clients start again after the 404.
+
+`serve` still binds loopback only, and the `Host` check stays. So put a TLS proxy on the same machine and have it set `Host` to `127.0.0.1`. Log lines never hold tokens or session ids.
 
 ## Shell verbs
 
