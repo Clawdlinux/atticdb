@@ -80,6 +80,11 @@ impl Hosted {
     pub fn handle(&mut self, message: &[u8]) -> Option<Value> {
         self.adapter.handle(message)
     }
+
+    /// [`Self::handle`] for a message already parsed, so `/mcp` parses each body once.
+    pub fn handle_value(&mut self, message: Value) -> Option<Value> {
+        self.adapter.handle_value(message)
+    }
 }
 
 /// The agent name for a client's `clientInfo.name`. It's lowercased, with every character
@@ -189,9 +194,14 @@ impl Adapter {
 
     /// One JSON-RPC message in, at most one out. Notifications and responses get none.
     fn handle(&mut self, line: &[u8]) -> Option<Value> {
-        let Ok(message) = serde_json::from_slice::<Value>(line) else {
-            return Some(rpc_error(Value::Null, -32700, "parse error"));
-        };
+        match serde_json::from_slice::<Value>(line) {
+            Ok(message) => self.handle_value(message),
+            Err(_) => Some(rpc_error(Value::Null, -32700, "parse error")),
+        }
+    }
+
+    /// [`Self::handle`] for a message already parsed.
+    fn handle_value(&mut self, message: Value) -> Option<Value> {
         let id = message.get("id").cloned();
         // JSON-RPC 2.0: an invalid envelope runs nothing, and a bad id is answered as null.
         let valid_id =

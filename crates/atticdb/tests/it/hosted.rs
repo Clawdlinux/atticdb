@@ -5,7 +5,6 @@ use atticdb::serve::MAX_CONNECTIONS;
 use atticdb_tape::SimDisk;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::net::SocketAddr;
 
 /// 1 answer: status, lowercase header names, body.
 struct Answer {
@@ -37,14 +36,8 @@ impl Server {
         Self { running, _dir: dir }
     }
 
-    fn addr(&self) -> SocketAddr {
-        match &self.running.vias[0] {
-            Via::Tcp(addr) => *addr,
-            Via::Unix(_) => unreachable!("vias[0] is TCP"),
-        }
-    }
-
-    /// 1 request on its own connection. `headers` are extra lines, such as `("Origin", ...)`.
+    /// 1 request over TCP on its own connection. `headers` are extra lines, such as
+    /// `("Origin", ...)`.
     fn send(
         &self,
         method: &str,
@@ -52,23 +45,7 @@ impl Server {
         headers: &[(&str, &str)],
         body: &str,
     ) -> Answer {
-        let mut head = format!("{method} /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\n");
-        if let Some(token) = token {
-            head.push_str(&format!("Authorization: Bearer {token}\r\n"));
-        }
-        for (name, value) in headers {
-            head.push_str(&format!("{name}: {value}\r\n"));
-        }
-        head.push_str(&format!("Content-Length: {}\r\nConnection: close\r\n\r\n", body.len()));
-        let raw = Via::Tcp(self.addr()).raw(format!("{head}{body}").as_bytes());
-        let (top, body) = raw.split_once("\r\n\r\n").unwrap_or_else(|| panic!("no head: {raw}"));
-        let mut lines = top.split("\r\n");
-        let status = lines.next().unwrap().split(' ').nth(1).unwrap().parse().unwrap();
-        let headers = lines
-            .map(|line| line.split_once(':').unwrap())
-            .map(|(name, value)| (name.to_ascii_lowercase(), value.trim().to_owned()))
-            .collect();
-        Answer { status, headers, body: body.to_owned() }
+        send(&self.running.vias[0], method, token, headers, body)
     }
 
     /// A POST of `message` as `token`, with an optional session id.
@@ -79,7 +56,12 @@ impl Server {
 
     /// `initialize` as `token`, then `notifications/initialized`. Returns the session id.
     fn session(&self, token: &str) -> String {
-        let answer = self.post(token, None, &initialize(1));
+        self.session_as(token, "Hosted Test")
+    }
+
+    /// [`Self::session`] with `clientInfo.name` set to `name`.
+    fn session_as(&self, token: &str, name: &str) -> String {
+        let answer = self.post(token, None, &initialize(1, name));
         assert_eq!(answer.status, 200, "{}", answer.body);
         let id = answer.session();
         let ready = self.post(token, Some(&id), &notification());
@@ -95,10 +77,37 @@ impl Server {
     }
 }
 
-fn initialize(id: u64) -> Value {
+/// 1 request to `/mcp` via `via`, on its own connection.
+fn send(
+    via: &Via,
+    method: &str,
+    token: Option<&str>,
+    headers: &[(&str, &str)],
+    body: &str,
+) -> Answer {
+    let mut head = format!("{method} /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\n");
+    if let Some(token) = token {
+        head.push_str(&format!("Authorization: Bearer {token}\r\n"));
+    }
+    for (name, value) in headers {
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
+    head.push_str(&format!("Content-Length: {}\r\nConnection: close\r\n\r\n", body.len()));
+    let raw = via.raw(format!("{head}{body}").as_bytes());
+    let (top, body) = raw.split_once("\r\n\r\n").unwrap_or_else(|| panic!("no head: {raw}"));
+    let mut lines = top.split("\r\n");
+    let status = lines.next().unwrap().split(' ').nth(1).unwrap().parse().unwrap();
+    let headers = lines
+        .map(|line| line.split_once(':').unwrap())
+        .map(|(name, value)| (name.to_ascii_lowercase(), value.trim().to_owned()))
+        .collect();
+    Answer { status, headers, body: body.to_owned() }
+}
+
+fn initialize(id: u64, name: &str) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "method": "initialize", "params": {
         "protocolVersion": "2025-11-25", "capabilities": {},
-        "clientInfo": {"name": "Hosted Test", "version": "1"}}})
+        "clientInfo": {"name": name, "version": "1"}}})
 }
 
 fn notification() -> Value {
@@ -121,7 +130,7 @@ fn committed(result: &Value) -> bool {
 #[test]
 fn initialize_then_tools_over_post() {
     let server = Server::start();
-    let answer = server.post(TOKEN_A, None, &initialize(1));
+    let answer = server.post(TOKEN_A, None, &initialize(1, "Hosted Test"));
     assert_eq!(answer.status, 200, "{}", answer.body);
     assert_eq!(answer.headers["content-type"], "application/json");
     let id = answer.session();
@@ -130,6 +139,7 @@ fn initialize_then_tools_over_post() {
 
     let ready = server.post(TOKEN_A, Some(&id), &notification());
     assert_eq!((ready.status, ready.body.as_str()), (202, ""));
+    assert_eq!(ready.headers["content-type"], "text/plain");
 
     let list = server.post(TOKEN_A, Some(&id), &rpc(2, "tools/list"));
     assert_eq!(list.status, 200, "{}", list.body);
@@ -200,6 +210,8 @@ fn methods_versions_and_tokens() {
         assert_eq!(answer.status, status, "{version}: {}", answer.body);
     }
     let headers = [("Mcp-Session-Id", id.as_str())];
+    let unversioned = server.send("POST", Some(TOKEN_A), &headers, &list);
+    assert_eq!(unversioned.status, 200, "no MCP-Protocol-Version: {}", unversioned.body);
     assert_eq!(server.send("POST", None, &headers, &list).status, 401);
 }
 
@@ -236,4 +248,48 @@ fn one_session_serves_concurrent_posts() {
         server.call(TOKEN_A, &other, "fact_list", json!({"prefix": "repo/", "limit": 100}));
     let facts = listed["structuredContent"]["facts"].as_array().unwrap();
     assert_eq!(facts.len(), 40, "{listed}");
+}
+
+#[test]
+fn sessions_guard_fact_writes_and_name_the_agent() {
+    let server = Server::start();
+    let (one, two) = (server.session_as(TOKEN_A, "Visual Studio Code"), server.session(TOKEN_A));
+    let set = |id: &str, content: &str| {
+        server.call(TOKEN_A, id, "fact_set", json!({"key": "repo/k", "content": content}))
+    };
+    assert!(committed(&set(&one, "one")), "session 1 sets an absent key");
+    let got = server.call(TOKEN_A, &two, "fact_get", json!({"key": "repo/k"}));
+    assert_eq!(got["structuredContent"]["fact"]["agent"], "visual-studio-code", "{got}");
+    assert!(committed(&set(&one, "one again")), "session 1 wrote the last value");
+    let stale = set(&two, "two");
+    assert_eq!(stale["isError"], true, "{stale}");
+    let text = stale["content"][0]["text"].as_str().unwrap();
+    assert!(text.starts_with("conflict:"), "{text}");
+    assert!(committed(&set(&two, "two")), "the retry after the conflict commits");
+}
+
+#[test]
+fn file_tools_are_unknown() {
+    let server = Server::start();
+    let id = server.session(TOKEN_A);
+    let file_ref = call(2, "file_ref", json!({"path": "/x", "about": "y"}));
+    let answer = server.post(TOKEN_A, Some(&id), &file_ref);
+    assert_eq!(answer.status, 200, "{}", answer.body);
+    assert_eq!(answer.json()["error"]["code"], -32602, "{}", answer.body);
+}
+
+#[cfg(unix)]
+#[test]
+fn mcp_answers_on_the_unix_socket() {
+    let server = Server::start();
+    let unix = &server.running.vias[1];
+    assert!(matches!(unix, Via::Unix(_)));
+    let init = initialize(1, "Hosted Test").to_string();
+    let answer = send(unix, "POST", Some(TOKEN_A), &[], &init);
+    assert_eq!(answer.status, 200, "{}", answer.body);
+    let id = answer.session();
+    let list = rpc(2, "tools/list").to_string();
+    let listed = send(unix, "POST", Some(TOKEN_A), &[("Mcp-Session-Id", &id)], &list);
+    assert_eq!(listed.status, 200, "{}", listed.body);
+    assert_eq!(listed.json()["result"]["tools"].as_array().unwrap().len(), 7, "{}", listed.body);
 }

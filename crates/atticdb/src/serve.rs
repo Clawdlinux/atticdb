@@ -3,12 +3,13 @@
 //!
 //! Memory: at most [`MAX_CONNECTIONS`] connections. A request body grows only as its
 //! bytes arrive, up to the 8 MiB cap, and the raw body is dropped once parsed into
-//! turns, which are no larger. At most 2 JSON trees exist at once, request parses and
-//! window builds together, and a tree can be about 16x its body. A window reads at most
-//! 8 MiB of turns; its body is at most 6x that, since JSON escapes a byte to at most 6.
+//! turns, which are no larger. At most 4 JSON trees exist at once: 2 for request parses
+//! and window builds together, and 2 for `/mcp` messages. A tree can be about 16x its body.
+//! A window reads at most 8 MiB of turns; its body is at most 6x that, since JSON escapes
+//! a byte to at most 6.
 //! Window bodies being written total at most 256 MiB, and at most 2 more wait for that
 //! budget, up to 5 s before 503 `busy`. So request and window memory stays under about
-//! 256 x 8 MiB = 2 GiB of raw bodies or turns, plus 2 trees of about 16 x 8 MiB, plus
+//! 256 x 8 MiB = 2 GiB of raw bodies or turns, plus 4 trees of about 16 x 8 MiB, plus
 //! 256 MiB + 2 x 49 MiB of window bodies, in the worst case.
 //!
 //! Windows has no Unix socket here. A server there always listens on loopback TCP. Its

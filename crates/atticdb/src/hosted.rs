@@ -4,8 +4,8 @@
 //! message names it in `Mcp-Session-Id`. Sessions live in memory only, so a restart drops
 //! them, and clients start again after the 404.
 
-use crate::api::{self, PARSERS};
-use crate::http::{Head, Response};
+use crate::api;
+use crate::http::{Budget, Head, Response};
 use crate::mcp::{Hosted, VERSIONS};
 use atticdb_core::Engine;
 use serde_json::{json, Value};
@@ -20,6 +20,10 @@ pub const MAX_SESSIONS_PER_TENANT: usize = 64;
 pub const MAX_SESSIONS: usize = 4096;
 /// A session idle this long is dropped.
 pub const SESSION_IDLE: Duration = Duration::from_secs(3600);
+
+/// `/mcp` message trees in memory at once, each held until its reply is built. It's apart
+/// from the store routes' parse budget, which a tool call inside a session takes too.
+static MCP_PARSERS: Budget = Budget::new(2);
 
 /// Sessions by id, each with its tenant and last use. A full store drops the least recently
 /// used session. Lookups scan at most [`MAX_SESSIONS`] entries.
@@ -114,14 +118,15 @@ pub fn mcp(
     {
         return refuse(400, "unsupported MCP-Protocol-Version");
     }
-    let initialize = match envelope(body) {
-        Ok(initialize) => initialize,
+    let Some(_slot) = MCP_PARSERS.take(1, Duration::MAX) else { return api::busy() };
+    let message = match envelope(body) {
+        Ok(message) => message,
         Err(response) => return response,
     };
     let now = Instant::now();
-    if initialize {
+    if message.get("method") == Some(&json!("initialize")) {
         let mut session = Hosted::new(engine.clone(), tenant);
-        let reply = session.handle(body);
+        let reply = session.handle_value(message);
         if !reply.as_ref().is_some_and(|reply| reply.get("result").is_some()) {
             return answer(reply);
         }
@@ -138,17 +143,15 @@ pub fn mcp(
         return rpc_error(404, -32001, "session not found");
     };
     // Calls on 1 session run one at a time. The store-wide lock is not held here.
-    let reply = session.lock().unwrap_or_else(PoisonError::into_inner).handle(body);
+    let reply = session.lock().unwrap_or_else(PoisonError::into_inner).handle_value(message);
     answer(reply)
 }
 
-/// Whether `body` is 1 JSON-RPC object, and whether it's `initialize`. Its tree counts
-/// against the same parse budget as the store's other routes.
-fn envelope(body: &[u8]) -> Result<bool, Response> {
-    let Some(_slot) = PARSERS.take(1, Duration::MAX) else { return Err(api::busy()) };
+/// `body` parsed once, if it's 1 JSON-RPC object. The caller holds an [`MCP_PARSERS`] slot.
+fn envelope(body: &[u8]) -> Result<Value, Response> {
     match serde_json::from_slice::<Value>(body) {
         Err(_) => Err(rpc_error(400, -32700, "parse error")),
-        Ok(Value::Object(message)) => Ok(message.get("method") == Some(&json!("initialize"))),
+        Ok(message) if message.is_object() => Ok(message),
         Ok(_) => Err(rpc_error(400, -32600, "invalid request: send 1 JSON-RPC object")),
     }
 }
@@ -156,7 +159,7 @@ fn envelope(body: &[u8]) -> Result<bool, Response> {
 /// 202 with no body for no reply. 400 for a parse or envelope error, else 200.
 fn answer(reply: Option<Value>) -> Response {
     let Some(reply) = reply else {
-        return Response::text(202, "application/json", String::new());
+        return Response::text(202, "text/plain", String::new());
     };
     let invalid = matches!(reply["error"]["code"].as_i64(), Some(-32700 | -32600));
     Response::json(if invalid { 400 } else { 200 }, &reply)

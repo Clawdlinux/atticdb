@@ -373,7 +373,7 @@ pub fn stats_fields(engine: &Engine) -> Option<Value> {
 /// JSON trees in memory at once: request parses and window builds. An 8 MiB body like
 /// `[{},{},...]` grows about 16x as a `Value` tree, so this bounds tree memory, not the
 /// connection count.
-pub(crate) static PARSERS: Budget = Budget::new(2);
+static PARSERS: Budget = Budget::new(2);
 /// Window bytes being written at once.
 static SENDING: Budget = Budget::new(256 << 20);
 /// How long a window waits for [`SENDING`] before it answers 503 `busy`.
