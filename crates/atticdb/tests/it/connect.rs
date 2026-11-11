@@ -225,6 +225,8 @@ fn connect_writes_the_session_start_hook() {
             atticdb::mcp::INSTRUCTIONS
         );
         assert_eq!(std::fs::read_to_string(&guide).unwrap(), text, "{var:?}");
+        let session = "Pass session=<repo> on memory_append and memory_recent.";
+        assert!(text.contains(session), "{var:?}: the guide names the session");
         assert_eq!(std::fs::metadata(&guide).unwrap().mode() & 0o777, 0o600, "{var:?}");
         let pretty = serde_json::to_string_pretty(&wanted).unwrap() + "\n";
         assert_eq!(std::fs::read_to_string(&file).unwrap(), pretty, "{var:?}");

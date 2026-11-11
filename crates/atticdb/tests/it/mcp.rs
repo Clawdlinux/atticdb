@@ -1513,14 +1513,25 @@ fn unknown_outcome_never_downgrades() {
 }
 
 /// The guide goes into every chat-start guide, so its size is budgeted. It had 240 words before
-/// it asked for reasons with their evidence. It may grow by at most 30.
+/// it asked for reasons with their evidence. It may grow by at most 35.
 #[test]
 fn instructions_stay_within_word_budget() {
     let words = atticdb::mcp::INSTRUCTIONS.split_whitespace().count();
-    assert!(words <= 240 + 30, "INSTRUCTIONS has {words} words, over the budget of 270");
+    assert!(words <= 240 + 35, "INSTRUCTIONS has {words} words, over the budget of 275");
     let words = atticdb::mcp::hosted_instructions().split_whitespace().count();
-    assert!(words <= 240 + 30, "the hosted instructions have {words} words, over 270");
+    assert!(words <= 240 + 35, "the hosted instructions have {words} words, over 275");
 }
+
+/// Hosts may start `atticdb mcp` outside the repo with no roots, so agents name the session.
+#[test]
+fn instructions_ask_for_the_repo_session() {
+    let instructions = atticdb::mcp::INSTRUCTIONS;
+    assert!(instructions.contains(SESSION_SENTENCE), "{instructions}");
+    assert!(!instructions.contains("Leave out the session argument."), "{instructions}");
+}
+
+/// The sentence that sends notes to the session the chat-start block reads.
+const SESSION_SENTENCE: &str = "Pass session=<repo> on memory_append and memory_recent.";
 
 /// Sends 1 JSON-RPC request to a hosted session. Returns its reply.
 fn hosted_rpc(hosted: &mut atticdb::mcp::Hosted, id: u64, method: &str, params: Value) -> Value {
@@ -1558,10 +1569,9 @@ fn hosted_session_runs_the_same_tools() {
     assert_eq!(result["serverInfo"]["name"], "atticdb", "{reply}");
     assert!(result["capabilities"].get("roots").is_none(), "{reply}");
     let instructions = result["instructions"].as_str().unwrap();
-    let hosted_sentence = "On this hosted store, pass session set to the repo's main folder \
-                           name on memory_append and memory_recent.";
-    assert!(instructions.contains(hosted_sentence), "{instructions}");
+    assert_eq!(instructions.matches(SESSION_SENTENCE).count(), 1, "{instructions}");
     assert!(!instructions.contains("Leave out the session argument."), "{instructions}");
+    assert!(!instructions.contains("hosted store"), "{instructions}");
     assert!(!instructions.contains("file_ref"), "no tool it doesn't list: {instructions}");
     // Both act on a local store, not the hosted one.
     for local in ["atticdb forget", "If the AtticDB tools are missing"] {
