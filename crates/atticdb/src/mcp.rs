@@ -5,20 +5,36 @@
 //! Newline-delimited JSON-RPC 2.0 on stdin and stdout, logs on stderr. One request at a
 //! time, so when stdin closes the call in progress has finished. The model never sees
 //! retry keys, tokens, tenants or `if_lsn`.
+//!
+//! [`Hosted`] answers the same messages for `serve`, in-process, as 1 tenant. It lists 7
+//! tools: the 2 file tools read files on the wrong machine there.
 
-use crate::client::{session_arg, Client};
+use crate::client::{session_arg, Client, DEFAULT_AGENT};
+use atticdb_core::Engine;
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufRead, Read, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Supported protocol revisions, newest first. Others get the first.
-const VERSIONS: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+pub(crate) const VERSIONS: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 /// Longest stdin line. A request body cannot be larger anyway.
 const MAX_LINE: u64 = 8 << 20;
 /// Longest wait for the client's roots before a call that uses the default session.
 const ROOTS_WAIT: Duration = Duration::from_secs(2);
+
+/// The tools a hosted session leaves out.
+const LOCAL_TOOLS: [&str; 2] = ["file_ref", "file_get"];
+/// What the hosted instructions say in place of [`STDIO_SESSION`].
+const HOSTED_SESSION: &str = "On this hosted store, pass session set to the repo's main folder \
+    name on memory_append and memory_recent.";
+/// The sentence of [`INSTRUCTIONS`] that only stdio keeps. Roots name its session there.
+const STDIO_SESSION: &str = "Leave out the session argument.";
+/// The sentence of [`INSTRUCTIONS`] on `file_ref`, which a hosted session doesn't list.
+const FILE_REF: &str = "To remember an image, recording or other file, call file_ref with its \
+    path and 1 line on what it shows. ";
 
 /// A stdin line, or `None` for one longer than [`MAX_LINE`].
 type Line = Option<Vec<u8>>;
@@ -36,6 +52,53 @@ struct Adapter {
     /// Calls wait for that answer only until 2 s after it was asked for.
     roots_deadline: Option<Instant>,
     initialized: bool,
+    /// Whether `serve` runs this adapter for a remote client. See [`Hosted`].
+    hosted: bool,
+}
+
+/// 1 MCP session on `serve`, for 1 tenant. It never asks for roots, so the default session is
+/// `default`. The agent comes from the client's name.
+pub struct Hosted {
+    adapter: Adapter,
+}
+
+impl std::fmt::Debug for Hosted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Hosted").finish_non_exhaustive()
+    }
+}
+
+impl Hosted {
+    /// A session that runs each tool call on `engine` as `tenant`, with fact writes guarded.
+    pub fn new(engine: Arc<Engine>, tenant: &str) -> Self {
+        let mut client = Client::local(engine, tenant.to_owned());
+        client.guard_facts();
+        Self { adapter: Adapter::with_client(client, false, true) }
+    }
+
+    /// 1 JSON-RPC message in, at most 1 out. Notifications and responses get none.
+    pub fn handle(&mut self, message: &[u8]) -> Option<Value> {
+        self.adapter.handle(message)
+    }
+}
+
+/// The agent name for a client's `clientInfo.name`. It's lowercased, with every character
+/// outside `a-z`, `0-9` and `-` changed to `-`, and cut to 64 bytes. Empty or missing is `mcp`.
+pub fn agent_name(client_info_name: Option<&str>) -> String {
+    let keep = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-';
+    let name = client_info_name.unwrap_or_default().chars().map(|c| c.to_ascii_lowercase());
+    let name: String = name.map(|c| if keep(c) { c } else { '-' }).take(64).collect();
+    if name.is_empty() {
+        DEFAULT_AGENT.into()
+    } else {
+        name
+    }
+}
+
+/// [`INSTRUCTIONS`] for a hosted session. It can't learn the repo from roots, and has no
+/// `file_ref`.
+pub fn hosted_instructions() -> String {
+    INSTRUCTIONS.replace(STDIO_SESSION, HOSTED_SESSION).replace(FILE_REF, "")
 }
 
 /// Runs the adapter on `atticdb mcp`'s flags until stdin closes. Returns the exit code.
@@ -108,7 +171,11 @@ impl Adapter {
         let session_flag = flags.contains_key("--session");
         let mut client = Client::new(flags)?;
         client.guard_facts();
-        Ok(Self {
+        Ok(Self::with_client(client, session_flag, false))
+    }
+
+    fn with_client(client: Client, session_flag: bool, hosted: bool) -> Self {
+        Self {
             client,
             session_flag,
             roots: false,
@@ -116,7 +183,8 @@ impl Adapter {
             roots_pending: None,
             roots_deadline: None,
             initialized: false,
-        })
+            hosted,
+        }
     }
 
     /// One JSON-RPC message in, at most one out. Notifications and responses get none.
@@ -158,18 +226,37 @@ impl Adapter {
                 let asked = params["protocolVersion"].as_str().unwrap_or_default();
                 let version = VERSIONS.into_iter().find(|v| *v == asked).unwrap_or(VERSIONS[0]);
                 self.initialized = true;
-                self.roots = !self.session_flag && !params["capabilities"]["roots"].is_null();
+                let roots = !params["capabilities"]["roots"].is_null();
+                self.roots = !self.hosted && !self.session_flag && roots;
+                let instructions = match self.hosted {
+                    true => {
+                        self.client.set_agent(agent_name(params["clientInfo"]["name"].as_str()));
+                        hosted_instructions()
+                    }
+                    false => INSTRUCTIONS.to_owned(),
+                };
                 json!({
                     "protocolVersion": version,
                     "capabilities": {"tools": {}},
                     "serverInfo": {"name": "atticdb", "version": crate::VERSION},
-                    "instructions": INSTRUCTIONS,
+                    "instructions": instructions,
                 })
             }
-            "tools/list" if self.initialized => tools(),
+            "tools/list" if self.initialized => {
+                let mut list = tools();
+                if let (true, Some(tools)) = (self.hosted, list["tools"].as_array_mut()) {
+                    tools.retain(|tool| !LOCAL_TOOLS.iter().any(|name| tool["name"] == *name));
+                }
+                list
+            }
             "tools/call" if self.initialized => {
                 let name = params["name"].as_str().unwrap_or_default();
-                match self.client.call(name, &params["arguments"]) {
+                // A file tool would read this machine's files, not the client's.
+                let called = match self.hosted && LOCAL_TOOLS.contains(&name) {
+                    true => None,
+                    false => self.client.call(name, &params["arguments"]),
+                };
+                match called {
                     Some(mut result) => {
                         safe_integers(&mut result);
                         result
@@ -456,4 +543,20 @@ fn root_repo(result: &Value) -> Option<String> {
     }
     let path = PathBuf::from(String::from_utf8(decoded).ok()?);
     path.is_absolute().then(|| crate::home::repo(&path)).flatten()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::agent_name;
+
+    #[test]
+    fn agent_names_come_from_client_info() {
+        assert_eq!(agent_name(Some("Visual Studio Code")), "visual-studio-code");
+        assert_eq!(agent_name(Some("claude-code")), "claude-code");
+        assert_eq!(agent_name(Some("")), "mcp");
+        assert_eq!(agent_name(None), "mcp");
+        assert_eq!(agent_name(Some("!!!")), "---");
+        assert_eq!(agent_name(Some(&"x".repeat(500))), "x".repeat(64));
+        assert_eq!(agent_name(Some("Ä")), "-");
+    }
 }

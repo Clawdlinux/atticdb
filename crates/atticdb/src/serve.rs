@@ -170,19 +170,9 @@ impl Shared {
                 }
                 Route::Stats => api::stats(&self.engine, &self.config.instance),
                 Route::Metrics => api::metrics(&self.engine),
-                Route::Append => api::append(&self.engine, &tenant, request.body),
-                Route::Window => api::window(&self.engine, &tenant, &request.head.target),
-                Route::FactPut | Route::FactDelete => {
-                    api::fact_write(&self.engine, &tenant, request.body, route == Route::FactDelete)
+                _ => {
+                    api::dispatch(&self.engine, &tenant, route, &request.head.target, request.body)
                 }
-                Route::FactGet | Route::FactHistory | Route::FactList => {
-                    api::fact_read(&self.engine, &tenant, route, &request.head.target)
-                }
-                Route::Search => api::search(&self.engine, &tenant, &request.head.target),
-                Route::Sessions => api::sessions(&self.engine, &tenant, &request.head.target),
-                Route::Records => api::records(&self.engine, &tenant, &request.head.target),
-                Route::Forget => api::forget(&self.engine, &tenant, request.body),
-                Route::Export => api::export(&self.engine, &tenant, &request.head.target),
             };
             let _ = conn.respond(&response);
             self.log(&method, &path, &response, &tenant, started);

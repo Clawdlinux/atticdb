@@ -113,6 +113,38 @@ pub fn check(auth: &Auth, head: &Head, tcp: bool) -> Result<(Route, Option<Strin
     }
 }
 
+/// The tenant route of `method` and `path`. `None` for `/healthz` and unknown pairs.
+pub fn tenant_route(method: &str, path: &str) -> Option<Route> {
+    let found = ROUTES.iter().find(|(m, p, _)| *m == method && *p == path);
+    found.map(|(_, _, route)| *route).filter(|route| *route != Route::Health)
+}
+
+/// Runs a tenant route's handler for `tenant`. `target` is the request target, query included.
+pub fn dispatch(
+    engine: &Engine,
+    tenant: &str,
+    route: Route,
+    target: &str,
+    body: Vec<u8>,
+) -> Response {
+    match route {
+        Route::Health | Route::Stats | Route::Metrics => unreachable!("not a tenant route"),
+        Route::Append => append(engine, tenant, body),
+        Route::Window => window(engine, tenant, target),
+        Route::FactPut | Route::FactDelete => {
+            fact_write(engine, tenant, body, route == Route::FactDelete)
+        }
+        Route::FactGet | Route::FactHistory | Route::FactList => {
+            fact_read(engine, tenant, route, target)
+        }
+        Route::Search => search(engine, tenant, target),
+        Route::Sessions => sessions(engine, tenant, target),
+        Route::Records => records(engine, tenant, target),
+        Route::Forget => forget(engine, tenant, body),
+        Route::Export => export(engine, tenant, target),
+    }
+}
+
 /// `127.0.0.1`, `localhost` or `[::1]`, with an optional port.
 pub(crate) fn loopback_host(value: &[u8]) -> bool {
     let text = String::from_utf8_lossy(value).to_ascii_lowercase();
