@@ -131,7 +131,7 @@ impl Head {
     }
 
     /// An HTTP/1.1 head with lowercase header `names`, for unit tests.
-    #[cfg(all(test, windows))]
+    #[cfg(test)]
     pub(crate) fn for_test(method: &str, target: &str, headers: &[(&str, &str)]) -> Self {
         let headers = headers.iter().map(|(name, value)| ((*name).into(), value.as_bytes().into()));
         Self {

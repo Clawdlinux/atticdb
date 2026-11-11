@@ -96,7 +96,8 @@ fn evict<T>(map: &mut HashMap<String, Entry<T>>, pick: impl Fn(&Entry<T>) -> boo
 }
 
 /// Answers 1 `POST /mcp` for `tenant`. The checks run in order: `Origin`,
-/// `MCP-Protocol-Version`, the body, then the session.
+/// `MCP-Protocol-Version`, the session, then the body. A message with a session id goes to
+/// that session, `initialize` included. Without one, only `initialize` is taken.
 pub fn mcp(
     sessions: &Sessions<Hosted>,
     engine: &Arc<Engine>,
@@ -118,33 +119,38 @@ pub fn mcp(
     {
         return refuse(400, "unsupported MCP-Protocol-Version");
     }
+    let now = Instant::now();
+    if let Some(id) = head.header("mcp-session-id") {
+        let found = std::str::from_utf8(id).ok().and_then(|id| sessions.get(id, tenant, now));
+        let Some(session) = found else {
+            return rpc_error(404, -32001, "session not found");
+        };
+        // Calls on 1 session run one at a time. The parse slot is taken only once this
+        // session is ours, so a call waiting on a busy session holds no global slot.
+        let mut session = session.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(_slot) = MCP_PARSERS.take(1, Duration::MAX) else { return api::busy() };
+        return match envelope(body) {
+            Ok(message) => answer(session.handle_value(message)),
+            Err(response) => response,
+        };
+    }
     let Some(_slot) = MCP_PARSERS.take(1, Duration::MAX) else { return api::busy() };
     let message = match envelope(body) {
         Ok(message) => message,
         Err(response) => return response,
     };
-    let now = Instant::now();
-    if message.get("method") == Some(&json!("initialize")) {
-        let mut session = Hosted::new(engine.clone(), tenant);
-        let reply = session.handle_value(message);
-        if !reply.as_ref().is_some_and(|reply| reply.get("result").is_some()) {
-            return answer(reply);
-        }
-        return match sessions.insert(tenant, session, now) {
-            Ok(id) => Response { headers: vec![("Mcp-Session-Id", id)], ..answer(reply) },
-            Err(error) => rpc_error(500, -32603, &crate::platform::no_random(error)),
-        };
-    }
-    let Some(id) = head.header("mcp-session-id") else {
+    if message.get("method") != Some(&json!("initialize")) {
         return refuse(400, "missing Mcp-Session-Id");
-    };
-    let found = std::str::from_utf8(id).ok().and_then(|id| sessions.get(id, tenant, now));
-    let Some(session) = found else {
-        return rpc_error(404, -32001, "session not found");
-    };
-    // Calls on 1 session run one at a time. The store-wide lock is not held here.
-    let reply = session.lock().unwrap_or_else(PoisonError::into_inner).handle_value(message);
-    answer(reply)
+    }
+    let mut session = Hosted::new(engine.clone(), tenant);
+    let reply = session.handle_value(message);
+    if !reply.as_ref().is_some_and(|reply| reply.get("result").is_some()) {
+        return answer(reply);
+    }
+    match sessions.insert(tenant, session, now) {
+        Ok(id) => Response { headers: vec![("Mcp-Session-Id", id)], ..answer(reply) },
+        Err(error) => rpc_error(500, -32603, &crate::platform::no_random(error)),
+    }
 }
 
 /// `body` parsed once, if it's 1 JSON-RPC object. The caller holds an [`MCP_PARSERS`] slot.
@@ -244,5 +250,47 @@ mod tests {
         assert_eq!(value(&sessions, &idle, "a", past), None, "idle past the limit");
         assert_eq!(value(&sessions, &kept, "a", past), Some(1), "the get at half refreshed it");
         assert_eq!(value(&sessions, &kept, "a", past + IDLE + Duration::from_secs(1)), None);
+    }
+
+    /// A call waiting on 1 busy session must not hold up another tenant's call.
+    #[test]
+    fn a_busy_session_does_not_stall_other_tenants() {
+        use atticdb_core::EngineOptions;
+        use atticdb_tape::{SimDisk, SystemClock};
+        let disk = Arc::new(SimDisk::new(4));
+        let opened = Engine::open_with(disk, Arc::new(SystemClock), "db", EngineOptions::default());
+        let engine = Arc::new(opened.unwrap());
+        let sessions = Sessions::new(MAX_SESSIONS_PER_TENANT, MAX_SESSIONS, SESSION_IDLE);
+        let id = sessions.insert("a", Hosted::new(engine.clone(), "a"), Instant::now()).unwrap();
+        let session = sessions.get(&id, "a", Instant::now()).unwrap();
+        // Stands in for a slow tool call on session `id`.
+        let busy = session.lock().unwrap();
+        let (sessions, engine) = (&sessions, &engine);
+        std::thread::scope(|scope| {
+            let waiting: Vec<_> = (0..2)
+                .map(|_| {
+                    let id = id.as_str();
+                    scope.spawn(move || {
+                        let head = Head::for_test("POST", "/mcp", &[("mcp-session-id", id)]);
+                        let ping = br#"{"jsonrpc": "2.0", "id": 1, "method": "ping"}"#;
+                        mcp(sessions, engine, "a", &head, ping).status
+                    })
+                })
+                .collect();
+            // Long enough for both calls to reach the session lock.
+            std::thread::sleep(Duration::from_millis(200));
+            let (send, done) = std::sync::mpsc::channel();
+            scope.spawn(move || {
+                let head = Head::for_test("POST", "/mcp", &[]);
+                let init = br#"{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}"#;
+                let _ = send.send(mcp(sessions, engine, "b", &head, init).status);
+            });
+            let other = done.recv_timeout(Duration::from_secs(10));
+            drop(busy);
+            assert_eq!(other, Ok(200), "tenant b finished while session a was busy");
+            for call in waiting {
+                assert_eq!(call.join().unwrap(), 200);
+            }
+        });
     }
 }
