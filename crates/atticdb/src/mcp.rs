@@ -35,6 +35,10 @@ const STDIO_SESSION: &str = "Leave out the session argument.";
 /// The sentence of [`INSTRUCTIONS`] on `file_ref`, which a hosted session doesn't list.
 const FILE_REF: &str = "To remember an image, recording or other file, call file_ref with its \
     path and 1 line on what it shows. ";
+/// The sentences of [`INSTRUCTIONS`] that act on a local store, not the hosted one.
+const LOCAL_STORE: &str = "To forget something, the user runs atticdb forget or uses studio. \
+    If the AtticDB tools are missing, run the atticdb command instead, for example: \
+    atticdb search --query '<words>'.";
 
 /// A stdin line, or `None` for one longer than [`MAX_LINE`].
 type Line = Option<Vec<u8>>;
@@ -100,10 +104,11 @@ pub fn agent_name(client_info_name: Option<&str>) -> String {
     }
 }
 
-/// [`INSTRUCTIONS`] for a hosted session. It can't learn the repo from roots, and has no
-/// `file_ref`.
+/// [`INSTRUCTIONS`] for a hosted session. It can't learn the repo from roots, has no
+/// `file_ref`, and has no local store for `atticdb forget` or the CLI.
 pub fn hosted_instructions() -> String {
-    INSTRUCTIONS.replace(STDIO_SESSION, HOSTED_SESSION).replace(FILE_REF, "")
+    let text = INSTRUCTIONS.replace(STDIO_SESSION, HOSTED_SESSION).replace(FILE_REF, "");
+    text.replace(LOCAL_STORE, "").trim_end().to_owned()
 }
 
 /// Runs the adapter on `atticdb mcp`'s flags until stdin closes. Returns the exit code.

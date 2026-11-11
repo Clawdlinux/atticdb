@@ -1563,6 +1563,11 @@ fn hosted_session_runs_the_same_tools() {
     assert!(instructions.contains(hosted_sentence), "{instructions}");
     assert!(!instructions.contains("Leave out the session argument."), "{instructions}");
     assert!(!instructions.contains("file_ref"), "no tool it doesn't list: {instructions}");
+    // Both act on a local store, not the hosted one.
+    for local in ["atticdb forget", "If the AtticDB tools are missing"] {
+        assert!(!instructions.contains(local), "{local}: {instructions}");
+    }
+    assert!(!instructions.ends_with(' '), "{instructions:?}");
     // Roots are never asked for, so the notification gets no reply.
     let ready = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
     assert_eq!(hosted.handle(ready.to_string().as_bytes()), None);

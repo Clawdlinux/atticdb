@@ -1,6 +1,6 @@
 # 0010: A hosted MCP endpoint
 
-Status: accepted, built in <PR>, 2026-11-11. Proposed 2026-11-10. This is Phase 1 of [0009](0009-default-memory-layer.md). The owner picked approach B below.
+Status: accepted, built on branch feat/hosted-mcp, 2026-11-11. Proposed 2026-11-10. This is Phase 1 of [0009](0009-default-memory-layer.md). The owner picked approach B below.
 
 ## Why
 
@@ -86,6 +86,7 @@ The first user is a developer whose agents run on several machines and in the cl
 - Over stdio, the session name comes from the client's roots: the repo folder.
 - `/mcp` doesn't ask for roots, so the default is `default`.
 - The `initialize` instructions on `/mcp` add 1 sentence: pass `session` set to the repo's main folder name on `memory_append` and `memory_recent`.
+- They drop the `file_ref` sentence and the 2 on `atticdb forget` and the CLI fallback. Those act on a local store, not the hosted one.
 - The stdio instructions don't change.
 
 ### The chat-start block

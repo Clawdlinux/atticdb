@@ -463,11 +463,22 @@ impl Client {
         self.seen = Some(HashMap::new());
     }
 
-    /// Records `lsn` as the last seen revision of `key`, when facts are guarded.
+    /// Records `lsn` as the last seen revision of `key`, when facts are guarded. A key with
+    /// no current value is dropped instead: a missing entry already means `if_lsn` 0. So reads
+    /// of missing keys can't grow `seen`.
     fn remember(&mut self, key: &str, lsn: &Value) {
         if let Some(seen) = &mut self.seen {
-            seen.insert(key.to_owned(), lsn.as_u64().unwrap_or(0));
+            match lsn.as_u64().filter(|lsn| *lsn != 0) {
+                Some(lsn) => seen.insert(key.to_owned(), lsn),
+                None => seen.remove(key),
+            };
         }
+    }
+
+    /// How many keys [`Client::remember`] holds.
+    #[cfg(test)]
+    pub(crate) fn seen_len(&self) -> usize {
+        self.seen.as_ref().map_or(0, HashMap::len)
     }
 
     /// Runs the operation `name` with the arguments `args`. Returns its tool result:
@@ -565,7 +576,7 @@ impl Client {
     }
 
     fn fact_get(&mut self, args: &Value) -> Value {
-        match string(args, "key").and_then(|key| key.ok_or("key is required".into())) {
+        match read_key(args) {
             Ok(key) => {
                 let target = format!("/v1/facts/get?key={}", encode(&key));
                 let result = self.read("fact_get", &target, "fact", fact);
@@ -582,7 +593,7 @@ impl Client {
     /// kept ones. It records no LSN: history is not the current value.
     fn fact_history(&mut self, args: &Value) -> Value {
         let target = (|| {
-            let key = string(args, "key")?.ok_or("key is required")?;
+            let key = read_key(args)?;
             let max_bytes = number(args, "max_bytes", 64 << 10)?;
             let mut target =
                 format!("/v1/facts/history?key={}&max_bytes={max_bytes}", encode(&key));
@@ -1142,6 +1153,16 @@ fn turns(reply: &Value) -> Value {
     answer(text, json!({"turns": turns, "truncated": reply["truncated"]}))
 }
 
+/// The `key` argument of a fact read. It's refused over 1024 bytes, the fact write limit, so
+/// no request carries it.
+fn read_key(args: &Value) -> Result<String, String> {
+    let key = string(args, "key")?.ok_or("key is required")?;
+    if key.len() > 1024 {
+        return Err("key is too long: it is over 1024 bytes".into());
+    }
+    Ok(key)
+}
+
 /// The facts key of a file ref: `file` and the absolute path with `/` separators, so a folder
 /// is a key prefix. Keys are at most 1024 bytes.
 fn file_key(path: &std::path::Path) -> Result<String, String> {
@@ -1286,6 +1307,7 @@ fn jitter(backoff: Duration) -> Duration {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
 
     fn rendered(reply: Value) -> String {
@@ -1300,6 +1322,52 @@ mod tests {
             rendered(json!({"revisions": [], "truncated": false, "next": null})),
             "no revisions"
         );
+    }
+
+    /// A client with guarded fact writes on a fresh in-memory store.
+    fn guarded() -> Client {
+        use atticdb_core::EngineOptions;
+        use atticdb_tape::{SimDisk, SystemClock};
+        let disk = Arc::new(SimDisk::new(4));
+        let opened = Engine::open_with(disk, Arc::new(SystemClock), "db", EngineOptions::default());
+        let mut client = Client::local(Arc::new(opened.unwrap()), "a".into());
+        client.guard_facts();
+        client
+    }
+
+    fn committed(client: &mut Client, args: Value, case: &str) {
+        let result = client.call("fact_set", &args).unwrap();
+        assert_eq!(result["structuredContent"]["committed"], true, "{case}: {result}");
+    }
+
+    #[test]
+    fn reads_of_missing_keys_remember_nothing() {
+        let mut client = guarded();
+        for i in 0..100 {
+            let got = client.call("fact_get", &json!({"key": format!("repo/gone/{i}")})).unwrap();
+            assert_ne!(got["isError"], true, "{got}");
+        }
+        assert_eq!(client.seen_len(), 0, "a missing key already means if_lsn 0");
+        committed(&mut client, json!({"key": "repo/k", "content": "one"}), "set");
+        assert_eq!(client.seen_len(), 1);
+        committed(&mut client, json!({"key": "repo/k", "delete": true}), "delete");
+        assert_eq!(client.seen_len(), 0, "a delete leaves no current value to remember");
+        committed(&mut client, json!({"key": "repo/k", "content": "two"}), "set after delete");
+    }
+
+    #[test]
+    fn a_read_key_over_1024_bytes_is_refused() {
+        let mut client = guarded();
+        let long = "k".repeat(1025);
+        for tool in ["fact_get", "fact_history"] {
+            let result = client.call(tool, &json!({"key": long})).unwrap();
+            assert_eq!(result["isError"], true, "{tool}: {result}");
+            let text = &result["content"][0]["text"];
+            assert_eq!(text, "key is too long: it is over 1024 bytes", "{tool}");
+        }
+        let got = client.call("fact_get", &json!({"key": "k".repeat(1024)})).unwrap();
+        assert_ne!(got["isError"], true, "1024 bytes is allowed: {got}");
+        assert_eq!(client.seen_len(), 0);
     }
 
     #[test]
