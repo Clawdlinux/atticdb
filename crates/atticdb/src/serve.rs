@@ -3,13 +3,16 @@
 //!
 //! Memory: at most [`MAX_CONNECTIONS`] connections. A request body grows only as its
 //! bytes arrive, up to the 8 MiB cap, and the raw body is dropped once parsed into
-//! turns, which are no larger. At most 2 JSON trees exist at once, request parses and
-//! window builds together, and a tree can be about 16x its body. A window reads at most
-//! 8 MiB of turns; its body is at most 6x that, since JSON escapes a byte to at most 6.
+//! turns, which are no larger. At most 8 JSON trees exist at once. 2 are for request parses
+//! and window builds together. Up to 2 `/mcp` calls run at once. Each holds at most its
+//! request tree, 1 handler-reply tree and its reply value. A tree can be about 16x its body.
+//! A reply carries at most 8 MiB of budgeted bytes, so each tree is about 16 x 8 MiB at most.
+//! A window reads at most 8 MiB of turns; its body is at most 6x that, since JSON escapes
+//! a byte to at most 6.
 //! Window bodies being written total at most 256 MiB, and at most 2 more wait for that
 //! budget, up to 5 s before 503 `busy`. So request and window memory stays under about
-//! 256 x 8 MiB = 2 GiB of raw bodies or turns, plus 2 trees of about 16 x 8 MiB, plus
-//! 256 MiB + 2 x 49 MiB of window bodies, in the worst case.
+//! 256 x 8 MiB = 2 GiB of raw bodies or turns, plus 8 trees of about 16 x 8 MiB = 1 GiB,
+//! plus 256 MiB + 2 x 49 MiB of window bodies, in the worst case.
 //!
 //! Windows has no Unix socket here. A server there always listens on loopback TCP. Its
 //! `LOCK` names that address and no socket.
@@ -17,6 +20,7 @@
 use crate::api::{self, Route};
 use crate::auth::Auth;
 use crate::config::{Config, Listen};
+use crate::hosted::{self, Sessions};
 use crate::http::{self, Limits, Response, ServerConn, Stream};
 #[cfg(not(unix))]
 use crate::listen;
@@ -115,6 +119,8 @@ struct Shared {
     unix: Option<Installed>,
     stopping: AtomicBool,
     tracker: Arc<Tracker>,
+    /// `/mcp` sessions, in memory only.
+    sessions: Sessions<crate::mcp::Hosted>,
 }
 
 impl Shared {
@@ -170,19 +176,13 @@ impl Shared {
                 }
                 Route::Stats => api::stats(&self.engine, &self.config.instance),
                 Route::Metrics => api::metrics(&self.engine),
-                Route::Append => api::append(&self.engine, &tenant, request.body),
-                Route::Window => api::window(&self.engine, &tenant, &request.head.target),
-                Route::FactPut | Route::FactDelete => {
-                    api::fact_write(&self.engine, &tenant, request.body, route == Route::FactDelete)
+                Route::Mcp => {
+                    let (engine, body) = (&self.engine, &request.body);
+                    hosted::mcp(&self.sessions, engine, &tenant, &request.head, body)
                 }
-                Route::FactGet | Route::FactHistory | Route::FactList => {
-                    api::fact_read(&self.engine, &tenant, route, &request.head.target)
+                _ => {
+                    api::dispatch(&self.engine, &tenant, route, &request.head.target, request.body)
                 }
-                Route::Search => api::search(&self.engine, &tenant, &request.head.target),
-                Route::Sessions => api::sessions(&self.engine, &tenant, &request.head.target),
-                Route::Records => api::records(&self.engine, &tenant, &request.head.target),
-                Route::Forget => api::forget(&self.engine, &tenant, request.body),
-                Route::Export => api::export(&self.engine, &tenant, &request.head.target),
             };
             let _ = conn.respond(&response);
             self.log(&method, &path, &response, &tenant, started);
@@ -265,6 +265,11 @@ pub fn run(engine: Arc<Engine>, listeners: Listeners, config: ServeConfig) -> io
         unix: unix_path,
         stopping: AtomicBool::new(false),
         tracker: Arc::default(),
+        sessions: Sessions::new(
+            hosted::MAX_SESSIONS_PER_TENANT,
+            hosted::MAX_SESSIONS,
+            hosted::SESSION_IDLE,
+        ),
         config,
     });
     let mut threads = Vec::new();

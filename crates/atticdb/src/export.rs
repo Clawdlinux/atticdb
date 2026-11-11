@@ -71,7 +71,13 @@ pub(crate) fn page(engine: &Engine, tenant: &str, target: &str) -> Response {
             debug_assert!(bytes.len() <= max_bytes, "{} > {max_bytes}", bytes.len());
             debug_assert_eq!(bytes.len(), body_len(at, &chunks, next.as_ref()));
             let json = "application/json";
-            Response { status: 200, body: bytes, content_type: json, headers: &[], _held: None }
+            Response {
+                status: 200,
+                body: bytes,
+                content_type: json,
+                headers: Vec::new(),
+                _held: None,
+            }
         }
         Err(response) => response,
     }

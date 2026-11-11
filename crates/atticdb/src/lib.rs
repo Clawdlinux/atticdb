@@ -15,6 +15,7 @@ pub mod export;
 pub mod fault;
 pub mod home;
 pub mod hook;
+pub mod hosted;
 pub mod http;
 pub mod jsonedit;
 pub mod launch;

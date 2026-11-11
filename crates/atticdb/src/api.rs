@@ -4,7 +4,8 @@
 //! `GET /v1/search`, `GET /v1/sessions`, `GET /v1/records` and `GET /v1/export`. `GET /healthz`
 //! needs no token.
 //! `GET /v1/stats` and `GET /metrics` answer on the Unix socket only, with no token. Fact keys
-//! travel in bodies and query strings, never in paths.
+//! travel in bodies and query strings, never in paths. `POST /mcp` is MCP for hosted agents,
+//! answered in [`crate::hosted`].
 
 use crate::auth::{self, Auth};
 use crate::http::{Budget, Head, Response};
@@ -72,9 +73,11 @@ pub enum Route {
     Forget,
     /// `GET /v1/export`.
     Export,
+    /// `POST /mcp`, answered by [`crate::hosted::mcp`].
+    Mcp,
 }
 
-const ROUTES: [(&str, &str, Route); 13] = [
+const ROUTES: [(&str, &str, Route); 14] = [
     ("GET", "/healthz", Route::Health),
     ("POST", "/v1/append", Route::Append),
     ("GET", "/v1/window", Route::Window),
@@ -88,6 +91,7 @@ const ROUTES: [(&str, &str, Route); 13] = [
     ("GET", "/v1/records", Route::Records),
     ("POST", "/v1/forget", Route::Forget),
     ("GET", "/v1/export", Route::Export),
+    ("POST", "/mcp", Route::Mcp),
 ];
 
 /// Checks a head before its body is read: `Host` on TCP, then the token. Returns the
@@ -110,6 +114,41 @@ pub fn check(auth: &Auth, head: &Head, tcp: bool) -> Result<(Route, Option<Strin
         Some((method, _, route)) if *method == head.method => Ok((*route, Some(tenant))),
         Some(_) => Err(Response::error(405, "method_not_allowed", None)),
         None => Err(Response::error(404, "not_found", None)),
+    }
+}
+
+/// The tenant route of `method` and `path`, as [`dispatch`] runs it. `None` for `/healthz`,
+/// `/mcp` and unknown pairs.
+pub fn tenant_route(method: &str, path: &str) -> Option<Route> {
+    let found = ROUTES.iter().find(|(m, p, _)| *m == method && *p == path);
+    found.map(|(_, _, route)| *route).filter(|route| !matches!(route, Route::Health | Route::Mcp))
+}
+
+/// Runs a tenant route's handler for `tenant`. `target` is the request target, query included.
+pub fn dispatch(
+    engine: &Engine,
+    tenant: &str,
+    route: Route,
+    target: &str,
+    body: Vec<u8>,
+) -> Response {
+    match route {
+        Route::Health | Route::Stats | Route::Metrics | Route::Mcp => {
+            unreachable!("not a tenant route")
+        }
+        Route::Append => append(engine, tenant, body),
+        Route::Window => window(engine, tenant, target),
+        Route::FactPut | Route::FactDelete => {
+            fact_write(engine, tenant, body, route == Route::FactDelete)
+        }
+        Route::FactGet | Route::FactHistory | Route::FactList => {
+            fact_read(engine, tenant, route, target)
+        }
+        Route::Search => search(engine, tenant, target),
+        Route::Sessions => sessions(engine, tenant, target),
+        Route::Records => records(engine, tenant, target),
+        Route::Forget => forget(engine, tenant, body),
+        Route::Export => export(engine, tenant, target),
     }
 }
 

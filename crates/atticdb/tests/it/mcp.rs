@@ -1518,4 +1518,105 @@ fn unknown_outcome_never_downgrades() {
 fn instructions_stay_within_word_budget() {
     let words = atticdb::mcp::INSTRUCTIONS.split_whitespace().count();
     assert!(words <= 240 + 30, "INSTRUCTIONS has {words} words, over the budget of 270");
+    let words = atticdb::mcp::hosted_instructions().split_whitespace().count();
+    assert!(words <= 240 + 30, "the hosted instructions have {words} words, over 270");
+}
+
+/// Sends 1 JSON-RPC request to a hosted session. Returns its reply.
+fn hosted_rpc(hosted: &mut atticdb::mcp::Hosted, id: u64, method: &str, params: Value) -> Value {
+    let message = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+    hosted.handle(message.to_string().as_bytes()).unwrap_or_else(|| panic!("{method}: no reply"))
+}
+
+/// Calls 1 tool on a hosted session. Returns its tool result.
+fn hosted_call(hosted: &mut atticdb::mcp::Hosted, name: &str, args: Value) -> Value {
+    let reply = hosted_rpc(hosted, 9, "tools/call", json!({"name": name, "arguments": args}));
+    reply["result"].clone()
+}
+
+/// A hosted session after `initialize` and `notifications/initialized`, as `name`.
+fn hosted_session(engine: &Arc<atticdb_core::Engine>, name: &str) -> atticdb::mcp::Hosted {
+    let mut hosted = atticdb::mcp::Hosted::new(engine.clone(), "a");
+    let params = json!({"protocolVersion": "2025-06-18", "capabilities": {"roots": {}},
+        "clientInfo": {"name": name, "version": "1"}});
+    let reply = hosted_rpc(&mut hosted, 1, "initialize", params);
+    assert!(reply["result"].is_object(), "{reply}");
+    let ready = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
+    assert_eq!(hosted.handle(ready.to_string().as_bytes()), None, "a notification gets no reply");
+    hosted
+}
+
+/// A hosted session runs the stdio tools in-process, less the 2 file tools.
+#[test]
+fn hosted_session_runs_the_same_tools() {
+    let engine = support::sim_engine(&SimDisk::new(4), |_| {});
+    let mut hosted = atticdb::mcp::Hosted::new(engine.clone(), "a");
+    let params = json!({"protocolVersion": "2025-06-18", "capabilities": {"roots": {}},
+        "clientInfo": {"name": "Visual Studio Code", "version": "1"}});
+    let reply = hosted_rpc(&mut hosted, 1, "initialize", params);
+    let result = &reply["result"];
+    assert_eq!(result["serverInfo"]["name"], "atticdb", "{reply}");
+    assert!(result["capabilities"].get("roots").is_none(), "{reply}");
+    let instructions = result["instructions"].as_str().unwrap();
+    let hosted_sentence = "On this hosted store, pass session set to the repo's main folder \
+                           name on memory_append and memory_recent.";
+    assert!(instructions.contains(hosted_sentence), "{instructions}");
+    assert!(!instructions.contains("Leave out the session argument."), "{instructions}");
+    assert!(!instructions.contains("file_ref"), "no tool it doesn't list: {instructions}");
+    // Both act on a local store, not the hosted one.
+    for local in ["atticdb forget", "If the AtticDB tools are missing"] {
+        assert!(!instructions.contains(local), "{local}: {instructions}");
+    }
+    assert!(!instructions.ends_with(' '), "{instructions:?}");
+    // Roots are never asked for, so the notification gets no reply.
+    let ready = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
+    assert_eq!(hosted.handle(ready.to_string().as_bytes()), None);
+    let list = hosted_rpc(&mut hosted, 2, "tools/list", json!({}));
+    let tools = list["result"]["tools"].as_array().unwrap();
+    let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+    let want = [
+        "memory_append",
+        "memory_recent",
+        "fact_set",
+        "fact_get",
+        "fact_list",
+        "memory_search",
+        "fact_history",
+    ];
+    assert_eq!(names, want);
+    for tool in ["file_ref", "file_get"] {
+        let args = json!({"name": tool, "arguments": {"path": "/x", "about": "y"}});
+        let reply = hosted_rpc(&mut hosted, 3, "tools/call", args);
+        assert_eq!(reply["error"]["code"], -32602, "{tool}: {reply}");
+    }
+    committed(
+        &hosted_call(&mut hosted, "fact_set", json!({"key": "repo/x", "content": "one"})),
+        "set",
+    );
+    let got = hosted_call(&mut hosted, "fact_get", json!({"key": "repo/x"}));
+    assert_eq!(got["structuredContent"]["fact"]["agent"], "visual-studio-code", "{got}");
+    assert_eq!(text(&got), "one");
+    let appended = hosted_call(&mut hosted, "memory_append", json!({"content": "no session"}));
+    committed(&appended, "append to the default session");
+    let recent = hosted_call(&mut hosted, "memory_recent", json!({"session": "default"}));
+    assert_eq!(contents(&recent), ["no session"], "{recent}");
+    let named = json!({"content": "in atticdb", "session": "atticdb"});
+    committed(&hosted_call(&mut hosted, "memory_append", named), "append to atticdb");
+    let recent = hosted_call(&mut hosted, "memory_recent", json!({"session": "atticdb"}));
+    assert_eq!(contents(&recent), ["in atticdb"], "{recent}");
+}
+
+/// Each hosted session guards its fact writes, as each stdio adapter does.
+#[test]
+fn hosted_sessions_guard_fact_writes() {
+    let engine = support::sim_engine(&SimDisk::new(4), |_| {});
+    let (mut h1, mut h2) = (hosted_session(&engine, "one"), hosted_session(&engine, "two"));
+    let set = |hosted: &mut atticdb::mcp::Hosted, content: &str| {
+        hosted_call(hosted, "fact_set", json!({"key": "repo/k", "content": content}))
+    };
+    committed(&set(&mut h1, "one"), "h1 sets an absent key");
+    let refused = set(&mut h2, "two");
+    assert_eq!(refused["isError"], true, "{refused}");
+    assert!(text(&refused).starts_with("conflict:"), "{refused}");
+    committed(&set(&mut h2, "two"), "h2 saw h1's value in the conflict");
 }

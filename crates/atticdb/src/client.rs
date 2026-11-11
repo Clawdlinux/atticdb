@@ -4,6 +4,7 @@
 //! `file<path>`.
 //! Each one checks its arguments, hides secrets in writes, sends the request with retries,
 //! and shapes the result. The MCP adapter, the shell verbs and the session-start hook use it.
+//! A hosted MCP session runs the same operations in-process, with no HTTP and no retries.
 //! The studio uses it only to find the store and token, then sends its own reads.
 //! `atticdb forget` uses it too, through [`forget_command`]. No tool forgets.
 
@@ -11,9 +12,11 @@ use crate::config::{read_token_file, Config, Token};
 use crate::launch::{Launch, Url};
 use crate::outcome::{self, Attempt, Merge, Outcome};
 use crate::redact::{Counts, Redactor};
+use atticdb_core::Engine;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// The environment variable that may hold the token.
@@ -44,12 +47,18 @@ pub(crate) struct Client {
     agent: String,
     /// The session of calls that name none. The MCP adapter sets it from the client's roots.
     pub(crate) session: String,
-    token: Token,
-    retry_deadline: Duration,
-    launch: Launch,
+    transport: Transport,
     /// The LSN of each fact key this connection last read or wrote, 0 for no value. `None`
     /// keeps `fact_set` last-write-wins, as the shell verbs need. See [`Client::guard_facts`].
     seen: Option<HashMap<String, u64>>,
+}
+
+/// Where a client's requests go.
+enum Transport {
+    /// HTTP to a server found or started by `launch`. Calls retry until `retry_deadline`.
+    Http { token: Token, launch: Box<Launch>, retry_deadline: Duration },
+    /// The handlers `serve` would call, run in-process as `tenant`. Calls try once.
+    Local { engine: Arc<Engine>, tenant: String },
 }
 
 /// Runs one tool from a shell, with arguments from `--<name>` flags. Prints the tool's
@@ -204,7 +213,10 @@ impl HomeReader {
     /// The server discovery last trusted for this reader, if any. It is set by the first call
     /// that connects. So it needs no request of its own.
     pub(crate) fn found(&self) -> Option<&crate::launch::Found> {
-        self.client.launch.found()
+        match &self.client.transport {
+            Transport::Http { launch, .. } => launch.found(),
+            Transport::Local { .. } => None,
+        }
     }
 
     /// Appends 1 turn as `agent` by `memory_append`, which hides secrets first. Returns its
@@ -216,7 +228,7 @@ impl HomeReader {
     fn run(&mut self, agent: &str, tool: &str, args: &Value) -> Result<Value, String> {
         self.client.agent = agent.to_owned();
         // `retry` and every exchange in it end at now + `retry_deadline`.
-        self.client.retry_deadline = self.deadline.saturating_duration_since(Instant::now());
+        self.client.set_deadline(self.deadline);
         let result = self.client.call(tool, args).ok_or_else(|| format!("unknown tool {tool}"))?;
         structured(result)
     }
@@ -225,7 +237,7 @@ impl HomeReader {
     /// first, in the server's largest window. Returns `{turns, truncated}`, or the error. A
     /// window cut by bytes drops its newest turns. The deadline is [`Self::read`]'s.
     pub(crate) fn window(&mut self, agent: &str, since: u64, limit: u64) -> Result<Value, String> {
-        self.client.retry_deadline = self.deadline.saturating_duration_since(Instant::now());
+        self.client.set_deadline(self.deadline);
         let (agent, session) = (encode(agent), encode(&self.client.session));
         let max = crate::api::MAX_WINDOW_BYTES;
         let target = format!(
@@ -239,7 +251,7 @@ impl HomeReader {
     /// page from just below it: after the agent and the name less its last character. `None`
     /// when the session has none, the name is empty, or the page doesn't reach it.
     pub(crate) fn forgotten_up_to(&mut self, agent: &str) -> Result<Option<u64>, String> {
-        self.client.retry_deadline = self.deadline.saturating_duration_since(Instant::now());
+        self.client.set_deadline(self.deadline);
         let session = self.client.session.clone();
         let Some((cut, _)) = session.char_indices().last() else { return Ok(None) };
         let (after_agent, after_session) = (encode(agent), encode(&session[..cut]));
@@ -417,11 +429,32 @@ impl Client {
                 let repo = std::env::current_dir().ok().and_then(|dir| crate::home::repo(&dir));
                 repo.unwrap_or_else(|| "default".into())
             }),
-            token,
-            retry_deadline,
-            launch,
+            transport: Transport::Http { token, launch: Box::new(launch), retry_deadline },
             seen: None,
         })
+    }
+
+    /// A client that runs each call in-process on `engine` as `tenant`, with agent `mcp` and
+    /// session `default`. Fact writes are not guarded until [`Client::guard_facts`].
+    pub(crate) fn local(engine: Arc<Engine>, tenant: String) -> Self {
+        Self {
+            agent: DEFAULT_AGENT.into(),
+            session: "default".into(),
+            transport: Transport::Local { engine, tenant },
+            seen: None,
+        }
+    }
+
+    /// Sets the agent that later calls write and read as.
+    pub(crate) fn set_agent(&mut self, agent: String) {
+        self.agent = agent;
+    }
+
+    /// Makes `retry` and every exchange in it end by `deadline`. Local calls have none.
+    fn set_deadline(&mut self, deadline: Instant) {
+        if let Transport::Http { retry_deadline, .. } = &mut self.transport {
+            *retry_deadline = deadline.saturating_duration_since(Instant::now());
+        }
     }
 
     /// Makes `fact_set` write a key only at the LSN this connection last saw, 0 for a key it
@@ -430,11 +463,22 @@ impl Client {
         self.seen = Some(HashMap::new());
     }
 
-    /// Records `lsn` as the last seen revision of `key`, when facts are guarded.
+    /// Records `lsn` as the last seen revision of `key`, when facts are guarded. A key with
+    /// no current value is dropped instead: a missing entry already means `if_lsn` 0. So reads
+    /// of missing keys can't grow `seen`.
     fn remember(&mut self, key: &str, lsn: &Value) {
         if let Some(seen) = &mut self.seen {
-            seen.insert(key.to_owned(), lsn.as_u64().unwrap_or(0));
+            match lsn.as_u64().filter(|lsn| *lsn != 0) {
+                Some(lsn) => seen.insert(key.to_owned(), lsn),
+                None => seen.remove(key),
+            };
         }
+    }
+
+    /// How many keys [`Client::remember`] holds.
+    #[cfg(test)]
+    pub(crate) fn seen_len(&self) -> usize {
+        self.seen.as_ref().map_or(0, HashMap::len)
     }
 
     /// Runs the operation `name` with the arguments `args`. Returns its tool result:
@@ -532,7 +576,7 @@ impl Client {
     }
 
     fn fact_get(&mut self, args: &Value) -> Value {
-        match string(args, "key").and_then(|key| key.ok_or("key is required".into())) {
+        match read_key(args) {
             Ok(key) => {
                 let target = format!("/v1/facts/get?key={}", encode(&key));
                 let result = self.read("fact_get", &target, "fact", fact);
@@ -549,7 +593,7 @@ impl Client {
     /// kept ones. It records no LSN: history is not the current value.
     fn fact_history(&mut self, args: &Value) -> Value {
         let target = (|| {
-            let key = string(args, "key")?.ok_or("key is required")?;
+            let key = read_key(args)?;
             let max_bytes = number(args, "max_bytes", 64 << 10)?;
             let mut target =
                 format!("/v1/facts/history?key={}&max_bytes={max_bytes}", encode(&key));
@@ -826,6 +870,11 @@ impl Client {
         })
     }
 
+    /// Whether the last connect failed in a way a retry within the same call cannot fix.
+    fn stuck(&self) -> bool {
+        matches!(&self.transport, Transport::Http { launch, .. } if launch.stuck())
+    }
+
     /// Sends one request, reconnecting before each attempt, until `judge` returns `Ok`.
     /// `Err` holds the result to report if the deadline passes first.
     fn retry(
@@ -835,13 +884,18 @@ impl Client {
         body: &[u8],
         mut judge: impl FnMut(Result<Value, (Attempt, String)>) -> Result<Value, Value>,
     ) -> Value {
-        let deadline = Instant::now() + self.retry_deadline;
+        let Transport::Http { retry_deadline, .. } = &self.transport else {
+            // In-process, nothing is lost on the way, so the first answer is final.
+            let reply = self.request(method, target, body, Instant::now());
+            return judge(reply).unwrap_or_else(|result| result);
+        };
+        let deadline = Instant::now() + *retry_deadline;
         let mut backoff = FIRST_BACKOFF;
         loop {
             let reply = self.request(method, target, body, deadline);
             match judge(reply) {
                 Ok(result) => return result,
-                Err(result) if self.launch.stuck() => return result,
+                Err(result) if self.stuck() => return result,
                 Err(result) if Instant::now() + backoff + MIN_ATTEMPT > deadline => return result,
                 Err(_) => std::thread::sleep(jitter(backoff)),
             }
@@ -857,6 +911,17 @@ impl Client {
         body: &[u8],
         deadline: Instant,
     ) -> Result<Value, (Attempt, String)> {
+        let (token, launch) = match &mut self.transport {
+            Transport::Http { token, launch, .. } => (token, launch),
+            Transport::Local { engine, tenant } => {
+                let path = target.split_once('?').map_or(target, |(path, _)| path);
+                let route = crate::api::tenant_route(method, path);
+                let route = route.ok_or((Attempt::NotSent, format!("no route {method} {path}")))?;
+                let response = crate::api::dispatch(engine, tenant, route, target, body.to_vec());
+                return serde_json::from_slice(&response.body)
+                    .map_err(|_| (Attempt::TransportError, "response is not JSON".into()));
+            }
+        };
         let connect_by = deadline.checked_sub(MIN_ATTEMPT).unwrap_or(deadline);
         // Checked before connecting and before sending. Nothing sent merges as
         // not_committed, which never clears an earlier unknown.
@@ -866,9 +931,9 @@ impl Client {
         };
         reserve()?;
         let (mut stream, host) =
-            self.launch.connect(connect_by).map_err(|e| (Attempt::NotSent, e.to_string()))?;
+            launch.connect(connect_by).map_err(|e| (Attempt::NotSent, e.to_string()))?;
         reserve()?;
-        let auth = format!("Bearer {}", self.token.expose());
+        let auth = format!("Bearer {}", token.expose());
         let headers = [("Host", host.as_str()), ("Authorization", auth.as_str())];
         let lost = |error: String| (Attempt::TransportError, error);
         let max = crate::api::MAX_RESPONSE_BYTES;
@@ -1088,6 +1153,16 @@ fn turns(reply: &Value) -> Value {
     answer(text, json!({"turns": turns, "truncated": reply["truncated"]}))
 }
 
+/// The `key` argument of a fact read. It's refused over 1024 bytes, the fact write limit, so
+/// no request carries it.
+fn read_key(args: &Value) -> Result<String, String> {
+    let key = string(args, "key")?.ok_or("key is required")?;
+    if key.len() > 1024 {
+        return Err("key is too long: it is over 1024 bytes".into());
+    }
+    Ok(key)
+}
+
 /// The facts key of a file ref: `file` and the absolute path with `/` separators, so a folder
 /// is a key prefix. Keys are at most 1024 bytes.
 fn file_key(path: &std::path::Path) -> Result<String, String> {
@@ -1232,6 +1307,7 @@ fn jitter(backoff: Duration) -> Duration {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
 
     fn rendered(reply: Value) -> String {
@@ -1246,6 +1322,52 @@ mod tests {
             rendered(json!({"revisions": [], "truncated": false, "next": null})),
             "no revisions"
         );
+    }
+
+    /// A client with guarded fact writes on a fresh in-memory store.
+    fn guarded() -> Client {
+        use atticdb_core::EngineOptions;
+        use atticdb_tape::{SimDisk, SystemClock};
+        let disk = Arc::new(SimDisk::new(4));
+        let opened = Engine::open_with(disk, Arc::new(SystemClock), "db", EngineOptions::default());
+        let mut client = Client::local(Arc::new(opened.unwrap()), "a".into());
+        client.guard_facts();
+        client
+    }
+
+    fn committed(client: &mut Client, args: Value, case: &str) {
+        let result = client.call("fact_set", &args).unwrap();
+        assert_eq!(result["structuredContent"]["committed"], true, "{case}: {result}");
+    }
+
+    #[test]
+    fn reads_of_missing_keys_remember_nothing() {
+        let mut client = guarded();
+        for i in 0..100 {
+            let got = client.call("fact_get", &json!({"key": format!("repo/gone/{i}")})).unwrap();
+            assert_ne!(got["isError"], true, "{got}");
+        }
+        assert_eq!(client.seen_len(), 0, "a missing key already means if_lsn 0");
+        committed(&mut client, json!({"key": "repo/k", "content": "one"}), "set");
+        assert_eq!(client.seen_len(), 1);
+        committed(&mut client, json!({"key": "repo/k", "delete": true}), "delete");
+        assert_eq!(client.seen_len(), 0, "a delete leaves no current value to remember");
+        committed(&mut client, json!({"key": "repo/k", "content": "two"}), "set after delete");
+    }
+
+    #[test]
+    fn a_read_key_over_1024_bytes_is_refused() {
+        let mut client = guarded();
+        let long = "k".repeat(1025);
+        for tool in ["fact_get", "fact_history"] {
+            let result = client.call(tool, &json!({"key": long})).unwrap();
+            assert_eq!(result["isError"], true, "{tool}: {result}");
+            let text = &result["content"][0]["text"];
+            assert_eq!(text, "key is too long: it is over 1024 bytes", "{tool}");
+        }
+        let got = client.call("fact_get", &json!({"key": "k".repeat(1024)})).unwrap();
+        assert_ne!(got["isError"], true, "1024 bytes is allowed: {got}");
+        assert_eq!(client.seen_len(), 0);
     }
 
     #[test]
