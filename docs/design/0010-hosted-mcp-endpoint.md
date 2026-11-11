@@ -85,9 +85,9 @@ The first user is a developer whose agents run on several machines and in the cl
 
 - Over stdio, the session name comes from the client's roots: the repo folder.
 - `/mcp` doesn't ask for roots, so the default is `default`.
-- The `initialize` instructions on `/mcp` add 1 sentence: pass `session` set to the repo's main folder name on `memory_append` and `memory_recent`.
+- The `initialize` instructions on `/mcp` ask agents to pass `session=<repo>` on `memory_append` and `memory_recent`.
 - They drop the `file_ref` sentence and the 2 on `atticdb forget` and the CLI fallback. Those act on a local store, not the hosted one.
-- The stdio instructions don't change.
+- Since D110, the stdio instructions use the same sentence.
 
 ### The chat-start block
 
