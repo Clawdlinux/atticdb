@@ -15,6 +15,8 @@ mod export;
 #[cfg(unix)]
 mod hook;
 #[cfg(unix)]
+mod hosted;
+#[cfg(unix)]
 mod listen;
 #[cfg(unix)]
 mod mcp;

@@ -625,7 +625,7 @@ fn forget_result(reply: Result<ClientResponse, Lost>) -> Value {
 
 /// A response with the browser headers.
 fn answer(status: u16, content_type: &'static str, body: Vec<u8>) -> Response {
-    Response { status, body, content_type, headers: HEADERS, _held: None }
+    Response { status, body, content_type, headers: http::owned(HEADERS), _held: None }
 }
 
 fn json(status: u16, body: &Value) -> Response {

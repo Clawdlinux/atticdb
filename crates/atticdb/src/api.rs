@@ -4,7 +4,8 @@
 //! `GET /v1/search`, `GET /v1/sessions`, `GET /v1/records` and `GET /v1/export`. `GET /healthz`
 //! needs no token.
 //! `GET /v1/stats` and `GET /metrics` answer on the Unix socket only, with no token. Fact keys
-//! travel in bodies and query strings, never in paths.
+//! travel in bodies and query strings, never in paths. `POST /mcp` is MCP for hosted agents,
+//! answered in [`crate::hosted`].
 
 use crate::auth::{self, Auth};
 use crate::http::{Budget, Head, Response};
@@ -72,9 +73,11 @@ pub enum Route {
     Forget,
     /// `GET /v1/export`.
     Export,
+    /// `POST /mcp`, answered by [`crate::hosted::mcp`].
+    Mcp,
 }
 
-const ROUTES: [(&str, &str, Route); 13] = [
+const ROUTES: [(&str, &str, Route); 14] = [
     ("GET", "/healthz", Route::Health),
     ("POST", "/v1/append", Route::Append),
     ("GET", "/v1/window", Route::Window),
@@ -88,6 +91,7 @@ const ROUTES: [(&str, &str, Route); 13] = [
     ("GET", "/v1/records", Route::Records),
     ("POST", "/v1/forget", Route::Forget),
     ("GET", "/v1/export", Route::Export),
+    ("POST", "/mcp", Route::Mcp),
 ];
 
 /// Checks a head before its body is read: `Host` on TCP, then the token. Returns the
@@ -113,10 +117,11 @@ pub fn check(auth: &Auth, head: &Head, tcp: bool) -> Result<(Route, Option<Strin
     }
 }
 
-/// The tenant route of `method` and `path`. `None` for `/healthz` and unknown pairs.
+/// The tenant route of `method` and `path`, as [`dispatch`] runs it. `None` for `/healthz`,
+/// `/mcp` and unknown pairs.
 pub fn tenant_route(method: &str, path: &str) -> Option<Route> {
     let found = ROUTES.iter().find(|(m, p, _)| *m == method && *p == path);
-    found.map(|(_, _, route)| *route).filter(|route| *route != Route::Health)
+    found.map(|(_, _, route)| *route).filter(|route| !matches!(route, Route::Health | Route::Mcp))
 }
 
 /// Runs a tenant route's handler for `tenant`. `target` is the request target, query included.
@@ -128,7 +133,9 @@ pub fn dispatch(
     body: Vec<u8>,
 ) -> Response {
     match route {
-        Route::Health | Route::Stats | Route::Metrics => unreachable!("not a tenant route"),
+        Route::Health | Route::Stats | Route::Metrics | Route::Mcp => {
+            unreachable!("not a tenant route")
+        }
         Route::Append => append(engine, tenant, body),
         Route::Window => window(engine, tenant, target),
         Route::FactPut | Route::FactDelete => {
@@ -366,7 +373,7 @@ pub fn stats_fields(engine: &Engine) -> Option<Value> {
 /// JSON trees in memory at once: request parses and window builds. An 8 MiB body like
 /// `[{},{},...]` grows about 16x as a `Value` tree, so this bounds tree memory, not the
 /// connection count.
-static PARSERS: Budget = Budget::new(2);
+pub(crate) static PARSERS: Budget = Budget::new(2);
 /// Window bytes being written at once.
 static SENDING: Budget = Budget::new(256 << 20);
 /// How long a window waits for [`SENDING`] before it answers 503 `busy`.

@@ -17,6 +17,7 @@
 use crate::api::{self, Route};
 use crate::auth::Auth;
 use crate::config::{Config, Listen};
+use crate::hosted::{self, Sessions};
 use crate::http::{self, Limits, Response, ServerConn, Stream};
 #[cfg(not(unix))]
 use crate::listen;
@@ -115,6 +116,8 @@ struct Shared {
     unix: Option<Installed>,
     stopping: AtomicBool,
     tracker: Arc<Tracker>,
+    /// `/mcp` sessions, in memory only.
+    sessions: Sessions<crate::mcp::Hosted>,
 }
 
 impl Shared {
@@ -170,6 +173,10 @@ impl Shared {
                 }
                 Route::Stats => api::stats(&self.engine, &self.config.instance),
                 Route::Metrics => api::metrics(&self.engine),
+                Route::Mcp => {
+                    let (engine, body) = (&self.engine, &request.body);
+                    hosted::mcp(&self.sessions, engine, &tenant, &request.head, body)
+                }
                 _ => {
                     api::dispatch(&self.engine, &tenant, route, &request.head.target, request.body)
                 }
@@ -255,6 +262,11 @@ pub fn run(engine: Arc<Engine>, listeners: Listeners, config: ServeConfig) -> io
         unix: unix_path,
         stopping: AtomicBool::new(false),
         tracker: Arc::default(),
+        sessions: Sessions::new(
+            hosted::MAX_SESSIONS_PER_TENANT,
+            hosted::MAX_SESSIONS,
+            hosted::SESSION_IDLE,
+        ),
         config,
     });
     let mut threads = Vec::new();

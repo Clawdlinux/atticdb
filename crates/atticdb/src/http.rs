@@ -184,8 +184,8 @@ pub struct Response {
     pub body: Vec<u8>,
     /// `Content-Type`.
     pub content_type: &'static str,
-    /// Extra headers, written after `Connection`. Empty for the store server.
-    pub headers: &'static [(&'static str, &'static str)],
+    /// Extra headers, written after `Connection`. The store server sends them on `/mcp` only.
+    pub headers: Vec<(&'static str, String)>,
     /// A share of a [`Budget`] that lasts until the response is dropped, after its write.
     pub(crate) _held: Option<Held>,
 }
@@ -198,7 +198,7 @@ impl Response {
 
     /// A response with a text body of `content_type`.
     pub fn text(status: u16, content_type: &'static str, body: String) -> Self {
-        Self { status, body: body.into_bytes(), content_type, headers: &[], _held: None }
+        Self { status, body: body.into_bytes(), content_type, headers: Vec::new(), _held: None }
     }
 
     /// `{"outcome": "not_committed", "error": <error>, "message"?: <message>}`. Nothing
@@ -303,7 +303,7 @@ impl<S: Stream> ServerConn<S> {
 
     /// An error the connection answers itself, with the extra headers in its limits.
     fn own(&self, response: Response) -> Response {
-        Response { headers: self.limits.headers, ..response }
+        Response { headers: owned(self.limits.headers), ..response }
     }
 
     /// Writes the response to the last request. Closes the connection after it when the
@@ -518,12 +518,17 @@ pub fn write_response<S: Stream + ?Sized>(
     let mut head = format!(
         "HTTP/1.1 {status} \r\nContent-Type: {kind}\r\nContent-Length: {length}\r\nConnection: {connection}\r\n"
     );
-    for (name, value) in response.headers {
+    for (name, value) in &response.headers {
         head.push_str(&format!("{name}: {value}\r\n"));
     }
     head.push_str("\r\n");
     write_until(stream, head.as_bytes(), deadline)?;
     write_until(stream, &response.body, deadline)
+}
+
+/// Static header pairs as [`Response::headers`].
+pub(crate) fn owned(headers: &[(&'static str, &str)]) -> Vec<(&'static str, String)> {
+    headers.iter().map(|(name, value)| (*name, (*value).to_owned())).collect()
 }
 
 /// A shared limit on what is in flight, such as parses or response bytes. A taker waits
