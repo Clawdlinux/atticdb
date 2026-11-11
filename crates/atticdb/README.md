@@ -325,7 +325,7 @@ AtticDB 0.4.0 is out (you have 0.3.0). Run: atticdb upgrade
 - The socket is bound in a per-start `<parent>/.zs.<8 hex>` directory, then hard-linked into place under a `flock` on `<socket>.lock`. Servers on other data directories that share the path take turns.
 - A crash during that step can leave a `.zs.*` directory behind. The `.lock` file always stays. Both are harmless. A killed server also leaves its socket file. The next start on that path removes it.
 - `LOCK` and `GET /healthz` carry a per-start instance id.
-- At most 256 connections. Past that, a new connection gets 503 `busy`. A request body grows only as its bytes arrive, up to 8 MiB, and is dropped once parsed. At most 4 JSON trees exist at once. 2 are for request parses and window builds, and 2 for `/mcp` messages. A tree can be about 16x its body. Window bodies being written total at most 256 MiB. A window that waits 5 s for that budget gets 503 `busy`. Memory stays under about 256 x 8 MiB = 2 GiB of raw bodies or turns, plus 4 trees of about 16 x 8 MiB, plus 256 MiB + 2 x 49 MiB of window bodies, in the worst case.
+- At most 256 connections. Past that, a new connection gets 503 `busy`. A request body grows only as its bytes arrive, up to 8 MiB, and is dropped once parsed. At most 4 JSON trees exist at once. 2 are for request parses and window builds, and 2 for `/mcp` messages. A tree can be about 16x its body. Window bodies being written total at most 256 MiB. A window that waits 5 s for that budget gets 503 `busy`. In the worst case, memory stays under the sum of 3 parts. Raw bodies or turns take about 256 x 8 MiB = 2 GiB. JSON trees take 4 x about 16 x 8 MiB. Window bodies take 256 MiB + 2 x 49 MiB.
 - `--exit-on-poison`: when the engine is poisoned, stop accepting, finish responses in flight, remove the socket path if it is still the one this server installed, and exit 70. A fresh start recovers. Without it, a poisoned server serves reads and 503 `poisoned` until you restart it.
 - Logs: startup, shutdown and 5xx answers on stderr, one line each with method, path, status, tenant and latency. `--log-requests` adds a line for every request. Never headers, bodies or query strings.
 - Stop it with a signal. Every acknowledged write is already synced, so `kill` is safe.
@@ -526,15 +526,18 @@ The protocol:
 - `MCP-Protocol-Version` may be `2025-11-25`, `2025-06-18`, `2025-03-26` or `2024-11-05`. It may be missing.
 - Calls on 1 session run one at a time. The server handles at most 2 `/mcp` messages at once, and the rest wait their turn.
 
-Errors from `/mcp` itself have JSON-RPC error bodies. 401, 405 and 501 come first, with the `outcome` bodies above.
+Some errors come before `/mcp` reads the message. They have the `outcome` bodies above: 401, 405, 413, 431, 501 and the `forbidden_host` 403.
+The rest come from `/mcp` itself, with JSON-RPC error bodies. That includes the `Origin` 403.
 
 | Status | When |
 |---|---|
 | 400 | A message other than `initialize` without `Mcp-Session-Id`, or an unknown `MCP-Protocol-Version` |
 | 401 | No token or a bad one, as on every route |
-| 403 | An `Origin` that starts with `http://` or `https://`. No `Origin`, `null` and other schemes, such as `vscode-file://`, are allowed |
+| 403 | `forbidden_host`: a `Host` that isn't loopback, as on every TCP route. Or, with a JSON-RPC body, an `Origin` that starts with `http://` or `https://`. No `Origin`, `null` and other schemes, such as `vscode-file://`, are allowed |
 | 404 | A session id that's unknown, expired, or made with another tenant's token. Start a new session |
-| 405 | `GET` or `DELETE` |
+| 405 | Any method but `POST` |
+| 413 | A body over 8 MiB |
+| 431 | A request head over 16 KiB |
 | 501 | A chunked body. Send `Content-Length` |
 
 Sessions live in memory only. At most 64 per tenant and 4,096 in all. A session idle for 1 h is dropped. When a cap is hit, the least recently used one goes. A restart drops them all, and clients start again after the 404.

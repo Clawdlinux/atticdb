@@ -290,7 +290,12 @@ Or from a terminal:
 copilot mcp add --transport http --header "Authorization: Bearer <token>" atticdb-hosted https://<host>/mcp
 ```
 
-VS Code, in `mcp.json`. Run **MCP: Open User Configuration** to open it. VS Code asks for the token once and keeps it in its secret store. Docs: [MCP configuration reference](https://code.visualstudio.com/docs/agents/reference/mcp-configuration).
+VS Code 1.144 and later also reads `~/.copilot/mcp-config.json`. So with the Copilot CLI entry above, VS Code already has `atticdb-hosted`.
+Don't add the `mcp.json` entry too. VS Code would list 2 servers, each with its own `/mcp` session.
+2 sessions don't share what they last read. So their `fact_set` calls can conflict for no reason (D101, D107).
+
+Use this VS Code entry only without Copilot CLI, or on a build older than 1.144. It goes in `mcp.json`.
+Run **MCP: Open User Configuration** to open it. VS Code asks for the token once and keeps it in its secret store. Docs: [MCP configuration reference](https://code.visualstudio.com/docs/agents/reference/mcp-configuration).
 
 ```json
 {

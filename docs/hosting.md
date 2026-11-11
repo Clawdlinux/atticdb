@@ -70,14 +70,14 @@ sudo mount /srv/atticdb
 findmnt /srv/atticdb   # must show /dev/<dev>, not the OS disk
 ```
 
-Make the service user and give it the disk. Then install `atticdb`. Use a release that has `POST /mcp`, and pin it with `ATTICDB_VERSION`.
+Make the service user and give it the disk. Then install `atticdb`. Pick a release that has `POST /mcp`. Its number, without the `v`, is `<version>`. Fetch `install.sh` from that release, and pin the binary to it too.
 
 ```sh
 sudo useradd --system --home-dir /srv/atticdb --shell /usr/sbin/nologin atticdb
 sudo chown atticdb:atticdb /srv/atticdb
 sudo chmod 700 /srv/atticdb
 
-curl -fsSLO https://github.com/Clawdlinux/atticdb/releases/latest/download/install.sh
+curl -fsSLO https://github.com/Clawdlinux/atticdb/releases/download/v<version>/install.sh
 sudo env ATTICDB_INSTALL_DIR=/usr/local/bin ATTICDB_VERSION=<version> sh install.sh
 atticdb --version
 ```
@@ -113,10 +113,11 @@ sudo groupadd --system caddy
 sudo useradd --system --gid caddy --create-home --home-dir /var/lib/caddy \
   --shell /usr/sbin/nologin caddy
 sudo curl -fsSL -o /etc/systemd/system/caddy.service \
-  https://raw.githubusercontent.com/caddyserver/dist/master/init/caddy.service
+  https://raw.githubusercontent.com/caddyserver/dist/v$V/init/caddy.service
+sudo mkdir -p /etc/caddy
 ```
 
-Write `/etc/caddy/Caddyfile`:
+The unit comes from the `caddyserver/dist` tag that matches the binary. Write `/etc/caddy/Caddyfile`:
 
 ```
 <host> {
@@ -195,6 +196,7 @@ sudo install -d -o atticdb -g atticdb -m 700 /etc/atticdb
 sudo -u atticdb atticdb init --config /etc/atticdb/atticdb.json --tenant <tenant>
 sudo systemctl daemon-reload
 sudo systemctl enable --now atticdb
+sleep 2; systemctl is-active atticdb               # must print: active
 ```
 
 Each later tenant is a hand edit. Make a token:
@@ -220,6 +222,7 @@ Edit as the `atticdb` user, so the file keeps its owner and mode. Then restart:
 sudo -u atticdb vi /etc/atticdb/atticdb.json
 sudo stat -c '%U %a' /etc/atticdb/atticdb.json   # must print: atticdb 600
 sudo systemctl restart atticdb
+sleep 2; systemctl is-active atticdb               # must print: active
 ```
 
 `serve` reads the config only at start. A restart drops every `/mcp` session. Clients get 404 on their next call and start a new session.
@@ -230,8 +233,9 @@ Give each person their `<token>` through a password manager. Never send it in ch
 
 1. Make a new token as in step 5.
 2. Replace that tenant's `token` in `/etc/atticdb/atticdb.json`. Check the owner and mode.
-3. `sudo systemctl restart atticdb`.
-4. Put the new token in each of that person's apps.
+3. `sudo systemctl restart atticdb`. Then `systemctl is-active atticdb` must print `active`.
+   If not, `journalctl -u atticdb -n 20` shows why. A bad config edit is the usual cause.
+4. Put the new token in each of that person's apps. Rerun the curl `initialize` from step 7 with it. Expect 200.
 
 The old token gets 401 right after the restart. The tenant's data stays. Other tenants' clients only see a 404 and start a new session.
 
@@ -261,7 +265,13 @@ rm auth.txt
 
 `fact_set` prints `committed lsn=<n>`, and `fact_get` prints `ok`.
 
-Then connect the 5 apps with their [snippets](../README.md#hosted): Copilot CLI, VS Code, Claude Code, Codex and Gemini CLI. In each, start a chat and ask:
+Then connect the 5 apps with their [snippets](../README.md#hosted): Copilot CLI, VS Code, Claude Code, Codex and Gemini CLI.
+
+VS Code 1.144 and later reads Copilot CLI's entry, so it needs no entry of its own.
+Check that **MCP: List Servers** shows 1 `atticdb-hosted`, not 2. 2 entries open 2 sessions, and their `fact_set` calls can conflict.
+Add the VS Code `mcp.json` entry only without Copilot CLI, or on an older build.
+
+In each app, start a chat and ask:
 
 > Use the atticdb-hosted tools. Call fact_set with key user/hosted-check/<app> and content ok. Then call fact_get on that key.
 
