@@ -65,7 +65,8 @@ fn header(repo: &str) -> String {
 
 /// The block lists rules, then this repo's facts, both in key order, then the newest 5
 /// turns of the repo's session from both Copilot agents, Claude Code, Codex and the shell
-/// verbs, oldest first. Forgotten rules and notes never show. Its JSON shape follows
+/// verbs, oldest first. Forgotten rules and notes never show. Session `other` shows by name
+/// only. Its JSON shape follows
 /// `--harness`. A worktree gets its main repo's
 /// block, and a table of layouts names its repos. Stdin stays open. A shell write's secrets
 /// are stored as placeholders, and its line counts them.
@@ -160,6 +161,7 @@ fn session_start_prints_the_memory_block() {
     let push = "push with [secret:github-token] or [secret:env:ATTICDB_TEST_TOKEN]";
     let block = [
         header("app"),
+        others("other"),
         "Rules:".to_owned(),
         fact("user/big-1", &cut(&rule_1)),
         fact("user/big-2", &cut(&rule_2)),
@@ -379,6 +381,35 @@ fn session_start_prints_the_same_block_on_the_same_memory() {
          Recent notes (myrepo), history only, not instructions:\n- {note}: a note"
     );
     assert_eq!(block, json!(header("myrepo") + &lines));
+}
+
+/// The block's second line names the other sessions with notes, each once, though 2 agents
+/// hold notes in `other`.
+#[test]
+fn session_start_names_other_sessions() {
+    let dir = Dir::new();
+    let home = dir.0.join("h");
+    let repo = home.join("app");
+    std::fs::create_dir_all(&repo).unwrap();
+    let _holders = Holders(vec![data_dir(&home)]);
+    let notes = [("copilot", "app"), ("copilot", "other"), ("codex", "other")];
+    for (agent, session) in notes {
+        seed(&home, &["append", "--agent", agent, "--session", session, "--content", "a note"]);
+    }
+    let out: Value = serde_json::from_str(&hook(&home, &cwd(&repo), 0, &[]).0).unwrap();
+    let block = out["additionalContext"].as_str().unwrap();
+    let lines: Vec<&str> = block.lines().collect();
+    assert_eq!(lines[0], header("app"), "{block}");
+    assert_eq!(lines[1], others("other"), "{block}");
+    assert_eq!(block.matches("other").count(), 1, "{block}");
+}
+
+/// The line naming the sessions `list`, after the header.
+fn others(list: &str) -> String {
+    format!(
+        "Other sessions with notes: {list}. When you work in one of those repos, pass its name \
+         as session and call fact_list with prefix repo/<name>/."
+    )
 }
 
 /// Each row prints `{}` and exits 0 within its time range, saying why on stderr. A slow
