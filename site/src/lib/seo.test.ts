@@ -72,6 +72,7 @@ describe("page metadata", () => {
       });
       expect(metadata.twitter).toEqual({
         card: "summary_large_image",
+        creator: "@shrey_sancheti",
         title,
         description,
         images: ["/og.png"],
