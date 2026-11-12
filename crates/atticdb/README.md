@@ -511,7 +511,7 @@ It is best effort. A secret that was changed, split or encoded gets through, so 
 It runs the same tool code as `atticdb mcp`, in the server's process. The differences:
 
 - **Tools:** 7. `file_ref` and `file_get` read files on the machine that runs them, so they're local only. A call to either gets JSON-RPC `-32602` "unknown tool".
-- **Session name:** there are no roots, so the default session is `default`. The instructions ask the model to pass `session`, set to the repo's main folder name, on `memory_append` and `memory_recent`.
+- **Session name:** there are no roots, so the default session is `default`. The instructions ask the model to pass `session` on `memory_append` and `memory_recent`. It's the main folder name of the repo you work in.
 - **Agent:** the app's `clientInfo.name` from `initialize`. It's lowercased, every character outside `a-z`, `0-9` and `-` becomes `-`, and it's cut to 64 characters. Empty or missing gives `mcp`. For example, `Visual Studio Code` gives `visual-studio-code`.
 - **Chat-start block:** none. The hook runs a local binary. The instructions already say to call `fact_list` when no block arrived.
 - **`fact_set`:** conditional on what this MCP session last read or wrote (D107). A new session has read nothing.

@@ -323,12 +323,13 @@ impl Adapter {
 /// Copilot's instructions folder, as Copilot may not read it here.
 pub const INSTRUCTIONS: &str = "AtticDB is this user's long-term memory. A chat may start with an \
     \"AtticDB memory\" block: rules, this repo's facts and recent notes. Use it. If no block \
-    arrived, call fact_list with prefix user/ and with repo/<repo>/. <repo> is the folder name \
-    of the repo you work in, not always the chat's. The block holds only the newest notes. When \
+    for <repo> arrived, call fact_list with prefix user/ and repo/<repo>/. <repo> is the main \
+    folder name of the repo you work in, not always the chat's. The block holds only the newest \
+    notes. When \
     asked why, when or how something was decided, call memory_search first, before you read \
     files or git history, even when a block arrived. Save a rule with fact_set only when the user \
     states it in this chat. Keys form a tree: user/<topic> for preferences and style, \
-    repo/<repo>/<area>/<topic> for this repo's rules and decisions. \
+    repo/<repo>/<area>/<topic> for the repo's rules and decisions. \
     agent/<agent>/<topic> is for 1 app only, and chat start doesn't load it. \
     team/ is reserved, so don't write there. When a task changed files or anything else, your \
     last step before the final reply is memory_append. Start with what changed and why, with \
