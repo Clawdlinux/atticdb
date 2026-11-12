@@ -263,7 +263,7 @@ fn block_in(repo: &str, deadline: Instant, lookup: &Lookup) -> Result<Option<Str
          shown. Before saying why or when something was decided, call memory_search. Dates \
          show when each line was saved. Before acting on a fact about code, a version or a \
          status, check it against the repo. If it is wrong, set its key again. A line ending \
-         in (cut) was shortened. Call fact_get for the rest."
+         in (cut) was shortened. Call fact_get or memory_search for the rest."
     );
     Ok((!lines.is_empty()).then(|| cap([header].into_iter().chain(lines))))
 }

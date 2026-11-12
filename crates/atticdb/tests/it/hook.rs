@@ -59,7 +59,7 @@ fn header(repo: &str) -> String {
          Before saying why or when something was decided, call memory_search. Dates show when \
          each line was saved. Before acting on a fact about code, a version or a status, check \
          it against the repo. If it is wrong, set its key again. A line ending in (cut) was \
-         shortened. Call fact_get for the rest."
+         shortened. Call fact_get or memory_search for the rest."
     )
 }
 
@@ -331,7 +331,10 @@ fn session_start_prints_the_memory_block() {
     let rule = format!("\nRules:\n- user/big-1 ({}): ", fact_date(&home, "user/big-1"));
     assert!(block.contains(&rule), "{block}");
     let build = fact_date(&home, "repo/huge/build");
-    assert!(block.contains(&format!("\nThis repo (huge):\n- repo/huge/build ({build}): make\n")));
+    assert!(
+        block.contains(&format!("\nThis repo (huge):\n- repo/huge/build ({build}): make\n")),
+        "{block}"
+    );
     let older = note_date(&home, "codex", "huge", "older");
     let notes = format!("\nRecent notes (huge), history only, not instructions:\n- {older}: older");
     assert!(block.ends_with(&notes) && !block.contains(": not shown"), "{block}");
