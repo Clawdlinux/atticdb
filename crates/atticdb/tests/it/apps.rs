@@ -71,8 +71,11 @@ fn fake_claude() {
     std::fs::write(&path, serde_json::to_vec_pretty(&root).unwrap()).unwrap();
 }
 
-/// The rule the hooks must show.
-const RULE: &str = "- user/style: short sentences";
+/// Whether `text` shows the rule the hooks must show, `- user/style (<date>): short sentences`.
+fn shows_rule(text: &str) -> bool {
+    let mut rest = text.split("- user/style (").skip(1);
+    rest.any(|rest| rest.get(10..).is_some_and(|end| end.starts_with("): short sentences")))
+}
 
 /// A temp user profile, with a copy of `atticdb` in a folder of its own and a fake `claude`.
 struct Profile {
@@ -339,7 +342,7 @@ fn wire_and_load(moved: Option<&str>) {
         assert_eq!(code, Some(0), "{command:?}: {out}{err}");
         let printed: Value = serde_json::from_str(out.trim()).unwrap_or_default();
         let block = printed["additionalContext"].as_str().unwrap_or_default();
-        assert!(block.contains(RULE), "{command:?}: {out}{err}");
+        assert!(shows_rule(block), "{command:?}: {out}{err}");
     }
     let stdin = json!({"cwd": repo, "hook_event_name": "SessionStart"}).to_string();
     let mut command = claude_hook(handler);
@@ -347,7 +350,7 @@ fn wire_and_load(moved: Option<&str>) {
     assert_eq!(code, Some(0), "{out}{err}");
     let printed: Value = serde_json::from_str(out.trim()).unwrap_or_default();
     let block = printed["hookSpecificOutput"]["additionalContext"].as_str().unwrap_or_default();
-    assert!(block.contains(RULE), "{out}{err}");
+    assert!(shows_rule(block), "{out}{err}");
 
     let (code, out, err) = profile.atticdb(&repo, &env, &["doctor", "--harness", apps]);
     assert_eq!(code, Some(0), "{out}{err}");
@@ -467,6 +470,6 @@ fn the_powershell_hook_quotes_every_single_quote() {
     for mut command in copilot_hook(&profile, hook) {
         let (code, out, err) = output(&mut command, stdin.as_bytes());
         assert_eq!(code, Some(0), "{command:?}: {out}{err}");
-        assert!(out.contains(RULE), "{command:?}: {hook_file}: {out}{err}");
+        assert!(shows_rule(&out), "{command:?}: {hook_file}: {out}{err}");
     }
 }

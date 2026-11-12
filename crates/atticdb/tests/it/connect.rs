@@ -951,7 +951,9 @@ fn connect_claude_code_adds_its_parts() {
     let out: Value = serde_json::from_str(out.lines().next().unwrap()).unwrap();
     assert_eq!(out["hookSpecificOutput"]["hookEventName"], "SessionStart", "{out}");
     let block = out["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
-    assert!(block.contains("\n- user/style: short sentences"), "{block}");
+    let rule =
+        |line: &str| line.starts_with("- user/style (") && line.ends_with("): short sentences");
+    assert!(block.lines().any(rule), "{block}");
     let (code, out) = run(&home, None, &bin, &[], &["disconnect", "claude-code"]);
     assert_eq!(code, Some(0), "{out}");
     assert!(
@@ -1753,7 +1755,9 @@ fn connect_codex_adds_its_parts() {
     assert_eq!(status.code(), Some(0), "{out}");
     let out: Value = serde_json::from_str(out.lines().next().unwrap()).unwrap();
     let block_text = out["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
-    assert!(block_text.contains("\n- user/style: short sentences"), "{block_text}");
+    let rule =
+        |line: &str| line.starts_with("- user/style (") && line.ends_with("): short sentences");
+    assert!(block_text.lines().any(rule), "{block_text}");
     assert_eq!(run(&home, None, &bin, &[], &["disconnect", "codex"]).0, Some(0));
     assert_eq!(text(&config), "");
 

@@ -244,8 +244,7 @@ fn block_in(repo: &str, deadline: Instant, lookup: &Lookup) -> Result<Option<Str
     for (agent, window) in agents.iter().zip(&mut windows) {
         reach_back(&mut home, agent, window);
     }
-    let notes = newest(&windows).into_iter();
-    let notes = notes.map(|turn| format!("- {}", line(&turn["content"], MAX_CONTENT))).collect();
+    let notes = newest(&windows).into_iter().map(note).collect();
     let sections = [
         ("Rules:".to_owned(), rules),
         (format!("This repo ({repo}):"), this_repo),
@@ -256,11 +255,15 @@ fn block_in(repo: &str, deadline: Instant, lookup: &Lookup) -> Result<Option<Str
         lines.push(title);
         lines.extend(entries);
     }
-    // Codex read the old, shorter header as "this is all the memory there is" (#122).
+    // Codex read the old, shorter header as "this is all the memory there is" (#122). Dates
+    // are absolute, so the block stays the same until memory changes (#217).
     let header = format!(
         "AtticDB memory for repo {repo}, a snapshot from chat start: rules, facts under \
          repo/{repo}/ and only the {TURNS} newest notes. Older notes and decisions are not \
-         shown. Before saying why or when something was decided, call memory_search."
+         shown. Before saying why or when something was decided, call memory_search. Dates \
+         show when each line was saved. Before acting on a fact about code, a version or a \
+         status, check it against the repo. If it is wrong, set its key again. A line ending \
+         in (cut) was shortened. Call fact_get for the rest."
     );
     Ok((!lines.is_empty()).then(|| cap([header].into_iter().chain(lines))))
 }
@@ -339,14 +342,40 @@ fn repo(cwd: &Path) -> Result<String, String> {
     crate::home::repo(cwd).ok_or_else(|| format!("cwd {cwd:?} has no directory name"))
 }
 
+/// A fact's line: `- <key> (<date>): <content>`, or `- <key>: <content>` with no save time.
 fn fact(fact: &Value) -> String {
-    format!("- {}: {}", line(&fact["key"], usize::MAX), line(&fact["content"], MAX_CONTENT))
+    let (key, content) = (line(&fact["key"], usize::MAX), line(&fact["content"], MAX_CONTENT));
+    match date(&fact["commit_time_ns"]) {
+        Some(date) => format!("- {key} ({date}): {content}"),
+        None => format!("- {key}: {content}"),
+    }
 }
 
-/// `text` cut to `max` characters, with newlines turned into spaces.
+/// A note's line: `- <date>: <content>`, or `- <content>` with no save time.
+fn note(turn: &Value) -> String {
+    let content = line(&turn["content"], MAX_CONTENT);
+    match date(&turn["commit_time_ns"]) {
+        Some(date) => format!("- {date}: {content}"),
+        None => format!("- {content}"),
+    }
+}
+
+/// The UTC date of a commit time, as `2026-11-12`. `None` for a missing or zero time.
+fn date(ns: &Value) -> Option<String> {
+    let ns = ns.as_u64().filter(|ns| *ns > 0)?;
+    Some(crate::export::utc(ns).chars().take(10).collect())
+}
+
+/// `text` cut to `max` characters, with newlines turned into spaces. A cut text ends in
+/// ` (cut)`.
 fn line(text: &Value, max: usize) -> String {
-    let text = text.as_str().unwrap_or_default().chars().take(max);
-    text.map(|c| if c == '\n' || c == '\r' { ' ' } else { c }).collect()
+    let text = text.as_str().unwrap_or_default();
+    let (text, cut) = match text.char_indices().nth(max) {
+        Some((at, _)) => (&text[..at], " (cut)"),
+        None => (text, ""),
+    };
+    let text: String = text.chars().map(|c| if c == '\n' || c == '\r' { ' ' } else { c }).collect();
+    text + cut
 }
 
 /// Joins `lines`. Past [`MAX_BLOCK`] characters, stops after the last whole line that
@@ -400,6 +429,31 @@ mod tests {
         assert_eq!(meta, meta_expected);
         let (content, _) = super::compact_note(&json!({"trigger": "auto"}), &"é".repeat(16_000));
         assert_eq!(content, format!("Compaction summary (auto): {}", "é".repeat(16_000)));
+    }
+
+    #[test]
+    fn line_marks_a_cut_and_turns_newlines_into_spaces() {
+        let x300 = "x".repeat(300);
+        assert_eq!(super::line(&json!(x300), 300), x300);
+        let expected = format!("{} (cut)", "é".repeat(300));
+        assert_eq!(super::line(&json!("é".repeat(301)), 300), expected);
+        assert_eq!(super::line(&json!("a\nb\r\nc"), 300), "a b  c");
+        let key = "k".repeat(1_000);
+        assert_eq!(super::line(&json!(key), usize::MAX), key);
+    }
+
+    #[test]
+    fn fact_and_note_show_the_save_date_when_there_is_one() {
+        // 2026-11-12T12:52:55Z.
+        let ns = 1_794_487_975_497_319_000_u64;
+        assert_eq!(super::fact(&json!({"key": "k", "content": "v"})), "- k: v");
+        let zero = json!({"key": "k", "content": "v", "commit_time_ns": 0});
+        assert_eq!(super::fact(&zero), "- k: v");
+        let dated = json!({"key": "k", "content": "v", "commit_time_ns": ns});
+        assert_eq!(super::fact(&dated), "- k (2026-11-12): v");
+        assert_eq!(super::note(&json!({"content": "n"})), "- n");
+        let dated = json!({"content": "n", "commit_time_ns": ns});
+        assert_eq!(super::note(&dated), "- 2026-11-12: n");
     }
 
     #[test]
