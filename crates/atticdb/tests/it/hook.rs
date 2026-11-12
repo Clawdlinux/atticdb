@@ -1,5 +1,6 @@
 use crate::support::{
-    atticdb, chmod, cwd, data_dir, hook, locked, seed, slow_store, Dir, Holders, Output, Via,
+    atticdb, chmod, cwd, data_dir, hook, locked, routed_store, seed, slow_store, Dir, Holders,
+    Output, Via,
 };
 use serde_json::{json, Value};
 use std::os::unix::fs::DirBuilderExt;
@@ -402,6 +403,50 @@ fn session_start_names_other_sessions() {
     assert_eq!(lines[0], header("app"), "{block}");
     assert_eq!(lines[1], others("other"), "{block}");
     assert_eq!(block.matches("other").count(), 1, "{block}");
+}
+
+/// With no rules, facts or notes for `app`, the block is the header and the line naming
+/// `other`.
+#[test]
+fn session_start_names_other_sessions_with_no_memory() {
+    let dir = Dir::new();
+    let home = dir.0.join("h");
+    let repo = home.join("app");
+    std::fs::create_dir_all(&repo).unwrap();
+    let _holders = Holders(vec![data_dir(&home)]);
+    seed(&home, &["append", "--agent", "copilot", "--session", "other", "--content", "a note"]);
+    let out: Value = serde_json::from_str(&hook(&home, &cwd(&repo), 0, &[]).0).unwrap();
+    assert_eq!(out, json!({"additionalContext": header("app") + "\n" + &others("other")}));
+}
+
+/// A failed sessions read leaves the line out of the block, says why on stderr, and the
+/// hook still exits 0. The fake server's replies have no `sessions` key.
+#[test]
+fn session_start_leaves_the_line_out_when_the_sessions_read_fails() {
+    let dir = Dir::new();
+    let home = dir.0.join("h");
+    let repo = home.join("app");
+    std::fs::create_dir_all(&repo).unwrap();
+    let _holders = Holders(vec![data_dir(&home)]);
+    let data = data_dir(&home);
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&data).unwrap();
+    let socket = data.join("atticdb.sock");
+    routed_store(&socket, |request| {
+        let facts = if request.contains("prefix=user") {
+            r#"[{"key":"user/x","content":"y"}]"#
+        } else {
+            "[]"
+        };
+        format!(r#"{{"facts":{facts},"next":null,"turns":[],"truncated":false}}"#)
+    });
+    let lock =
+        format!("pid={} instance=X unix={} tcp=none\n", std::process::id(), socket.display());
+    std::fs::write(data.join("LOCK"), lock).unwrap();
+    let (out, err) = hook(&home, &cwd(&repo), 0, &[]);
+    let out: Value = serde_json::from_str(&out).unwrap();
+    let block = [header("app"), "Rules:".to_owned(), "- user/x: y".to_owned()].join("\n");
+    assert_eq!(out, json!({"additionalContext": block}), "{err}");
+    assert!(err.contains("atticdb: sessions hint left out: "), "{err}");
 }
 
 /// The line naming the sessions `list`, after the header.

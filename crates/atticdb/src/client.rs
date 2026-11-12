@@ -269,8 +269,9 @@ impl HomeReader {
     }
 
     /// The distinct non-empty session names of all agents, in byte order. It reads sessions
-    /// pages of 1,000, follows `next`, and stops after 5 pages. The deadline is
-    /// [`Self::read`]'s.
+    /// pages of 1,000, follows `next`, and stops after 5 pages. Past 5 pages of 1,000
+    /// (agent, session) pairs, the list can miss sessions held only by later agents. The
+    /// deadline is [`Self::read`]'s.
     pub(crate) fn session_names(&mut self) -> Result<Vec<String>, String> {
         let (mut names, mut after) = (Vec::new(), String::new());
         for _ in 0..5 {

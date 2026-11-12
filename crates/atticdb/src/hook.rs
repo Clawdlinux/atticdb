@@ -204,8 +204,8 @@ fn block(input: impl Read, deadline: Instant, lookup: &Lookup) -> Result<Option<
     block_in(&repo(Path::new(cwd))?, deadline, lookup)
 }
 
-/// The block for `repo`, or `None` when memory has nothing for it. Reads the home, as the
-/// hook does, and ends by `deadline`.
+/// The block for `repo`, or `None` when memory has nothing for it and no other session has
+/// notes. Reads the home, as the hook does, and ends by `deadline`.
 pub(crate) fn block_for(repo: &str, deadline: Instant) -> Result<Option<String>, String> {
     block_in(repo, deadline, &Lookup::ENV)
 }
@@ -255,12 +255,19 @@ fn block_in(repo: &str, deadline: Instant, lookup: &Lookup) -> Result<Option<Str
         lines.push(title);
         lines.extend(entries);
     }
-    if lines.is_empty() {
+    // Last, so it spends no budget the reads above need. The line is a hint, not memory, so
+    // a failed read leaves it out and says why on stderr (#220). It shows even with no
+    // memory lines, so a chat in a repo with no notes still finds the others.
+    let hint = match home.session_names() {
+        Ok(names) => others(names, repo),
+        Err(error) => {
+            let _ = writeln!(std::io::stderr(), "atticdb: sessions hint left out: {error}");
+            None
+        }
+    };
+    if lines.is_empty() && hint.is_none() {
         return Ok(None);
     }
-    // Last, so it spends no budget the reads above need. The line is a hint, not memory, so
-    // a failed read leaves it out (#220).
-    let hint = home.session_names().ok().and_then(|names| others(names, repo));
     // Codex read the old, shorter header as "this is all the memory there is" (#122). Dates
     // are absolute, so the block stays the same until memory changes (#217).
     let header = format!(
@@ -271,16 +278,21 @@ fn block_in(repo: &str, deadline: Instant, lookup: &Lookup) -> Result<Option<Str
          status, check it against the repo. If it is wrong, set its key again. A line ending \
          in (cut) was shortened. Call fact_get or memory_search for the rest."
     );
-    // Right after the header, so the cap never drops it. 20 names of at most 255 bytes fit.
+    // Right after the header, so the cap never drops it. [`others`] keeps the list near
+    // [`OTHERS_CHARS`], so the header and the line fit in [`MAX_BLOCK`].
     Ok(Some(cap([header].into_iter().chain(hint).chain(lines))))
 }
 
 /// Most sessions [`others`] names.
 const OTHERS: usize = 20;
+/// Most characters of the names [`others`] lists, separators included. The first name shows
+/// even past it.
+const OTHERS_CHARS: usize = 1_000;
 
 /// The line naming the sessions in `names` other than `repo`, each once, in byte order. It
-/// names at most [`OTHERS`], then counts the rest. An empty name never shows. `None` when
-/// no name is left.
+/// names at most [`OTHERS`], and stops before a name that takes the list past
+/// [`OTHERS_CHARS`]. Then it counts the rest. An empty name never shows. `None` when no name
+/// is left.
 fn others(mut names: Vec<String>, repo: &str) -> Option<String> {
     names.retain(|name| !name.is_empty() && name != repo);
     names.sort_unstable();
@@ -288,11 +300,21 @@ fn others(mut names: Vec<String>, repo: &str) -> Option<String> {
     if names.is_empty() {
         return None;
     }
-    let more = names.len().saturating_sub(OTHERS);
-    names.truncate(OTHERS);
-    // As in a fact's key, a newline in a name can't start a line of its own.
-    let names: Vec<String> = names.iter().map(|name| line(&json!(name), usize::MAX)).collect();
-    let mut list = names.join(", ");
+    let mut list = String::new();
+    let mut listed = 0;
+    for name in names.iter().take(OTHERS) {
+        // As in a fact's key, a newline in a name can't start a line of its own.
+        let name = line(&json!(name), usize::MAX);
+        let sep = if listed == 0 { "" } else { ", " };
+        let chars = list.chars().count() + sep.len() + name.chars().count();
+        if listed > 0 && chars > OTHERS_CHARS {
+            break;
+        }
+        list += sep;
+        list += &name;
+        listed += 1;
+    }
+    let more = names.len() - listed;
     if more > 0 {
         list += &format!(", and {more} more");
     }
@@ -503,6 +525,16 @@ mod tests {
         let line = super::others(many, "app");
         let list = first.join(", ");
         assert_eq!(line, Some(format!("Other sessions with notes: {list}, and 3 more. {tail}")));
+        // 300-character names: 3 fit in 1,000 characters with their separators, 7 are counted.
+        let long: Vec<String> = (0..10).map(|n| format!("{n}{}", "x".repeat(299))).collect();
+        let list = long[..3].join(", ");
+        let line = super::others(long, "app").unwrap();
+        assert_eq!(line, format!("Other sessions with notes: {list}, and 7 more. {tail}"));
+        assert!(list.chars().count() <= super::OTHERS_CHARS, "{}", list.len());
+        // The first name shows even when it alone is past 1,000 characters.
+        let first = "a".repeat(1_500);
+        let line = super::others(vec![first.clone(), "b".into()], "app");
+        assert_eq!(line, Some(format!("Other sessions with notes: {first}, and 1 more. {tail}")));
     }
 
     #[test]
