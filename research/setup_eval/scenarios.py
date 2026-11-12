@@ -121,7 +121,9 @@ def check_save(out: Outcome, block: str) -> Verdict:
     if not keys:
         return Verdict(False, [f"no fact_set under {FACT_PREFIX}"])
     lines = _block_lines(block)
-    shown = any(line.startswith(f"- {key}:") and "22" in line for key in keys for line in lines)
+    # A fact line is `- <key>: ...`, or `- <key> (<YYYY-MM-DD>): ...` since D111.
+    shown = any(re.match(rf"- {re.escape(key)}( \(\d{{4}}-\d\d-\d\d\))?:", line) and "22" in line
+                for key in keys for line in lines)
     return Verdict(shown, [] if shown else ["the next block lacks the fact"])
 
 
