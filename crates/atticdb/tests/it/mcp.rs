@@ -1530,6 +1530,20 @@ fn instructions_ask_for_the_repo_session() {
     assert!(!instructions.contains("Leave out the session argument."), "{instructions}");
 }
 
+/// A chat opened in 1 repo may work in another, so `<repo>` names the repo the work is in (#220).
+#[test]
+fn instructions_define_repo_as_the_work_repo() {
+    let sentence = "<repo> is the main folder name of the repo you work in, not always the chat's.";
+    let fallback =
+        "If no block for <repo> arrived, call fact_list with prefix user/ and repo/<repo>/.";
+    for instructions in [atticdb::mcp::INSTRUCTIONS.to_owned(), atticdb::mcp::hosted_instructions()]
+    {
+        assert!(instructions.contains(sentence), "{instructions}");
+        assert!(instructions.contains(fallback), "{instructions}");
+        assert!(!instructions.contains("main checkout's folder name"), "{instructions}");
+    }
+}
+
 /// The sentence that sends notes to the session the chat-start block reads.
 const SESSION_SENTENCE: &str = "Pass session=<repo> on memory_append and memory_recent.";
 

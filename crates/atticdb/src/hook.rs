@@ -40,7 +40,8 @@ const MORE: &str = "(more in atticdb)";
 const MAX_SUMMARY: usize = 16_000;
 
 /// Reads the hook's JSON on stdin and prints the block in the shape `harness` reads, or `{}`
-/// when there is nothing to show, on any error, or 4 s after the start. Errors go to stderr.
+/// when there is nothing to show, on any error in its fact or note reads, or 4 s after the
+/// start. Errors go to stderr.
 /// `claude-code`, `codex` and `gemini` read
 /// `{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "<block>"}}`.
 /// `None`, `vscode` and `copilot` read `{"additionalContext": "<block>"}`. Any other name,
@@ -196,16 +197,16 @@ fn print_once(output: &Value) -> bool {
     first
 }
 
-/// The block for the `cwd` in `input`, or `None` when memory has nothing for it. Reads the
-/// home `lookup` finds, and end by `deadline`.
+/// The block for the `cwd` in `input`, or `None` when memory has nothing for it and no other
+/// session has notes. Reads the home `lookup` finds, and ends by `deadline`.
 fn block(input: impl Read, deadline: Instant, lookup: &Lookup) -> Result<Option<String>, String> {
     let input = first_value(input)?;
     let cwd = input["cwd"].as_str().ok_or("stdin has no cwd string")?;
     block_in(&repo(Path::new(cwd))?, deadline, lookup)
 }
 
-/// The block for `repo`, or `None` when memory has nothing for it. Reads the home, as the
-/// hook does, and ends by `deadline`.
+/// The block for `repo`, or `None` when memory has nothing for it and no other session has
+/// notes. Reads the home, as the hook does, and ends by `deadline`.
 pub(crate) fn block_for(repo: &str, deadline: Instant) -> Result<Option<String>, String> {
     block_in(repo, deadline, &Lookup::ENV)
 }
@@ -240,7 +241,7 @@ fn block_in(repo: &str, deadline: Instant, lookup: &Lookup) -> Result<Option<Str
         let args = json!({"n": TURNS, "max_bytes": crate::api::MAX_WINDOW_BYTES});
         windows.push(home.read(agent, "memory_recent", &args)?);
     }
-    // Only after every other read, so read-back can't spend the budget those need.
+    // Only after the fact and note reads, so read-back can't spend the budget those need.
     for (agent, window) in agents.iter().zip(&mut windows) {
         reach_back(&mut home, agent, window);
     }
@@ -255,6 +256,19 @@ fn block_in(repo: &str, deadline: Instant, lookup: &Lookup) -> Result<Option<Str
         lines.push(title);
         lines.extend(entries);
     }
+    // Last, so it spends no budget the reads above need. The line is a hint, not memory, so
+    // a failed read leaves it out and says why on stderr (#220). It shows even with no
+    // memory lines, so a chat in a repo with no notes still finds the others.
+    let hint = match home.session_names() {
+        Ok(names) => others(names, repo),
+        Err(error) => {
+            let _ = writeln!(std::io::stderr(), "atticdb: sessions hint left out: {error}");
+            None
+        }
+    };
+    if lines.is_empty() && hint.is_none() {
+        return Ok(None);
+    }
     // Codex read the old, shorter header as "this is all the memory there is" (#122). Dates
     // are absolute, so the block stays the same until memory changes (#217).
     let header = format!(
@@ -265,7 +279,50 @@ fn block_in(repo: &str, deadline: Instant, lookup: &Lookup) -> Result<Option<Str
          status, check it against the repo. If it is wrong, set its key again. A line ending \
          in (cut) was shortened. Call fact_get or memory_search for the rest."
     );
-    Ok((!lines.is_empty()).then(|| cap([header].into_iter().chain(lines))))
+    // Right after the header, so the cap never drops it. [`others`] keeps the list near
+    // [`OTHERS_CHARS`], so the header and the line fit in [`MAX_BLOCK`].
+    Ok(Some(cap([header].into_iter().chain(hint).chain(lines))))
+}
+
+/// Most sessions [`others`] names.
+const OTHERS: usize = 20;
+/// Most characters of the names [`others`] lists, separators included. The first name shows
+/// even past it.
+const OTHERS_CHARS: usize = 1_000;
+
+/// The line naming the sessions in `names` other than `repo`, each once, in byte order. It
+/// names at most [`OTHERS`], and stops before a name that takes the list past
+/// [`OTHERS_CHARS`]. Then it counts the rest. An empty name never shows. `None` when no name
+/// is left.
+fn others(mut names: Vec<String>, repo: &str) -> Option<String> {
+    names.retain(|name| !name.is_empty() && name != repo);
+    names.sort_unstable();
+    names.dedup();
+    if names.is_empty() {
+        return None;
+    }
+    let mut list = String::new();
+    let mut listed = 0;
+    for name in names.iter().take(OTHERS) {
+        // As in a fact's key, a newline in a name can't start a line of its own.
+        let name = line(&json!(name), usize::MAX);
+        let sep = if listed == 0 { "" } else { ", " };
+        let chars = list.chars().count() + sep.len() + name.chars().count();
+        if listed > 0 && chars > OTHERS_CHARS {
+            break;
+        }
+        list += sep;
+        list += &name;
+        listed += 1;
+    }
+    let more = names.len() - listed;
+    if more > 0 {
+        list += &format!(", and {more} more");
+    }
+    Some(format!(
+        "Other sessions with notes: {list}. When you work in one of those repos, pass its name \
+         as session and call fact_list with prefix repo/<name>/."
+    ))
 }
 
 /// Most turns the 1 older read in [`reach_back`] asks for: the server's cap.
@@ -454,6 +511,31 @@ mod tests {
         assert_eq!(super::note(&json!({"content": "n"})), "- n");
         let dated = json!({"content": "n", "commit_time_ns": ns});
         assert_eq!(super::note(&dated), "- 2026-11-12: n");
+    }
+
+    #[test]
+    fn others_names_other_sessions_once_in_byte_order() {
+        let names = |list: &[&str]| list.iter().map(|name| name.to_string()).collect();
+        assert_eq!(super::others(names(&["app"]), "app"), None);
+        let tail = "When you work in one of those repos, pass its name as session and call \
+                    fact_list with prefix repo/<name>/.";
+        let line = super::others(names(&["b", "a", "app", "a", ""]), "app");
+        assert_eq!(line, Some(format!("Other sessions with notes: a, b. {tail}")));
+        let many: Vec<String> = (0..23).rev().map(|n| format!("s{n:02}")).collect();
+        let first: Vec<String> = (0..20).map(|n| format!("s{n:02}")).collect();
+        let line = super::others(many, "app");
+        let list = first.join(", ");
+        assert_eq!(line, Some(format!("Other sessions with notes: {list}, and 3 more. {tail}")));
+        // 300-character names: 3 fit in 1,000 characters with their separators, 7 are counted.
+        let long: Vec<String> = (0..10).map(|n| format!("{n}{}", "x".repeat(299))).collect();
+        let list = long[..3].join(", ");
+        let line = super::others(long, "app").unwrap();
+        assert_eq!(line, format!("Other sessions with notes: {list}, and 7 more. {tail}"));
+        assert!(list.chars().count() <= super::OTHERS_CHARS, "{}", list.len());
+        // The first name shows even when it alone is past 1,000 characters.
+        let first = "a".repeat(1_500);
+        let line = super::others(vec![first.clone(), "b".into()], "app");
+        assert_eq!(line, Some(format!("Other sessions with notes: {first}, and 1 more. {tail}")));
     }
 
     #[test]

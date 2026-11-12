@@ -121,7 +121,7 @@ AtticDB saves facts under keys that work like folder paths. Use these top-level 
 | `agent/<agent>/<topic>` | Notes for 1 app only | Not yet |
 | `team/<team>/` | Reserved for sync later | Don't write here yet |
 
-`<repo>` is the folder name of the repo's main checkout. `<area>` is optional. It helps once a repo has many rules, as in `repo/myrepo/api/retry`.
+`<repo>` is the main folder name of the repo you work in. `<area>` is optional. It helps once a repo has many rules, as in `repo/myrepo/api/retry`.
 Your agents save a rule here when you state it in a chat. You can save one yourself:
 
 ```sh
@@ -264,7 +264,7 @@ Whoever runs the server gives you `<host>` and `<token>`. The token picks your t
 
 - The hosted server lists 7 tools. `file_ref` and `file_get` are local only, since they read files on the machine that runs them.
 - Remote agents get no chat-start block. That hook runs a local binary. The instructions tell the agent to call `fact_list` with prefix `user/` and with `repo/<repo>/` instead.
-- The server can't see your repo. So the agent passes `session`, set to the repo's main folder name, on `memory_append` and `memory_recent`.
+- The server can't see your repo. So the agent passes `session` on `memory_append` and `memory_recent`. It's the main folder name of the repo you work in.
 - Notes name the app that wrote them. The name comes from the app's MCP `clientInfo.name`.
 - The entries below are named `atticdb-hosted`, so they don't replace the local `atticdb` entry from `atticdb setup`. Keep 1 of the 2 in each app, or the model sees 2 memories.
 - Keep `<token>` out of repos and shared config files.

@@ -267,6 +267,34 @@ impl HomeReader {
         let found = sessions.iter().find(|s| s["agent"] == agent && s["session"] == *session);
         Ok(found.and_then(|found| found["forgotten_up_to"].as_u64()))
     }
+
+    /// The distinct non-empty session names of all agents, in byte order. It reads sessions
+    /// pages of 1,000, follows `next`, and stops after 5 pages. Past 5 pages of 1,000
+    /// (agent, session) pairs, the list can miss sessions held only by later agents. The
+    /// deadline is [`Self::read`]'s.
+    pub(crate) fn session_names(&mut self) -> Result<Vec<String>, String> {
+        let (mut names, mut after) = (Vec::new(), String::new());
+        for _ in 0..5 {
+            self.client.set_deadline(self.deadline);
+            let target = format!("/v1/sessions?limit={}{after}", crate::api::MAX_WINDOW_TURNS);
+            let page = self.client.read("hook", &target, "sessions", |reply| {
+                answer(String::new(), json!({"sessions": reply["sessions"], "next": reply["next"]}))
+            });
+            let page = structured(page)?;
+            let sessions = page["sessions"].as_array().map(Vec::as_slice).unwrap_or_default();
+            let found = sessions.iter().filter_map(|s| s["session"].as_str());
+            names.extend(found.filter(|name| !name.is_empty()).map(str::to_owned));
+            let next = &page["next"];
+            let (Some(agent), Some(session)) = (next["agent"].as_str(), next["session"].as_str())
+            else {
+                break;
+            };
+            after = format!("&after_agent={}&after_session={}", encode(agent), encode(session));
+        }
+        names.sort_unstable();
+        names.dedup();
+        Ok(names)
+    }
 }
 
 /// A tool result's `structuredContent`, or its error text.

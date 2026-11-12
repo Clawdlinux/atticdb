@@ -878,13 +878,33 @@ pub fn slow_store(socket: &Path, delay: Option<Duration>) -> Arc<AtomicUsize> {
 
 /// [`slow_store`], with `health` as the `/healthz` body.
 pub fn fake_store(socket: &Path, delay: Option<Duration>, health: Value) -> Arc<AtomicUsize> {
-    let health = Arc::new(health.to_string());
+    let empty = r#"{"facts": [], "next": null, "turns": [], "truncated": false}"#;
+    store(socket, delay, health, move |_| empty.to_owned())
+}
+
+/// [`slow_store`] with no delay. Any other request gets `body` of its request line, such as
+/// `GET /v1/facts/list?prefix=user%2F&limit=50&max_bytes=65536 HTTP/1.1`.
+pub fn routed_store(
+    socket: &Path,
+    body: impl Fn(&str) -> String + Send + Sync + 'static,
+) -> Arc<AtomicUsize> {
+    store(socket, Some(Duration::ZERO), json!({"instance": "X"}), body)
+}
+
+/// [`fake_store`], with `body` of the request line as the body of a request not to `/healthz`.
+fn store(
+    socket: &Path,
+    delay: Option<Duration>,
+    health: Value,
+    body: impl Fn(&str) -> String + Send + Sync + 'static,
+) -> Arc<AtomicUsize> {
+    let (health, body) = (Arc::new(health.to_string()), Arc::new(body));
     let listener = UnixListener::bind(socket).unwrap();
     let reads = Arc::new(AtomicUsize::new(0));
     let counted = reads.clone();
     std::thread::spawn(move || {
         for mut stream in listener.incoming().map_while(Result::ok) {
-            let (counted, health) = (counted.clone(), health.clone());
+            let (counted, health, body) = (counted.clone(), health.clone(), body.clone());
             std::thread::spawn(move || {
                 let mut reader = BufReader::new(stream.try_clone().unwrap());
                 loop {
@@ -895,7 +915,7 @@ pub fn fake_store(socket: &Path, delay: Option<Duration>, health: Value) -> Arc<
                         }
                     }
                     let body = if head.starts_with("GET /healthz ") {
-                        health.as_str()
+                        health.to_string()
                     } else {
                         counted.fetch_add(1, Ordering::SeqCst);
                         let Some(delay) = delay else {
@@ -903,7 +923,7 @@ pub fn fake_store(socket: &Path, delay: Option<Duration>, health: Value) -> Arc<
                             return;
                         };
                         std::thread::sleep(delay);
-                        r#"{"facts": [], "next": null, "turns": [], "truncated": false}"#
+                        body(head.lines().next().unwrap_or_default())
                     };
                     let length = body.len();
                     let reply =
