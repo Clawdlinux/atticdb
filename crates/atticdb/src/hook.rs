@@ -40,7 +40,8 @@ const MORE: &str = "(more in atticdb)";
 const MAX_SUMMARY: usize = 16_000;
 
 /// Reads the hook's JSON on stdin and prints the block in the shape `harness` reads, or `{}`
-/// when there is nothing to show, on any error, or 4 s after the start. Errors go to stderr.
+/// when there is nothing to show, on any error in its fact or note reads, or 4 s after the
+/// start. Errors go to stderr.
 /// `claude-code`, `codex` and `gemini` read
 /// `{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "<block>"}}`.
 /// `None`, `vscode` and `copilot` read `{"additionalContext": "<block>"}`. Any other name,
@@ -196,8 +197,8 @@ fn print_once(output: &Value) -> bool {
     first
 }
 
-/// The block for the `cwd` in `input`, or `None` when memory has nothing for it. Reads the
-/// home `lookup` finds, and end by `deadline`.
+/// The block for the `cwd` in `input`, or `None` when memory has nothing for it and no other
+/// session has notes. Reads the home `lookup` finds, and ends by `deadline`.
 fn block(input: impl Read, deadline: Instant, lookup: &Lookup) -> Result<Option<String>, String> {
     let input = first_value(input)?;
     let cwd = input["cwd"].as_str().ok_or("stdin has no cwd string")?;
