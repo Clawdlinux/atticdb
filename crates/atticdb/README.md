@@ -310,6 +310,7 @@ The steps match the top README's Install, plus a copy of `atticdb.exe` kept to r
 With it on, the home's server runs `<its binary> upgrade --yes --version <v>` when the cache names a newer release.
 It runs in its own process group, so it outlives the server it stops. Its output appends to `<home>/upgrade.log`, mode 0600, after a dated line.
 The server tries each version at most once a day. A `+dev` server never runs it. The off switches stop it too, since they stop the check.
+Homes that share 1 binary share its upgrades. After 1 home's upgrade, another home's server runs the old code until it restarts. `atticdb doctor` flags that server. On Linux its own auto-upgrade can't start, since its binary was replaced, and its log says so.
 
 ### Update check
 
