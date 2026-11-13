@@ -1,4 +1,4 @@
-"""The 5 arms. Each one returns (dia_ids, query, ms) for 1 question.
+"""The 6 arms. Each one returns (dia_ids, query, ms) for 1 question.
 
 `dia_ids` is the ranked list, best first. `query` is what the arm searched for.
 `ms` is the search call's wall time, or None when no search ran.
@@ -21,7 +21,7 @@ from .data import Conversation, Question
 CLIENT_PATH = Path(__file__).resolve().parents[2] / "clients" / "python" / "atticdb_client.py"
 
 AGENT = "locomo"
-SEARCH_LIMIT = 100  # The server's cap. Arms 1 to 3 keep the hits in returned order.
+SEARCH_LIMIT = 100  # The server's cap. The AtticDB arms keep the hits in returned order.
 FTS_TOP = 20
 RANDOM_TOP = 20
 SEED_STRIDE = 1_000_003
@@ -114,10 +114,12 @@ def _hit_ids(reply, corpus: Corpus) -> list[str]:
     return ids
 
 
-def _search(client, corpus: Corpus, query: str) -> Result:
+def _search(client, corpus: Corpus, query: str, order: str | None = None) -> Result:
+    # Only the ranked arm sends `order`. The others call search exactly as before.
+    extra = {"order": order} if order is not None else {}
     start = time.perf_counter()
     try:
-        reply = client.search(query, limit=SEARCH_LIMIT)
+        reply = client.search(query, limit=SEARCH_LIMIT, **extra)
     except atticdb_client.Error as e:
         raise SearchError(str(e)) from e
     ms = (time.perf_counter() - start) * 1000
@@ -144,6 +146,11 @@ def atticdb_1word(client, corpus: Corpus, question: Question) -> Result:
 def atticdb_2words(client, corpus: Corpus, question: Question) -> Result:
     """Arm 3: the question's 2 rarest content words in this conversation."""
     return _rarest(client, corpus, question, 2)
+
+
+def atticdb_ranked(client, corpus: Corpus, question: Question) -> Result:
+    """Arm 6: the whole question, ranked by the server with `order=relevance`."""
+    return _search(client, corpus, question.question, order="relevance")
 
 
 # ---- the controls ----

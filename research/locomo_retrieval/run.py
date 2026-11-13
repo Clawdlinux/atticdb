@@ -1,4 +1,4 @@
-"""Run every scored question through the 5 arms, and write results.csv and summary.md.
+"""Run every scored question through the 6 arms, and write results.csv and summary.md.
 
 Each conversation gets a fresh temp ATTICDB_HOME and its own `atticdb serve` on a Unix socket.
 The server is stopped and the home deleted after the conversation, on errors too.
@@ -30,7 +30,7 @@ from research.setup_eval.proc import Runner
 
 from . import arms, data, score
 
-ARMS = ("atticdb-question", "atticdb-1word", "atticdb-2words", "fts5-bm25", "random")
+ARMS = ("atticdb-question", "atticdb-1word", "atticdb-2words", "fts5-bm25", "random", "atticdb-ranked")
 KS = (5, 10, 20)
 TOP = 20  # Ids kept per row. Scoring at any k uses this list.
 SUMMARY_K = 10
@@ -213,6 +213,8 @@ def _call(name: str, client, corpus: arms.Corpus, q: data.Question, seed: int) -
         return arms.fts5_bm25(corpus, q)
     if name == "random":
         return arms.random_turns(corpus, q, seed)
+    if name == "atticdb-ranked":
+        return arms.atticdb_ranked(client, corpus, q)
     raise ValueError(f"unknown arm {name!r}")
 
 
@@ -345,7 +347,7 @@ def summary_markdown(rows: list[Mapping], meta: Mapping) -> str:
     lines += ["", "## Latency", "",
               "Wall time of the search call only, in ms. Ingestion and server start are excluded.",
               "p50 and p95 cover only questions where the arm ran a search.",
-              "Arms 1 to 3 go over the Unix socket. FTS5 runs in process. Random runs no search.",
+              "Arms 1 to 3 and 6 go over the Unix socket. FTS5 runs in process. Random runs no search.",
               "", "| arm | searches | p50 | p95 |", "|---|---|---|---|"]
     for arm in ARMS:
         ms = [r["ms"] for r in by_arm[arm] if r["ms"] is not None]
