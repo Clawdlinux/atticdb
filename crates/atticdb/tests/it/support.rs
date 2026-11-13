@@ -15,7 +15,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Every entry name in `dir` with its bytes, or `None` when it cannot be read as a file.
@@ -320,11 +320,7 @@ pub struct Dir(pub PathBuf);
 impl Dir {
     pub fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        // Its real path, since servers build absolute paths from `getcwd` and tests compare them.
-        let root = std::env::var_os("ATTICDB_TEST_DIR").map_or_else(tmp_root, |root| {
-            std::fs::create_dir_all(&root).unwrap();
-            std::fs::canonicalize(root).unwrap()
-        });
+        let root = test_root();
         let name = format!("{:x}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
         let path = root.join(name);
         std::fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
@@ -341,6 +337,84 @@ impl Dir {
 impl Drop for Dir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The root that holds each [`Dir`]: `ATTICDB_TEST_DIR` if set, else [`tmp_root`]. The first
+/// call in a test process also runs [`sweep`] on it.
+fn test_root() -> PathBuf {
+    static SWEPT: OnceLock<()> = OnceLock::new();
+    // Its real path, since servers build absolute paths from `getcwd` and tests compare them.
+    let root = std::env::var_os("ATTICDB_TEST_DIR").map_or_else(tmp_root, |root| {
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::canonicalize(root).unwrap()
+    });
+    SWEPT.get_or_init(|| sweep(&root));
+    root
+}
+
+/// How many levels below a leftover [`Dir`] the sweep looks for `LOCK` files. A home's data
+/// directory, such as `h/Library/Application Support/atticdb/data/LOCK`, fits.
+const SWEEP_DEPTH: usize = 6;
+
+/// Stops servers that killed test runs left under `root`, then removes the runs' folders.
+/// A killed run never drops its [`Dir`] or [`Holders`], so its servers would run forever
+/// (#227). It only takes a folder named `<hex pid>-<n>` whose pid isn't running and isn't
+/// this process. It signals only what [`stop_servers`] confirms serves that folder. Errors are
+/// ignored, since the sweep must never fail a test run.
+pub fn sweep(root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root) else { return };
+    let leftovers: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter(|entry| left_by_dead_run(&entry.file_name()))
+        .map(|entry| entry.path())
+        .collect();
+    let mut data = Vec::new();
+    for dir in &leftovers {
+        lock_dirs(dir, 1, &mut data);
+    }
+    if !data.is_empty() {
+        stop_servers(&data);
+    }
+    for dir in &leftovers {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// Whether `name` is a [`Dir`] name, `<hex pid>-<n>`, whose pid isn't this process and isn't
+/// running. A pid we may not signal still runs. Only `ESRCH` means it is gone.
+fn left_by_dead_run(name: &OsStr) -> bool {
+    let Some((pid, n)) = name.to_str().and_then(|name| name.split_once('-')) else {
+        return false;
+    };
+    let hex =
+        !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    if !hex || n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    let Ok(raw) = u32::from_str_radix(pid, 16) else { return false };
+    if raw == std::process::id() {
+        return false;
+    }
+    let Some(pid) = i32::try_from(raw).ok().and_then(rustix::process::Pid::from_raw) else {
+        return false;
+    };
+    rustix::process::test_kill_process(pid) == Err(rustix::io::Errno::SRCH)
+}
+
+/// Adds to `found` each directory under `dir` that holds a `LOCK` file. The entries of `dir`
+/// are `depth` levels below the leftover folder, and the walk stops at [`SWEEP_DEPTH`].
+/// Symlinks aren't followed.
+fn lock_dirs(dir: &Path, depth: usize, found: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.filter_map(Result::ok) {
+        let Ok(kind) = entry.file_type() else { continue };
+        if kind.is_dir() && depth < SWEEP_DEPTH {
+            lock_dirs(&entry.path(), depth + 1, found);
+        } else if kind.is_file() && entry.file_name() == "LOCK" {
+            found.push(dir.to_owned());
+        }
     }
 }
 

@@ -28,4 +28,6 @@ mod studio;
 #[cfg(unix)]
 mod support;
 #[cfg(unix)]
+mod sweep;
+#[cfg(unix)]
 mod update;
