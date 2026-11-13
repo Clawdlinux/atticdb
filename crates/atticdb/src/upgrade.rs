@@ -188,6 +188,18 @@ mod unix {
                 }
             }
         }
+        // Upgrades of this binary, by hand or by a server, take turns from here. One that
+        // waited finds the binary another upgrade replaced, and stops.
+        let _turn = lock_folder(&exe)?;
+        if let Some(now) = on_disk_version(&exe) {
+            if now != format!("atticdb {}", crate::VERSION) {
+                let exe = exe.display();
+                println!(
+                    "Another upgrade changed {exe} meanwhile. It says: {now}. Nothing changed."
+                );
+                return Ok(0);
+            }
+        }
         install(&exe, &prev, &to)?;
         println!("Installed AtticDB {to} at {}.", exe.display());
         if let Some(home) = home {
@@ -304,6 +316,29 @@ mod unix {
             }
             Ok(_) => Some(answer.trim().to_owned()),
         }
+    }
+
+    /// An exclusive `flock` on `exe`'s folder, held until it drops. It waits for an upgrade
+    /// that holds it. Locking the folder leaves no lock file beside the binary.
+    fn lock_folder(exe: &Path) -> Result<std::os::fd::OwnedFd, Error> {
+        use rustix::fs::{FlockOperation, Mode, OFlags};
+        let dir = exe.parent().unwrap_or(Path::new("/"));
+        let failed = |error: rustix::io::Errno| {
+            Error::Failed(format!("cannot lock {}: {error}. Nothing changed.", dir.display()))
+        };
+        let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
+        let fd = rustix::fs::open(dir, flags, Mode::empty()).map_err(failed)?;
+        rustix::fs::flock(&fd, FlockOperation::LockExclusive).map_err(failed)?;
+        Ok(fd)
+    }
+
+    /// What `exe --version` prints now, trimmed. `None` when it can't run.
+    fn on_disk_version(exe: &Path) -> Option<String> {
+        let mut command = Command::new(exe);
+        command.arg("--version").stdin(Stdio::null()).stdout(Stdio::piped());
+        command.stderr(Stdio::null()).env_remove(crate::client::TOKEN_ENV);
+        let output = crate::spawn(&mut command).and_then(|child| child.wait_with_output()).ok()?;
+        Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
     }
 
     /// Downloads the `install.sh` of release `to` to a temp file. Then it keeps `exe` as

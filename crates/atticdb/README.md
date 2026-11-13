@@ -266,6 +266,7 @@ A `+dev` source build counts as older than its own release.
 
 Then it does this:
 
+0. Takes an exclusive `flock` on the binary's folder, held to the end, so upgrades of 1 binary take turns. If the binary there no longer prints this version, another upgrade replaced it. Then it prints `Another upgrade changed <binary> meanwhile. It says: <its --version>. Nothing changed.` and exits 0.
 1. Downloads `<base>/download/v<to>/install.sh` to a temp file. `<base>` is `ATTICDB_DOWNLOAD_BASE`, or `https://github.com/Clawdlinux/atticdb/releases`.
 2. Copies this binary to `atticdb.prev` beside it. An earlier `atticdb.prev` waits as `atticdb.prev.old` until the end.
 3. Runs `/bin/sh install.sh` with `ATTICDB_VERSION=<to>` and `ATTICDB_INSTALL_DIR=<this binary's folder>`. It passes `ATTICDB_DOWNLOAD_BASE` too, when set. The installer checks the tarball against `SHA256SUMS`.
@@ -315,6 +316,7 @@ The server tries each version at most once a day. A `+dev` server never runs it.
 `atticdb doctor` and `atticdb setup` check for a new release at most once a day. Setup checks only when it applies a plan.
 The home's server checks too, from a background thread, every hour through the same cache. So it asks at most once a day.
 Only a server whose data dir is `<home>/data` checks, by `ATTICDB_HOME` or the default home. Other servers never do.
+A server AtticDB starts for the home gets that home as `ATTICDB_HOME`, so a hook's `--home` works too.
 The hook reads the cache alone and shows the notice in its block. The hook, `atticdb mcp` and the other verbs never ask.
 When a newer release is out, they print this last, and keep their exit code:
 

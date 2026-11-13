@@ -423,7 +423,8 @@ impl StoreFlags {
         if url.is_none() && data_dir.is_none() {
             return Err("set --url, or --data-dir or a config with data_dir".into());
         }
-        let launch = Launch::new(url, data_dir, config_path, unix_socket);
+        let launch =
+            Launch::new(url, data_dir, config_path, unix_socket).with_home(home_dir.clone());
         #[cfg(windows)]
         let launch = launch.with_token(token.clone());
         Ok(Store { launch, token, kind, tenant, home: home_dir })

@@ -132,6 +132,23 @@ impl Setup {
         env: &[(&str, &str)],
         stdin: &str,
     ) -> Output {
+        let mut process = self.start_exe(exe, path, url, args, env);
+        let mut input = process.child.stdin.take().unwrap();
+        let _ = input.write_all(stdin.as_bytes());
+        drop(input);
+        let (status, _) = process.wait();
+        (status.code(), steady(&process.stdout()), process.stderr())
+    }
+
+    /// Starts [`Self::run_exe`]'s process, with stdin still open.
+    fn start_exe(
+        &self,
+        exe: &Path,
+        path: &OsStr,
+        url: &str,
+        args: &[&str],
+        env: &[(&str, &str)],
+    ) -> Process {
         let mut command = support::command(exe);
         command.args(args).current_dir(&self.dir.0).env("HOME", self.dir.0.join("h"));
         command.env("ATTICDB_HOME", self.home()).env("PATH", path).env(API, url);
@@ -140,12 +157,7 @@ impl Setup {
         command.env_remove("XDG_CONFIG_HOME");
         command.env_remove("ATTICDB_TOKEN").env_remove("ATTICDB_SETUP_INTERACTIVE");
         command.envs(env.iter().copied()).stdin(Stdio::piped());
-        let mut process = Process::start(&mut command);
-        let mut input = process.child.stdin.take().unwrap();
-        let _ = input.write_all(stdin.as_bytes());
-        drop(input);
-        let (status, _) = process.wait();
-        (status.code(), steady(&process.stdout()), process.stderr())
+        Process::start(&mut command)
     }
 
     /// `atticdb doctor` with the check off.
@@ -416,8 +428,9 @@ fn wait_for(mut done: impl FnMut() -> bool) -> bool {
     done()
 }
 
-/// The home's server refreshes the cache once, in the background. A source build never
-/// auto-upgrades, even with auto-upgrade on: no `install.sh` is fetched.
+/// The home's server refreshes the cache once, in the background. With auto-upgrade on, a
+/// release build installs the release. A source build never does: no `install.sh` is
+/// fetched. It runs from a copy, so a stub never replaces the test's binary.
 #[test]
 fn home_server_refreshes_cache() {
     let setup = Setup::new();
@@ -425,19 +438,79 @@ fn home_server_refreshes_cache() {
     std::fs::write(setup.home().join("auto-upgrade"), "on\n").unwrap();
     let release = Release::new("v9.9.9", stub(Stub::Install));
     let _holders = Holders(vec![setup.home().join("data")]);
+    let exe = setup.copy_binary("bin2");
+    let path = format!("{}:/bin:/usr/bin", setup.path.to_str().unwrap());
+    let tmp = setup.tmp();
+    let env = [("ATTICDB_DOWNLOAD_BASE", release.base.as_str()), ("TMPDIR", tmp.to_str().unwrap())];
     let args = ["fact", "set", "--key", "k", "--content", "v"];
-    let (code, out, err) = setup.run(&release.api, &args, &[], "");
+    let (code, out, err) = setup.run_exe(&exe, path.as_ref(), &release.api, &args, &env, "");
     assert_eq!(code, Some(0), "{out}{err}");
     let cached = || std::fs::read(setup.cache()).ok().and_then(|t| serde_json::from_slice(&t).ok());
     let cached = wait_for(|| cached().is_some_and(|c: Value| c["latest"] == "9.9.9"));
     assert!(cached, "{:?}", release.paths());
     // Time for an auto-upgrade a release build would start.
     std::thread::sleep(std::time::Duration::from_secs(1));
-    let mut want = vec![LATEST.to_owned()];
-    if !atticdb::VERSION.ends_with("+dev") {
-        want.push(installer("9.9.9"));
+    if atticdb::VERSION.ends_with("+dev") {
+        assert_eq!(release.paths(), [LATEST.to_owned()]);
+    } else {
+        assert!(wait_for(|| std::fs::read(&exe).is_ok_and(|b| b == new_binary("9.9.9"))));
+        assert_eq!(release.paths(), [LATEST.to_owned(), installer("9.9.9")]);
     }
-    assert_eq!(release.paths(), want);
+}
+
+/// A server the hook starts for its `--home` checks for that home, even when
+/// `ATTICDB_HOME` names another. The hook passes the home on.
+#[test]
+fn hook_home_server_checks() {
+    let setup = Setup::new();
+    let _holders = Holders(vec![setup.home().join("data")]);
+    let (url, count) = fake_api(200, TAG);
+    let other = setup.dir.0.join("other");
+    let home = setup.home();
+    let stdin = json!({"cwd": setup.dir.0}).to_string();
+    let args = ["hook", "session-start", "--home", home.to_str().unwrap()];
+    let env = [("ATTICDB_HOME", other.to_str().unwrap())];
+    let (code, out, err) = setup.run(&url, &args, &env, &stdin);
+    assert_eq!(code, Some(0), "{out}{err}");
+    assert!(home.join("data").exists(), "{out}{err}");
+    assert!(wait_for(|| setup.cache().exists()), "{out}{err}");
+    assert_eq!(setup.read_cache()["latest"], "9.9.9");
+    assert!(hits(&count) >= 1);
+    assert!(!other.exists());
+}
+
+/// Upgrades of 1 binary take turns on its folder's lock. One that waited finds the binary
+/// another upgrade replaced, and changes nothing.
+#[test]
+fn upgrade_waits_its_turn() {
+    let setup = Setup::new();
+    setup.make_home();
+    let exe = setup.copy_binary("bin2");
+    let dir = exe.parent().unwrap().to_owned();
+    let release = Release::new("v9.9.9", stub(Stub::Install));
+    let folder = std::fs::File::open(&dir).unwrap();
+    folder.lock().unwrap();
+    let path = format!("{}:/bin:/usr/bin", setup.path.to_str().unwrap());
+    let tmp = setup.tmp();
+    let env = [("ATTICDB_DOWNLOAD_BASE", release.base.as_str()), ("TMPDIR", tmp.to_str().unwrap())];
+    let mut process =
+        setup.start_exe(&exe, path.as_ref(), &release.api, &["upgrade", "--yes"], &env);
+    drop(process.child.stdin.take());
+    assert!(wait_for(|| release.paths().contains(&LATEST.to_owned())));
+    // Another upgrade replaces the binary while this one waits, or before it locks.
+    let swap = dir.join(".swap");
+    std::fs::write(&swap, "#!/bin/sh\necho 'atticdb 0.0.1'\n").unwrap();
+    std::fs::set_permissions(&swap, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    std::fs::rename(&swap, &exe).unwrap();
+    drop(folder);
+    let (status, _) = process.wait();
+    let (out, err) = (process.stdout(), process.stderr());
+    assert_eq!(status.code(), Some(0), "{out}{err}");
+    let said =
+        format!("Another upgrade changed {} meanwhile. It says: atticdb 0.0.1.", exe.display());
+    assert!(out.contains(&said), "{out}");
+    assert_eq!(release.paths(), [LATEST.to_owned()], "no install");
+    assert_eq!(names(&dir), ["atticdb"]);
 }
 
 /// `upgrade --auto off` removes the switch. `--auto on` writes it, mode 0600, but never for a
