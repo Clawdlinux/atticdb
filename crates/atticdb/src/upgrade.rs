@@ -16,21 +16,34 @@ pub fn auto(value: &str) -> u8 {
             return 2;
         }
     };
-    #[cfg(unix)]
-    let set = unix::auto(on).map_err(|error| (error.code(), error.to_string()));
-    #[cfg(not(unix))]
     let set = match on {
+        false => auto_off(),
+        #[cfg(unix)]
+        true => unix::auto().map_err(|error| (error.code(), error.to_string())),
+        #[cfg(not(unix))]
         true => Err((1, "auto-upgrade doesn't run on Windows. See: atticdb upgrade".to_owned())),
-        false => {
-            println!("Auto-upgrade is off.");
-            Ok(())
-        }
     };
     match set {
         Ok(()) => 0,
         Err((code, why)) => {
             eprintln!("atticdb: {why}");
             code
+        }
+    }
+}
+
+/// Removes the home's [`crate::update::AUTO`] file, on every platform, so a home copied from
+/// Unix turns off too. Returns the exit code and message for an error.
+fn auto_off() -> Result<(), (u8, String)> {
+    let home = crate::home::dir().map_err(|why| (2, why))?;
+    let marker = home.join(crate::update::AUTO);
+    match std::fs::remove_file(&marker) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            Err((1, format!("{}: {error}", marker.display())))
+        }
+        _ => {
+            println!("Auto-upgrade is off.");
+            Ok(())
         }
     }
 }
@@ -245,22 +258,10 @@ mod unix {
         }
     }
 
-    /// [`super::auto`]. `on` writes the home's [`update::AUTO`] file, mode 0600. `off`
-    /// removes it.
-    pub(super) fn auto(on: bool) -> Result<(), Error> {
+    /// [`super::auto`] with `on`: writes the home's [`update::AUTO`] file, mode 0600.
+    pub(super) fn auto() -> Result<(), Error> {
         let home = crate::home::dir().map_err(Error::Usage)?;
         let marker = home.join(update::AUTO);
-        if !on {
-            return match std::fs::remove_file(&marker) {
-                Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
-                    Err(Error::Failed(format!("{}: {error}", marker.display())))
-                }
-                _ => {
-                    println!("Auto-upgrade is off.");
-                    Ok(())
-                }
-            };
-        }
         let exe = this_binary()?;
         if let Some(line) = managed(&exe, crate::VERSION) {
             return Err(Error::Failed(format!("{line}. Auto-upgrade can't run for it.")));
