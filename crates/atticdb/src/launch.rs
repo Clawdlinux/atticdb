@@ -162,7 +162,8 @@ impl Launch {
             if let Some(Ok(Some(status))) = self.child.as_mut().map(Child::try_wait) {
                 eprintln!("atticdb: started server exited: {status}");
                 self.child = None;
-                // 75 lost the lock race and 70 is a poison exit: both clear on a retry.
+                // 75 lost the lock race or lost its `LOCK` (D114). 70 is a poison exit. Both
+                // clear on a retry.
                 // Anything else is a start failure, such as a bad data directory.
                 if !matches!(status.code(), Some(75 | 70) | None) {
                     self.stuck = true;
@@ -191,7 +192,7 @@ impl Launch {
                     self.refused = reason;
                 }
             }
-            // A child that exited 75 lost the lock race, but the holder may be a poisoned
+            // A child that exited 75 lost the lock race or its `LOCK`. The holder may be a poisoned
             // server shutting down. So spawn again, with backoff, until one is trusted.
             if self.child.is_none() && Instant::now() >= self.next_spawn {
                 if let Some(config) = self.config.clone() {
