@@ -320,6 +320,12 @@ impl<S: Stream> ServerConn<S> {
         result
     }
 
+    /// Writes the response to the last request with `Connection: close`, then closes.
+    pub fn respond_and_close(&mut self, response: &Response) -> io::Result<()> {
+        self.keep_alive = false;
+        self.respond(response)
+    }
+
     fn reject<T>(&mut self, response: &Response) -> Option<T> {
         let _ = self.write_response(response, true);
         self.close();

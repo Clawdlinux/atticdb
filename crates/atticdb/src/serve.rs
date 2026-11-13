@@ -155,10 +155,18 @@ impl Shared {
 
     /// Stops accepting, waits for responses in flight, and removes the socket path if it is
     /// still ours. Then [`Server::wait`] returns `why`. Does nothing once already stopping.
+    /// It sets `stopping` before it takes the tracker lock. So every request admitted under
+    /// that lock is waited for, and every later one is refused.
     fn exit(&self, why: Exit) {
         if !self.stop() {
             return;
         }
+        // Idle keep-alive connections read EOF at once. A response being written still goes out.
+        self.tracker.update(|conns| {
+            for stream in conns.open.values() {
+                let _ = stream.shutdown(Shutdown::Read);
+            }
+        });
         self.tracker.wait_until(|conns| conns.in_flight == 0);
         #[cfg(unix)]
         if let Some(unix) = &self.unix {
@@ -180,11 +188,23 @@ impl Shared {
                 })
         };
         while let Some((request, (route, tenant, started))) = conn.next_request(check) {
-            // Counted once the body is in. A body still arriving at a poison exit gets a
-            // reset: the client sees a transport error and retries with the same key.
-            self.tracker.update(|conns| conns.in_flight += 1);
+            // Admitted once the body is in, under the tracker lock and only before a stop.
+            // After a stop a body still arriving reads EOF, and a read one gets 503 `busy`.
+            // Either way nothing was written, and the client retries with the same key.
+            let admitted = {
+                let mut conns = self.tracker.lock();
+                let open = !self.stopping.load(Ordering::Acquire);
+                conns.in_flight += usize::from(open);
+                open
+            };
             let (method, path) = (request.head.method.clone(), request.head.path().to_owned());
             let tenant = tenant.unwrap_or_default();
+            if !admitted {
+                let response = api::busy();
+                let _ = conn.respond_and_close(&response);
+                self.log(&method, &path, &response, &tenant, started);
+                break;
+            }
             let response = match route {
                 #[cfg(unix)]
                 Route::Health => api::health(&self.engine, &self.config.instance),
@@ -258,10 +278,13 @@ impl Server {
     /// `--exit-on-poison` and without a `LOCK` watch it never returns.
     pub fn wait(&self) -> Exit {
         let tracker = &self.shared.tracker;
-        let conns = tracker.lock();
-        let conns = tracker.changed.wait_while(conns, |conns| conns.exited.is_none());
-        let why = conns.unwrap_or_else(PoisonError::into_inner).exited;
-        why.unwrap_or(Exit::Poisoned)
+        let mut conns = tracker.lock();
+        loop {
+            if let Some(why) = conns.exited {
+                return why;
+            }
+            conns = tracker.changed.wait(conns).unwrap_or_else(PoisonError::into_inner);
+        }
     }
 
     /// Stops accepting, closes every connection and joins every thread. Afterwards
@@ -523,6 +546,8 @@ fn try_start(config: Config, exit_on_poison: bool, log_requests: bool) -> Result
     #[cfg(unix)]
     let unix = listen::install_unix(&socket, group, &instance).map_err(fail)?;
     #[cfg(unix)]
+    let installed = unix.1.clone();
+    #[cfg(unix)]
     let listeners = Listeners { tcp, unix: Some(unix) };
     #[cfg(not(unix))]
     let listeners = Listeners { tcp };
@@ -531,7 +556,12 @@ fn try_start(config: Config, exit_on_poison: bool, log_requests: bool) -> Result
     let lock_path = Some(data_dir.join("LOCK"));
     let config =
         ServeConfig { auth, instance, exit_on_poison, max_connections, log_requests, lock_path };
-    let server = run(Arc::new(engine), listeners, config).map_err(|e| fail(e.to_string()))?;
+    let server = run(Arc::new(engine), listeners, config).map_err(|error| {
+        // It never served, so it leaves no socket behind.
+        #[cfg(unix)]
+        let _ = installed.remove();
+        fail(error.to_string())
+    })?;
     // One write, so a reader never sees half of the line.
     #[cfg(unix)]
     let (instance, socket) = (&server.shared.config.instance, socket.display());

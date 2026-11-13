@@ -557,31 +557,34 @@ fn startup_checks() {
 }
 
 /// `atticdb serve` exits 75 when its `LOCK` or data folder is removed or replaced (#227).
-/// A server whose `LOCK` stays put keeps serving. All 4 servers run at once.
+/// A server whose `LOCK` stays put keeps serving. All 5 servers run at once.
 #[test]
 fn serve_watches_its_lock() {
     type Act = fn(&Path);
-    let rows: [(&str, Act, bool); 4] = [
-        ("LOCK removed", |data| std::fs::remove_file(data.join("LOCK")).unwrap(), true),
-        ("data folder removed", |data| std::fs::remove_dir_all(data).unwrap(), true),
+    let removed: Act = |data| std::fs::remove_file(data.join("LOCK")).unwrap();
+    let rows: [(&str, &[&str], Act, bool); 5] = [
+        ("LOCK removed", &[], removed, true),
+        ("LOCK removed with --exit-on-poison", &["--exit-on-poison"], removed, true),
+        ("data folder removed", &[], |data| std::fs::remove_dir_all(data).unwrap(), true),
         (
             "LOCK replaced",
+            &[],
             |data| {
                 std::fs::remove_file(data.join("LOCK")).unwrap();
                 std::fs::write(data.join("LOCK"), "pid=1 instance=0123 tcp=none\n").unwrap();
             },
             true,
         ),
-        ("LOCK untouched", |_| {}, false),
+        ("LOCK untouched", &[], |_| {}, false),
     ];
     let mut started = Vec::new();
-    for (case, act, lost) in rows {
+    for (case, extra, act, lost) in rows {
         let dir = Dir::new();
         support::init_config(&dir);
         let data = dir.0.join("d");
         let args = ["serve", "--config", "c.json", "--data-dir", data.to_str().unwrap()];
-        let mut server =
-            Process::spawn(&dir.0, &[&args[..], &["--listen", "127.0.0.1:0"]].concat());
+        let listen = ["--listen", "127.0.0.1:0"];
+        let mut server = Process::spawn(&dir.0, &[&args[..], &listen, extra].concat());
         let (instance, _) = server.ready();
         started.push((case, act, lost, dir, data, server, instance));
     }

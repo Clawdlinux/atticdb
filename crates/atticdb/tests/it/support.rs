@@ -551,6 +551,16 @@ pub struct Running {
 }
 
 pub fn serve(engine: Arc<Engine>, dir: &Dir, max_connections: usize) -> Running {
+    serve_watching(engine, dir, max_connections, None)
+}
+
+/// [`serve`], with the server watching `lock_path` as its `LOCK`.
+pub fn serve_watching(
+    engine: Arc<Engine>,
+    dir: &Dir,
+    max_connections: usize,
+    lock_path: Option<PathBuf>,
+) -> Running {
     let socket = dir.0.join("a");
     wait_unheard(&socket);
     let instance = atticdb::random_hex(16).unwrap();
@@ -568,7 +578,7 @@ pub fn serve(engine: Arc<Engine>, dir: &Dir, max_connections: usize) -> Running 
         exit_on_poison: false,
         max_connections,
         log_requests: false,
-        lock_path: None,
+        lock_path,
     };
     let server = serve::run(engine, listeners, config).unwrap();
     let vias = [Via::Tcp(server.tcp_addr().unwrap()), Via::Unix(socket)];
