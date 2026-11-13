@@ -62,12 +62,16 @@ enum Transport {
 }
 
 /// Runs one tool from a shell, with arguments from `--<name>` flags. Prints the tool's
-/// `structuredContent` as one JSON line. A search with no hits and no next page also prints
-/// a hint on stderr. Exits 0, 1 when nothing was written or a read failed, 2 for a bad flag,
+/// `structuredContent` as one JSON line. A `--order newest` search with no hits and no next
+/// page also prints a hint on stderr. Exits 0, 1 when nothing was written or a read failed, 2 for a bad flag,
 /// or 3 when a write's outcome is unknown.
 pub fn command(tool: &str, mut flags: HashMap<String, String>) -> u8 {
     let mut args = json!({});
-    for name in ["content", "role", "key", "prefix", "after", "query", "path", "about"] {
+    if flags.get("--order").is_some_and(|order| order != "relevance" && order != "newest") {
+        eprintln!("atticdb: --order must be relevance or newest");
+        return 2;
+    }
+    for name in ["content", "role", "key", "prefix", "after", "query", "path", "about", "order"] {
         if let Some(value) = flags.remove(&format!("--{name}")) {
             args[name] = json!(value);
         }
@@ -97,9 +101,11 @@ pub fn command(tool: &str, mut flags: HashMap<String, String>) -> u8 {
     if result["isError"] != true {
         let output = &result["structuredContent"];
         println!("{output}");
-        // Search ANDs its words, so a question finds nothing. Only the shell verb says so.
+        // Newest-first search ANDs its words, so a question finds nothing. Only the shell verb
+        // says so. A ranked search keeps any word, so the hint would be wrong there.
         let none = output["hits"].as_array().is_some_and(Vec::is_empty);
-        if tool == "memory_search" && none && output["next"].is_null() {
+        let newest = args["order"] == "newest";
+        if tool == "memory_search" && newest && none && output["next"].is_null() {
             eprintln!("{NO_HITS}");
         }
         return 0;
@@ -864,8 +870,12 @@ impl Client {
             let query = string(args, "query")?.ok_or("query is required")?;
             let (limit, max_bytes) =
                 (number(args, "limit", 10)?.clamp(1, 50), number(args, "max_bytes", 64 << 10)?);
-            let mut target =
-                format!("/v1/search?q={}&limit={limit}&max_bytes={max_bytes}", encode(&query));
+            // Ranked unless the caller asks for newest first.
+            let order = if args["order"] == "newest" { "newest" } else { "relevance" };
+            let mut target = format!(
+                "/v1/search?q={}&order={order}&limit={limit}&max_bytes={max_bytes}",
+                encode(&query)
+            );
             if !args["before"].is_null() {
                 target += &format!("&before={}", number(args, "before", 0)?);
             }

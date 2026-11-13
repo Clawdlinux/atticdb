@@ -448,12 +448,19 @@ fn tool_schemas() -> Value {
         {
             "name": "memory_search",
             "description": "Find past turns and facts by words, across every session and agent. \
-                Every word must appear, ignoring case, as part of a word or a whole one. Newest \
-                first. Use it when you don't know the fact key or the session.",
+                By default it ranks by relevance: a hit holds any query word, and rarer words \
+                count more. Pass a whole question if you like. order=newest needs every word \
+                and returns newest first, with before for paging. Use it when you don't know \
+                the fact key or the session.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "query": {"type": "string"},
+                    "order": {
+                        "type": "string",
+                        "enum": ["relevance", "newest"],
+                        "default": "relevance",
+                    },
                     "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10},
                     "before": {"type": "integer", "minimum": 1},
                     "max_bytes": {"type": "integer", "minimum": 0, "default": 65536},

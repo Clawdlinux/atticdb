@@ -26,7 +26,8 @@ pub const USAGE: &str = "usage:
                 [--tenant <name>] [--token-file <path>] [--no-open] [--allow-forget]
   atticdb append <connect> --content <text> [--role user|assistant|tool]
   atticdb recent <connect> [--n <n>] [--max-bytes <n>]
-  atticdb search <connect> --query <words> [--limit <n>] [--before <lsn>] [--max-bytes <n>]
+  atticdb search <connect> --query <words> [--order relevance|newest] [--limit <n>]
+                [--before <lsn>] [--max-bytes <n>]
   atticdb fact set <connect> --key <key> (--content <text> | --delete)
   atticdb fact get <connect> --key <key>
   atticdb fact history <connect> --key <key> [--before <lsn>] [--max-bytes <n>]
@@ -531,8 +532,8 @@ mod tests {
         assert_eq!(
             command_usage("search").as_deref(),
             Some(
-                "usage: atticdb search <connect> --query <words> [--limit <n>] [--before <lsn>] \
-                 [--max-bytes <n>]\n"
+                "usage: atticdb search <connect> --query <words> [--order relevance|newest] \
+                 [--limit <n>]\n                     [--before <lsn>] [--max-bytes <n>]\n"
             )
         );
         let serve = command_usage("serve").unwrap_or_default();

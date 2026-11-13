@@ -117,7 +117,8 @@ fn main() -> ExitCode {
             "append" => tool(rest, "memory_append", &["--content", "--role"], &[]),
             "recent" => tool(rest, "memory_recent", &["--n", "--max-bytes"], &[]),
             "search" => {
-                tool(rest, "memory_search", &["--query", "--limit", "--before", "--max-bytes"], &[])
+                let valued = ["--query", "--order", "--limit", "--before", "--max-bytes"];
+                tool(rest, "memory_search", &valued, &[])
             }
             "fact" => match rest.split_first().map(|(verb, rest)| (verb.as_str(), rest)) {
                 Some(("set", rest)) => {

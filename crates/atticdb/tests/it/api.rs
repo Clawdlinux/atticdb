@@ -526,6 +526,67 @@ fn fact_history_pages_with_before() {
     running.server.shutdown();
 }
 
+/// `order=relevance` ranks hits by their rarer words, with no `next`. No `order` keeps newest
+/// first, where every word must appear. Any other `order` is 400.
+#[test]
+fn search_orders_by_relevance_or_newest() {
+    let dir = Dir::new();
+    let running = serve(sim_engine(&SimDisk::new(6), |_| {}), &dir, MAX_CONNECTIONS);
+    let unix = &running.vias[1];
+    let mut lsns = Vec::new();
+    for (key, content) in [
+        ("k1", "melanie painted a sunrise"),
+        ("k2", "melanie went shopping"),
+        ("k3", "melanie likes tea"),
+    ] {
+        let (status, put) = unix.a("POST", "/v1/append", Some(&append_body("s", key, content)));
+        assert_eq!(status, 200, "{put}");
+        lsns.push(put["first_lsn"].as_u64().unwrap());
+    }
+    let q = query_value("When did Melanie paint a sunrise?");
+    let search = |query: &str| {
+        let target = format!("/v1/search?q={q}{query}");
+        let (status, page) = unix.a("GET", &target, None);
+        assert_eq!(status, 200, "{target}: {page}");
+        let hits = page["hits"].as_array().unwrap();
+        let found: Vec<String> =
+            hits.iter().map(|hit| hit["content"].as_str().unwrap().to_owned()).collect();
+        (found, page["next"].clone())
+    };
+    let (sunrise, shopping, tea) =
+        ("melanie painted a sunrise", "melanie went shopping", "melanie likes tea");
+    for (query, expected) in [
+        ("", vec![]),
+        ("&order=newest", vec![]),
+        ("&order=relevance", vec![sunrise, tea, shopping]),
+        ("&order=relevance&limit=1", vec![sunrise]),
+        (&format!("&order=relevance&before={}", lsns[2]), vec![sunrise, shopping]),
+    ] {
+        assert_eq!(search(query), (expected.iter().map(|s| s.to_string()).collect(), Value::Null));
+    }
+    let melanie = |query: &str| {
+        let (status, page) = unix.a("GET", &format!("/v1/search?q=melanie{query}"), None);
+        assert_eq!(status, 200, "{page}");
+        page
+    };
+    let page = melanie("&limit=2");
+    let found: Vec<&Value> =
+        page["hits"].as_array().unwrap().iter().map(|h| &h["content"]).collect();
+    assert_eq!(found, [&json!(tea), &json!(shopping)], "newest first: {page}");
+    let next = page["next"].as_u64().unwrap_or_else(|| panic!("newest pages: {page}"));
+    let rest = melanie(&format!("&before={next}"));
+    assert_eq!((&rest["hits"][0]["content"], &rest["next"]), (&json!(sunrise), &Value::Null));
+    for target in [
+        format!("/v1/search?q={q}&order=x"),
+        format!("/v1/search?q={q}&order="),
+        "/v1/search?q=%3F%21&order=relevance".to_owned(),
+    ] {
+        let (status, rejected) = unix.a("GET", &target, None);
+        assert_eq!((status, &rejected["error"]), (400, &json!("invalid_input")), "{target}");
+    }
+    running.server.shutdown();
+}
+
 #[test]
 fn auth_and_host_rules() {
     let dir = Dir::new();

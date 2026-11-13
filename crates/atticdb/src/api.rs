@@ -748,13 +748,18 @@ pub fn fact_read(engine: &Engine, tenant: &str, route: Route, target: &str) -> R
     })
 }
 
-/// `GET /v1/search?q=&before=&limit=&max_bytes=`. Hits are newest first. Pass `next` as
-/// `before` for the next page.
+/// `GET /v1/search?q=&before=&limit=&max_bytes=&order=`. By default hits are newest first.
+/// Pass `next` as `before` for the next page. `order=relevance` ranks them, with no `next`.
 pub fn search(engine: &Engine, tenant: &str, target: &str) -> Response {
     let query = (|| {
         let mut params = params(target)?;
         let query = params.remove("q").filter(|q| !q.trim().is_empty());
         let query = query.ok_or("q is required")?;
+        let order = match params.remove("order").as_deref() {
+            None | Some("newest") => SearchOrder::Newest,
+            Some("relevance") => SearchOrder::Relevance,
+            Some(_) => return Err("order must be newest or relevance".to_owned()),
+        };
         let before = number(params.remove("before"), "before")?;
         let limit = number(params.remove("limit"), "limit")?.map_or(10, |n| cap(n, 100)).max(1);
         let max_bytes = number(params.remove("max_bytes"), "max_bytes")?;
@@ -762,14 +767,7 @@ pub fn search(engine: &Engine, tenant: &str, target: &str) -> Response {
         if !params.is_empty() || query.len() > 1024 {
             return Err("unknown query parameter, or q over 1024 bytes".to_owned());
         }
-        Ok(SearchQuery {
-            query,
-            before,
-            limit,
-            max_bytes,
-            visits: SEARCH_VISITS,
-            order: SearchOrder::Newest,
-        })
+        Ok(SearchQuery { query, before, limit, max_bytes, visits: SEARCH_VISITS, order })
     })();
     match query {
         Ok(query) => send(engine.search(tenant, query), |page| {
