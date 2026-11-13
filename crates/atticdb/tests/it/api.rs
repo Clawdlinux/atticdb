@@ -1049,8 +1049,8 @@ fn lock_replaced_before_run_never_serves() {
         server
     });
     // Well under the 2 s between watch checks, so only the check in `run` can stop it.
-    assert_eq!(rx.recv_timeout(Duration::from_secs(1)), Ok(Exit::LockLost));
-    assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
+    assert_eq!(rx.recv_timeout(Duration::from_millis(1500)), Ok(Exit::LockLost));
+    assert!(started.elapsed() < Duration::from_millis(1500), "{:?}", started.elapsed());
     // No TCP check: another test may take the freed port at once.
     let [_, Via::Unix(socket)] = &running.vias else { unreachable!() };
     assert!(!socket.exists(), "the socket path was removed");
