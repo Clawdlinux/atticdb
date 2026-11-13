@@ -196,7 +196,8 @@ pub enum SearchOrder {
     #[default]
     Newest,
     /// At least 1 query word must match. Ranked by summed IDF, then newest first. 1 page of
-    /// the top hits, with no `next`. An exhausted `visits` budget cuts it short.
+    /// the top hits, with no `next`. Hits come from the walked newest records, plus as many
+    /// indexed ones as `visits` allows, in score order.
     Relevance,
 }
 /// A search: every word of `query` must appear, ignoring case, in a record. In relevance
@@ -217,7 +218,8 @@ pub struct SearchQuery {
     pub max_bytes: usize,
     /// Records to visit at most, which bounds the call's record reads. `next` resumes below
     /// them. Word index work isn't counted. It grows with the postings of the query words. In
-    /// relevance order, running out cuts the results, and there is still no `next`.
+    /// relevance order, the walk spends visits first. What is left reads the best indexed
+    /// records. Walked hits always count, and there is still no `next`.
     pub visits: usize,
     /// How hits are matched and ordered.
     pub order: SearchOrder,
@@ -1540,7 +1542,8 @@ impl Engine {
 
     /// Turns and current facts holding at least 1 query word, best first. A record scores the
     /// summed IDF of the words it holds. Ties go newest first. Returns at most `query.limit`
-    /// hits in 1 page, with no `next`. When `visits` runs out, the results stop there.
+    /// hits in 1 page, with no `next`. Hits come from the walked records, plus as many indexed
+    /// ones as the rest of `visits` allows, in score order.
     ///
     /// `visits` bounds record reads. The index work grows with the query words' postings.
     ///
@@ -1620,20 +1623,24 @@ impl Engine {
         }
         // Best first: higher score, then higher LSN.
         let best = |a: &(f64, u64), b: &(f64, u64)| b.0.total_cmp(&a.0).then(b.1.cmp(&a.1));
-        // Below, each index candidate costs 1 visit and a walked one costs none. So at most
-        // `k` candidates can be read. Only those are sorted.
-        let k = (query.visits - visited).saturating_add(ranked.len() - from_index);
-        if k < ranked.len() {
-            ranked.select_nth_unstable_by(k, best);
-            ranked.truncate(k);
+        // Below, each index candidate costs 1 visit and a walked one costs none. So phase 2
+        // reads at most `k` = the visits left plus the walked count. Every walked candidate
+        // stays. Of the index candidates, only the best ones the visits left can pay for stay.
+        let remaining = query.visits - visited;
+        let walked = ranked.split_off(from_index);
+        if remaining < ranked.len() {
+            ranked.select_nth_unstable_by(remaining, best);
+            ranked.truncate(remaining);
         }
+        ranked.extend(walked);
         ranked.sort_unstable_by(best);
         let (mut hits, mut bytes) = (Vec::new(), 0usize);
         for (_, lsn) in ranked {
-            // A walked record was counted when the walk read it.
+            // A walked record was counted when the walk read it. An index candidate needs a
+            // visit. Without one it is skipped, and walked hits below it still count.
             if lsn <= indexed {
                 if visited == query.visits {
-                    break;
+                    continue;
                 }
                 visited += 1;
             }

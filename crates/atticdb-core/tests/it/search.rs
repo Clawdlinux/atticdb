@@ -842,6 +842,35 @@ fn ranked_search_reads_at_most_visits_records() {
 }
 
 #[test]
+fn ranked_search_keeps_walked_hits_when_visits_run_out() {
+    // 1 record is walked. Its visit is the only one, so no indexed record can be read.
+    let opts = EngineOptions { search_walk_first: 1, ..options() };
+    let engine = open(Arc::new(SimDisk::new(75)), opts);
+    for text in ["kayak lake", "music tonight", "garden chores", "kayak day"] {
+        say(&engine, &scope("s"), text);
+    }
+    indexed(&engine);
+    let query = r("kayak lake");
+    let all = ["s:kayak lake", "s:kayak day"];
+    assert_eq!(ranked(&engine, "tenant", query.clone()), all, "the indexed record scores higher");
+    let one = SearchQuery { visits: 1, ..query };
+    assert_eq!(ranked(&engine, "tenant", one), all[1..], "the walked hit still shows");
+
+    // 4 records are walked, but 2 visits read only the 2 newest, which don't match. No visit is
+    // left for the indexed match, so nothing can be read.
+    let opts = EngineOptions { search_walk_first: 4, ..options() };
+    let engine = open(Arc::new(SimDisk::new(76)), opts);
+    say(&engine, &scope("s"), "kayak lake");
+    for text in ["music tonight", "garden chores", "movie night", "book club", "lunch was fine"] {
+        say(&engine, &scope("s"), text);
+    }
+    indexed(&engine);
+    assert_eq!(ranked(&engine, "tenant", r("kayak")), ["s:kayak lake"], "found with visits");
+    let two = SearchQuery { visits: 2, ..r("kayak") };
+    assert!(ranked(&engine, "tenant", two).is_empty(), "no visit is left for it");
+}
+
+#[test]
 fn ranked_search_never_shows_hidden_records() {
     for walk in WALKS {
         let opts = EngineOptions { search_walk_first: walk, ..options() };
