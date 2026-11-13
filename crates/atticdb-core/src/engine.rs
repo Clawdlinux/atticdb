@@ -195,16 +195,18 @@ pub enum SearchOrder {
     /// Every whitespace-separated word must match. Newest first, in pages.
     #[default]
     Newest,
-    /// At least 1 content word must match. Ranked by summed IDF, then newest first. 1 page of
-    /// the top hits, with no `next`.
+    /// At least 1 query word must match. Ranked by summed IDF, then newest first. 1 page of
+    /// the top hits, with no `next`. An exhausted `visits` budget cuts it short.
     Relevance,
 }
 /// A search: every word of `query` must appear, ignoring case, in a record. In relevance
-/// order, at least 1 of its content words.
+/// order, at least 1 of its query words.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SearchQuery {
     /// Words separated by whitespace. Matched as substrings, so `deploy` finds `deployment`.
-    /// A plural word also matches its singular, so `keys` finds `key`.
+    /// A plural word also matches its singular, so `keys` finds `key`. In relevance order, the
+    /// query splits on every char that isn't alphanumeric. Stopwords and words under 3 chars
+    /// are dropped. If that leaves none, every word is kept.
     pub query: String,
     /// Exclusive cursor: only records below this LSN. A previous page's `next`.
     pub before: Option<u64>,
@@ -212,7 +214,9 @@ pub struct SearchQuery {
     pub limit: usize,
     /// Content, meta and key bytes per page. The first hit is always returned.
     pub max_bytes: usize,
-    /// Records to visit at most, which bounds the call's cost. `next` resumes below them.
+    /// Records to visit at most, which bounds the call's record reads. `next` resumes below
+    /// them. Word index work isn't counted. It grows with the postings of the query words. In
+    /// relevance order, running out cuts the results, and there is still no `next`.
     pub visits: usize,
     /// How hits are matched and ordered.
     pub order: SearchOrder,
@@ -232,7 +236,7 @@ pub enum Hit {
     /// A fact's current value.
     Fact(StoredFact),
 }
-/// One page of hits, in the query's order.
+/// 1 page of hits, in the query's order.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SearchPage {
     /// Matching turns and current facts, in the query's order.
@@ -1457,8 +1461,8 @@ impl Engine {
     /// Records above the word index's watermark are walked; below it, only its candidates.
     /// Visits at most `query.visits` records; `next` resumes below them.
     ///
-    /// In relevance order, a hit needs only 1 content word. Hits are ranked by summed IDF in
-    /// 1 page of at most `query.limit`, with no `next`.
+    /// In relevance order, a hit needs only 1 query word. Hits are ranked by summed IDF in 1
+    /// page of at most `query.limit`, with no `next`.
     pub fn search(&self, tenant: &str, query: SearchQuery) -> Result<SearchPage> {
         if query.order == SearchOrder::Relevance {
             return self.search_ranked(tenant, query);
@@ -1533,9 +1537,11 @@ impl Engine {
         Ok(SearchPage { hits, next: next.flatten() })
     }
 
-    /// Turns and current facts holding at least 1 content word of the query, best first. A
-    /// record scores the summed IDF of the words it holds. Ties go newest first. Returns at most
-    /// `query.limit` hits in 1 page, with no `next`.
+    /// Turns and current facts holding at least 1 query word, best first. A record scores the
+    /// summed IDF of the words it holds. Ties go newest first. Returns at most `query.limit`
+    /// hits in 1 page, with no `next`. When `visits` runs out, the results stop there.
+    ///
+    /// `visits` bounds record reads. The index work grows with the query words' postings.
     ///
     /// The word index gives `N` and each word's `df`, and scores the records below its
     /// watermark from postings. Every word is scored, however common. The newest records are
@@ -1566,8 +1572,8 @@ impl Engine {
             .unwrap_or_default();
         postings.resize(words.len(), Vec::new());
         let indexed = watermark.min(top.saturating_sub(self.walk_first));
-        // Below `indexed`, scores come from postings. Weights add in query order on both paths,
-        // so a record scores the same from postings or from its text.
+        // Below `indexed`, scores come from postings. Weights add in query order on both paths.
+        // So a record scores the same from postings or text.
         let mut scored = Vec::new();
         let mut scores: HashMap<u64, f64> = HashMap::new();
         for ((word, stem), lsns) in words.iter().zip(&stems).zip(&postings) {
@@ -1592,6 +1598,7 @@ impl Engine {
         let (mut visited, mut reader) = (0usize, self.tape.reader());
         let mut ranked: Vec<(f64, u64)> =
             scores.into_iter().map(|(lsn, score)| (score, lsn)).collect();
+        let from_index = ranked.len();
         // Above `indexed`, records are walked newest first and scored from their text. The walk
         // counts toward `query.visits`, as in newest order, so a store without an index stays
         // bounded. Only the score is kept. The best hits are read again below.
@@ -1610,7 +1617,16 @@ impl Engine {
                 ranked.extend(got.get().map(|score| (score, lsn)));
             }
         }
-        ranked.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then(b.1.cmp(&a.1)));
+        // Best first: higher score, then higher LSN.
+        let best = |a: &(f64, u64), b: &(f64, u64)| b.0.total_cmp(&a.0).then(b.1.cmp(&a.1));
+        // Below, each index candidate costs 1 visit and a walked one costs none. So at most
+        // `k` candidates can be read. Only those are sorted.
+        let k = (query.visits - visited).saturating_add(ranked.len() - from_index);
+        if k < ranked.len() {
+            ranked.select_nth_unstable_by(k, best);
+            ranked.truncate(k);
+        }
+        ranked.sort_unstable_by(best);
         let (mut hits, mut bytes) = (Vec::new(), 0usize);
         for (_, lsn) in ranked {
             // A walked record was counted when the walk read it.

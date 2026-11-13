@@ -823,6 +823,25 @@ fn ranked_search_finds_words_in_small_stores() {
 }
 
 #[test]
+fn ranked_search_reads_at_most_visits_records() {
+    let opts = EngineOptions { search_walk_first: 1000, ..options() };
+    let engine = open(Arc::new(SimDisk::new(74)), opts);
+    for text in ["kayak lake", "music tonight", "garden chores", "kayak trip", "kayak day"] {
+        say(&engine, &scope("s"), text);
+    }
+    indexed(&engine);
+    let query = r("kayak lake");
+    let all = ["s:kayak lake", "s:kayak day", "s:kayak trip"];
+    assert_eq!(ranked(&engine, "tenant", query.clone()), all, "every record walked");
+    // Every record is walked, newest first. 2 visits read only the 2 newest, so the best
+    // match, oldest, is never seen.
+    let two = SearchQuery { visits: 2, ..query.clone() };
+    assert_eq!(ranked(&engine, "tenant", two), all[1..], "the 2 newest");
+    let one = SearchQuery { visits: 1, ..query };
+    assert_eq!(ranked(&engine, "tenant", one), all[1..2], "the newest");
+}
+
+#[test]
 fn ranked_search_never_shows_hidden_records() {
     for walk in WALKS {
         let opts = EngineOptions { search_walk_first: walk, ..options() };

@@ -66,7 +66,7 @@ struct Terms {
     postings: Vec<Postings>,
     /// Per 3-byte window, the ids of the tokens holding it.
     grams: HashMap<u32, Postings>,
-    /// Records added with text. Ranked search's `N`.
+    /// Records added with at least 1 token. Ranked search's `N`.
     records: u64,
     /// Gives every token the same hash, so tests reach `collided`.
     #[cfg(test)]
@@ -187,8 +187,9 @@ impl Index {
             let postings = &mut terms.postings[id as usize];
             self.bytes += postings.push(lsn);
         }
-        // A hidden record arrives without fields, like a kind that holds no text.
-        if !fields.is_empty() {
+        // Only a record with at least 1 token counts. A hidden record arrives without fields,
+        // like a kind that holds no text. Empty or blank text adds no token either.
+        if !seen.is_empty() {
             terms.records += 1;
         }
         self.lsn = lsn;
@@ -227,8 +228,8 @@ impl Index {
         found
     }
 
-    /// How many records of `tenant` were added with text. Hidden ones and kinds without text
-    /// don't count.
+    /// How many records of `tenant` were added with at least 1 token. Hidden ones, kinds
+    /// without text and blank text don't count.
     pub(crate) fn records(&self, tenant: u32) -> u64 {
         self.tenants.get(&tenant).map_or(0, |terms| terms.records)
     }
@@ -527,6 +528,8 @@ mod tests {
             assert!(index.add(1, lsn, &[text.as_bytes().to_vec()]));
         }
         assert!(index.add(1, 10, &[]), "a record without text");
+        assert!(index.add(1, 12, &[Vec::new()]), "an empty field");
+        assert!(index.add(1, 13, &[b" \t\n ".to_vec()]), "a blank field");
         assert!(index.add(2, 11, &[b"lake".to_vec()]));
         assert_eq!((index.records(1), index.records(2), index.records(3)), (3, 1, 0));
         assert_eq!(index.lsns(1, "paint", None, u64::MAX), [3, 9]);

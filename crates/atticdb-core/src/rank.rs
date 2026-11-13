@@ -2,6 +2,8 @@
 //!
 //! The rules match the LoCoMo research harness, so its numbers carry over.
 
+use std::collections::HashSet;
+
 /// Common English function words, question words and light verbs. Words under 3 chars are
 /// dropped anyway. Copied from `STOPWORDS` in `research/locomo_retrieval/words.py`. It is
 /// fixed, and never tuned on answers.
@@ -175,9 +177,9 @@ const MIN_CHARS: usize = 3;
 /// aren't stopwords are kept. If none are, every word is kept, so `is it ok` still matches.
 pub(crate) fn query_words(query: &str) -> Vec<String> {
     let lower = query.to_lowercase();
-    let mut all: Vec<&str> = Vec::new();
+    let (mut all, mut seen): (Vec<&str>, HashSet<&str>) = (Vec::new(), HashSet::new());
     for word in lower.split(|c: char| !c.is_alphanumeric()).filter(|word| !word.is_empty()) {
-        if !all.contains(&word) {
+        if seen.insert(word) {
             all.push(word);
         }
     }
@@ -205,6 +207,8 @@ mod tests {
     fn query_words_drop_stopwords_and_short_words() {
         assert_eq!(query_words("What did Caroline paint, in 2022?"), ["caroline", "paint", "2022"]);
         assert_eq!(query_words("is it ok"), ["is", "it", "ok"], "nothing left, so every word");
+        assert_eq!(query_words("Paint, paint PAINT"), ["paint"], "no repeats");
+        assert_eq!(query_words("ok OK it"), ["ok", "it"], "no repeats in the fallback");
     }
 
     #[test]
