@@ -4,7 +4,7 @@ use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Set in the child that [`sweep_runs_on_the_test_dir`] starts.
 const CHILD: &str = "ATTICDB_SWEEP_CHILD";
@@ -73,18 +73,6 @@ fn sweep_stops_leftovers() {
     let left = folder(root, &format!("{dead}-0"), 0o700);
     let mut stopped = serve(root, &left);
 
-    // A held `LOCK` that names a running process which doesn't serve that folder. It is let go
-    // after about 1 s, so the sweep needn't wait out its 15 s limit.
-    let reused = folder(root, &format!("{dead}-1"), 0o700);
-    std::fs::write(reused.join("LOCK"), format!("pid={} instance=0 tcp=none\n", sleep.0.id()))
-        .unwrap();
-    let held = File::open(reused.join("LOCK")).unwrap();
-    held.lock().unwrap();
-    let release = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(1));
-        drop(held);
-    });
-
     // A symlink out of a leftover, to a folder with a live server and a plain file.
     let outside = Dir::new();
     let target = outside.0.join("x/data");
@@ -112,13 +100,10 @@ fn sweep_stops_leftovers() {
     }
 
     support::sweep(root, false);
-    release.join().unwrap();
 
     let (status, output) = stopped.wait_up_to(Duration::from_secs(10));
     assert_eq!(status.signal(), Some(9), "the sweep stops the server: {output}");
     assert!(!root.join(format!("{dead}-0")).exists(), "its folder is removed");
-    assert!(!root.join(format!("{dead}-1")).exists(), "the reused pid's folder is removed");
-    assert!(sleep.0.try_wait().unwrap().is_none(), "the reused pid is not signaled");
     assert!(!linked.exists(), "the folder with the link is removed");
     assert!(beyond.child.try_wait().unwrap().is_none(), "{}", beyond.stderr());
     assert!(support::locked(&target), "the server behind the link keeps its lock");
@@ -129,6 +114,27 @@ fn sweep_stops_leftovers() {
         assert!(root.join(name).join("x/data/LOCK").exists(), "{name} is left alone");
     }
     assert!(root.join("c.json").exists(), "a file in the root is left alone");
+
+    // A held `LOCK` that names a running process which doesn't serve that folder, swept on its
+    // own. The lock is let go about 1 s into the sweep, so it needn't wait out 15 s.
+    let solo = Dir::new();
+    let reused = folder(&solo.0, &format!("{dead}-1"), 0o700);
+    std::fs::write(reused.join("LOCK"), format!("pid={} instance=0 tcp=none\n", sleep.0.id()))
+        .unwrap();
+    let held = File::open(reused.join("LOCK")).unwrap();
+    held.lock().unwrap();
+    assert!(support::locked(&reused), "the reused pid's LOCK is held");
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(1));
+        drop(held);
+    });
+    let started = Instant::now();
+    support::sweep(&solo.0, false);
+    release.join().unwrap();
+    // A free lock ends the sweep after 500 ms, so this shows it saw the lock held.
+    assert!(started.elapsed() >= Duration::from_secs(1), "{:?}", started.elapsed());
+    assert!(sleep.0.try_wait().unwrap().is_none(), "the reused pid is not signaled");
+    assert!(!solo.0.join(format!("{dead}-1")).exists(), "the reused pid's folder is removed");
 }
 
 /// With `ATTICDB_TEST_DIR` set, the first [`Dir`] in a test process sweeps that root. There

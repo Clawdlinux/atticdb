@@ -367,22 +367,27 @@ const SWEEP_DEPTH: usize = 6;
 
 /// Stops servers left under `root` by killed test runs, then removes the runs' folders.
 /// A killed run never drops its [`Dir`] or [`Holders`], so its servers would run forever
-/// (#227). It handles 1 leftover at a time, and only one that [`leftover`] proves. It signals
-/// only what [`stop_servers`] confirms serves that folder. Errors are ignored, since the sweep
-/// must never fail a test run.
+/// (#227). It takes only folders that [`leftover`] proves, and stops their servers together.
+/// It signals only what [`stop_servers`] confirms serves that folder. Then it checks each
+/// folder again right before removing it. Errors are ignored, since the sweep must never fail
+/// a test run.
 pub fn sweep(root: &Path, need_marker: bool) {
     let Ok(entries) = std::fs::read_dir(root) else { return };
-    for entry in entries.filter_map(Result::ok) {
-        let path = entry.path();
-        let Some(id) = leftover(&path, need_marker) else { continue };
-        let mut data = Vec::new();
-        lock_dirs(&path, 1, &mut data);
-        if !data.is_empty() {
-            stop_servers(&data);
-        }
-        // Check again, in case the pid or the folder changed while servers stopped.
-        if leftover(&path, need_marker) == Some(id) {
-            let _ = std::fs::remove_dir_all(&path);
+    let leftovers: Vec<(PathBuf, (u64, u64))> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| leftover(&entry.path(), need_marker).map(|id| (entry.path(), id)))
+        .collect();
+    let mut data = Vec::new();
+    for (path, _) in &leftovers {
+        lock_dirs(path, 1, &mut data);
+    }
+    if !data.is_empty() {
+        stop_servers(&data);
+    }
+    for (path, id) in &leftovers {
+        // In case the pid or the folder changed while servers stopped.
+        if leftover(path, need_marker) == Some(*id) {
+            let _ = std::fs::remove_dir_all(path);
         }
     }
 }
