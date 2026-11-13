@@ -118,6 +118,7 @@ fn sweep_stops_leftovers() {
     // A held `LOCK` that names a running process which doesn't serve that folder, swept on its
     // own. The lock is let go about 1 s into the sweep, so it needn't wait out 15 s.
     let solo = Dir::new();
+    let dead = dead_pid();
     let reused = folder(&solo.0, &format!("{dead}-1"), 0o700);
     std::fs::write(reused.join("LOCK"), format!("pid={} instance=0 tcp=none\n", sleep.0.id()))
         .unwrap();
