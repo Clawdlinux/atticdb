@@ -953,9 +953,10 @@ fn upgrade_reports_a_failed_check() {
     assert_eq!(names(exe.parent().unwrap()), ["atticdb"]);
 }
 
-/// A binary under `.cargo/bin`, `/opt/homebrew/` or a Homebrew `Cellar` gets its tool's
-/// command, and exit 1. Nothing runs: no request, and no change. A symlink into the Cellar
-/// counts as the Cellar.
+/// A binary under `/opt/homebrew/` or a Homebrew `Cellar` gets its tool's command and exit 1,
+/// as does a source build under `.cargo/bin`. Nothing runs: no request, and no change. A
+/// symlink into the Cellar counts as the Cellar. A release under `.cargo/bin` came from
+/// install.sh, so it upgrades.
 #[test]
 fn upgrade_points_cargo_and_brew_to_their_tool() {
     let setup = Setup::new();
@@ -967,12 +968,16 @@ fn upgrade_points_cargo_and_brew_to_their_tool() {
     let link = setup.dir.0.join("usr/local/bin");
     std::fs::create_dir_all(&link).unwrap();
     std::os::unix::fs::symlink(&cellar, link.join("atticdb")).unwrap();
-    let rows = [
-        (setup.copy_binary("h/.cargo/bin"), cargo),
+    let in_cargo = setup.copy_binary("h/.cargo/bin");
+    let source = atticdb::VERSION.ends_with("+dev");
+    let mut rows = vec![
         (setup.copy_binary("opt/homebrew/bin"), brew),
         (cellar.clone(), brew),
         (link.join("atticdb"), brew),
     ];
+    if source {
+        rows.push((in_cargo.clone(), cargo));
+    }
     let release = Release::new("v9.9.9", stub(Stub::Install));
     for (exe, said) in rows {
         let old = std::fs::read(&exe).unwrap();
@@ -982,6 +987,12 @@ fn upgrade_points_cargo_and_brew_to_their_tool() {
         assert_eq!(names(exe.parent().unwrap()), ["atticdb"], "{}", exe.display());
     }
     assert_eq!(release.paths(), Vec::<String>::new());
+    if !source {
+        let (code, out, err) = setup.upgrade(&in_cargo, &release, &["--yes"], &[], "");
+        assert_eq!(code, Some(0), "{out}{err}");
+        assert_eq!(std::fs::read(&in_cargo).unwrap(), new_binary("9.9.9"));
+        assert_eq!(release.paths(), [LATEST.to_owned(), installer("9.9.9")]);
+    }
 }
 
 /// curl skips the user's `~/.curlrc`. One that caps downloads at 1 byte would fail the

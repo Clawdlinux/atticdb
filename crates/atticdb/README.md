@@ -967,7 +967,7 @@ Each `<date>` is the UTC save date, as `2026-11-12`, so the block stays the same
 Past 6,000 characters the block stops at a whole line and ends with `(more in atticdb)`.
 The `Update:` line shows when the home's `update-check.json` names a newer release than this binary, whatever the cache's age.
 The hook never asks the network for it. With auto-upgrade on, the line says the server installs it, and names `upgrade.log`.
-The off switches and `+dev` builds leave it out. With no memory and no other sessions, the block is the header and this line.
+On Windows, which has no auto-upgrade, the line ends after `To upgrade: atticdb upgrade.` The off switches and `+dev` builds leave it out. With no memory and no other sessions, the block is the header and this line.
 The block depends only on the repo, memory and that cache.
 It is a snapshot. The model can call `memory_search` or `fact_list` for more.
 

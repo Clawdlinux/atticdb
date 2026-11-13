@@ -159,24 +159,26 @@ fn cached_latest(home: &Path) -> Option<String> {
 pub(crate) fn hook_notice(home: &Path) -> Option<String> {
     let latest = cached_latest(home)?;
     let log = auto_on(home).then(|| home.join(UPGRADE_LOG));
-    block_notice(crate::VERSION, &latest, log.as_deref())
+    block_notice(crate::VERSION, &latest, log.as_deref(), cfg!(unix))
 }
 
 /// The block's line for `latest` over `current`, as [`notice`] decides. `log` is the
-/// auto-upgrade log when auto-upgrade is on.
-fn block_notice(current: &str, latest: &str, log: Option<&Path>) -> Option<String> {
+/// auto-upgrade log when auto-upgrade is on. `auto` says whether this platform has
+/// auto-upgrade. Windows doesn't, and its `atticdb upgrade` prints the manual steps.
+fn block_notice(current: &str, latest: &str, log: Option<&Path>, auto: bool) -> Option<String> {
     notice(current, latest)?;
     let (latest, current) = (bare(latest), bare(current));
     let head = format!("Update: AtticDB {latest} is out (you have {current}).");
-    Some(match log {
-        Some(log) => format!(
+    Some(match (log, auto) {
+        (Some(log), true) => format!(
             "{head} Auto-upgrade is on, so the server installs it. If it doesn't, read {}.",
             log.display()
         ),
-        None => format!(
+        (_, true) => format!(
             "{head} Tell the user once. To upgrade: atticdb upgrade. To upgrade on its own \
              from now on: atticdb upgrade --auto on."
         ),
+        (_, false) => format!("{head} Tell the user once. To upgrade: atticdb upgrade."),
     })
 }
 
@@ -480,21 +482,26 @@ mod tests {
 
     #[test]
     fn block_notice_names_the_command() {
-        let line = block_notice("0.3.3", "v0.3.4", None).unwrap();
+        let line = block_notice("0.3.3", "v0.3.4", None, true).unwrap();
         assert_eq!(
             line,
             "Update: AtticDB 0.3.4 is out (you have 0.3.3). Tell the user once. To upgrade: \
              atticdb upgrade. To upgrade on its own from now on: atticdb upgrade --auto on."
         );
         let log = Path::new("/h/upgrade.log");
-        let line = block_notice("0.3.3", "0.3.4", Some(log)).unwrap();
+        let line = block_notice("0.3.3", "0.3.4", Some(log), true).unwrap();
         assert_eq!(
             line,
             "Update: AtticDB 0.3.4 is out (you have 0.3.3). Auto-upgrade is on, so the server \
              installs it. If it doesn't, read /h/upgrade.log."
         );
-        assert_eq!(block_notice("0.3.4", "0.3.4", None), None);
-        assert_eq!(block_notice("0.3.3+dev", "0.3.4", None), None);
+        // Windows has no auto-upgrade, so its line names only the manual command.
+        let windows = "Update: AtticDB 0.3.4 is out (you have 0.3.3). Tell the user once. To \
+                       upgrade: atticdb upgrade.";
+        assert_eq!(block_notice("0.3.3", "0.3.4", None, false).as_deref(), Some(windows));
+        assert_eq!(block_notice("0.3.3", "0.3.4", Some(log), false).as_deref(), Some(windows));
+        assert_eq!(block_notice("0.3.4", "0.3.4", None, true), None);
+        assert_eq!(block_notice("0.3.3+dev", "0.3.4", None, true), None);
     }
 
     #[test]
