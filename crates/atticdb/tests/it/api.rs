@@ -1051,8 +1051,8 @@ fn lock_replaced_before_run_never_serves() {
     // Well under the 2 s between watch checks, so only the check in `run` can stop it.
     assert_eq!(rx.recv_timeout(Duration::from_secs(1)), Ok(Exit::LockLost));
     assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
-    let [Via::Tcp(addr), Via::Unix(socket)] = &running.vias else { unreachable!() };
-    assert!(std::net::TcpStream::connect(addr).is_err(), "nothing listens on tcp");
+    // No TCP check: another test may take the freed port at once.
+    let [_, Via::Unix(socket)] = &running.vias else { unreachable!() };
     assert!(!socket.exists(), "the socket path was removed");
     waiter.join().unwrap().shutdown();
 }
