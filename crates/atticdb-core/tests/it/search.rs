@@ -1,7 +1,7 @@
 use crate::support::{open, options, scope, turn};
 use atticdb_core::{
     forget::Selector, Engine, EngineOptions, ErrorKind, Hit, NewFact, NewTurn, Outcome, Record,
-    RecordKind, RecordQuery, Role, Scope, SearchQuery, SessionQuery, WindowQuery,
+    RecordKind, RecordQuery, Role, Scope, SearchOrder, SearchQuery, SessionQuery, WindowQuery,
 };
 use atticdb_tape::SimDisk;
 use std::sync::Arc;
@@ -23,6 +23,7 @@ fn q(words: &str) -> SearchQuery {
         limit: 10,
         max_bytes: 1 << 20,
         visits: 1 << 20,
+        order: SearchOrder::Newest,
     }
 }
 
@@ -670,4 +671,186 @@ fn search_with_the_index_equals_a_full_scan() {
         engines.iter().for_each(indexed);
         check(&engines, "rebuilt");
     }
+}
+
+fn r(words: &str) -> SearchQuery {
+    SearchQuery { order: SearchOrder::Relevance, ..q(words) }
+}
+
+/// The 1 page of a ranked search, as `session:content` or `key=content`.
+fn ranked(engine: &Engine, tenant: &str, query: SearchQuery) -> Vec<String> {
+    let page = engine.search(tenant, query).unwrap();
+    assert_eq!(page.next, None, "ranked results have no next page");
+    page.hits
+        .into_iter()
+        .map(|hit| match hit {
+            Hit::Turn { session, turn, .. } => {
+                format!("{session}:{}", String::from_utf8_lossy(&turn.content))
+            }
+            Hit::Fact(fact) => format!("{}={}", fact.key, String::from_utf8_lossy(&fact.content)),
+        })
+        .collect()
+}
+
+/// Walking 0 records first scores every hit from the index. Walking 1,000 scores every hit
+/// from its text. 4 mixes both. All 3 must give the same ranking.
+const WALKS: [u64; 3] = [0, 4, 1000];
+
+#[test]
+fn ranked_search_orders_hits_by_summed_idf() {
+    for walk in WALKS {
+        let opts = EngineOptions { search_walk_first: walk, ..options() };
+        let engine = open(Arc::new(SimDisk::new(70)), opts);
+        for text in [
+            "Melanie painted a sunrise in 2022",
+            "the weather is nice",
+            "lunch was fine",
+            "Caroline joined a club",
+            "music tonight",
+            "garden chores",
+            "Caroline met Melanie",
+            "movie night",
+            "book club",
+            "Melanie went home",
+        ] {
+            say(&engine, &scope("s"), text);
+        }
+        indexed(&engine);
+        let both = "caroline melanie";
+        let lsn = |content: &str| {
+            let hits = engine.search("tenant", q(content)).unwrap().hits;
+            hits[0].lsn()
+        };
+        let met = lsn("Caroline met Melanie");
+        // 10 records hold text. "melanie" is in 3, "caroline" and "club" in 2, the rest in 1.
+        for (case, query, expected) in [
+            (
+                "2 rare words beat 1 common word, and ties go newest first",
+                r("When did Melanie paint a sunrise?"),
+                &[
+                    "s:Melanie painted a sunrise in 2022",
+                    "s:Melanie went home",
+                    "s:Caroline met Melanie",
+                ][..],
+            ),
+            (
+                "a rarer word beats a newer, more common one",
+                r(both),
+                &[
+                    "s:Caroline met Melanie",
+                    "s:Caroline joined a club",
+                    "s:Melanie went home",
+                    "s:Melanie painted a sunrise in 2022",
+                ][..],
+            ),
+            (
+                "before keeps only older hits",
+                SearchQuery { before: Some(met), ..r(both) },
+                &["s:Caroline joined a club", "s:Melanie painted a sunrise in 2022"][..],
+            ),
+            (
+                "limit keeps the top hits",
+                SearchQuery { limit: 2, ..r(both) },
+                &["s:Caroline met Melanie", "s:Caroline joined a club"][..],
+            ),
+            (
+                "the first hit always fits",
+                SearchQuery { max_bytes: 1, ..r(both) },
+                &["s:Caroline met Melanie"][..],
+            ),
+            (
+                "only stopwords and short words, so every word counts",
+                r("is it ok"),
+                &["s:book club", "s:the weather is nice", "s:Melanie painted a sunrise in 2022"][..],
+            ),
+            (
+                "a plural finds its singular",
+                r("Clubs?"),
+                &["s:book club", "s:Caroline joined a club"][..],
+            ),
+            ("a word in over half the records is skipped", r("e"), &[][..]),
+        ] {
+            assert_eq!(ranked(&engine, "tenant", query), expected, "walk {walk}: {case}");
+        }
+        assert!(
+            search(&engine, "tenant", q("When did Melanie paint a sunrise?")).is_empty(),
+            "walk {walk}: newest needs every word"
+        );
+        assert!(ranked(&engine, "nobody", r(both)).is_empty(), "walk {walk}: unknown tenant");
+        if walk == 0 {
+            let one = SearchQuery { visits: 1, ..r(both) };
+            assert_eq!(ranked(&engine, "tenant", one), ["s:Caroline met Melanie"], "1 visit");
+        }
+        for bad in [
+            r("  "),
+            r("?!"),
+            SearchQuery { limit: 0, ..r("x") },
+            SearchQuery { visits: 0, ..r("x") },
+        ] {
+            let kind = engine.search("tenant", bad).unwrap_err().kind;
+            assert!(matches!(kind, ErrorKind::InvalidInput), "walk {walk}");
+        }
+    }
+}
+
+#[test]
+fn ranked_search_never_shows_hidden_records() {
+    for walk in WALKS {
+        let opts = EngineOptions { search_walk_first: walk, ..options() };
+        let engine = open(Arc::new(SimDisk::new(71)), opts);
+        for text in ["lunch was fine", "music tonight", "garden chores", "movie night", "book club"]
+        {
+            say(&engine, &scope("s2"), text);
+        }
+        say(&engine, &scope("s1"), "zebra quilt kayak");
+        set(&engine, "pets", "zebra quilt kayak");
+        set(&engine, "pets", "a quilt");
+        set(&engine, "gone", "zebra kayak");
+        engine.fact_delete("tenant", "gone", "a", None, None).unwrap();
+        say(&engine, &scope("s2"), "kayak trip");
+        indexed(&engine);
+        let query = r("zebra quilt kayak");
+        let visible = ["pets=a quilt", "s2:kayak trip"];
+        let first = ranked(&engine, "tenant", query.clone());
+        assert_eq!(first, ["s1:zebra quilt kayak", visible[0], visible[1]], "walk {walk}");
+        // The index keeps a forgotten turn's tokens until restart. It still never shows.
+        let s1 = Selector::Session { agent: "agent".into(), session: "s1".into() };
+        engine.forget("tenant", s1, None, None).unwrap();
+        assert_eq!(ranked(&engine, "tenant", query), visible, "walk {walk}");
+    }
+}
+
+#[test]
+fn ranked_search_scores_records_above_the_index_watermark() {
+    let opts = EngineOptions { search_walk_first: 0, search_index_bytes: 64 << 10, ..options() };
+    let engine = open(Arc::new(SimDisk::new(72)), opts);
+    for text in [
+        "Caroline saw the sunrise",
+        "Caroline went out",
+        "lunch was fine",
+        "music tonight",
+        "garden chores",
+        "movie night",
+    ] {
+        say(&engine, &scope("s"), text);
+    }
+    // Its tokens fill the budget, so the index stops at the next record.
+    let pad: Vec<String> = (0..3000).map(|i| format!("p{i}q")).collect();
+    say(&engine, &scope("s"), &pad.join(" "));
+    for text in ["a sunrise again", "Caroline on a sunrise hill", "zebra crossing"] {
+        say(&engine, &scope("s"), text);
+    }
+    indexed(&engine);
+    let m = engine.metrics().unwrap();
+    assert!(m.search_index_stopped.unwrap_or_default().contains("budget"));
+    assert!(m.search_index_lsn < m.durable_lsn, "the last 3 turns are above the watermark");
+    // From the index: 7 records, "caroline" in 2 and "sunrise" in 1.
+    let expected = [
+        "s:Caroline on a sunrise hill",
+        "s:Caroline saw the sunrise",
+        "s:a sunrise again",
+        "s:Caroline went out",
+    ];
+    assert_eq!(ranked(&engine, "tenant", r("caroline sunrise")), expected);
+    assert_eq!(ranked(&engine, "tenant", r("zebra")), ["s:zebra crossing"], "unseen by the index");
 }

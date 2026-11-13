@@ -12,7 +12,7 @@ use crate::http::{Budget, Head, Response};
 use atticdb_core::{
     forget::Selector, Appended, Engine, EngineError, ErrorKind, FactQuery, FactWritten, Forgotten,
     Health, Hit, NewFact, NewTurn, Record, RecordKind, RecordQuery, Revision, Role, Scope,
-    SearchQuery, SessionQuery, StoredFact, Turn, WindowQuery,
+    SearchOrder, SearchQuery, SessionQuery, StoredFact, Turn, WindowQuery,
 };
 use atticdb_tape::{Error, Outcome};
 use serde_json::{json, Map, Value};
@@ -762,7 +762,14 @@ pub fn search(engine: &Engine, tenant: &str, target: &str) -> Response {
         if !params.is_empty() || query.len() > 1024 {
             return Err("unknown query parameter, or q over 1024 bytes".to_owned());
         }
-        Ok(SearchQuery { query, before, limit, max_bytes, visits: SEARCH_VISITS })
+        Ok(SearchQuery {
+            query,
+            before,
+            limit,
+            max_bytes,
+            visits: SEARCH_VISITS,
+            order: SearchOrder::Newest,
+        })
     })();
     match query {
         Ok(query) => send(engine.search(tenant, query), |page| {

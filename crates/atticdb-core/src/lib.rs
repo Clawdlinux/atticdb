@@ -14,6 +14,7 @@ mod forgets;
 mod hot_cache;
 mod machine;
 mod options;
+mod rank;
 mod search_index;
 mod session;
 mod state;
@@ -24,8 +25,8 @@ pub use atticdb_tape::Outcome;
 pub use engine::{
     Appended, Engine, ExportEntry, ExportPage, ExportPos, ExportQuery, FactHistory, FactPage,
     FactQuery, FactWritten, Forgotten, Health, Hit, Metrics, NewFact, Record, RecordKind,
-    RecordPage, RecordQuery, Revision, Scope, SearchPage, SearchQuery, SessionInfo, SessionPage,
-    SessionQuery, StoredFact, Turn, Window, WindowQuery,
+    RecordPage, RecordQuery, Revision, Scope, SearchOrder, SearchPage, SearchQuery, SessionInfo,
+    SessionPage, SessionQuery, StoredFact, Turn, Window, WindowQuery,
 };
 #[cfg(feature = "sim")]
 pub use engine::{SimAppend, SimFact, SimForget};

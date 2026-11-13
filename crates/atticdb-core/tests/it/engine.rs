@@ -122,7 +122,7 @@ fn windows_are_dense_and_read_cost_depends_only_on_returned_turns() {
 
 #[test]
 fn compression_migrates_one_way_and_retries_match_across_modes() {
-    use atticdb_core::{CompressionMode, SearchQuery};
+    use atticdb_core::{CompressionMode, SearchOrder, SearchQuery};
     let disk = Arc::new(SimDisk::new(3));
     let with = |mode| {
         let mut opts = options();
@@ -190,6 +190,7 @@ fn compression_migrates_one_way_and_retries_match_across_modes() {
             limit: 10,
             max_bytes: 1 << 20,
             visits: 1000,
+            order: SearchOrder::Newest,
         };
         let hits = engine.search("tenant", query).unwrap().hits;
         assert_eq!(hits.len(), 1, "{case}: search reads compressed content");
@@ -210,6 +211,7 @@ fn compression_migrates_one_way_and_retries_match_across_modes() {
         limit: 10,
         max_bytes: 1 << 20,
         visits: 1000,
+        order: SearchOrder::Newest,
     };
     assert!(engine.search("tenant", query).unwrap().hits.is_empty(), "absent from search");
     let query = atticdb_core::RecordQuery {

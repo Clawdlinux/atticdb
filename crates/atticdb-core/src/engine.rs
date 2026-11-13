@@ -13,7 +13,7 @@ use atticdb_tape::{
     Clock, Committed, Digest, Durability, Frame, Header, Io, Kind, RecordInput, StdIo, SystemClock,
     Tape,
 };
-use std::collections::{BinaryHeap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -189,7 +189,18 @@ pub enum WindowQuery {
         limit: usize,
     },
 }
-/// A search: every word of `query` must appear, ignoring case, in a record.
+/// How `search` orders and matches records.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SearchOrder {
+    /// Every whitespace-separated word must match. Newest first, in pages.
+    #[default]
+    Newest,
+    /// At least 1 content word must match. Ranked by summed IDF, then newest first. 1 page of
+    /// the top hits, with no `next`.
+    Relevance,
+}
+/// A search: every word of `query` must appear, ignoring case, in a record. In relevance
+/// order, at least 1 of its content words.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SearchQuery {
     /// Words separated by whitespace. Matched as substrings, so `deploy` finds `deployment`.
@@ -203,6 +214,8 @@ pub struct SearchQuery {
     pub max_bytes: usize,
     /// Records to visit at most, which bounds the call's cost. `next` resumes below them.
     pub visits: usize,
+    /// How hits are matched and ordered.
+    pub order: SearchOrder,
 }
 /// One search result.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -219,10 +232,10 @@ pub enum Hit {
     /// A fact's current value.
     Fact(StoredFact),
 }
-/// One page of hits, newest first.
+/// One page of hits, in the query's order.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SearchPage {
-    /// Matching turns and current facts, newest first.
+    /// Matching turns and current facts, in the query's order.
     pub hits: Vec<Hit>,
     /// Pass as `before` to continue. A page can be empty while it is set. None once the walk
     /// reached the oldest record.
@@ -1443,25 +1456,18 @@ impl Engine {
     /// Returns turns and current facts that contain every word of the query, newest first.
     /// Records above the word index's watermark are walked; below it, only its candidates.
     /// Visits at most `query.visits` records; `next` resumes below them.
+    ///
+    /// In relevance order, a hit needs only 1 content word. Hits are ranked by summed IDF in
+    /// 1 page of at most `query.limit`, with no `next`.
     pub fn search(&self, tenant: &str, query: SearchQuery) -> Result<SearchPage> {
+        if query.order == SearchOrder::Relevance {
+            return self.search_ranked(tenant, query);
+        }
         let words: Vec<String> = query.query.split_whitespace().map(str::to_lowercase).collect();
         let stems: Vec<Option<String>> = words.iter().map(|word| singular(word)).collect();
         if words.is_empty() {
             return Err(EngineError::rejected(ErrorKind::InvalidInput));
         }
-        // A fact counts only while it is its key's newest durable revision and not deleted,
-        // checked when the walk reaches it. So a superseded value never shows. The index keeps
-        // old revisions only for readers at the previous durable LSN, so a key changed during
-        // the walk may be missing from this call, like any record written after it started.
-        let current = |id: u32, key: &str, lsn: u64| -> Result<bool> {
-            let state = lock(&self.state)?;
-            let fact_key = (id, key.to_owned());
-            let revs = state.facts.map.get(&fact_key);
-            let newest = revs.and_then(|revs| visible(revs, self.tape.durable_lsn()).last());
-            Ok(newest.is_some_and(|rev| {
-                rev.lsn == lsn && !rev.deleted && !state.forgets.hides_fact(&fact_key, lsn)
-            }))
-        };
         let found = |fields: &[&[u8]]| {
             let text: Vec<String> =
                 fields.iter().map(|field| crate::search_index::lower(field)).collect();
@@ -1470,40 +1476,6 @@ impl Engine {
                 .iter()
                 .zip(&stems)
                 .all(|(word, stem)| has(word) || stem.as_deref().is_some_and(has))
-        };
-        let pick = |frame: &Frame| -> Result<Option<(Hit, usize)>> {
-            let hit = match frame.header.kind {
-                Kind::Turn => {
-                    // Parsed without inflating, checked, then inflated only when visible.
-                    let parsed = parse_turn(frame)?;
-                    if self.hides_turn(frame, &parsed)? {
-                        return Ok(None);
-                    }
-                    let (agent, session, turn) = turn_parsed(frame, parsed)?;
-                    if !found(&[&turn.content]) {
-                        return Ok(None);
-                    }
-                    Hit::Turn { agent, session, turn }
-                }
-                Kind::Fact => {
-                    let corrupt = |_| EngineError::rejected(ErrorKind::CorruptIndex);
-                    let fact = crate::fact::decode(&frame.payload).map_err(corrupt)?;
-                    let (id, lsn) = (frame.header.tenant_id, frame.header.lsn);
-                    let keep = found(&[fact.key.as_bytes(), &fact.content])
-                        && current(id, &fact.key, lsn)?;
-                    if !keep {
-                        return Ok(None);
-                    }
-                    let rev = Rev { lsn, deleted: false };
-                    Hit::Fact(stored((rev, frame.header.commit_time_ns, fact)))
-                }
-                _ => return Ok(None),
-            };
-            let size = match &hit {
-                Hit::Turn { turn, .. } => turn.content.len() + turn.meta.len(),
-                Hit::Fact(fact) => fact.key.len() + fact.content.len() + fact.meta.len(),
-            };
-            Ok(Some((hit, size)))
         };
         if query.limit == 0 || query.visits == 0 {
             return Err(EngineError::rejected(ErrorKind::InvalidInput));
@@ -1531,7 +1503,7 @@ impl Engine {
             }
             visited += 1;
             let Some(frame) = reader.read_if(lsn, mine)? else { return Ok(None) };
-            let Some((hit, size)) = pick(&frame)? else { return Ok(None) };
+            let Some((hit, size)) = self.search_pick(&frame, found)? else { return Ok(None) };
             bytes = bytes.saturating_add(size);
             if bytes > query.max_bytes && !hits.is_empty() {
                 return Ok(Some(Some(lsn + 1)));
@@ -1559,6 +1531,167 @@ impl Engine {
         }
         drop(visit);
         Ok(SearchPage { hits, next: next.flatten() })
+    }
+
+    /// Turns and current facts holding at least 1 content word of the query, best first. A
+    /// record scores the summed IDF of the words it holds. Ties go newest first. Returns at most
+    /// `query.limit` hits in 1 page, with no `next`.
+    ///
+    /// The word index gives `N` and each word's `df`, and scores the records below its
+    /// watermark from postings. A word in over half the records is skipped. The newest records
+    /// are walked and scored from their text, with the same `df`. Then the best are read in
+    /// order through the same checks as newest order.
+    fn search_ranked(&self, tenant: &str, query: SearchQuery) -> Result<SearchPage> {
+        let words = crate::rank::query_words(&query.query);
+        if words.is_empty() || query.limit == 0 || query.visits == 0 {
+            return Err(EngineError::rejected(ErrorKind::InvalidInput));
+        }
+        let stems: Vec<Option<String>> = words.iter().map(|word| singular(word)).collect();
+        let Some((state, snapshot, id)) = self.fact_snapshot(tenant)? else {
+            return Ok(SearchPage { hits: Vec::new(), next: None });
+        };
+        // Release the state lock before any tape read.
+        drop(state);
+        let top = query.before.map_or(snapshot, |before| before.saturating_sub(1).min(snapshot));
+        // `df` counts every indexed LSN, so `before` and the walk don't change a word's weight.
+        let (watermark, n, mut postings) = self
+            .indexer
+            .current(|index| {
+                let pairs = words.iter().zip(&stems);
+                let lists: Vec<Vec<u64>> = pairs
+                    .map(|(word, stem)| index.lsns(id, word, stem.as_deref(), u64::MAX))
+                    .collect();
+                (index.lsn, index.records(id), lists)
+            })
+            .unwrap_or_default();
+        postings.resize(words.len(), Vec::new());
+        let indexed = watermark.min(top.saturating_sub(self.walk_first));
+        // Below `indexed`, scores come from postings. Weights add in query order on both paths,
+        // so a record scores the same from postings or from its text.
+        let mut scored = Vec::new();
+        let mut scores: HashMap<u64, f64> = HashMap::new();
+        for ((word, stem), lsns) in words.iter().zip(&stems).zip(&postings) {
+            let df = lsns.len() as u64;
+            if df > n / 2 {
+                continue;
+            }
+            let weight = crate::rank::idf(n, df);
+            scored.push((word.as_str(), stem.as_deref(), weight));
+            for &lsn in &lsns[..lsns.partition_point(|&lsn| lsn <= indexed)] {
+                *scores.entry(lsn).or_insert(0.0) += weight;
+            }
+        }
+        drop(postings);
+        // None when the fields hold no scored word.
+        let score = |fields: &[&[u8]]| -> Option<f64> {
+            let text: Vec<String> =
+                fields.iter().map(|field| crate::search_index::lower(field)).collect();
+            let has = |word: &str| text.iter().any(|field| field.contains(word));
+            let held = scored.iter().filter(|(word, stem, _)| has(word) || stem.is_some_and(has));
+            held.map(|&(_, _, weight)| weight).reduce(|sum, weight| sum + weight)
+        };
+        let mine = |header: &Header| {
+            header.tenant_id == id && matches!(header.kind, Kind::Turn | Kind::Fact)
+        };
+        let (mut visited, mut reader) = (0usize, self.tape.reader());
+        let mut ranked: Vec<(f64, u64)> =
+            scores.into_iter().map(|(lsn, score)| (score, lsn)).collect();
+        // Above `indexed`, records are walked newest first and scored from their text. The walk
+        // counts toward `query.visits`, as in newest order, so a store without an index stays
+        // bounded. Only the score is kept. The best hits are read again below.
+        for lsn in (indexed + 1..=top).rev() {
+            if visited == query.visits {
+                break;
+            }
+            visited += 1;
+            let Some(frame) = reader.read_if(lsn, mine)? else { continue };
+            let got = std::cell::Cell::new(None);
+            let found = |fields: &[&[u8]]| {
+                got.set(score(fields));
+                got.get().is_some()
+            };
+            if self.search_pick(&frame, found)?.is_some() {
+                ranked.extend(got.get().map(|score| (score, lsn)));
+            }
+        }
+        ranked.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then(b.1.cmp(&a.1)));
+        let (mut hits, mut bytes) = (Vec::new(), 0usize);
+        for (_, lsn) in ranked {
+            // A walked record was counted when the walk read it.
+            if lsn <= indexed {
+                if visited == query.visits {
+                    break;
+                }
+                visited += 1;
+            }
+            let Some(frame) = reader.read_if(lsn, mine)? else { continue };
+            let found = |fields: &[&[u8]]| score(fields).is_some();
+            let Some((hit, size)) = self.search_pick(&frame, found)? else { continue };
+            bytes = bytes.saturating_add(size);
+            if bytes > query.max_bytes && !hits.is_empty() {
+                break;
+            }
+            hits.push(hit);
+            if hits.len() == query.limit {
+                break;
+            }
+        }
+        Ok(SearchPage { hits, next: None })
+    }
+
+    /// Reads 1 search candidate as a hit with its size, or None. A hidden turn is never
+    /// inflated. A fact counts only while it is its key's current value. `found` says whether
+    /// the record's text matches: turn content, or fact key and content.
+    fn search_pick(
+        &self,
+        frame: &Frame,
+        found: impl Fn(&[&[u8]]) -> bool,
+    ) -> Result<Option<(Hit, usize)>> {
+        // A fact counts only while it is its key's newest durable revision and not deleted,
+        // checked when the walk reaches it. So a superseded value never shows. The index keeps
+        // old revisions only for readers at the previous durable LSN, so a key changed during
+        // the walk may be missing from this call, like any record written after it started.
+        let current = |id: u32, key: &str, lsn: u64| -> Result<bool> {
+            let state = lock(&self.state)?;
+            let fact_key = (id, key.to_owned());
+            let revs = state.facts.map.get(&fact_key);
+            let newest = revs.and_then(|revs| visible(revs, self.tape.durable_lsn()).last());
+            Ok(newest.is_some_and(|rev| {
+                rev.lsn == lsn && !rev.deleted && !state.forgets.hides_fact(&fact_key, lsn)
+            }))
+        };
+        let hit = match frame.header.kind {
+            Kind::Turn => {
+                // Parsed without inflating, checked, then inflated only when visible.
+                let parsed = parse_turn(frame)?;
+                if self.hides_turn(frame, &parsed)? {
+                    return Ok(None);
+                }
+                let (agent, session, turn) = turn_parsed(frame, parsed)?;
+                if !found(&[&turn.content]) {
+                    return Ok(None);
+                }
+                Hit::Turn { agent, session, turn }
+            }
+            Kind::Fact => {
+                let corrupt = |_| EngineError::rejected(ErrorKind::CorruptIndex);
+                let fact = crate::fact::decode(&frame.payload).map_err(corrupt)?;
+                let (id, lsn) = (frame.header.tenant_id, frame.header.lsn);
+                let keep =
+                    found(&[fact.key.as_bytes(), &fact.content]) && current(id, &fact.key, lsn)?;
+                if !keep {
+                    return Ok(None);
+                }
+                let rev = Rev { lsn, deleted: false };
+                Hit::Fact(stored((rev, frame.header.commit_time_ns, fact)))
+            }
+            _ => return Ok(None),
+        };
+        let size = match &hit {
+            Hit::Turn { turn, .. } => turn.content.len() + turn.meta.len(),
+            Hit::Fact(fact) => fact.key.len() + fact.content.len() + fact.meta.len(),
+        };
+        Ok(Some((hit, size)))
     }
 
     /// Walks a tenant's turns and fact revisions newest first, each as written. Superseded
