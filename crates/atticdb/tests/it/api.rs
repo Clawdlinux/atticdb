@@ -856,3 +856,26 @@ fn health_tracks_engine_state() {
         assert_eq!(serde_json::from_slice::<Value>(&response.body).unwrap(), body, "{case}");
     }
 }
+
+/// A child forked by another test thread holds a copy of every descriptor until it execs. So
+/// an old listener can outlive `shutdown` and answer the reopen's probe (#219). Here a child
+/// holds a copy as its stdin for 1 s, and `serve` must wait it out. The test checks the copy
+/// still answers right before `serve`, and that the child is gone once `serve` returns. So it
+/// can't pass without the wait.
+#[test]
+fn serve_waits_out_a_copy_of_the_old_listener() {
+    let dir = Dir::new();
+    let path = dir.0.join("a");
+    let engine = sim_engine(&SimDisk::new(6), |_| {});
+    let (listener, _) = atticdb::listen::install_unix(&path, None, "0123456789abcdef").unwrap();
+    let copy = std::os::fd::OwnedFd::from(listener.try_clone().unwrap());
+    let mut child =
+        support::command("sleep").arg("1").stdin(std::process::Stdio::from(copy)).spawn().unwrap();
+    drop(listener);
+    assert!(std::os::unix::net::UnixStream::connect(&path).is_ok(), "the copy should answer");
+    let running = serve(engine, &dir, MAX_CONNECTIONS);
+    assert!(child.try_wait().unwrap().is_some(), "serve returned while the copy listened");
+    assert_eq!(running.vias[1].call(None, None, "GET", "/healthz", None).0, 200);
+    running.server.shutdown();
+    assert!(child.wait().unwrap().success());
+}

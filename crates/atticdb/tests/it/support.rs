@@ -478,6 +478,7 @@ pub struct Running {
 
 pub fn serve(engine: Arc<Engine>, dir: &Dir, max_connections: usize) -> Running {
     let socket = dir.0.join("a");
+    wait_unheard(&socket);
     let instance = atticdb::random_hex(16).unwrap();
     let tenants = [("a", TOKEN_A), ("b", TOKEN_B)].map(|(name, token)| Tenant {
         name: name.into(),
@@ -497,6 +498,28 @@ pub fn serve(engine: Arc<Engine>, dir: &Dir, max_connections: usize) -> Running 
     let server = serve::run(engine, listeners, config).unwrap();
     let vias = [Via::Tcp(server.tcp_addr().unwrap()), Via::Unix(socket)];
     Running { server, vias, instance }
+}
+
+/// Waits up to 10 s until nothing listens on `path`. A test that reopens a server there
+/// shuts the old one down first. But a child forked by another test thread holds a copy of
+/// every descriptor until it execs. Its copy keeps the old listener live, so `install_unix`
+/// would refuse the path (#219). A refused or missing path ends the wait at once.
+fn wait_unheard(path: &Path) {
+    use rustix::io::Errno;
+    use rustix::net::{AddressFamily, SocketAddrUnix, SocketType};
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let addr = SocketAddrUnix::new(path).unwrap();
+    loop {
+        let socket = rustix::net::socket(AddressFamily::UNIX, SocketType::STREAM, None).unwrap();
+        rustix::io::fcntl_setfd(&socket, rustix::io::FdFlags::CLOEXEC).unwrap();
+        // Nonblocking, so a full backlog answers EAGAIN instead of blocking.
+        rustix::io::ioctl_fionbio(&socket, true).unwrap();
+        if !matches!(rustix::net::connect(&socket, &addr), Ok(()) | Err(Errno::AGAIN)) {
+            return;
+        }
+        assert!(Instant::now() < deadline, "{} still listens after 10 s", path.display());
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// A spawned `atticdb` process. Its output is collected. Drop kills it.
