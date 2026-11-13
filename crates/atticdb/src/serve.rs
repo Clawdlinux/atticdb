@@ -576,6 +576,7 @@ fn try_start(config: Config, exit_on_poison: bool, log_requests: bool) -> Result
     // `run` stops at once when `LOCK` was already lost. Then it never served.
     if server.shared.tracker.lock().exited.is_none() {
         let _ = io::stderr().write_all(line.as_bytes());
+        crate::update::serve_watch(&data_dir);
     }
     match server.wait() {
         Exit::Poisoned => {

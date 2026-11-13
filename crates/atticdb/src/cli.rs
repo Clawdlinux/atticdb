@@ -17,6 +17,7 @@ pub const USAGE: &str = "usage:
   atticdb setup [--yes] [--harness <list>] [--no-hook] [--notes ask|auto] [--dry-run]
   atticdb doctor [--harness <list>]
   atticdb upgrade [--yes] [--version <v>]
+  atticdb upgrade --auto on|off
   atticdb connect <vscode|copilot> [--force] [--dry-run]
   atticdb connect <antigravity|claude-desktop> [--force] [--dry-run]
   atticdb connect <claude-code|codex|gemini> [--force] [--no-hook] [--notes ask|auto] [--dry-run]
@@ -71,7 +72,9 @@ pub const USAGE: &str = "usage:
   atticdb doctor --help.
   upgrade installs the latest release, or --version, over this binary with the release's
   install.sh. It keeps the old binary as atticdb.prev. Then it stops the server and runs
-  doctor. It asks first, unless --yes. Without a terminal on stdin, it needs --yes.";
+  doctor. It asks first, unless --yes. Without a terminal on stdin, it needs --yes.
+  upgrade --auto on lets the home's server run upgrade --yes for each new release, within a
+  day. Unix only. --auto off stops that.";
 
 /// How much color a stream gets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

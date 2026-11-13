@@ -103,9 +103,13 @@ fn main() -> ExitCode {
                 Some(0)
             }
             "doctor" => flags(rest, &["--harness"], &[]).and_then(doctor),
-            "upgrade" => flags(rest, &["--version"], &["--yes"]).map(|flags| {
+            "upgrade" => flags(rest, &["--version", "--auto"], &["--yes"]).and_then(|flags| {
+                if let Some(value) = flags.get("--auto") {
+                    // --auto only sets the switch, so it takes no other flag.
+                    return (flags.len() == 1).then(|| atticdb::upgrade::auto(value));
+                }
                 let version = flags.get("--version").map(String::as_str);
-                atticdb::upgrade::upgrade(flags.contains_key("--yes"), version)
+                Some(atticdb::upgrade::upgrade(flags.contains_key("--yes"), version))
             }),
             "disconnect" => match rest {
                 [name] => Harness::parse(name).map(atticdb::connect::disconnect),

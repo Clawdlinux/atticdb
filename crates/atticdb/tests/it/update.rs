@@ -132,6 +132,23 @@ impl Setup {
         env: &[(&str, &str)],
         stdin: &str,
     ) -> Output {
+        let mut process = self.start_exe(exe, path, url, args, env);
+        let mut input = process.child.stdin.take().unwrap();
+        let _ = input.write_all(stdin.as_bytes());
+        drop(input);
+        let (status, _) = process.wait();
+        (status.code(), steady(&process.stdout()), process.stderr())
+    }
+
+    /// Starts [`Self::run_exe`]'s process, with stdin still open.
+    fn start_exe(
+        &self,
+        exe: &Path,
+        path: &OsStr,
+        url: &str,
+        args: &[&str],
+        env: &[(&str, &str)],
+    ) -> Process {
         let mut command = support::command(exe);
         command.args(args).current_dir(&self.dir.0).env("HOME", self.dir.0.join("h"));
         command.env("ATTICDB_HOME", self.home()).env("PATH", path).env(API, url);
@@ -140,12 +157,7 @@ impl Setup {
         command.env_remove("XDG_CONFIG_HOME");
         command.env_remove("ATTICDB_TOKEN").env_remove("ATTICDB_SETUP_INTERACTIVE");
         command.envs(env.iter().copied()).stdin(Stdio::piped());
-        let mut process = Process::start(&mut command);
-        let mut input = process.child.stdin.take().unwrap();
-        let _ = input.write_all(stdin.as_bytes());
-        drop(input);
-        let (status, _) = process.wait();
-        (status.code(), steady(&process.stdout()), process.stderr())
+        Process::start(&mut command)
     }
 
     /// `atticdb doctor` with the check off.
@@ -358,7 +370,8 @@ fn setup_checks_after_apply() {
 
     let (code, out, err) = setup.run(&url, &args, &[], "");
     assert_eq!(code, Some(0), "{out}{err}");
-    assert_eq!(hits(&count), 1, "{out}{err}");
+    // The home's server that setup starts may ask too, before either writes the cache.
+    assert!(hits(&count) >= 1, "{out}{err}");
     assert_eq!(setup.read_cache()["latest"], "9.9.9");
     let last = out.lines().last().unwrap();
     match notice("9.9.9") {
@@ -368,20 +381,27 @@ fn setup_checks_after_apply() {
     assert!(!err.contains("curl") && !err.contains(" is out "), "{err}");
 }
 
-/// The hook and `mcp` never check, even with the check on and the API set: the listener
-/// sees no connection.
+/// The hook and `mcp` never check, even with the check on, the API set and a stale cache:
+/// the listener sees no connection. The home's server runs with the check off, so only the
+/// hook and `mcp` could ask.
 #[test]
 fn hook_never_checks() {
     let setup = Setup::new();
-    let _holders = Holders(vec![setup.home().join("data"), data_dir(&setup.dir.0.join("h"))]);
+    let data = setup.start_server();
+    let _holders = Holders(vec![data, data_dir(&setup.dir.0.join("h"))]);
+    let stale = json!({"checked": 1, "latest": "9.9.9"}).to_string();
+    std::fs::write(setup.cache(), &stale).unwrap();
     let (url, count) = fake_api(200, TAG);
     let stdin = json!({"cwd": setup.dir.0}).to_string();
     for hook in ["session-start", "post-compact"] {
         let (code, out, err) = setup.run(&url, &["hook", hook], &[], &stdin);
         assert_eq!(code, Some(0), "{hook}: {out}{err}");
         assert_eq!(hits(&count), 0, "{hook}: {out}{err}");
+        if hook == "session-start" && !atticdb::VERSION.ends_with("+dev") {
+            assert!(out.contains("Update: AtticDB 9.9.9 is out"), "{out}");
+        }
     }
-    assert!(!setup.cache().exists());
+    assert_eq!(std::fs::read_to_string(setup.cache()).unwrap(), stale);
 
     let mut command = support::command(env!("CARGO_BIN_EXE_atticdb"));
     command.arg("mcp").current_dir(&setup.dir.0).env("HOME", setup.dir.0.join("h"));
@@ -393,7 +413,141 @@ fn hook_never_checks() {
     assert!(!tools.as_array().unwrap().is_empty(), "{tools}");
     assert_eq!(mcp.close().0.code(), Some(0));
     assert_eq!(hits(&count), 0, "mcp never checks");
-    assert!(!setup.cache().exists());
+    assert_eq!(std::fs::read_to_string(setup.cache()).unwrap(), stale);
+}
+
+/// Polls `done` every 50 ms for up to 20 s.
+fn wait_for(mut done: impl FnMut() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while std::time::Instant::now() < deadline {
+        if done() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    done()
+}
+
+/// The home's server refreshes the cache once, in the background. With auto-upgrade on, a
+/// release build installs the release. A source build never does: no `install.sh` is
+/// fetched. It runs from a copy, so a stub never replaces the test's binary.
+#[test]
+fn home_server_refreshes_cache() {
+    let setup = Setup::new();
+    setup.make_home();
+    std::fs::write(setup.home().join("auto-upgrade"), "on\n").unwrap();
+    let release = Release::new("v9.9.9", stub(Stub::Install));
+    let _holders = Holders(vec![setup.home().join("data")]);
+    let exe = setup.copy_binary("bin2");
+    let path = format!("{}:/bin:/usr/bin", setup.path.to_str().unwrap());
+    let tmp = setup.tmp();
+    let env = [("ATTICDB_DOWNLOAD_BASE", release.base.as_str()), ("TMPDIR", tmp.to_str().unwrap())];
+    let args = ["fact", "set", "--key", "k", "--content", "v"];
+    let (code, out, err) = setup.run_exe(&exe, path.as_ref(), &release.api, &args, &env, "");
+    assert_eq!(code, Some(0), "{out}{err}");
+    let cached = || std::fs::read(setup.cache()).ok().and_then(|t| serde_json::from_slice(&t).ok());
+    let cached = wait_for(|| cached().is_some_and(|c: Value| c["latest"] == "9.9.9"));
+    assert!(cached, "{:?}", release.paths());
+    // Time for an auto-upgrade a release build would start.
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    if atticdb::VERSION.ends_with("+dev") {
+        assert_eq!(release.paths(), [LATEST.to_owned()]);
+    } else {
+        assert!(wait_for(|| std::fs::read(&exe).is_ok_and(|b| b == new_binary("9.9.9"))));
+        assert_eq!(release.paths(), [LATEST.to_owned(), installer("9.9.9")]);
+    }
+}
+
+/// A server the hook starts for its `--home` checks for that home, even when
+/// `ATTICDB_HOME` names another. The hook passes the home on.
+#[test]
+fn hook_home_server_checks() {
+    let setup = Setup::new();
+    let _holders = Holders(vec![setup.home().join("data")]);
+    let (url, count) = fake_api(200, TAG);
+    let other = setup.dir.0.join("other");
+    let home = setup.home();
+    let stdin = json!({"cwd": setup.dir.0}).to_string();
+    let args = ["hook", "session-start", "--home", home.to_str().unwrap()];
+    let env = [("ATTICDB_HOME", other.to_str().unwrap())];
+    let (code, out, err) = setup.run(&url, &args, &env, &stdin);
+    assert_eq!(code, Some(0), "{out}{err}");
+    assert!(home.join("data").exists(), "{out}{err}");
+    assert!(wait_for(|| setup.cache().exists()), "{out}{err}");
+    assert_eq!(setup.read_cache()["latest"], "9.9.9");
+    assert!(hits(&count) >= 1);
+    assert!(!other.exists());
+}
+
+/// Upgrades of 1 binary take turns on its folder's lock. One that waited finds the binary
+/// another upgrade replaced, and changes nothing.
+#[test]
+fn upgrade_waits_its_turn() {
+    let setup = Setup::new();
+    setup.make_home();
+    let exe = setup.copy_binary("bin2");
+    let dir = exe.parent().unwrap().to_owned();
+    let release = Release::new("v9.9.9", stub(Stub::Install));
+    let folder = std::fs::File::open(&dir).unwrap();
+    folder.lock().unwrap();
+    let path = format!("{}:/bin:/usr/bin", setup.path.to_str().unwrap());
+    let tmp = setup.tmp();
+    let env = [("ATTICDB_DOWNLOAD_BASE", release.base.as_str()), ("TMPDIR", tmp.to_str().unwrap())];
+    let mut process =
+        setup.start_exe(&exe, path.as_ref(), &release.api, &["upgrade", "--yes"], &env);
+    drop(process.child.stdin.take());
+    assert!(wait_for(|| release.paths().contains(&LATEST.to_owned())));
+    // Another upgrade replaces the binary while this one waits, or before it locks.
+    let swap = dir.join(".swap");
+    std::fs::write(&swap, "#!/bin/sh\necho 'atticdb 0.0.1'\n").unwrap();
+    std::fs::set_permissions(&swap, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    std::fs::rename(&swap, &exe).unwrap();
+    drop(folder);
+    let (status, _) = process.wait();
+    let (out, err) = (process.stdout(), process.stderr());
+    assert_eq!(status.code(), Some(0), "{out}{err}");
+    let said =
+        format!("Another upgrade changed {} meanwhile. It says: atticdb 0.0.1.", exe.display());
+    assert!(out.contains(&said), "{out}");
+    assert_eq!(release.paths(), [LATEST.to_owned()], "no install");
+    assert_eq!(names(&dir), ["atticdb"]);
+}
+
+/// `upgrade --auto off` removes the switch. `--auto on` writes it, mode 0600, but never for a
+/// source build. Doctor names it while it is on. Any other value, or another flag beside
+/// `--auto`, is a usage error.
+#[test]
+fn upgrade_auto_switch() {
+    let setup = Setup::new();
+    setup.make_home();
+    let marker = setup.home().join("auto-upgrade");
+    let url = "http://127.0.0.1:9/";
+    let log = setup.home().join("upgrade.log");
+
+    std::fs::write(&marker, "on\n").unwrap();
+    let (_, out, _) = setup.doctor_off(url);
+    assert!(out.contains(&format!("Auto-upgrade: on. Log: {}\n", log.display())), "{out}");
+    let (code, out, err) = setup.run(url, &["upgrade", "--auto", "off"], &[], "");
+    assert_eq!((code, out.as_str(), err.as_str()), (Some(0), "Auto-upgrade is off.\n", ""));
+    assert!(!marker.exists());
+    let (_, out, _) = setup.doctor_off(url);
+    assert!(!out.contains("Auto-upgrade"), "{out}");
+
+    let (code, out, err) = setup.run(url, &["upgrade", "--auto", "on"], &[], "");
+    if atticdb::VERSION.ends_with("+dev") {
+        assert_eq!(code, Some(1), "{out}{err}");
+        assert!(err.ends_with("is a source build, which never auto-upgrades.\n"), "{err}");
+        assert!(!marker.exists());
+    } else {
+        assert_eq!(code, Some(0), "{out}{err}");
+        assert!(out.starts_with("Auto-upgrade is on."), "{out}");
+        assert_eq!(std::fs::metadata(&marker).unwrap().mode() & 0o777, 0o600);
+    }
+
+    let (code, _, err) = setup.run(url, &["upgrade", "--auto", "maybe"], &[], "");
+    assert_eq!((code, err.as_str()), (Some(2), "atticdb: --auto takes on or off\n"));
+    let (code, out, err) = setup.run(url, &["upgrade", "--auto", "on", "--yes"], &[], "");
+    assert_eq!(code, Some(2), "{out}{err}");
 }
 
 /// The warning every upgrade plan shows.
@@ -799,9 +953,10 @@ fn upgrade_reports_a_failed_check() {
     assert_eq!(names(exe.parent().unwrap()), ["atticdb"]);
 }
 
-/// A binary under `.cargo/bin`, `/opt/homebrew/` or a Homebrew `Cellar` gets its tool's
-/// command, and exit 1. Nothing runs: no request, and no change. A symlink into the Cellar
-/// counts as the Cellar.
+/// A binary under `/opt/homebrew/` or a Homebrew `Cellar` gets its tool's command and exit 1,
+/// as does a source build under `.cargo/bin`. Nothing runs: no request, and no change. A
+/// symlink into the Cellar counts as the Cellar. A release under `.cargo/bin` came from
+/// install.sh, so it upgrades.
 #[test]
 fn upgrade_points_cargo_and_brew_to_their_tool() {
     let setup = Setup::new();
@@ -813,12 +968,16 @@ fn upgrade_points_cargo_and_brew_to_their_tool() {
     let link = setup.dir.0.join("usr/local/bin");
     std::fs::create_dir_all(&link).unwrap();
     std::os::unix::fs::symlink(&cellar, link.join("atticdb")).unwrap();
-    let rows = [
-        (setup.copy_binary("h/.cargo/bin"), cargo),
+    let in_cargo = setup.copy_binary("h/.cargo/bin");
+    let source = atticdb::VERSION.ends_with("+dev");
+    let mut rows = vec![
         (setup.copy_binary("opt/homebrew/bin"), brew),
         (cellar.clone(), brew),
         (link.join("atticdb"), brew),
     ];
+    if source {
+        rows.push((in_cargo.clone(), cargo));
+    }
     let release = Release::new("v9.9.9", stub(Stub::Install));
     for (exe, said) in rows {
         let old = std::fs::read(&exe).unwrap();
@@ -828,6 +987,12 @@ fn upgrade_points_cargo_and_brew_to_their_tool() {
         assert_eq!(names(exe.parent().unwrap()), ["atticdb"], "{}", exe.display());
     }
     assert_eq!(release.paths(), Vec::<String>::new());
+    if !source {
+        let (code, out, err) = setup.upgrade(&in_cargo, &release, &["--yes"], &[], "");
+        assert_eq!(code, Some(0), "{out}{err}");
+        assert_eq!(std::fs::read(&in_cargo).unwrap(), new_binary("9.9.9"));
+        assert_eq!(release.paths(), [LATEST.to_owned(), installer("9.9.9")]);
+    }
 }
 
 /// curl skips the user's `~/.curlrc`. One that caps downloads at 1 byte would fail the

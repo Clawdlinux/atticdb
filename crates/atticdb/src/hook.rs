@@ -266,7 +266,9 @@ fn block_in(repo: &str, deadline: Instant, lookup: &Lookup) -> Result<Option<Str
             None
         }
     };
-    if lines.is_empty() && hint.is_none() {
+    // From the cache alone, so the hook never waits on the network.
+    let update = lookup.dir().ok().and_then(|dir| crate::update::hook_notice(&dir));
+    if lines.is_empty() && hint.is_none() && update.is_none() {
         return Ok(None);
     }
     // Codex read the old, shorter header as "this is all the memory there is" (#122). Dates
@@ -279,9 +281,9 @@ fn block_in(repo: &str, deadline: Instant, lookup: &Lookup) -> Result<Option<Str
          status, check it against the repo. If it is wrong, set its key again. A line ending \
          in (cut) was shortened. Call fact_get or memory_search for the rest."
     );
-    // Right after the header, so the cap never drops it. [`others`] keeps the list near
-    // [`OTHERS_CHARS`], so the header and the line fit in [`MAX_BLOCK`].
-    Ok(Some(cap([header].into_iter().chain(hint).chain(lines))))
+    // Right after the header, so the cap never drops them. [`others`] keeps the list near
+    // [`OTHERS_CHARS`], so the header, the update line and the list fit in [`MAX_BLOCK`].
+    Ok(Some(cap([header].into_iter().chain(update).chain(hint).chain(lines))))
 }
 
 /// Most sessions [`others`] names.

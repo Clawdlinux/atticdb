@@ -90,6 +90,9 @@ pub struct Launch {
     data_dir: Option<PathBuf>,
     config: Option<PathBuf>,
     unix_socket: Option<PathBuf>,
+    /// The home this store is, when it is one. A started server gets it as `ATTICDB_HOME`,
+    /// so it knows it is the home's, even when a hook's `--home` named it.
+    home: Option<PathBuf>,
     child: Option<Child>,
     next_spawn: Instant,
     backoff: Duration,
@@ -121,6 +124,7 @@ impl Launch {
             data_dir,
             config,
             unix_socket,
+            home: None,
             child: None,
             next_spawn: Instant::now(),
             backoff: FIRST_BACKOFF,
@@ -130,6 +134,12 @@ impl Launch {
             #[cfg(windows)]
             token: None,
         }
+    }
+
+    /// Sets the home this store is, which a started server gets as `ATTICDB_HOME`.
+    pub(crate) fn with_home(mut self, home: Option<PathBuf>) -> Self {
+        self.home = home;
+        self
     }
 
     /// Sets the token a server found through `LOCK` must prove it knows.
@@ -231,6 +241,9 @@ impl Launch {
         crate::config::check_private(&log, &path, "server log").map_err(io::Error::other)?;
         let mut command = Command::new(std::env::current_exe()?);
         command.arg("serve").arg("--config").arg(config).arg("--data-dir").arg(dir);
+        if let Some(home) = &self.home {
+            command.env(crate::home::HOME_ENV, home);
+        }
         if let Some(socket) = &self.unix_socket {
             command.arg("--unix-socket").arg(socket);
         }
@@ -265,6 +278,9 @@ impl Launch {
         crate::config::check_private(&log, &path, "server log").map_err(io::Error::other)?;
         let mut command = Command::new(std::env::current_exe()?);
         command.arg("serve").arg("--config").arg(config).arg("--data-dir").arg(dir);
+        if let Some(home) = &self.home {
+            command.env(crate::home::HOME_ENV, home);
+        }
         command
             .args(["--listen", "127.0.0.1:0", "--exit-on-poison"])
             .env_remove(crate::client::TOKEN_ENV)

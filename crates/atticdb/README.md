@@ -242,6 +242,8 @@ In Copilot CLI, run `/sandbox`, and on the Filesystem tab add the home under Use
 atticdb upgrade                   # the latest release. Shows the plan, then asks
 atticdb upgrade --yes             # doesn't ask. Needed when stdin is not a terminal
 atticdb upgrade --version 0.3.0   # this release, with or without the v, even an older one
+atticdb upgrade --auto on         # the home's server upgrades on its own
+atticdb upgrade --auto off        # back to asking
 ```
 
 It installs a release over this binary with that release's own `install.sh`. The plan comes first:
@@ -264,6 +266,7 @@ A `+dev` source build counts as older than its own release.
 
 Then it does this:
 
+0. Takes an exclusive `flock` on the binary's folder, held to the end, so upgrades of 1 binary take turns. If the binary there no longer prints this version, another upgrade replaced it. Then it prints `Another upgrade changed <binary> meanwhile. It says: <its --version>. Nothing changed.` and exits 0.
 1. Downloads `<base>/download/v<to>/install.sh` to a temp file. `<base>` is `ATTICDB_DOWNLOAD_BASE`, or `https://github.com/Clawdlinux/atticdb/releases`.
 2. Copies this binary to `atticdb.prev` beside it. An earlier `atticdb.prev` waits as `atticdb.prev.old` until the end.
 3. Runs `/bin/sh install.sh` with `ATTICDB_VERSION=<to>` and `ATTICDB_INSTALL_DIR=<this binary's folder>`. It passes `ATTICDB_DOWNLOAD_BASE` too, when set. The installer checks the tarball against `SHA256SUMS`.
@@ -284,7 +287,8 @@ To roll back, put `atticdb.prev` back and stop the server. With the default inst
 mv ~/.local/bin/atticdb.prev ~/.local/bin/atticdb
 ```
 
-A binary under `.cargo/bin` gets `Installed by cargo. Run: cargo install --git https://github.com/Clawdlinux/atticdb atticdb --locked`.
+A `+dev` binary under `.cargo/bin` gets `Installed by cargo. Run: cargo install --git https://github.com/Clawdlinux/atticdb atticdb --locked`.
+cargo builds from source, so a release version there came from `install.sh`, and upgrades as usual.
 One under `/opt/homebrew/` or in a Homebrew `Cellar/` gets `Installed by Homebrew. Run: brew upgrade atticdb`.
 Neither runs anything, and both exit 1.
 
@@ -297,10 +301,24 @@ The steps match the top README's Install, plus a copy of `atticdb.exe` kept to r
 | 1 | The check, the download or the installer failed, or the binary isn't named `atticdb`. Or cargo or Homebrew owns it, or it runs on Windows |
 | 2 | A usage error such as a bad `--version`, no terminal without `--yes`, or no answer |
 
+### Auto-upgrade
+
+`atticdb upgrade --auto on` writes `<home>/auto-upgrade`, mode 0600. `--auto off` removes it. `--auto` takes no other flag.
+`on` fails with exit 1 on Windows, for a `+dev` build, and for a binary cargo or Homebrew owns. It needs the home to exist.
+`atticdb doctor` prints `Auto-upgrade: on. Log: <home>/upgrade.log` while it is on.
+
+With it on, the home's server runs `<its binary> upgrade --yes --version <v>` when the cache names a newer release.
+It runs in its own process group, so it outlives the server it stops. Its output appends to `<home>/upgrade.log`, mode 0600, after a dated line.
+The server tries each version at most once a day. A `+dev` server never runs it. The off switches stop it too, since they stop the check.
+Homes that share 1 binary share its upgrades. After 1 home's upgrade, another home's server runs the old code until it restarts. `atticdb doctor` flags that server. On Linux its own auto-upgrade can't start, since its binary was replaced, and its log says so.
+
 ### Update check
 
 `atticdb doctor` and `atticdb setup` check for a new release at most once a day. Setup checks only when it applies a plan.
-The hook, `atticdb mcp`, `atticdb serve` and the other verbs never check.
+The home's server checks too, from a background thread, every hour through the same cache. So it asks at most once a day.
+Only a server whose data dir is `<home>/data` checks, by `ATTICDB_HOME` or the default home. Other servers never do.
+A server AtticDB starts for the home gets that home as `ATTICDB_HOME`, so a hook's `--home` works too.
+The hook reads the cache alone and shows the notice in its block. The hook, `atticdb mcp` and the other verbs never ask.
 When a newer release is out, they print this last, and keep their exit code:
 
 ```
@@ -314,7 +332,7 @@ AtticDB 0.4.0 is out (you have 0.3.0). Run: atticdb upgrade
 - **Cache:** `<home>/update-check.json`, mode 0600, written through a temp file and a rename. It holds `{"checked": <unix seconds>, "latest": "<x.y.z>"}` for 24 h.
   A failed check writes `{"checked": <unix seconds>}` alone. No check runs for 1 h after it.
   A cache dated in the future is ignored. The check never creates the home.
-- **Off switches:** `ATTICDB_NO_UPDATE_CHECK` set to any value but empty or `0`. Or `CI` set to anything, even empty.
+- **Off switches:** `ATTICDB_NO_UPDATE_CHECK` set to any value but empty or `0`. Or `CI` set to anything, even empty. They also hide the hook's notice.
   A `+dev` build still checks, but never prints the notice. `atticdb upgrade` ignores the off switches.
 
 ## `atticdb serve`
@@ -930,6 +948,7 @@ The stop cannot help if the harness stops reading the hook's output mid-line. Th
 
 ```text
 AtticDB memory for repo <repo>, a snapshot from chat start: rules, facts under repo/<repo>/ and only the 5 newest notes. Older notes and decisions are not shown. Before saying why or when something was decided, call memory_search. Dates show when each line was saved. Before acting on a fact about code, a version or a status, check it against the repo. If it is wrong, set its key again. A line ending in (cut) was shortened. Call fact_get or memory_search for the rest.
+Update: AtticDB <latest> is out (you have <current>). Tell the user once. To upgrade: atticdb upgrade. To upgrade on its own from now on: atticdb upgrade --auto on.
 Other sessions with notes: <session>, <session>. When you work in one of those repos, pass its name as session and call fact_list with prefix repo/<name>/.
 Rules:
 - <key> (<date>): <content>
@@ -947,7 +966,10 @@ With no memory but other sessions, the block is the header and this line.
 A content over 300 characters is cut to 300 and ends in ` (cut)`. Newlines become spaces.
 Each `<date>` is the UTC save date, as `2026-11-12`, so the block stays the same until memory changes.
 Past 6,000 characters the block stops at a whole line and ends with `(more in atticdb)`.
-The block depends only on the repo and memory.
+The `Update:` line shows when the home's `update-check.json` names a newer release than this binary, whatever the cache's age.
+The hook never asks the network for it. With auto-upgrade on, the line says the server installs it, and names `upgrade.log`.
+On Windows, which has no auto-upgrade, the line ends after `To upgrade: atticdb upgrade.` The off switches and `+dev` builds leave it out. With no memory and no other sessions, the block is the header and this line.
+The block depends only on the repo, memory and that cache.
 It is a snapshot. The model can call `memory_search` or `fact_list` for more.
 
 ## `atticdb hook post-compact`

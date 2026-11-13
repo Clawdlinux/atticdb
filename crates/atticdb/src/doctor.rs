@@ -72,6 +72,10 @@ impl Checks {
 pub fn run(harnesses: Option<Vec<Harness>>) -> u8 {
     let code = check(harnesses);
     if let Ok(dir) = crate::home::dir() {
+        if crate::update::auto_on(&dir) {
+            let log = dir.join(crate::update::UPGRADE_LOG);
+            println!("Auto-upgrade: on. Log: {}", log.display());
+        }
         crate::update::show(&dir);
     }
     code
