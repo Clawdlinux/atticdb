@@ -1142,4 +1142,4 @@ Not yet: arm64, an `install.ps1`, and Codex's hooks ([#142](https://github.com/C
 
 ## Tests
 
-Socket paths, staging included, must fit `sun_path` (104 bytes on macOS). Tests put them under `/tmp/atticdb-test-<uid>` on macOS and `/var/tmp/atticdb-test-<uid>` on Linux. The checkout path does not matter. Tests create that directory with mode 0700 and fail if it is not private to you. `ATTICDB_TEST_DIR` is optional. It may be any short directory, and tests resolve it to its real path.
+Socket paths, staging included, must fit `sun_path` (104 bytes on macOS). Tests put them under `/tmp/atticdb-test-<uid>` on macOS and `/var/tmp/atticdb-test-<uid>` on Linux. The checkout path does not matter. Tests create that directory with mode 0700 and fail if it is not private to you. `ATTICDB_TEST_DIR` is optional. It may be any short directory, and tests resolve it to its real path. Point it at a folder used only for tests, since tests remove what dead test runs left there.
