@@ -856,3 +856,24 @@ fn health_tracks_engine_state() {
         assert_eq!(serde_json::from_slice::<Value>(&response.body).unwrap(), body, "{case}");
     }
 }
+
+/// A child forked by another test thread holds a copy of every descriptor until it execs. So
+/// an old listener can outlive `shutdown` and answer the reopen's probe (#219). Here a child
+/// holds a copy as its stdin for 300 ms, and `serve` must wait it out.
+#[test]
+fn serve_waits_out_a_copy_of_the_old_listener() {
+    let dir = Dir::new();
+    let (listener, _) =
+        atticdb::listen::install_unix(&dir.0.join("a"), None, "0123456789abcdef").unwrap();
+    let copy = std::os::fd::OwnedFd::from(listener.try_clone().unwrap());
+    let mut child = support::command("sleep")
+        .arg("0.3")
+        .stdin(std::process::Stdio::from(copy))
+        .spawn()
+        .unwrap();
+    drop(listener);
+    let running = serve(sim_engine(&SimDisk::new(6), |_| {}), &dir, MAX_CONNECTIONS);
+    assert_eq!(running.vias[1].call(None, None, "GET", "/healthz", None).0, 200);
+    running.server.shutdown();
+    assert!(child.wait().unwrap().success());
+}
