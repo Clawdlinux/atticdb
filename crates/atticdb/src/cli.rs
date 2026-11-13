@@ -51,6 +51,7 @@ pub const USAGE: &str = "usage:
   after the folder holding .git. A worktree takes its main repo's name.
   append, recent, search, fact and file print one JSON line. They exit 1 when nothing was written,
   3 when a write may or may not be saved.
+  search ranks by relevance. --order newest needs every word and pages with --before.
   tree prints fact keys as a tree of / segments, with counts and the newest change date.
   With no <prefix>, --depth defaults to 2. --content adds each value's first line. --json
   prints 1 JSON line. Deleted and forgotten keys never show.

@@ -353,7 +353,9 @@ def wiring_hits(hroot: str) -> list[str]:
 # ---- the commands of 1 run ----
 
 def search_step(cfg: Config, repo: str, phase: str, token: str) -> Step:
-    return Step(phase, [cfg.atticdb, "search", "--query", token], repo, agents.ATTICDB_TIMEOUT)
+    # Newest order needs every word, so a token is found only as a whole, as before ranking.
+    argv = [cfg.atticdb, "search", "--query", token, "--order", "newest"]
+    return Step(phase, argv, repo, agents.ATTICDB_TIMEOUT)
 
 
 def oracle_state(case: Case, arm: str) -> dict[str, str]:

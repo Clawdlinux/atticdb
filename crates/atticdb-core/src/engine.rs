@@ -206,7 +206,8 @@ pub struct SearchQuery {
     /// Words separated by whitespace. Matched as substrings, so `deploy` finds `deployment`.
     /// A plural word also matches its singular, so `keys` finds `key`. In relevance order, the
     /// query splits on every char that isn't alphanumeric. Stopwords and words under 3 chars
-    /// are dropped. If that leaves none, every word is kept.
+    /// are dropped. A whitespace-delimited token of 3 or more chars with a digit, such as
+    /// `fin-88`, is also kept whole. If that leaves none, every split word is kept.
     pub query: String,
     /// Exclusive cursor: only records below this LSN. A previous page's `next`.
     pub before: Option<u64>,

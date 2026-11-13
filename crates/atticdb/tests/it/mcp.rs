@@ -309,7 +309,8 @@ fn tool_calls_over_stdio() {
     );
     let page = mcp.call("fact_list", json!({"prefix": "repo/", "after": "repo/b"}));
     assert_eq!((text(&page), &page["structuredContent"]["next"]), ("repo/c: repo/c", &Value::Null));
-    // Search spans sessions and current facts, newest first; a deleted fact is gone.
+    // Search spans sessions and current facts, ranked; a 1-letter query ties, so newest first.
+    // A deleted fact is gone.
     let found = mcp.call("memory_search", json!({"query": "T"}));
     let (found, seq) = (text(&found), first_turn + 1);
     assert_eq!(found, format!("[ag/s1 #{seq} assistant] three\n[ag/s2 #1 user] two"));
@@ -1162,6 +1163,13 @@ fn memory_search_ranks_by_default() {
     );
     let none = a.call("memory_search", json!({"query": question, "order": "newest"}));
     assert_eq!(text(&none), "no matches");
+    for order in [json!("oldest"), json!(1)] {
+        let bad = a.call("memory_search", json!({"query": question, "order": order}));
+        assert_eq!(
+            (&bad["isError"], text(&bad)),
+            (&json!(true), "order must be relevance or newest")
+        );
+    }
     let page = a.call("memory_search", json!({"query": "melanie", "order": "newest", "limit": 2}));
     assert_eq!(contents_of_hits(&page), [tea, shopping], "{page}");
     let next = page["structuredContent"]["next"].as_u64().unwrap_or_else(|| panic!("{page}"));
@@ -1697,6 +1705,10 @@ fn hosted_session_runs_the_same_tools() {
     committed(&hosted_call(&mut hosted, "memory_append", named), "append to atticdb");
     let recent = hosted_call(&mut hosted, "memory_recent", json!({"session": "atticdb"}));
     assert_eq!(contents(&recent), ["in atticdb"], "{recent}");
+    // Hosted search ranks too: each turn holds 1 of the words, so the tie goes newest first.
+    let found = hosted_call(&mut hosted, "memory_search", json!({"query": "session atticdb"}));
+    assert_eq!(contents_of_hits(&found), ["in atticdb", "no session"], "{found}");
+    assert_eq!(found["structuredContent"]["next"], Value::Null, "{found}");
 }
 
 /// Each hosted session guards its fact writes, as each stdio adapter does.

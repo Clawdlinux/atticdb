@@ -336,6 +336,17 @@ def claude_stream(reply: str, tool_result: str = "") -> str:
     return "".join(json.dumps(ev) + "\n" for ev in events)
 
 
+def test_search_steps_ask_for_newest_order(env):
+    """An evidence search needs every word of its token, so it asks for newest order."""
+    cfg = make_cfg(env, models=dict(MODELS))
+    arm = next(a for a in arms.ARMS if arms.has_writer(a))
+    steps = run.plan(cfg, CASES["H1"], arm, "claude-code", "copilot", "/tmp/zhe-root")
+    searches = steps["start"] + steps["capture"]
+    assert steps["capture"] and len(searches) == 2 * len(CASES["H1"].evidence)
+    for step, token in zip(searches, CASES["H1"].evidence * 2):
+        assert step.argv == [cfg.atticdb, "search", "--query", token, "--order", "newest"]
+
+
 def test_blank_plan_has_reader_only(env):
     cfg = make_cfg(env, models=dict(MODELS))
     steps = run.plan(cfg, CASES["H1"], "blank", "claude-code", "copilot", "/tmp/zhe-root")

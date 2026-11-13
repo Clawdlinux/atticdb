@@ -584,6 +584,16 @@ fn search_orders_by_relevance_or_newest() {
         let (status, rejected) = unix.a("GET", &target, None);
         assert_eq!((status, &rejected["error"]), (400, &json!("invalid_input")), "{target}");
     }
+    // An id stays whole too, so the turn naming FIN-88 beats a newer one with only "fin".
+    for (key, content) in [("k4", "closed FIN-88 today"), ("k5", "fin 88 notes")] {
+        let (status, put) = unix.a("POST", "/v1/append", Some(&append_body("s", key, content)));
+        assert_eq!(status, 200, "{put}");
+    }
+    let target = format!("/v1/search?q={}&order=relevance", query_value("Is FIN-88 fixed?"));
+    let (status, page) = unix.a("GET", &target, None);
+    let found: Vec<&Value> =
+        page["hits"].as_array().unwrap().iter().map(|h| &h["content"]).collect();
+    assert_eq!((status, found), (200, vec![&json!("closed FIN-88 today"), &json!("fin 88 notes")]));
     running.server.shutdown();
 }
 

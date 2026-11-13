@@ -1,6 +1,7 @@
 //! Query words and IDF weights for ranked search.
 //!
-//! The rules match the LoCoMo research harness, so its numbers carry over.
+//! The rules match the LoCoMo research harness, so its numbers carry over. Only keeping ids
+//! such as `fin-88` whole is extra.
 
 use std::collections::HashSet;
 
@@ -174,20 +175,28 @@ const MIN_CHARS: usize = 3;
 
 /// The words ranked search scores, in first-seen order without repeats. The query is
 /// lowercased and split on every char that isn't alphanumeric. Words of 3 or more chars that
-/// aren't stopwords are kept. If none are, every word is kept, so `is it ok` still matches.
+/// aren't stopwords are kept. An id such as `fin-88` or `v0.3.1` is kept whole too, after the
+/// words split from it. That is a whitespace-delimited token of 3 or more chars, trimmed of
+/// leading and trailing non-alphanumeric chars, that holds an ASCII digit. If nothing is
+/// kept, every split word is, so `is it ok` still matches.
 pub(crate) fn query_words(query: &str) -> Vec<String> {
     let lower = query.to_lowercase();
-    let (mut all, mut seen): (Vec<&str>, HashSet<&str>) = (Vec::new(), HashSet::new());
-    for word in lower.split(|c: char| !c.is_alphanumeric()).filter(|word| !word.is_empty()) {
-        if seen.insert(word) {
-            all.push(word);
+    let (mut all, mut content, mut seen) = (Vec::new(), Vec::new(), HashSet::new());
+    for token in lower.split_whitespace() {
+        for word in token.split(|c: char| !c.is_alphanumeric()).filter(|word| !word.is_empty()) {
+            if seen.insert(word) {
+                all.push(word);
+                if word.chars().count() >= MIN_CHARS && !STOPWORDS.contains(&word) {
+                    content.push(word);
+                }
+            }
+        }
+        let whole = token.trim_matches(|c: char| !c.is_alphanumeric());
+        let id = whole.chars().count() >= MIN_CHARS && whole.bytes().any(|b| b.is_ascii_digit());
+        if id && seen.insert(whole) {
+            content.push(whole);
         }
     }
-    let content: Vec<&str> = all
-        .iter()
-        .copied()
-        .filter(|word| word.chars().count() >= MIN_CHARS && !STOPWORDS.contains(word))
-        .collect();
     let words = if content.is_empty() { all } else { content };
     words.into_iter().map(str::to_owned).collect()
 }
@@ -209,6 +218,17 @@ mod tests {
         assert_eq!(query_words("is it ok"), ["is", "it", "ok"], "nothing left, so every word");
         assert_eq!(query_words("Paint, paint PAINT"), ["paint"], "no repeats");
         assert_eq!(query_words("ok OK it"), ["ok", "it"], "no repeats in the fallback");
+    }
+
+    #[test]
+    fn query_words_keep_ids_whole() {
+        assert_eq!(query_words("Is FIN-88 fixed?"), ["fin", "fin-88", "fixed"]);
+        // "only" is a stopword.
+        assert_eq!(query_words("python 3.9 only"), ["python", "3.9"]);
+        assert!(query_words("v0.3.1 tag").contains(&"v0.3.1".to_owned()));
+        assert_eq!(query_words("(2022) in 2022"), ["2022"], "a trimmed id is a repeat");
+        assert_eq!(query_words("chapter 7, page"), ["chapter", "page"], "7 is under 3 chars");
+        assert_eq!(query_words("is 7.5 ok"), ["7.5"], "an id is kept, so no fallback");
     }
 
     #[test]
