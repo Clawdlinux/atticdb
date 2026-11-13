@@ -639,3 +639,67 @@ pub fn recover(dir: &Path, lsn: u64) -> u8 {
         }
     }
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use crate::config::{Tenant, Token};
+    use atticdb_tape::{SimDisk, SystemClock};
+
+    const TOKEN: &str = "token-a-0123456789abcdefghijklmnopqrstuv";
+
+    /// Writes 1 full keep-alive append into a socket pair, serves the other end, and returns
+    /// everything the server wrote before it closed.
+    fn append(shared: &Shared, key: &str) -> String {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let body = serde_json::json!({"agent": "a", "session": "s", "idem_key": key,
+            "turns": [{"role": "user", "content": key}]})
+        .to_string();
+        let head = format!(
+            "POST /v1/append HTTP/1.1\r\nAuthorization: Bearer {TOKEN}\r\n\
+             Connection: keep-alive\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        client.write_all(format!("{head}{body}").as_bytes()).unwrap();
+        // The server reads EOF after the request, so a kept-alive connection ends too.
+        client.shutdown(Shutdown::Write).unwrap();
+        shared.connection(server, false);
+        let mut reply = String::new();
+        client.read_to_string(&mut reply).unwrap();
+        reply
+    }
+
+    /// A full request read after the stop decision gets 503 `busy` and `Connection: close`,
+    /// and never reaches the engine. Only the admission check covers this: no stream was
+    /// shut, since `stop` alone shuts none.
+    #[test]
+    fn a_full_request_after_stop_is_refused() {
+        let disk = Arc::new(SimDisk::new(9));
+        let opened = Engine::open_with(disk, Arc::new(SystemClock), "db", Default::default());
+        let engine = Arc::new(opened.unwrap());
+        let tenant = Tenant { name: "a".into(), token: Token::new(TOKEN.into()).unwrap() };
+        let config = ServeConfig {
+            auth: Auth::new(&[tenant]),
+            instance: "0123456789abcdef".into(),
+            exit_on_poison: false,
+            max_connections: MAX_CONNECTIONS,
+            log_requests: false,
+            lock_path: None,
+        };
+        let server = run(engine.clone(), Listeners::default(), config).unwrap();
+        let durable = || engine.metrics().unwrap().durable_lsn;
+        let served = append(&server.shared, "before");
+        assert!(served.starts_with("HTTP/1.1 200 "), "the request is valid: {served}");
+        let before = durable();
+        assert!(server.shared.stop());
+        let refused = append(&server.shared, "after");
+        assert!(refused.starts_with("HTTP/1.1 503 "), "{refused}");
+        assert!(refused.contains("\r\nConnection: close\r\n"), "{refused}");
+        let body = refused.split_once("\r\n\r\n").unwrap().1;
+        let body: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(body, serde_json::json!({"outcome": "not_committed", "error": "busy"}));
+        assert_eq!(durable(), before, "nothing was committed");
+        server.shutdown();
+    }
+}
