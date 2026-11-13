@@ -1021,7 +1021,6 @@ fn note(reasons: &mut Vec<String>, reason: String) -> String {
     reasons.join("; ")
 }
 
-/// The server's error kind and message, for the model.
 /// The `/v1/search` target for `memory_search`'s `args`, and whether it sends `order`.
 /// Ranked unless `order` is "newest". Newest sends no `order`, as before ranked search, so an
 /// older server still answers it.
@@ -1050,6 +1049,7 @@ fn unknown_param(reply: &Value) -> bool {
     reply["error"] == "invalid_input" && message.starts_with("unknown query parameter")
 }
 
+/// The server's error kind and message, for the model.
 fn describe(reply: &Value) -> String {
     let error = reply["error"].as_str().unwrap_or("no error kind");
     match reply["message"].as_str() {
