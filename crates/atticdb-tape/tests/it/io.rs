@@ -65,6 +65,26 @@ fn preallocation_supported(dir: &Path) -> bool {
     }
 }
 
+/// The real backend's guard names the locked file by the device and inode of its handle.
+/// `SimDisk` has no such identity.
+#[cfg(unix)]
+#[test]
+fn lock_guard_identity_is_the_locked_file() {
+    use std::os::unix::fs::MetadataExt;
+    let dir = TestDir::new();
+    let path = dir.0.join("LOCK");
+    let guard = StdIo::new().try_lock_exclusive(&path).unwrap();
+    let meta = std::fs::metadata(&path).unwrap();
+    assert_eq!(guard.identity(), Some((meta.dev(), meta.ino())));
+    // A file put at the path later is another file.
+    std::fs::remove_file(&path).unwrap();
+    std::fs::write(&path, "").unwrap();
+    let meta = std::fs::metadata(&path).unwrap();
+    assert_ne!(guard.identity(), Some((meta.dev(), meta.ino())));
+    let sim = SimDisk::new(1);
+    assert_eq!(sim.try_lock_exclusive(Path::new("LOCK")).unwrap().identity(), None);
+}
+
 #[test]
 fn allocation_sets_length_for_growth_repeats_and_shrink() {
     let dir = TestDir::new();

@@ -90,7 +90,8 @@ pub struct ServeConfig {
     /// lock. 5xx answers are always logged.
     pub log_requests: bool,
     /// The data folder's `LOCK`. On Unix the server stops once this path is gone or names
-    /// another file. `None` means no watch, as for an engine on `SimDisk`.
+    /// another file than the engine's held lock. `None` means no watch. So does an engine
+    /// with no lock identity, such as one on `SimDisk`.
     pub lock_path: Option<PathBuf>,
 }
 
@@ -305,10 +306,9 @@ impl Server {
 
 /// Serves an opened engine on bound listeners. Tests pass an engine on `SimDisk`.
 pub fn run(engine: Arc<Engine>, listeners: Listeners, config: ServeConfig) -> io::Result<Server> {
-    // Taken first, so an error here leaves no thread running.
+    // The held lock's identity comes from its handle, so a path swapped before now is caught.
     #[cfg(unix)]
-    let lock =
-        config.lock_path.clone().map(|path| lock_id(&path).map(|id| (path, id))).transpose()?;
+    let watch = config.lock_path.clone().zip(engine.lock_identity());
     let tcp = listeners.tcp.as_ref().map(TcpListener::local_addr).transpose()?;
     #[cfg(unix)]
     let (unix, unix_path) = listeners.unix.unzip();
@@ -326,6 +326,12 @@ pub fn run(engine: Arc<Engine>, listeners: Listeners, config: ServeConfig) -> io
         ),
         config,
     });
+    // Checked before any accept loop starts. A server whose `LOCK` is already lost never serves.
+    #[cfg(unix)]
+    if watch.as_ref().is_some_and(|(path, held)| lock_lost(path, *held)) {
+        shared.exit(Exit::LockLost);
+        return Ok(Server { shared, threads: Vec::new() });
+    }
     let mut threads = Vec::new();
     // Accepted streams can inherit nonblocking mode from the listener, as on macOS.
     if let Some(listener) = listeners.tcp {
@@ -358,30 +364,31 @@ pub fn run(engine: Arc<Engine>, listeners: Listeners, config: ServeConfig) -> io
         threads.push(thread::Builder::new().name("atticdb-poison".into()).spawn(tick)?);
     }
     #[cfg(unix)]
-    if let Some((path, id)) = lock {
-        threads.push(spawn_lock_watch(&shared, path, id)?);
+    if let Some((path, held)) = watch {
+        threads.push(spawn_lock_watch(&shared, path, held)?);
     }
     Ok(Server { shared, threads })
 }
 
-/// The device and inode at `path`, not following a symlink.
+/// Whether `path` is gone or names another file than the held lock's device and inode `held`.
+/// If so, a new server could lock the data folder beside this one. The path is not followed
+/// as a symlink. Other errors count as not lost.
 #[cfg(unix)]
-fn lock_id(path: &Path) -> io::Result<(u64, u64)> {
+fn lock_lost(path: &Path, held: (u64, u64)) -> bool {
     use std::os::unix::fs::MetadataExt;
-    let meta = std::fs::symlink_metadata(path)
-        .map_err(|error| io::Error::new(error.kind(), format!("{}: {error}", path.display())))?;
-    Ok((meta.dev(), meta.ino()))
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => (meta.dev(), meta.ino()) != held,
+        Err(error) => error.kind() == io::ErrorKind::NotFound,
+    }
 }
 
-/// Every [`LOCK_CHECK`], checks that `path` still has the device and inode `id`. If it is
-/// gone or names another file, a new server could lock the data folder beside this one. So
-/// this one stops. Other errors are ignored for that check. Checks `stopping` every 50 ms,
+/// Every [`LOCK_CHECK`], stops the server once [`lock_lost`]. Checks `stopping` every 50 ms,
 /// so `shutdown` joins it soon.
 #[cfg(unix)]
 fn spawn_lock_watch(
     shared: &Arc<Shared>,
     path: PathBuf,
-    id: (u64, u64),
+    held: (u64, u64),
 ) -> io::Result<JoinHandle<()>> {
     let shared = shared.clone();
     let watch = move || {
@@ -392,11 +399,7 @@ fn spawn_lock_watch(
                 continue;
             }
             next = Instant::now() + LOCK_CHECK;
-            let lost = match lock_id(&path) {
-                Ok(now) => now != id,
-                Err(error) => error.kind() == io::ErrorKind::NotFound,
-            };
-            if lost {
+            if lock_lost(&path, held) {
                 shared.exit(Exit::LockLost);
             }
         }
@@ -570,7 +573,10 @@ fn try_start(config: Config, exit_on_poison: bool, log_requests: bool) -> Result
     #[cfg(not(unix))]
     let line =
         format!("atticdb: serving instance={} tcp={tcp_text}\n", server.shared.config.instance);
-    let _ = io::stderr().write_all(line.as_bytes());
+    // `run` stops at once when `LOCK` was already lost. Then it never served.
+    if server.shared.tracker.lock().exited.is_none() {
+        let _ = io::stderr().write_all(line.as_bytes());
+    }
     match server.wait() {
         Exit::Poisoned => {
             let line = "atticdb: engine poisoned, exiting so a fresh start can recover";

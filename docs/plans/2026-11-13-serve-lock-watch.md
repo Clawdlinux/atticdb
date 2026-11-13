@@ -18,7 +18,7 @@
 - Check interval: 2 s, a named constant `LOCK_CHECK` in serve.rs.
 - Lock lost means either case below:
   - `std::fs::symlink_metadata(<data_dir>/LOCK)` fails with `NotFound`;
-  - it succeeds with a different `(dev, ino)` than at start.
+  - it succeeds with a different `(dev, ino)` than the held lock (see Ruling 1).
 
   Any other error is ignored for that tick.
 - On lock lost: stop accepting, wait for requests in flight, remove the socket path only if it is still ours (`UnixListener` `remove`, as the poison exit does), then mark exited. Write 1 stderr line, exactly: `atticdb: <data_dir>/LOCK was removed or replaced, exiting so 2 servers can't share the data folder`. `atticdb serve` exits `EXIT_LOCKED` (75). Update that constant's doc to cover this.
@@ -30,7 +30,7 @@
 
 ## Rulings
 
-- Ruling: a path stat with `(dev, ino)`, not an `fstat` of the held handle. Why: the lock handle lives inside atticdb-tape behind the `Io` trait, and exposing it crosses 2 crates. A path check catches both removal and replacement. Cost if wrong: up to 2 s where 2 servers could overlap after a manual `LOCK` delete.
+- Ruling (revised after the PR #228 review): the expected `(dev, ino)` comes from the held lock handle, not a path snapshot. `LockGuard` records it, and the tape and `Engine::lock_identity` expose it. Each check compares a path stat with it, once before serving and then every 2 s. Why: a snapshot taken at the start of `run` adopts a `LOCK` replaced before it, and then passes forever. Cost: 1 small accessor in each of 3 crates. A manual `LOCK` delete still leaves up to 2 s where 2 servers could overlap.
 - Ruling: exit 75, not a new code. Why: `Launch` already treats 75 as "retry the spawn", which is the right reaction. Cost if wrong: a log reader confuses this exit with a lost lock race. The stderr line tells them apart.
 
 ## Review Focus

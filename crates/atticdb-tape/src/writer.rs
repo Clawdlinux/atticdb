@@ -298,6 +298,8 @@ struct ReadState {
     space: Mutex<()>,
     /// The resolved free-space floor, or `u64::MAX` while unknown.
     floor: AtomicU64,
+    /// See [`DataDir::lock_identity`].
+    lock_identity: Option<(u64, u64)>,
 }
 
 impl ReadState {
@@ -583,6 +585,7 @@ impl<S: StateMachine> WriterCore<S> {
             stage_max_ns: Default::default(),
             space: Mutex::new(()),
             floor: AtomicU64::new(free_space_floor.unwrap_or(u64::MAX)),
+            lock_identity: dir.lock_identity(),
         });
         if let Some(from) = opts.replay_from_lsn.checked_add(1) {
             for record in reads.scan(from) {
@@ -1379,6 +1382,12 @@ impl<S: StateMachine> Tape<S> {
     /// True after a storage failure. Reopen before accepting more writes.
     pub fn is_poisoned(&self) -> bool {
         self.reads.poisoned.load(Ordering::Acquire)
+    }
+
+    /// The device and inode of the held `LOCK`, from its handle. `None` when the I/O backend
+    /// has none, as on Windows and on `SimDisk`.
+    pub fn lock_identity(&self) -> Option<(u64, u64)> {
+        self.reads.lock_identity
     }
 
     /// Reads a complete durable record, or returns `None` for an unpublished LSN.

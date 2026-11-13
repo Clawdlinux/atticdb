@@ -23,6 +23,7 @@ pub struct FileId(
 /// An exclusive file lock released when dropped.
 pub struct LockGuard {
     release: Option<Box<dyn FnOnce() + Send + Sync>>,
+    identity: Option<(u64, u64)>,
 }
 
 impl std::fmt::Debug for LockGuard {
@@ -34,7 +35,19 @@ impl std::fmt::Debug for LockGuard {
 impl LockGuard {
     /// Owns a backend lock and releases it exactly once when dropped.
     pub fn new(release: impl FnOnce() + Send + Sync + 'static) -> Self {
-        Self { release: Some(Box::new(release)) }
+        Self { release: Some(Box::new(release)), identity: None }
+    }
+
+    /// Records the device and inode of the locked file, read from the held handle.
+    pub fn with_identity(mut self, identity: (u64, u64)) -> Self {
+        self.identity = Some(identity);
+        self
+    }
+
+    /// The locked file's device and inode. `None` when the backend has none, as on Windows
+    /// and on `SimDisk`.
+    pub fn identity(&self) -> Option<(u64, u64)> {
+        self.identity
     }
 }
 
@@ -324,6 +337,15 @@ impl Io for StdIo {
         }
         #[cfg(not(windows))]
         match file.try_lock() {
+            #[cfg(unix)]
+            Ok(()) => {
+                use std::os::unix::fs::MetadataExt;
+                // From the handle, so it names the file locked, whatever the path names later.
+                let meta = file.metadata()?;
+                let identity = (meta.dev(), meta.ino());
+                Ok(LockGuard::new(move || drop(file)).with_identity(identity))
+            }
+            #[cfg(not(unix))]
             Ok(()) => Ok(LockGuard::new(move || drop(file))),
             Err(TryLockError::WouldBlock) => {
                 let mut holder = String::new();
