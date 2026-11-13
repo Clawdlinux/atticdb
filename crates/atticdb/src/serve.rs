@@ -1,5 +1,5 @@
-//! `atticdb serve`: startup order, accept loops, one thread per connection, and
-//! `--exit-on-poison`.
+//! `atticdb serve`: startup order, accept loops, one thread per connection,
+//! `--exit-on-poison`, and the `LOCK` watch.
 //!
 //! Memory: at most [`MAX_CONNECTIONS`] connections. A request body grows only as its
 //! bytes arrive, up to the 8 MiB cap, and the raw body is dropped once parsed into
@@ -38,7 +38,7 @@ use std::os::fd::AsFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 #[cfg(windows)]
 use std::os::windows::io::AsSocket as AsFd;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
@@ -46,10 +46,23 @@ use std::time::{Duration, Instant};
 
 /// Default cap on open connections. Past it a new connection gets 503 `busy`.
 pub const MAX_CONNECTIONS: usize = 256;
-/// Exit code when the data directory lock is held by another process.
+/// Exit code when the data directory lock is held by another process. Also when a running
+/// server finds its `LOCK` or data folder removed or replaced, on Unix.
 pub const EXIT_LOCKED: u8 = 75;
 /// Exit code after `--exit-on-poison` stops a poisoned server.
 pub const EXIT_POISONED: u8 = 70;
+/// How often a server checks that `<data_dir>/LOCK` is still the file it locked.
+#[cfg(unix)]
+const LOCK_CHECK: Duration = Duration::from_secs(2);
+
+/// Why a server stopped on its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Exit {
+    /// `--exit-on-poison` stopped a poisoned server.
+    Poisoned,
+    /// `LOCK` was removed or replaced, or its data folder was.
+    LockLost,
+}
 
 /// Bound listeners. Either may be absent.
 #[derive(Debug, Default)]
@@ -76,6 +89,9 @@ pub struct ServeConfig {
     /// One stderr line per request. Off by default: every connection thread shares the
     /// lock. 5xx answers are always logged.
     pub log_requests: bool,
+    /// The data folder's `LOCK`. On Unix the server stops once this path is gone or names
+    /// another file. `None` means no watch, as for an engine on `SimDisk`.
+    pub lock_path: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -83,7 +99,7 @@ struct Conns {
     next: u64,
     open: HashMap<u64, Box<dyn Stream + Send>>,
     in_flight: usize,
-    exited: bool,
+    exited: Option<Exit>,
 }
 
 #[derive(Default)]
@@ -130,10 +146,17 @@ impl Shared {
         !self.stopping.swap(true, Ordering::AcqRel)
     }
 
-    /// With `--exit-on-poison`, once the engine is poisoned: stop accepting, wait for
-    /// responses in flight, remove the socket path while the lock is still held.
+    /// With `--exit-on-poison`, once the engine is poisoned: [`Shared::exit`].
     fn exit_on_poison(&self) {
-        if !self.config.exit_on_poison || self.engine.health() != Health::Poisoned || !self.stop() {
+        if self.config.exit_on_poison && self.engine.health() == Health::Poisoned {
+            self.exit(Exit::Poisoned);
+        }
+    }
+
+    /// Stops accepting, waits for responses in flight, and removes the socket path if it is
+    /// still ours. Then [`Server::wait`] returns `why`. Does nothing once already stopping.
+    fn exit(&self, why: Exit) {
+        if !self.stop() {
             return;
         }
         self.tracker.wait_until(|conns| conns.in_flight == 0);
@@ -141,7 +164,7 @@ impl Shared {
         if let Some(unix) = &self.unix {
             let _ = unix.remove();
         }
-        self.tracker.update(|conns| conns.exited = true);
+        self.tracker.update(|conns| conns.exited = Some(why));
     }
 
     fn connection<S: Stream>(&self, stream: S, tcp: bool) {
@@ -230,11 +253,15 @@ impl Server {
         self.shared.tcp
     }
 
-    /// Blocks until `--exit-on-poison` has stopped the server: accepting stopped,
-    /// responses in flight were written, and the socket path is gone. Without the flag
-    /// it never returns.
-    pub fn wait(&self) {
-        self.shared.tracker.wait_until(|conns| conns.exited);
+    /// Blocks until the server stops on its own, and returns why. By then accepting stopped,
+    /// responses in flight were written, and the socket path is gone. Without
+    /// `--exit-on-poison` and without a `LOCK` watch it never returns.
+    pub fn wait(&self) -> Exit {
+        let tracker = &self.shared.tracker;
+        let conns = tracker.lock();
+        let conns = tracker.changed.wait_while(conns, |conns| conns.exited.is_none());
+        let why = conns.unwrap_or_else(PoisonError::into_inner).exited;
+        why.unwrap_or(Exit::Poisoned)
     }
 
     /// Stops accepting, closes every connection and joins every thread. Afterwards
@@ -255,6 +282,10 @@ impl Server {
 
 /// Serves an opened engine on bound listeners. Tests pass an engine on `SimDisk`.
 pub fn run(engine: Arc<Engine>, listeners: Listeners, config: ServeConfig) -> io::Result<Server> {
+    // Taken first, so an error here leaves no thread running.
+    #[cfg(unix)]
+    let lock =
+        config.lock_path.clone().map(|path| lock_id(&path).map(|id| (path, id))).transpose()?;
     let tcp = listeners.tcp.as_ref().map(TcpListener::local_addr).transpose()?;
     #[cfg(unix)]
     let (unix, unix_path) = listeners.unix.unzip();
@@ -303,7 +334,51 @@ pub fn run(engine: Arc<Engine>, listeners: Listeners, config: ServeConfig) -> io
         };
         threads.push(thread::Builder::new().name("atticdb-poison".into()).spawn(tick)?);
     }
+    #[cfg(unix)]
+    if let Some((path, id)) = lock {
+        threads.push(spawn_lock_watch(&shared, path, id)?);
+    }
     Ok(Server { shared, threads })
+}
+
+/// The device and inode at `path`, not following a symlink.
+#[cfg(unix)]
+fn lock_id(path: &Path) -> io::Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::symlink_metadata(path)
+        .map_err(|error| io::Error::new(error.kind(), format!("{}: {error}", path.display())))?;
+    Ok((meta.dev(), meta.ino()))
+}
+
+/// Every [`LOCK_CHECK`], checks that `path` still has the device and inode `id`. If it is
+/// gone or names another file, a new server could lock the data folder beside this one. So
+/// this one stops. Other errors are ignored for that check. Checks `stopping` every 50 ms,
+/// so `shutdown` joins it soon.
+#[cfg(unix)]
+fn spawn_lock_watch(
+    shared: &Arc<Shared>,
+    path: PathBuf,
+    id: (u64, u64),
+) -> io::Result<JoinHandle<()>> {
+    let shared = shared.clone();
+    let watch = move || {
+        let mut next = Instant::now() + LOCK_CHECK;
+        while !shared.stopping.load(Ordering::Acquire) {
+            thread::sleep(Duration::from_millis(50));
+            if Instant::now() < next {
+                continue;
+            }
+            next = Instant::now() + LOCK_CHECK;
+            let lost = match lock_id(&path) {
+                Ok(now) => now != id,
+                Err(error) => error.kind() == io::ErrorKind::NotFound,
+            };
+            if lost {
+                shared.exit(Exit::LockLost);
+            }
+        }
+    };
+    thread::Builder::new().name("atticdb-lockwatch".into()).spawn(watch)
 }
 
 /// Waits up to 50 ms for a connection. So the accept loop sees `stopping` without a
@@ -453,7 +528,9 @@ fn try_start(config: Config, exit_on_poison: bool, log_requests: bool) -> Result
     let listeners = Listeners { tcp };
     let auth = Auth::new(&config.tenants);
     let max_connections = MAX_CONNECTIONS;
-    let config = ServeConfig { auth, instance, exit_on_poison, max_connections, log_requests };
+    let lock_path = Some(data_dir.join("LOCK"));
+    let config =
+        ServeConfig { auth, instance, exit_on_poison, max_connections, log_requests, lock_path };
     let server = run(Arc::new(engine), listeners, config).map_err(|e| fail(e.to_string()))?;
     // One write, so a reader never sees half of the line.
     #[cfg(unix)]
@@ -464,10 +541,23 @@ fn try_start(config: Config, exit_on_poison: bool, log_requests: bool) -> Result
     let line =
         format!("atticdb: serving instance={} tcp={tcp_text}\n", server.shared.config.instance);
     let _ = io::stderr().write_all(line.as_bytes());
-    server.wait();
-    let _ =
-        writeln!(io::stderr(), "atticdb: engine poisoned, exiting so a fresh start can recover");
-    Ok(EXIT_POISONED)
+    match server.wait() {
+        Exit::Poisoned => {
+            let line = "atticdb: engine poisoned, exiting so a fresh start can recover";
+            let _ = writeln!(io::stderr(), "{line}");
+            Ok(EXIT_POISONED)
+        }
+        Exit::LockLost => {
+            let lock = data_dir.join("LOCK");
+            let line = format!(
+                "atticdb: {} was removed or replaced, exiting so 2 servers can't share the data \
+                 folder",
+                lock.display()
+            );
+            let _ = writeln!(io::stderr(), "{line}");
+            Ok(EXIT_LOCKED)
+        }
+    }
 }
 
 /// The `LOCK` contents when another process holds the data directory lock.
