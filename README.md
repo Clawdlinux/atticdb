@@ -53,13 +53,20 @@ AtticDB 0.4.0 is out (you have 0.3.0). Run: atticdb upgrade
 ```
 
 The notice never changes their exit code. A failed check prints nothing, and the next try waits 1 h.
-The hook, `atticdb mcp`, `atticdb serve` and the other commands never check.
+The server AtticDB starts for you checks too, in the background, through the same daily cache.
+Your agent sees the notice at chat start, in the AtticDB memory block. The hook reads the cache only, so it never waits on the network.
+The hook, `atticdb mcp` and the other commands never check.
 
 ```sh
 atticdb upgrade                   # shows the plan, then asks
 atticdb upgrade --yes             # doesn't ask. Needed when stdin is not a terminal
 atticdb upgrade --version 0.3.0   # installs this release, even an older one
+atticdb upgrade --auto on         # the server installs each new release on its own
+atticdb upgrade --auto off        # back to asking
 ```
+
+Auto-upgrade is off until you turn it on. With it on, the server runs `atticdb upgrade --yes` within a day of a new release.
+Its output goes to `upgrade.log` in the home. It runs on macOS and Linux only, and never for a `+dev` build.
 
 It runs the new release's own `install.sh`, which checks the download against `SHA256SUMS`.
 The old binary stays beside the new one as `atticdb.prev`.
@@ -88,7 +95,7 @@ It carries no token, no ID and no data about you. GitHub sees your IP address, a
 curl runs with `-q`, so your `~/.curlrc` doesn't apply.
 The answer is cached in the home as `update-check.json`.
 
-If cargo installed `atticdb`, `upgrade` prints the `cargo install` command to run instead. If Homebrew did, it prints `brew upgrade atticdb`.
+If cargo built `atticdb` from source, `upgrade` prints the `cargo install` command to run instead. A release binary you put in `~/.cargo/bin` upgrades as usual. If Homebrew did, it prints `brew upgrade atticdb`.
 Neither runs anything. On Windows, `upgrade` prints the manual steps, as in Install above.
 
 ## Quick start

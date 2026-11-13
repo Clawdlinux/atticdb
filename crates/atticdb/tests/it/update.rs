@@ -358,7 +358,8 @@ fn setup_checks_after_apply() {
 
     let (code, out, err) = setup.run(&url, &args, &[], "");
     assert_eq!(code, Some(0), "{out}{err}");
-    assert_eq!(hits(&count), 1, "{out}{err}");
+    // The home's server that setup starts may ask too, before either writes the cache.
+    assert!(hits(&count) >= 1, "{out}{err}");
     assert_eq!(setup.read_cache()["latest"], "9.9.9");
     let last = out.lines().last().unwrap();
     match notice("9.9.9") {
@@ -368,20 +369,27 @@ fn setup_checks_after_apply() {
     assert!(!err.contains("curl") && !err.contains(" is out "), "{err}");
 }
 
-/// The hook and `mcp` never check, even with the check on and the API set: the listener
-/// sees no connection.
+/// The hook and `mcp` never check, even with the check on, the API set and a stale cache:
+/// the listener sees no connection. The home's server runs with the check off, so only the
+/// hook and `mcp` could ask.
 #[test]
 fn hook_never_checks() {
     let setup = Setup::new();
-    let _holders = Holders(vec![setup.home().join("data"), data_dir(&setup.dir.0.join("h"))]);
+    let data = setup.start_server();
+    let _holders = Holders(vec![data, data_dir(&setup.dir.0.join("h"))]);
+    let stale = json!({"checked": 1, "latest": "9.9.9"}).to_string();
+    std::fs::write(setup.cache(), &stale).unwrap();
     let (url, count) = fake_api(200, TAG);
     let stdin = json!({"cwd": setup.dir.0}).to_string();
     for hook in ["session-start", "post-compact"] {
         let (code, out, err) = setup.run(&url, &["hook", hook], &[], &stdin);
         assert_eq!(code, Some(0), "{hook}: {out}{err}");
         assert_eq!(hits(&count), 0, "{hook}: {out}{err}");
+        if hook == "session-start" && !atticdb::VERSION.ends_with("+dev") {
+            assert!(out.contains("Update: AtticDB 9.9.9 is out"), "{out}");
+        }
     }
-    assert!(!setup.cache().exists());
+    assert_eq!(std::fs::read_to_string(setup.cache()).unwrap(), stale);
 
     let mut command = support::command(env!("CARGO_BIN_EXE_atticdb"));
     command.arg("mcp").current_dir(&setup.dir.0).env("HOME", setup.dir.0.join("h"));
@@ -393,7 +401,80 @@ fn hook_never_checks() {
     assert!(!tools.as_array().unwrap().is_empty(), "{tools}");
     assert_eq!(mcp.close().0.code(), Some(0));
     assert_eq!(hits(&count), 0, "mcp never checks");
-    assert!(!setup.cache().exists());
+    assert_eq!(std::fs::read_to_string(setup.cache()).unwrap(), stale);
+}
+
+/// Polls `done` every 50 ms for up to 20 s.
+fn wait_for(mut done: impl FnMut() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while std::time::Instant::now() < deadline {
+        if done() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    done()
+}
+
+/// The home's server refreshes the cache once, in the background. A source build never
+/// auto-upgrades, even with auto-upgrade on: no `install.sh` is fetched.
+#[test]
+fn home_server_refreshes_cache() {
+    let setup = Setup::new();
+    setup.make_home();
+    std::fs::write(setup.home().join("auto-upgrade"), "on\n").unwrap();
+    let release = Release::new("v9.9.9", stub(Stub::Install));
+    let _holders = Holders(vec![setup.home().join("data")]);
+    let args = ["fact", "set", "--key", "k", "--content", "v"];
+    let (code, out, err) = setup.run(&release.api, &args, &[], "");
+    assert_eq!(code, Some(0), "{out}{err}");
+    let cached = || std::fs::read(setup.cache()).ok().and_then(|t| serde_json::from_slice(&t).ok());
+    let cached = wait_for(|| cached().is_some_and(|c: Value| c["latest"] == "9.9.9"));
+    assert!(cached, "{:?}", release.paths());
+    // Time for an auto-upgrade a release build would start.
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    let mut want = vec![LATEST.to_owned()];
+    if !atticdb::VERSION.ends_with("+dev") {
+        want.push(installer("9.9.9"));
+    }
+    assert_eq!(release.paths(), want);
+}
+
+/// `upgrade --auto off` removes the switch. `--auto on` writes it, mode 0600, but never for a
+/// source build. Doctor names it while it is on. Any other value, or another flag beside
+/// `--auto`, is a usage error.
+#[test]
+fn upgrade_auto_switch() {
+    let setup = Setup::new();
+    setup.make_home();
+    let marker = setup.home().join("auto-upgrade");
+    let url = "http://127.0.0.1:9/";
+    let log = setup.home().join("upgrade.log");
+
+    std::fs::write(&marker, "on\n").unwrap();
+    let (_, out, _) = setup.doctor_off(url);
+    assert!(out.contains(&format!("Auto-upgrade: on. Log: {}\n", log.display())), "{out}");
+    let (code, out, err) = setup.run(url, &["upgrade", "--auto", "off"], &[], "");
+    assert_eq!((code, out.as_str(), err.as_str()), (Some(0), "Auto-upgrade is off.\n", ""));
+    assert!(!marker.exists());
+    let (_, out, _) = setup.doctor_off(url);
+    assert!(!out.contains("Auto-upgrade"), "{out}");
+
+    let (code, out, err) = setup.run(url, &["upgrade", "--auto", "on"], &[], "");
+    if atticdb::VERSION.ends_with("+dev") {
+        assert_eq!(code, Some(1), "{out}{err}");
+        assert!(err.ends_with("is a source build, which never auto-upgrades.\n"), "{err}");
+        assert!(!marker.exists());
+    } else {
+        assert_eq!(code, Some(0), "{out}{err}");
+        assert!(out.starts_with("Auto-upgrade is on."), "{out}");
+        assert_eq!(std::fs::metadata(&marker).unwrap().mode() & 0o777, 0o600);
+    }
+
+    let (code, _, err) = setup.run(url, &["upgrade", "--auto", "maybe"], &[], "");
+    assert_eq!((code, err.as_str()), (Some(2), "atticdb: --auto takes on or off\n"));
+    let (code, out, err) = setup.run(url, &["upgrade", "--auto", "on", "--yes"], &[], "");
+    assert_eq!(code, Some(2), "{out}{err}");
 }
 
 /// The warning every upgrade plan shows.

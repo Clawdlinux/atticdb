@@ -4,6 +4,37 @@
 //! A binary that cargo or Homebrew installed gets that tool's command instead. Windows gets
 //! the manual steps.
 
+/// Runs `atticdb upgrade --auto <on|off>`. Returns the exit code: 0 when it is set. 1 when
+/// it can't be, as on Windows, for a source build, or for a binary cargo or Homebrew owns.
+/// 2 for a value other than `on` or `off`, or a bad home.
+pub fn auto(value: &str) -> u8 {
+    let on = match value {
+        "on" => true,
+        "off" => false,
+        _ => {
+            eprintln!("atticdb: --auto takes on or off");
+            return 2;
+        }
+    };
+    #[cfg(unix)]
+    let set = unix::auto(on).map_err(|error| (error.code(), error.to_string()));
+    #[cfg(not(unix))]
+    let set = match on {
+        true => Err((1, "auto-upgrade doesn't run on Windows. See: atticdb upgrade".to_owned())),
+        false => {
+            println!("Auto-upgrade is off.");
+            Ok(())
+        }
+    };
+    match set {
+        Ok(()) => 0,
+        Err((code, why)) => {
+            eprintln!("atticdb: {why}");
+            code
+        }
+    }
+}
+
 /// Runs `atticdb upgrade`. `yes` skips the question, and `version` pins the release. Returns
 /// the exit code: 0 when it upgraded, was up to date or was told no. 1 when the check, the
 /// download or the installer failed, or another tool owns the binary. 2 for a usage error, or
@@ -119,7 +150,7 @@ mod unix {
         let bad_version = || Error::Usage("--version must be a release such as 0.3.0".into());
         let pinned = version.map(|v| update::version_of(v).ok_or_else(bad_version)).transpose()?;
         let exe = this_binary()?;
-        if let Some(line) = managed(&exe) {
+        if let Some(line) = managed(&exe, crate::VERSION) {
             println!("{line}");
             return Ok(1);
         }
@@ -188,16 +219,59 @@ mod unix {
         Ok(exe)
     }
 
-    /// The line pointing to the tool that installed `exe`, when it was cargo or Homebrew.
-    fn managed(exe: &Path) -> Option<&'static str> {
+    /// The line pointing to the tool that installed `exe`, at `version`, when it was cargo or
+    /// Homebrew. cargo builds from source, which prints `+dev`. So a release under
+    /// `.cargo/bin` came from `install.sh`, and `upgrade` handles it.
+    fn managed(exe: &Path, version: &str) -> Option<&'static str> {
         let path = exe.to_string_lossy();
-        if path.contains("/.cargo/bin/") {
+        if path.contains("/.cargo/bin/") && version.ends_with("+dev") {
             Some(CARGO)
         } else if path.contains("/opt/homebrew/") || path.contains("/Cellar/") {
             Some(BREW)
         } else {
             None
         }
+    }
+
+    /// [`super::auto`]. `on` writes the home's [`update::AUTO`] file, mode 0600. `off`
+    /// removes it.
+    pub(super) fn auto(on: bool) -> Result<(), Error> {
+        let home = crate::home::dir().map_err(Error::Usage)?;
+        let marker = home.join(update::AUTO);
+        if !on {
+            return match std::fs::remove_file(&marker) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                    Err(Error::Failed(format!("{}: {error}", marker.display())))
+                }
+                _ => {
+                    println!("Auto-upgrade is off.");
+                    Ok(())
+                }
+            };
+        }
+        let exe = this_binary()?;
+        if let Some(line) = managed(&exe, crate::VERSION) {
+            return Err(Error::Failed(format!("{line}. Auto-upgrade can't run for it.")));
+        }
+        if crate::VERSION.ends_with("+dev") {
+            let why = format!("{} is a source build, which never auto-upgrades.", exe.display());
+            return Err(Error::Failed(why));
+        }
+        if !home.is_dir() {
+            let why = format!("{} doesn't exist. Run: atticdb setup", home.display());
+            return Err(Error::Failed(why));
+        }
+        let mut options = std::fs::OpenOptions::new();
+        std::os::unix::fs::OpenOptionsExt::mode(options.create(true).write(true), 0o600);
+        crate::config::open_regular(&mut options, &marker)
+            .and_then(|mut file| file.write_all(b"on\n"))
+            .map_err(|error| Error::Failed(format!("{}: {error}", marker.display())))?;
+        println!(
+            "Auto-upgrade is on. The AtticDB server installs each new release within a day.\n\
+             Log: {}\nTurn it off: atticdb upgrade --auto off",
+            home.join(update::UPGRADE_LOG).display()
+        );
+        Ok(())
     }
 
     /// Whether `to`, a release's `x.y.z`, is an upgrade from `current`. A source build,
@@ -433,8 +507,11 @@ mod unix {
                 ("/home/u/cargo/bin/atticdb", None),
             ];
             for (path, line) in cases {
-                assert_eq!(managed(Path::new(path)), line, "{path}");
+                assert_eq!(managed(Path::new(path), "0.3.0+dev"), line, "{path}");
             }
+            // A release in `.cargo/bin` came from install.sh. Homebrew's stays Homebrew's.
+            assert_eq!(managed(Path::new("/home/u/.cargo/bin/atticdb"), "0.3.0"), None);
+            assert_eq!(managed(Path::new("/opt/homebrew/bin/atticdb"), "0.3.0"), Some(BREW));
         }
 
         #[test]

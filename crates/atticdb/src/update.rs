@@ -1,5 +1,7 @@
-//! The daily check for a new release, and the notice `doctor` and `setup` print last. Only
-//! those verbs and `upgrade` check. The hook, `mcp` and `serve` never do.
+//! The daily check for a new release, and the notice `doctor` and `setup` print last. Those
+//! verbs, `upgrade` and the home's `serve` check. The hook shows the notice from the cache
+//! alone. The hook and `mcp` never ask the network. With auto-upgrade on, the home's `serve`
+//! also runs `atticdb upgrade` for a newer release.
 
 #[cfg(not(unix))]
 use crate::platform::OpenOptionsExt;
@@ -11,7 +13,7 @@ use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Overrides the releases API's URL. Tests point it at a fake on 127.0.0.1.
 pub(crate) const API_ENV: &str = "ATTICDB_RELEASES_API";
@@ -44,6 +46,14 @@ const MAX_DOWNLOAD: u64 = 1 << 20;
 const DOWNLOAD_TIME: &str = "60";
 /// Most bytes read from the cache, which is well under 100.
 const MAX_CACHE: u64 = 4 << 10;
+/// The file in the home that turns auto-upgrade on.
+pub(crate) const AUTO: &str = "auto-upgrade";
+/// The file in the home that auto-upgrades append their output to.
+pub(crate) const UPGRADE_LOG: &str = "upgrade.log";
+/// How often the home's server reads the cache. The cache still asks at most once a day.
+const SERVE_EVERY: Duration = Duration::from_secs(60 * 60);
+/// How long the home's server waits before it tries the same release again.
+const RETRY: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// The latest release's version, `x.y.z` without its `v`. The cache in `home` answers for
 /// 24 h. Otherwise it asks the API, then writes the cache. A failed check is cached too, and
@@ -113,13 +123,7 @@ enum Cached {
 /// set back, doesn't. Nor does one that can't be read, or holds a `latest` that isn't
 /// `x.y.z`.
 fn cached(cache: &Path, now: u64) -> Option<Cached> {
-    let file = crate::config::open_regular(OpenOptions::new().read(true), cache).ok()?;
-    let mut text = Vec::new();
-    file.take(MAX_CACHE + 1).read_to_end(&mut text).ok()?;
-    if text.len() as u64 > MAX_CACHE {
-        return None;
-    }
-    let cache: Value = serde_json::from_slice(&text).ok()?;
+    let cache = read_cache(cache)?;
     let age = now.checked_sub(cache.get("checked")?.as_u64()?)?;
     let Some(latest) = cache.get("latest") else {
         return (age < BACKOFF_SECS).then_some(Cached::Failed);
@@ -127,6 +131,129 @@ fn cached(cache: &Path, now: u64) -> Option<Cached> {
     let latest = latest.as_str()?;
     parse(latest)?;
     (age < FRESH_SECS).then(|| Cached::Latest(latest.to_owned()))
+}
+
+/// The cache file's JSON, or `None` when it is missing, too large or not JSON.
+fn read_cache(cache: &Path) -> Option<Value> {
+    let file = crate::config::open_regular(OpenOptions::new().read(true), cache).ok()?;
+    let mut text = Vec::new();
+    file.take(MAX_CACHE + 1).read_to_end(&mut text).ok()?;
+    if text.len() as u64 > MAX_CACHE {
+        return None;
+    }
+    serde_json::from_slice(&text).ok()
+}
+
+/// The `latest` version the cache in `home` holds, whatever its age. An old answer is still
+/// a release that is out. It never asks the network. `None` when the off switches are set.
+fn cached_latest(home: &Path) -> Option<String> {
+    if off(|name| std::env::var_os(name)) {
+        return None;
+    }
+    let latest = read_cache(&home.join(CACHE))?.get("latest")?.as_str()?.to_owned();
+    parse(&latest).map(|_| latest)
+}
+
+/// The line the chat-start block shows when the cache in `home` names a newer release.
+/// It reads the cache alone, so the hook stays offline.
+pub(crate) fn hook_notice(home: &Path) -> Option<String> {
+    let latest = cached_latest(home)?;
+    let log = auto_on(home).then(|| home.join(UPGRADE_LOG));
+    block_notice(crate::VERSION, &latest, log.as_deref())
+}
+
+/// The block's line for `latest` over `current`, as [`notice`] decides. `log` is the
+/// auto-upgrade log when auto-upgrade is on.
+fn block_notice(current: &str, latest: &str, log: Option<&Path>) -> Option<String> {
+    notice(current, latest)?;
+    let (latest, current) = (bare(latest), bare(current));
+    let head = format!("Update: AtticDB {latest} is out (you have {current}).");
+    Some(match log {
+        Some(log) => format!(
+            "{head} Auto-upgrade is on, so the server installs it. If it doesn't, read {}.",
+            log.display()
+        ),
+        None => format!(
+            "{head} Tell the user once. To upgrade: atticdb upgrade. To upgrade on its own \
+             from now on: atticdb upgrade --auto on."
+        ),
+    })
+}
+
+/// Whether auto-upgrade is on: the home holds a regular file named [`AUTO`].
+pub(crate) fn auto_on(home: &Path) -> bool {
+    std::fs::symlink_metadata(home.join(AUTO)).is_ok_and(|meta| meta.is_file())
+}
+
+/// Whether an auto-upgrade from `current` to `latest` should run. Never for a source build.
+fn auto_wanted(current: &str, latest: &str) -> bool {
+    !current.ends_with("+dev") && newer(latest, current)
+}
+
+/// Starts the home server's update thread, when `data_dir` is the home's `data`. Other
+/// servers, hosted or sandboxed, never check. Every [`SERVE_EVERY`] it calls [`latest`],
+/// which asks at most once a day. With auto-upgrade on, a newer release starts
+/// `atticdb upgrade` at most once per [`RETRY`] per version.
+pub(crate) fn serve_watch(data_dir: &Path) {
+    let Ok(home) = crate::home::dir() else { return };
+    if data_dir != home.join("data") {
+        return;
+    }
+    let _ = std::thread::Builder::new().name("atticdb-update".into()).spawn(move || {
+        let mut tried: Option<(String, Instant)> = None;
+        loop {
+            if let Some(latest) = latest(&home, SystemTime::now()) {
+                let recent = tried
+                    .as_ref()
+                    .is_some_and(|(version, at)| *version == latest && at.elapsed() < RETRY);
+                if !recent && auto_on(&home) && auto_wanted(crate::VERSION, &latest) {
+                    tried = Some((latest.clone(), Instant::now()));
+                    auto_upgrade(&home, &latest);
+                }
+            }
+            std::thread::sleep(SERVE_EVERY);
+        }
+    });
+}
+
+/// Runs `<this binary> upgrade --yes --version <latest>` in its own process group, so it
+/// outlives this server, which it stops. Its output appends to [`UPGRADE_LOG`]. Says on
+/// stderr, the server's log, whether it started.
+#[cfg(unix)]
+fn auto_upgrade(home: &Path, latest: &str) {
+    match spawn_upgrade(home, latest) {
+        Ok(pid) => eprintln!(
+            "atticdb: auto-upgrade to {latest} started, pid {pid}, log {}",
+            home.join(UPGRADE_LOG).display()
+        ),
+        Err(error) => eprintln!("atticdb: auto-upgrade to {latest} did not start: {error}"),
+    }
+}
+
+/// Windows has no `atticdb upgrade`, so there is no auto-upgrade.
+#[cfg(not(unix))]
+fn auto_upgrade(_home: &Path, _latest: &str) {}
+
+/// [`auto_upgrade`]'s spawn. Returns the child's pid. A thread reaps it.
+#[cfg(unix)]
+fn spawn_upgrade(home: &Path, latest: &str) -> std::io::Result<u32> {
+    use std::os::unix::process::CommandExt;
+    let path = home.join(UPGRADE_LOG);
+    let mut log = crate::config::open_regular(
+        OpenOptions::new().create(true).append(true).mode(0o600),
+        &path,
+    )?;
+    crate::config::check_private(&log, &path, "upgrade log").map_err(std::io::Error::other)?;
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs());
+    writeln!(log, "auto-upgrade at {secs} (unix seconds): {} to {latest}", crate::VERSION)?;
+    let mut command = Command::new(std::env::current_exe()?);
+    command.args(["upgrade", "--yes", "--version", latest]);
+    command.env_remove(crate::client::TOKEN_ENV).current_dir("/").stdin(Stdio::null());
+    command.stdout(log.try_clone()?).stderr(log).process_group(0);
+    let mut child = crate::spawn(&mut command)?;
+    let pid = child.id();
+    let _ = std::thread::Builder::new().spawn(move || child.wait());
+    Ok(pid)
 }
 
 /// Asks the API at `api` with `curl -q -fsSL --max-time 3`, and reads `tag_name`. `None` when
@@ -349,6 +476,53 @@ mod tests {
         let long = format!("v1.2.{}", "0".repeat(28));
         assert_eq!(long.len(), 33);
         assert_eq!(version_of(&long), None);
+    }
+
+    #[test]
+    fn block_notice_names_the_command() {
+        let line = block_notice("0.3.3", "v0.3.4", None).unwrap();
+        assert_eq!(
+            line,
+            "Update: AtticDB 0.3.4 is out (you have 0.3.3). Tell the user once. To upgrade: \
+             atticdb upgrade. To upgrade on its own from now on: atticdb upgrade --auto on."
+        );
+        let log = Path::new("/h/upgrade.log");
+        let line = block_notice("0.3.3", "0.3.4", Some(log)).unwrap();
+        assert_eq!(
+            line,
+            "Update: AtticDB 0.3.4 is out (you have 0.3.3). Auto-upgrade is on, so the server \
+             installs it. If it doesn't, read /h/upgrade.log."
+        );
+        assert_eq!(block_notice("0.3.4", "0.3.4", None), None);
+        assert_eq!(block_notice("0.3.3+dev", "0.3.4", None), None);
+    }
+
+    #[test]
+    fn auto_only_for_a_newer_release() {
+        assert!(auto_wanted("0.3.3", "0.3.4"));
+        assert!(!auto_wanted("0.3.4", "0.3.4"));
+        assert!(!auto_wanted("0.3.4", "0.3.3"));
+        assert!(!auto_wanted("0.3.3+dev", "0.3.4"));
+    }
+
+    #[test]
+    fn cached_latest_ignores_age() {
+        let dir =
+            std::env::temp_dir().join(format!("atticdb-cl-{}", crate::random_hex(8).unwrap()));
+        std::fs::create_dir(&dir).unwrap();
+        let cases = [
+            (r#"{"checked": 1, "latest": "0.3.4"}"#, Some("0.3.4")),
+            (r#"{"checked": 1}"#, None),
+            (r#"{"checked": 1, "latest": "v0.3.4"}"#, None),
+            ("not json", None),
+        ];
+        for (text, want) in cases {
+            std::fs::write(dir.join(CACHE), text).unwrap();
+            // Unless the off switches are set in this test's environment.
+            let want = want.filter(|_| !off(|name| std::env::var_os(name)));
+            assert_eq!(cached_latest(&dir).as_deref(), want, "{text}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
