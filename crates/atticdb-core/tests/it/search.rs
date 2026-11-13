@@ -768,7 +768,20 @@ fn ranked_search_orders_hits_by_summed_idf() {
                 r("Clubs?"),
                 &["s:book club", "s:Caroline joined a club"][..],
             ),
-            ("a word in over half the records is skipped", r("e"), &[][..]),
+            (
+                "a word in most records still counts",
+                r("e"),
+                &[
+                    "s:Melanie went home",
+                    "s:movie night",
+                    "s:Caroline met Melanie",
+                    "s:garden chores",
+                    "s:Caroline joined a club",
+                    "s:lunch was fine",
+                    "s:the weather is nice",
+                    "s:Melanie painted a sunrise in 2022",
+                ][..],
+            ),
         ] {
             assert_eq!(ranked(&engine, "tenant", query), expected, "walk {walk}: {case}");
         }
@@ -790,6 +803,22 @@ fn ranked_search_orders_hits_by_summed_idf() {
             let kind = engine.search("tenant", bad).unwrap_err().kind;
             assert!(matches!(kind, ErrorKind::InvalidInput), "walk {walk}");
         }
+    }
+}
+
+#[test]
+fn ranked_search_finds_words_in_small_stores() {
+    for walk in WALKS {
+        let opts = EngineOptions { search_walk_first: walk, ..options() };
+        let engine = open(Arc::new(SimDisk::new(73)), opts);
+        say(&engine, &scope("s"), "kayak trip");
+        indexed(&engine);
+        let one = ranked(&engine, "tenant", r("kayak"));
+        assert_eq!(one, ["s:kayak trip"], "walk {walk}: 1 turn holds the word");
+        say(&engine, &scope("s"), "kayak lake");
+        indexed(&engine);
+        let both = ranked(&engine, "tenant", r("kayak"));
+        assert_eq!(both, ["s:kayak lake", "s:kayak trip"], "walk {walk}: 2 turns share it");
     }
 }
 

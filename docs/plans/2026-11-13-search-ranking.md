@@ -15,8 +15,7 @@
 - Scoring: `idf(w) = ln(1 + (N - df + 0.5) / (df + 0.5))`. `N` is the tenant's indexed record count. `df` is the number of distinct indexed LSNs holding `w` or its singular as a substring of a token. A record's score is the sum of `idf` over the query words it holds. Ties go to the higher LSN (newer).
 - Query words: lowercase the query and split on every char that isn't `char::is_alphanumeric`. Keep words of 3 or more chars that aren't in `STOPWORDS`, deduplicated in first-seen order. If none are left, use every non-empty split word instead.
 - `STOPWORDS` is the list in `research/locomo_retrieval/words.py`, copied exactly. It's never tuned on answers.
-- A word with `df > N / 2` is skipped for scoring. Its IDF is under ln 2.
-- Matching stays the same as today: a word, or its `singular`, is a substring of the record's lowercased text. A hit must hold at least 1 scored word.
+- Matching stays the same as today: a word, or its `singular`, is a substring of the record's lowercased text. A hit must hold at least 1 query word.
 - Ranked results return at most `limit` hits and `next: null`. `before` still limits results to LSNs below it.
 - Hidden turns, forgotten records and superseded or deleted facts never show. These are the same checks as newest mode.
 - Performance: search p50 under 1 ms on the LoCoMo harness, on the same machine as the 2026-11-07 run.
@@ -25,7 +24,7 @@
 
 ## Rulings
 
-- Ruling: skip words in over half the records. Why: they add under ln 2 each and cost the most to decode. The simulation lost about 1 recall point on LoCoMo. Cost if wrong: a query made only of very common words finds nothing, so it falls back to unfiltered words. That still goes through the same skip.
+- Ruling: score every query word, whatever its `df`. No word is skipped for being common. Why: the simulation scored higher without a skip, recall@10 59.5 against 58.4. A skip also breaks small stores. With 1 record, a word in it was never scored. Cost if wrong: very common words cost more to decode. Task 3 measures that.
 - Ruling: no `score` field in hits. Why: no caller needs it yet. Cost if wrong: a later additive field.
 - Ruling: records above the index watermark are scored by reading them, using `df` from the index. Those are the newest records, which the index hasn't reached yet. A word the index hasn't seen gets `df = 0`. Why: search already walks those records 1 by 1.
 
@@ -81,7 +80,7 @@ Expected: the new tests FAIL to compile or fail.
 
 In `search`, branch on `query.order`. Relevance:
 1. Take the words from `query_words`, and each one's `singular`.
-2. Get `N` from `records`. Score every word whose `df` is at most `N / 2`, using `lsns` below `min(top, indexed) + 1`.
+2. Get `N` from `records`. Score every word, using `lsns` below `min(top, indexed) + 1`.
 3. Walk the records above `indexed` the way search does today, and score them from their text.
 4. Sort the candidates by score, then LSN, descending.
 5. Visit them in that order through the same `pick` checks, with the match rule "holds at least 1 scored word". Stop at `limit`, `max_bytes` or `visits`.

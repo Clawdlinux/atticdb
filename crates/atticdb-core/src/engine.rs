@@ -1538,9 +1538,9 @@ impl Engine {
     /// `query.limit` hits in 1 page, with no `next`.
     ///
     /// The word index gives `N` and each word's `df`, and scores the records below its
-    /// watermark from postings. A word in over half the records is skipped. The newest records
-    /// are walked and scored from their text, with the same `df`. Then the best are read in
-    /// order through the same checks as newest order.
+    /// watermark from postings. Every word is scored, however common. The newest records are
+    /// walked and scored from their text, with the same `df`. Then the best are read in order
+    /// through the same checks as newest order.
     fn search_ranked(&self, tenant: &str, query: SearchQuery) -> Result<SearchPage> {
         let words = crate::rank::query_words(&query.query);
         if words.is_empty() || query.limit == 0 || query.visits == 0 {
@@ -1571,18 +1571,14 @@ impl Engine {
         let mut scored = Vec::new();
         let mut scores: HashMap<u64, f64> = HashMap::new();
         for ((word, stem), lsns) in words.iter().zip(&stems).zip(&postings) {
-            let df = lsns.len() as u64;
-            if df > n / 2 {
-                continue;
-            }
-            let weight = crate::rank::idf(n, df);
+            let weight = crate::rank::idf(n, lsns.len() as u64);
             scored.push((word.as_str(), stem.as_deref(), weight));
             for &lsn in &lsns[..lsns.partition_point(|&lsn| lsn <= indexed)] {
                 *scores.entry(lsn).or_insert(0.0) += weight;
             }
         }
         drop(postings);
-        // None when the fields hold no scored word.
+        // None when the fields hold no query word.
         let score = |fields: &[&[u8]]| -> Option<f64> {
             let text: Vec<String> =
                 fields.iter().map(|field| crate::search_index::lower(field)).collect();
