@@ -8,7 +8,7 @@ It is stdlib only, and no answering model is involved.
 
 - LoCoMo has 10 long conversations, each with questions labelled by their evidence turns (`dia_id`s).
 - Each conversation goes into its own fresh AtticDB store, 1 note per turn.
-- Every scored question runs through 5 arms. Each arm returns a ranked list of `dia_id`s.
+- Every scored question runs through 6 arms. Each arm returns a ranked list of `dia_id`s.
 - Each list is scored against LoCoMo's own `evidence` labels, for k = 5, 10 and 20:
   - `recall@k`: the share of a question's evidence ids in the top k, averaged over questions.
   - `hit@k`: the share of questions with at least 1 evidence id in the top k.
@@ -16,7 +16,7 @@ It is stdlib only, and no answering model is involved.
 - Latency is the median and p95 wall time of the search call, in ms.
   - Ingestion and server start are excluded.
   - p50 and p95 cover only questions where the arm ran a search. An arm with no content words runs none.
-  - Arms 1 to 3 go over the Unix socket. FTS5 runs in process, so it skips the IPC cost.
+  - Arms 1 to 3 and 6 go over the Unix socket. FTS5 runs in process, so it skips the IPC cost.
 - Full context is the average bytes/4 of a whole conversation's turn contents.
 
 ## What it doesn't measure
@@ -38,8 +38,10 @@ LoCoMo is CC BY-NC 4.0. None of it is in this repo, and none of it may be commit
 
 ```sh
 cargo build --release --locked -p atticdb
-python3 -m research.locomo_retrieval --atticdb target/release/atticdb --out /tmp/locomo-out
+python3 -m research.locomo_retrieval --atticdb "$PWD/target/release/atticdb" --out /tmp/locomo-out
 ```
+
+Pass the binary as an absolute path. The harness runs it from a temp dir, so a relative path fails.
 
 Options:
 - `--cache-dir D`: where the checked dataset is cached. The default is `~/.cache/atticdb-locomo`.
@@ -80,6 +82,7 @@ It is never scored as 0 recall.
 ## The arms
 
 The arms, the stopword list and k were fixed in the plan before any run.
+Arm 6 was added later, fixed in `docs/plans/2026-11-13-search-ranking.md` before its first run.
 
 1. `atticdb-question`: the whole question as the search query, `limit` 100.
 2. `atticdb-1word`: the question's rarest content word in this conversation.
@@ -89,9 +92,11 @@ The arms, the stopword list and k were fixed in the plan before any run.
    - Results are ordered by `bm25()`, then rowid, and cut to 20.
 5. `random`: a shuffle of every turn, seeded with `seed * 1_000_003 + question index`, cut to 20.
    - Top 5 is a prefix of top 20. It is the chance floor: recall@k is near k / turns.
+6. `atticdb-ranked`: the whole question as the search query, `limit` 100, with `order=relevance`.
+   - Only this arm sends `order`. Arms 1 to 3 send none, so they stay newest first.
 
 Notes on arms 1 to 3:
-- AtticDB search returns turns holding every query word, newest first.
+- AtticDB search in newest order returns turns holding every query word, newest first.
 - It matches each whitespace-separated word as a lowercase substring.
   - Every word must be present, filler words included. So a whole question almost never matches.
   - Arm 1 shows what happens when an agent passes the question as it is.
@@ -99,6 +104,15 @@ Notes on arms 1 to 3:
 - "Rarest" means the fewest turns in the conversation hold it. Ties break alphabetically.
 - Words the conversation never holds are skipped. With none left, the arm runs no search and returns nothing.
 - The hits come in returned order. The first 20 are kept, and each k is scored from them.
+
+Notes on arm 6:
+- Ranked search keeps turns holding at least 1 query word.
+- Each turn scores the summed IDF of the query words it holds. Ties go newest first.
+- The server picks the query words itself. Its rules and stopwords are in `crates/atticdb-core/src/rank.rs`.
+- `N` and each word's `df` come from the server's word index.
+  - Right after ingest, the index may not have caught up. So the first questions can rank differently.
+  - Over 4 runs, up to 16 of 1,536 arm 6 rows changed. Overall recall moved 0.2 points at most.
+  - Arms 1 to 5 give the same rows on every run.
 
 ## Questions and normalization
 

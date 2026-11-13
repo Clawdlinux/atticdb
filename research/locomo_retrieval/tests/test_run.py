@@ -1,4 +1,4 @@
-"""The runner, the 5 arms and the outputs.
+"""The runner, the 6 arms and the outputs.
 
 Tests that start a server need a real atticdb binary in ATTICDB_BIN, and skip without it.
 Build one with: cargo build --locked -p atticdb. The rest run without it.
@@ -25,7 +25,7 @@ ATTICDB = os.environ.get("ATTICDB_BIN", "")
 needs_atticdb = pytest.mark.skipif(not (ATTICDB and os.access(ATTICDB, os.X_OK)),
                                    reason="set ATTICDB_BIN to a built atticdb binary")
 
-ARMS = ["atticdb-question", "atticdb-1word", "atticdb-2words", "fts5-bm25", "random"]
+ARMS = ["atticdb-question", "atticdb-1word", "atticdb-2words", "fts5-bm25", "random", "atticdb-ranked"]
 COLUMNS = ["sample_id", "q_index", "category", "arm", "query", "retrieved", "n_evidence",
            "recall@5", "recall@10", "recall@20", "hit@5", "hit@10", "hit@20",
            "tokens@5", "tokens@10", "tokens@20", "ms"]
@@ -89,8 +89,8 @@ def test_end_to_end_fixture(short_tmp, dataset, tmp_path, capsys):
     assert code == 0, err
     rows = _rows(out)
     assert list(rows[0]) == COLUMNS
-    # 9 kept questions times 5 arms.
-    assert len(rows) == 45
+    # 9 kept questions times 6 arms.
+    assert len(rows) == 54
     for sid, indices in KEPT.items():
         for i in indices:
             assert sorted(r["arm"] for r in rows if (r["sample_id"], r["q_index"]) == (sid, str(i))) == sorted(ARMS)
@@ -110,6 +110,10 @@ def test_end_to_end_fixture(short_tmp, dataset, tmp_path, capsys):
     fts = _row(rows, "fx-a", 0, "fts5-bm25")
     assert fts["query"] == '"orla" OR "sign" OR "pottery" OR "workshop"'
     assert fts["retrieved"].split()[0] == "D1:1" and fts["recall@5"] == "1.0"
+    # Ranked, the whole question finds D1:1 first: it holds every content word, rare ones too.
+    ranked = _row(rows, "fx-a", 0, "atticdb-ranked")
+    assert ranked["query"] == q0["query"] and float(ranked["ms"]) >= 0
+    assert ranked["retrieved"].split()[0] == "D1:1" and ranked["recall@5"] == "1.0"
 
     # fx-a qa[2]: evidence D2:2 and D10:2. Words: glaze 2, orla 4, teacher 1, survive 1.
     # 1 word: "survive" (tie with teacher, alphabetical) finds D10:2 only, so recall is 1/2.
@@ -161,7 +165,7 @@ def test_conversations_limits_the_run(short_tmp, dataset, tmp_path, capsys):
                          "--conversations", 1)
     assert code == 0, err
     rows = _rows(out)
-    assert {r["sample_id"] for r in rows} == {"fx-a"} and len(rows) == 35
+    assert {r["sample_id"] for r in rows} == {"fx-a"} and len(rows) == 42
     summary = (out / "summary.md").read_text(encoding="utf-8")
     # Counts cover the conversations that ran: fx-a has 1 category 5 and 1 empty evidence.
     assert "| category_5 | 1 |" in summary and "| empty_evidence | 1 |" in summary
@@ -269,8 +273,10 @@ def test_search_error_stops_the_run(short_tmp, dataset, tmp_path, capsys, monkey
 class FakeClient:
     def __init__(self, reply=None, error=None):
         self.reply, self.error = reply, error
+        self.calls = []
 
-    def search(self, query, limit=None):
+    def search(self, query, **kwargs):
+        self.calls.append((query, kwargs))
         if self.error:
             raise self.error
         return self.reply
@@ -318,6 +324,35 @@ def test_good_reply_keeps_order():
         assert ms is not None and ms >= 0
     finally:
         corpus.close()
+
+
+def test_only_the_ranked_arm_sends_order():
+    corpus = arms.Corpus.build(_conv("fx-a"))
+    try:
+        reply = {"hits": [_hit("D1:1")], "next": None}
+        q = Question(0, 4, "Where did Orla sign up for a pottery workshop?", ("D1:1",))
+        client = FakeClient(reply)
+        ids, query, ms = arms.atticdb_ranked(client, corpus, q)
+        assert (ids, query) == (["D1:1"], q.question) and ms is not None
+        # The whole question, as it is, ranked by the server.
+        assert client.calls == [(q.question, {"limit": 100, "order": "relevance"})]
+        # The other AtticDB arms send no order, so the server keeps them newest first.
+        for arm, sent in ((arms.atticdb_question, q.question), (arms.atticdb_1word, "pottery"),
+                          (arms.atticdb_2words, "pottery workshop")):
+            client = FakeClient(reply)
+            arm(client, corpus, q)
+            assert client.calls == [(sent, {"limit": 100})]
+    finally:
+        corpus.close()
+
+
+def test_client_sends_order_only_when_set(monkeypatch):
+    client = arms.atticdb_client.Client("unix:///nonexistent/s", "t")
+    targets = []
+    monkeypatch.setattr(client, "_read", lambda target, ok: targets.append(target) or {})
+    client.search("a b", limit=100)
+    client.search("a b", limit=100, order="relevance")
+    assert targets == ["/v1/search?q=a+b&limit=100", "/v1/search?q=a+b&limit=100&order=relevance"]
 
 
 def test_no_content_words_means_no_search():

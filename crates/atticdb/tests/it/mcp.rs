@@ -309,7 +309,8 @@ fn tool_calls_over_stdio() {
     );
     let page = mcp.call("fact_list", json!({"prefix": "repo/", "after": "repo/b"}));
     assert_eq!((text(&page), &page["structuredContent"]["next"]), ("repo/c: repo/c", &Value::Null));
-    // Search spans sessions and current facts, newest first; a deleted fact is gone.
+    // Search spans sessions and current facts, ranked; a 1-letter query ties, so newest first.
+    // A deleted fact is gone.
     let found = mcp.call("memory_search", json!({"query": "T"}));
     let (found, seq) = (text(&found), first_turn + 1);
     assert_eq!(found, format!("[ag/s1 #{seq} assistant] three\n[ag/s2 #1 user] two"));
@@ -317,10 +318,11 @@ fn tool_calls_over_stdio() {
         text(&mcp.call("memory_search", json!({"query": "REPO/"}))),
         "[fact repo/c] repo/c\n[fact repo/b] repo/b"
     );
-    let page = mcp.call("memory_search", json!({"query": "t", "limit": 1}));
+    let page = mcp.call("memory_search", json!({"query": "t", "limit": 1, "order": "newest"}));
     let before = page["structuredContent"]["next"].as_u64().unwrap();
     assert!(text(&page).ends_with(&format!("more: call again with before={before}")));
-    let rest = mcp.call("memory_search", json!({"query": "t", "before": before}));
+    let rest =
+        mcp.call("memory_search", json!({"query": "t", "before": before, "order": "newest"}));
     assert_eq!(contents_of_hits(&rest), ["two"]);
     // 2 agents share session s1, so each heading names its agent.
     let other = support::append_body("s1", "z1", "zebra one");
@@ -656,8 +658,8 @@ fn tool_calls_over_stdio() {
     assert!(err.starts_with(empty) && err.contains(&format!("{store} --key tree/agent/rule")));
     let (all, _) = cli(&["tree", "tree/", "--content", "--json"], 0);
     assert!(!all.contains("agent") && !all.contains("secret plan"), "forgotten: {all}");
-    // A search that finds nothing prints the same JSON, and a hint on stderr.
-    let (out, err) = cli(&["search", "--query", "hi there"], 0);
+    // A newest-first search that finds nothing prints the same JSON, and a hint on stderr.
+    let (out, err) = cli(&["search", "--query", "hi there", "--order", "newest"], 0);
     assert_eq!(serde_json::from_str::<Value>(&out).unwrap(), json!({"hits": [], "next": null}));
     assert!(err.contains("No hits. Search matches every word. Try 1 or 2 words.\n"), "{err}");
     // (command, exit code, what stderr says)
@@ -1126,6 +1128,79 @@ fn fact_history_pages_past_the_index_cap() {
     assert_eq!(status.code(), Some(0), "{out}");
     let printed: Value = serde_json::from_str(&shell.stdout()).unwrap();
     assert_eq!(printed["revisions"].as_array().unwrap().len(), 4, "{printed}");
+    assert_eq!(a.close().0.code(), Some(0), "{}", a.process.stderr());
+}
+
+/// `memory_search` and `atticdb search` rank by relevance, so a whole question finds its turn.
+/// `order: "newest"` needs every word and pages newest first.
+#[test]
+fn memory_search_ranks_by_default() {
+    let dir = Dir::new();
+    let (_running, flags, mut a, _) = two_writers(&dir);
+    let (sunrise, shopping, tea) =
+        ("melanie painted a sunrise", "melanie went shopping", "melanie likes tea");
+    for content in [sunrise, shopping, tea] {
+        appended(&a.call("memory_append", json!({"content": content})), content);
+    }
+    let tools = a.request("tools/list", json!({}))["result"]["tools"].clone();
+    let tool = tools.as_array().unwrap().iter().find(|t| t["name"] == "memory_search").unwrap();
+    let order = json!({"type": "string", "enum": ["relevance", "newest"], "default": "relevance"});
+    assert_eq!(tool["inputSchema"]["properties"]["order"], order, "{tool}");
+    let described = "Find past turns and facts by words, across every session and agent. By \
+        default it ranks by relevance: a hit holds any query word, and rarer words count more. \
+        Pass a whole question if you like. order=newest needs every word and returns newest \
+        first, with before for paging. Use it when you don't know the fact key or the session.";
+    assert_eq!(tool["description"], described);
+
+    let question = "When did Melanie paint a sunrise?";
+    let ranked = a.call("memory_search", json!({"query": question}));
+    assert_eq!(contents_of_hits(&ranked), [sunrise, tea, shopping], "{ranked}");
+    assert_eq!(ranked["structuredContent"]["next"], Value::Null);
+    let top = a.call("memory_search", json!({"query": question, "order": "relevance", "limit": 1}));
+    assert_eq!(
+        (contents_of_hits(&top), &top["structuredContent"]["next"]),
+        (vec![sunrise], &Value::Null)
+    );
+    let none = a.call("memory_search", json!({"query": question, "order": "newest"}));
+    assert_eq!(text(&none), "no matches");
+    for order in [json!("oldest"), json!(1)] {
+        let bad = a.call("memory_search", json!({"query": question, "order": order}));
+        assert_eq!(
+            (&bad["isError"], text(&bad)),
+            (&json!(true), "order must be relevance or newest")
+        );
+    }
+    let page = a.call("memory_search", json!({"query": "melanie", "order": "newest", "limit": 2}));
+    assert_eq!(contents_of_hits(&page), [tea, shopping], "{page}");
+    let next = page["structuredContent"]["next"].as_u64().unwrap_or_else(|| panic!("{page}"));
+    let rest =
+        a.call("memory_search", json!({"query": "melanie", "order": "newest", "before": next}));
+    assert_eq!(contents_of_hits(&rest), [sunrise], "{rest}");
+
+    // The shell verb ranks too. Only `--order newest` says a question finds nothing.
+    let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
+    let shell = |verb: &[&str], code: i32| {
+        let mut process = Process::spawn(&dir.0, &[&["search"][..], verb, &flags[..]].concat());
+        let (status, out) = process.wait();
+        assert_eq!(status.code(), Some(code), "{verb:?}: {out}");
+        (process.stdout(), process.stderr())
+    };
+    let printed = |out: &str| -> Vec<String> {
+        let page: Value = serde_json::from_str(out).unwrap();
+        let hits = page["hits"].as_array().unwrap();
+        hits.iter().map(|hit| hit["content"].as_str().unwrap().to_owned()).collect()
+    };
+    let (out, err) = shell(&["--query", question], 0);
+    assert_eq!(printed(&out), [sunrise, tea, shopping], "{out}");
+    assert!(err.is_empty(), "{err}");
+    let (out, err) = shell(&["--query", question, "--order", "newest"], 0);
+    assert!(printed(&out).is_empty(), "{out}");
+    assert!(err.contains("No hits. Search matches every word. Try 1 or 2 words.\n"), "{err}");
+    let (out, _) = shell(&["--query", "melanie", "--order", "newest", "--limit", "1"], 0);
+    let page: Value = serde_json::from_str(&out).unwrap();
+    assert!(page["next"].is_u64(), "{out}");
+    let (out, err) = shell(&["--query", "melanie", "--order", "oldest"], 2);
+    assert!(out.is_empty() && err.contains("--order must be relevance or newest"), "{err}");
     assert_eq!(a.close().0.code(), Some(0), "{}", a.process.stderr());
 }
 
@@ -1608,6 +1683,8 @@ fn hosted_session_runs_the_same_tools() {
         "fact_history",
     ];
     assert_eq!(names, want);
+    let order = &tools[5]["inputSchema"]["properties"]["order"];
+    assert_eq!(order["default"], "relevance", "hosted search ranks too: {order}");
     for tool in ["file_ref", "file_get"] {
         let args = json!({"name": tool, "arguments": {"path": "/x", "about": "y"}});
         let reply = hosted_rpc(&mut hosted, 3, "tools/call", args);
@@ -1628,6 +1705,10 @@ fn hosted_session_runs_the_same_tools() {
     committed(&hosted_call(&mut hosted, "memory_append", named), "append to atticdb");
     let recent = hosted_call(&mut hosted, "memory_recent", json!({"session": "atticdb"}));
     assert_eq!(contents(&recent), ["in atticdb"], "{recent}");
+    // Hosted search ranks too: each turn holds 1 of the words, so the tie goes newest first.
+    let found = hosted_call(&mut hosted, "memory_search", json!({"query": "session atticdb"}));
+    assert_eq!(contents_of_hits(&found), ["in atticdb", "no session"], "{found}");
+    assert_eq!(found["structuredContent"]["next"], Value::Null, "{found}");
 }
 
 /// Each hosted session guards its fact writes, as each stdio adapter does.

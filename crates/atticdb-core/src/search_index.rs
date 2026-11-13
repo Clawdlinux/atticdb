@@ -66,6 +66,8 @@ struct Terms {
     postings: Vec<Postings>,
     /// Per 3-byte window, the ids of the tokens holding it.
     grams: HashMap<u32, Postings>,
+    /// Records added with at least 1 token. Ranked search's `N`.
+    records: u64,
     /// Gives every token the same hash, so tests reach `collided`.
     #[cfg(test)]
     collide: bool,
@@ -185,6 +187,11 @@ impl Index {
             let postings = &mut terms.postings[id as usize];
             self.bytes += postings.push(lsn);
         }
+        // Only a record with at least 1 token counts. A hidden record arrives without fields,
+        // like a kind that holds no text. Empty or blank text adds no token either.
+        if !seen.is_empty() {
+            terms.records += 1;
+        }
         self.lsn = lsn;
         true
     }
@@ -201,12 +208,7 @@ impl Index {
         let mut sets: Vec<(u64, Vec<u32>)> = words
             .iter()
             .map(|(word, stem)| {
-                let mut ids = terms.matching(word);
-                if let Some(stem) = stem {
-                    ids.extend(terms.matching(stem));
-                    ids.sort_unstable();
-                    ids.dedup();
-                }
+                let ids = terms.holding(word, stem.as_deref());
                 let total = ids.iter().map(|&id| u64::from(terms.postings[id as usize].count));
                 (total.sum(), ids)
             })
@@ -224,6 +226,19 @@ impl Index {
         }
         found.reverse();
         found
+    }
+
+    /// How many records of `tenant` were added with at least 1 token. Hidden ones, kinds
+    /// without text and blank text don't count.
+    pub(crate) fn records(&self, tenant: u32) -> u64 {
+        self.tenants.get(&tenant).map_or(0, |terms| terms.records)
+    }
+
+    /// Ascending distinct LSNs below `below` holding `word` or `stem`. Unlike `candidates`, it
+    /// is exact, so its length is the word's `df`.
+    pub(crate) fn lsns(&self, tenant: u32, word: &str, stem: Option<&str>, below: u64) -> Vec<u64> {
+        let Some(terms) = self.tenants.get(&tenant) else { return Vec::new() };
+        terms.union(&terms.holding(word, stem), below)
     }
 }
 
@@ -284,6 +299,17 @@ impl Terms {
             });
         }
         ids.into_iter().map(|id| id as u32).filter(|&id| self.text(id).contains(word)).collect()
+    }
+
+    /// Ids of the tokens containing `word` or `stem`, ascending.
+    fn holding(&self, word: &str, stem: Option<&str>) -> Vec<u32> {
+        let mut ids = self.matching(word);
+        if let Some(stem) = stem {
+            ids.extend(self.matching(stem));
+            ids.sort_unstable();
+            ids.dedup();
+        }
+        ids
     }
 
     /// Ascending, deduplicated LSNs below `below` of the tokens `ids`.
@@ -493,5 +519,23 @@ mod tests {
         // alpha, beta, gamma and "\u{fffd}beta": all hash to 0, so 3 go to `collided`.
         assert_eq!((terms.postings.len(), terms.collided.len()), (4, 3));
         assert_eq!((index.lsn, index.terms), ((1 << 40) + 1, 4));
+    }
+
+    #[test]
+    fn records_and_lsns_count_what_was_added() {
+        let mut index = Index::new(usize::MAX);
+        for (lsn, text) in [(3, "Painted lake"), (5, "a lake"), (9, "the painters")] {
+            assert!(index.add(1, lsn, &[text.as_bytes().to_vec()]));
+        }
+        assert!(index.add(1, 10, &[]), "a record without text");
+        assert!(index.add(1, 12, &[Vec::new()]), "an empty field");
+        assert!(index.add(1, 13, &[b" \t\n ".to_vec()]), "a blank field");
+        assert!(index.add(2, 11, &[b"lake".to_vec()]));
+        assert_eq!((index.records(1), index.records(2), index.records(3)), (3, 1, 0));
+        assert_eq!(index.lsns(1, "paint", None, u64::MAX), [3, 9]);
+        assert_eq!(index.lsns(1, "paint", None, 9), [3], "below is exclusive");
+        assert_eq!(index.lsns(1, "lakes", Some("lake"), u64::MAX), [3, 5], "the singular");
+        assert_eq!(index.lsns(1, "zebra", None, u64::MAX), Vec::<u64>::new());
+        assert_eq!(index.lsns(3, "lake", None, u64::MAX), Vec::<u64>::new());
     }
 }

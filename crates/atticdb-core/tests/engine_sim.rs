@@ -4,7 +4,8 @@
 use atticdb_core::{
     forget::Selector, turn::decode, Appended, CompressionMode, Engine, EngineError, EngineOptions,
     ErrorKind, FactQuery, FactWritten, Forgotten, Health, Hit, NewFact, NewTurn, Outcome, Record,
-    RecordQuery, Revision, Role, Scope, SearchQuery, SessionQuery, SimFact, Turn, WindowQuery,
+    RecordQuery, Revision, Role, Scope, SearchOrder, SearchQuery, SessionQuery, SimFact, Turn,
+    WindowQuery,
 };
 use atticdb_tape::sim::{CapacityError, CapacityPlan, PublishPause, SimClock, StorageFullFault};
 use atticdb_tape::{Clock, Error, HookIo, Io, Kind, Op, SimDisk, Tape, TapeOptions};
@@ -583,6 +584,7 @@ impl Oracle {
                     limit: 1 + rng.below(40),
                     max_bytes: usize::MAX,
                     visits: usize::MAX,
+                    order: SearchOrder::Newest,
                 };
                 let page = engine.search(tenant, query).unwrap();
                 got.extend(page.hits.into_iter().map(|hit| match hit {

@@ -29,8 +29,11 @@ const MAX_BACKOFF: Duration = Duration::from_secs(2);
 /// Time kept for the request itself: no attempt connects or sends with less than this
 /// left before the deadline.
 const MIN_ATTEMPT: Duration = Duration::from_secs(2);
-/// What `atticdb search` prints on stderr when it finds nothing.
+/// What `atticdb search --order newest` prints on stderr when it finds nothing.
 const NO_HITS: &str = "No hits. Search matches every word. Try 1 or 2 words.";
+/// Why a read failed when the server doesn't know a query parameter this client sent.
+const OLDER_SERVER: &str = "the running AtticDB server is older than this client. Stop it and \
+    the next call starts a new one. Run atticdb doctor for the pid.";
 /// The first line of a `fact_set` refused because the key changed. The current value follows.
 const CONFLICT: &str = "conflict: this fact changed, or you haven't read it in this chat yet. \
     Nothing was written. Its current value is below. Merge it with your change and call \
@@ -62,12 +65,16 @@ enum Transport {
 }
 
 /// Runs one tool from a shell, with arguments from `--<name>` flags. Prints the tool's
-/// `structuredContent` as one JSON line. A search with no hits and no next page also prints
-/// a hint on stderr. Exits 0, 1 when nothing was written or a read failed, 2 for a bad flag,
-/// or 3 when a write's outcome is unknown.
+/// `structuredContent` as one JSON line. A `--order newest` search with no hits and no next
+/// page also prints a hint on stderr. Exits 0, 1 when nothing was written or a read failed, 2
+/// for a bad flag, or 3 when a write's outcome is unknown.
 pub fn command(tool: &str, mut flags: HashMap<String, String>) -> u8 {
     let mut args = json!({});
-    for name in ["content", "role", "key", "prefix", "after", "query", "path", "about"] {
+    if flags.get("--order").is_some_and(|order| order != "relevance" && order != "newest") {
+        eprintln!("atticdb: --order must be relevance or newest");
+        return 2;
+    }
+    for name in ["content", "role", "key", "prefix", "after", "query", "path", "about", "order"] {
         if let Some(value) = flags.remove(&format!("--{name}")) {
             args[name] = json!(value);
         }
@@ -97,9 +104,11 @@ pub fn command(tool: &str, mut flags: HashMap<String, String>) -> u8 {
     if result["isError"] != true {
         let output = &result["structuredContent"];
         println!("{output}");
-        // Search ANDs its words, so a question finds nothing. Only the shell verb says so.
+        // Newest-first search ANDs its words, so a question finds nothing. Only the shell verb
+        // says so. A ranked search keeps any word, so the hint would be wrong there.
         let none = output["hits"].as_array().is_some_and(Vec::is_empty);
-        if tool == "memory_search" && none && output["next"].is_null() {
+        let newest = args["order"] == "newest";
+        if tool == "memory_search" && newest && none && output["next"].is_null() {
             eprintln!("{NO_HITS}");
         }
         return 0;
@@ -860,19 +869,8 @@ impl Client {
     }
 
     fn search(&mut self, args: &Value) -> Value {
-        let target = (|| {
-            let query = string(args, "query")?.ok_or("query is required")?;
-            let (limit, max_bytes) =
-                (number(args, "limit", 10)?.clamp(1, 50), number(args, "max_bytes", 64 << 10)?);
-            let mut target =
-                format!("/v1/search?q={}&limit={limit}&max_bytes={max_bytes}", encode(&query));
-            if !args["before"].is_null() {
-                target += &format!("&before={}", number(args, "before", 0)?);
-            }
-            Ok::<_, String>(target)
-        })();
-        match target {
-            Ok(target) => self.read("memory_search", &target, "hits", hits),
+        match search_target(args) {
+            Ok((target, ranked)) => self.read_new("memory_search", &target, "hits", hits, ranked),
             Err(message) => tool_error(message),
         }
     }
@@ -885,9 +883,25 @@ impl Client {
         field: &str,
         render: fn(&Value) -> Value,
     ) -> Value {
+        self.read_new(tool, target, field, render, false)
+    }
+
+    /// [`Self::read`]. With `new_param`, a 400 for an unknown query parameter means the server
+    /// predates a parameter in `target`. Then the error says to restart the server.
+    fn read_new(
+        &mut self,
+        tool: &str,
+        target: &str,
+        field: &str,
+        render: fn(&Value) -> Value,
+        new_param: bool,
+    ) -> Value {
         let mut reasons = Vec::new();
         self.retry("GET", target, &[], |reply| match reply {
             Ok(reply) if reply.get(field).is_some() => Ok(render(&reply)),
+            Ok(reply) if new_param && unknown_param(&reply) => {
+                Ok(tool_error(format!("{tool} failed: {OLDER_SERVER}")))
+            }
             Ok(reply) => {
                 let detail = note(&mut reasons, describe(&reply));
                 Ok(tool_error(format!("{tool} failed: {detail}")))
@@ -1005,6 +1019,34 @@ fn note(reasons: &mut Vec<String>, reason: String) -> String {
         reasons.push(reason);
     }
     reasons.join("; ")
+}
+
+/// The `/v1/search` target for `memory_search`'s `args`, and whether it sends `order`.
+/// Ranked unless `order` is "newest". Newest sends no `order`, as before ranked search, so an
+/// older server still answers it.
+fn search_target(args: &Value) -> Result<(String, bool), String> {
+    let query = string(args, "query")?.ok_or("query is required")?;
+    let (limit, max_bytes) =
+        (number(args, "limit", 10)?.clamp(1, 50), number(args, "max_bytes", 64 << 10)?);
+    let newest = match (&args["order"], args["order"].as_str()) {
+        (Value::Null, _) | (_, Some("relevance")) => false,
+        (_, Some("newest")) => true,
+        _ => return Err("order must be relevance or newest".to_owned()),
+    };
+    let order = if newest { "" } else { "&order=relevance" };
+    let mut target =
+        format!("/v1/search?q={}{order}&limit={limit}&max_bytes={max_bytes}", encode(&query));
+    if !args["before"].is_null() {
+        target += &format!("&before={}", number(args, "before", 0)?);
+    }
+    // A q over 1024 bytes gets the same 400 from any server, so it says nothing of the version.
+    Ok((target, !newest && query.len() <= 1024))
+}
+
+/// Whether `reply` is the 400 a server sends for a query parameter it doesn't know.
+fn unknown_param(reply: &Value) -> bool {
+    let message = reply["message"].as_str().unwrap_or_default();
+    reply["error"] == "invalid_input" && message.starts_with("unknown query parameter")
 }
 
 /// The server's error kind and message, for the model.
@@ -1340,6 +1382,28 @@ mod tests {
 
     fn rendered(reply: Value) -> String {
         history(&reply)["content"][0]["text"].as_str().unwrap_or_default().to_owned()
+    }
+
+    /// Newest sends the request from before ranked search, byte for byte.
+    #[test]
+    fn search_targets_send_order_only_to_rank() {
+        let target = |args: Value| search_target(&args);
+        let newest = target(json!({"query": "a b", "order": "newest", "before": 7}));
+        let old = "/v1/search?q=a%20b&limit=10&max_bytes=65536&before=7".to_owned();
+        assert_eq!(newest, Ok((old, false)));
+        let ranked = "/v1/search?q=a%20b&order=relevance&limit=10&max_bytes=65536".to_owned();
+        assert_eq!(target(json!({"query": "a b"})), Ok((ranked.clone(), true)));
+        assert_eq!(target(json!({"query": "a b", "order": "relevance"})), Ok((ranked, true)));
+        let long = target(json!({"query": "x".repeat(1025)})).unwrap();
+        assert!(long.0.contains("&order=relevance") && !long.1, "a long q is 400 anywhere");
+        for order in [json!("oldest"), json!(1), json!("")] {
+            let bad = target(json!({"query": "a", "order": order}));
+            assert_eq!(bad, Err("order must be relevance or newest".to_owned()), "{order}");
+        }
+        let refused = json!({"error": "invalid_input",
+                             "message": "unknown query parameter, or q over 1024 bytes"});
+        assert!(unknown_param(&refused));
+        assert!(!unknown_param(&json!({"error": "invalid_input", "message": "q is required"})));
     }
 
     #[test]

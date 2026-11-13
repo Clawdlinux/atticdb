@@ -53,7 +53,9 @@ A store reserves 2 segment files, the one in use and a spare, plus 2 MiB of inde
 
 ### Search
 
-`memory_search` keeps a turn or current fact when every query word, or its singular, is a substring of its lowercased text. A query word has no whitespace, so a match lies inside 1 whitespace-delimited token. The server keeps a dictionary of those tokens per tenant, and per token the records holding it (D96). A query walks the newest 64 records, then finds the candidate tokens through the trigrams of each word, and reads only the candidate records. It checks every record it returns again, so the index can make a search slower but never changes its result.
+`memory_search` and `atticdb search` rank hits by relevance by default (D113). The query splits on every char that isn't a letter or digit. Words under 3 chars and English stopwords are dropped, unless none would be left. A token of 3 or more chars with a digit, such as `FIN-88` or `v0.3.1`, is also kept whole. A hit holds at least 1 kept word, or its singular, as a substring. Its score is the sum of each held word's IDF, so rarer words count more. Every kept word is scored, however many records hold it. Ties go to the newer record. A ranked call returns at most `limit` hits and `next: null`. `before` still keeps only LSNs below it. The HTTP API ranks only with `order=relevance`.
+
+Newest order needs every query word in a turn or current fact. A word matches when it, or its singular, is a substring of the lowercased text. A query word has no whitespace, so a match lies inside 1 whitespace-delimited token. The server keeps a dictionary of those tokens per tenant, and per token the records holding it (D96). A query walks the newest 64 records, then finds the candidate tokens through the trigrams of each word, and reads only the candidate records. It checks every record it returns again, so the index can make a search slower but never changes its result.
 
 The index is built in memory from plain text, off the write path. After a restart it rebuilds in the background. Until then, search walks the records it doesn't cover yet.
 
@@ -357,7 +359,7 @@ Send `Authorization: Bearer <token>`. The token picks the tenant. On TCP the `Ho
 |---|---|---|
 | `POST /v1/append` | `{"agent", "session", "idem_key", "turns": [{"role", "content", "meta"?}]}` | `{"outcome": "committed", "deduplicated", "txn", "first_lsn", "last_lsn", "seqs"}` |
 | `GET /v1/window` | `?agent=&session=` plus `last=N`, or `since_seq=S` with an optional `limit=N`. Optional `max_bytes=B` | `{"turns": [{"seq", "lsn", "commit_time_ns", "role", "content", "meta"}], "truncated", "as_of_lsn"}` |
-| `GET /v1/search` | `?q=` words, plus optional `limit=N` (default 10, cap 100), `before=LSN` and `max_bytes=B` | `{"hits": [{"kind": "turn", "agent", "session", "seq", "lsn", "commit_time_ns", "role", "content", "meta"} or {"kind": "fact", "key", "lsn", "commit_time_ns", "agent", "content", "meta"}], "next"}` |
+| `GET /v1/search` | `?q=` words, plus optional `order=newest` (default) or `order=relevance`, `limit=N` (default 10, cap 100), `before=LSN` and `max_bytes=B` | `{"hits": [{"kind": "turn", "agent", "session", "seq", "lsn", "commit_time_ns", "role", "content", "meta"} or {"kind": "fact", "key", "lsn", "commit_time_ns", "agent", "content", "meta"}], "next"}` |
 | `GET /v1/sessions` | Optional `limit=N` (default 100, cap 1,000), and `after_agent=` with `after_session=` | `{"sessions": [{"agent", "session", "turns", "forgotten_up_to"}], "next": {"agent", "session"} or null, "total": {"sessions", "turns"}, "as_of_lsn"}` |
 | `GET /v1/records` | Optional `before=LSN`, `limit=N` (default 50, cap 1,000), `kind=turn` or `kind=fact`, and `max_bytes=B` | `{"records": [{"kind": "turn", "lsn", "commit_time_ns", "agent", "session", "seq", "role", "content", "meta"} or {"kind": "fact", "lsn", "commit_time_ns", "key", "agent", "deleted", "content", "meta"}], "next"}` |
 | `POST /v1/facts/put` | `{"key", "content", "idem_key"}`, plus optional `"meta"`, `"agent"` and `"if_lsn"` | `{"outcome": "committed", "deduplicated", "txn", "lsn"}` |
@@ -378,7 +380,8 @@ Send `Authorization: Bearer <token>`. The token picks the tenant. On TCP the `Ho
 
 - `role` is `system`, `user`, `assistant` or `tool`. `meta` is a JSON object, at most 64 KiB. `idem_key` is required, 1 to 128 bytes.
 - `last` and `limit` are capped at 1,000. `max_bytes` defaults to 1 MiB and is capped at 8 MiB. Turns are never cut. `truncated` says the budget, not the query, ended the window.
-- Search walks records newest first. A turn matches when its content holds every word of `q`, ignoring case, as a substring. A plural word also matches its singular (Harman's S-stemmer), so `keys` finds `key`. A fact matches on its key or content, and only its current value counts: a superseded value never shows. A fact changed while a call runs may be missing from that call, like any record written after it started. A call visits at most 1,000,000 records. Pass `next` as `before` to go on. `next` is null once the walk reaches the oldest record.
+- `order` is `newest`, the default, or `relevance`. Anything else is 400 `invalid_input`. `relevance` ranks as [Search](#search) says. It returns at most `limit` hits and `next: null`, and `before` still applies. With `relevance`, a `q` with no letter or digit is 400 `invalid_input`.
+- By default search walks records newest first. A turn matches when its content holds every word of `q`, ignoring case, as a substring. A plural word also matches its singular (Harman's S-stemmer), so `keys` finds `key`. A fact matches on its key or content, and only its current value counts: a superseded value never shows. A fact changed while a call runs may be missing from that call, like any record written after it started. A call visits at most 1,000,000 records. Pass `next` as `before` to go on. `next` is null once the walk reaches the oldest record.
 - Sessions lists the tenant's sessions with at least 1 published turn, in byte order of agent, then session. `turns` counts published turns, and is also the newest turn's `seq`. A counted turn is already durable. `window`, `records` and `search` return it a few microseconds after it is counted. `total` counts all the tenant's sessions and turns, not only this page. Pass `next` as `after_agent` and `after_session` to go on. `next` is null on the last page. Passing only 1 of them is 400 `invalid_input`.
 - Each sessions call scans every tenant's sessions under the engine's state lock, and appends wait for it. A first page over 100,000 sessions takes about 1 to 4 ms at limit 100 to 1,000. A page after a cursor costs about 1.5x that. At the default cap of 1,000,000 sessions, a first page takes about 25 to 30 ms. Figures are from an Apple M4.
 - Records walks the tenant's turns and fact revisions newest first, each as written. Superseded values and deletes show too: it is the log, not the current state. A delete has `"deleted": true` and empty content. `max_bytes` counts agent, session, key, content and meta bytes. The first record always comes back, even over `max_bytes`.
@@ -425,14 +428,14 @@ Branch on `outcome`, never on the status alone. One call is one `idem_key`, reus
 
 ## `atticdb mcp`
 
-`atticdb mcp` gives the model `memory_append`, `memory_recent`, `fact_set`, `fact_get`, `fact_list`, `fact_history`, `memory_search`, `file_ref` and `file_get`. It has no forget tool. The instructions say the user runs `atticdb forget` or uses studio. Search finds turns and current facts by words, across every session, newest first. It starts the server if none is running.
+`atticdb mcp` gives the model `memory_append`, `memory_recent`, `fact_set`, `fact_get`, `fact_list`, `fact_history`, `memory_search`, `file_ref` and `file_get`. It has no forget tool. The instructions say the user runs `atticdb forget` or uses studio. Search finds turns and current facts by words, across every session. It ranks by relevance unless `order` is `newest`. It starts the server if none is running.
 Its `fact_set` writes a key only if it's unchanged since this `atticdb mcp` process last read or wrote it. VS Code and Claude Desktop share 1 process across chats. A key it never read must be absent. Otherwise nothing is written, and the model gets the current value to merge. Under the value, a line says who set it and when: `by <agent> at <UTC time>`. `atticdb fact set` always overwrites.
 `fact_history` lists a key's revisions, newest first, with who set or deleted each and when. A line reads `lsn <lsn> at <UTC time> by <agent>: <content>`. A delete shows `(deleted)`, a forgotten revision `lsn <lsn> (forgotten)`. When older revisions exist, the last line is `more: call fact_history again with before=<lsn>`. A page can be empty and still have more. Then it reads `no revisions in this range`. An older server sends no `next`, so the hint is `more: older revisions were cut; raise max_bytes`. `before` pages past the 16 revisions the index keeps. Reading it doesn't count as reading the key.
 The model can read and write any session in the tenant. Don't give it to a model you don't trust with the whole tenant.
 The server's instructions tell the model when to read memory and what to save. Claude Code and Codex read them.
 
 Newline-delimited JSON-RPC 2.0 on stdin and stdout. Logs go to stderr. It exits 0 when stdin closes.
-Tools: `memory_append {content, role?, session?, meta?}`, `memory_recent {n?, session?, max_bytes?}`, the fact tools, `memory_search {query, limit?, before?, max_bytes?}`, `file_ref {path, about}` and `file_get {path, versions?}`.
+Tools: `memory_append {content, role?, session?, meta?}`, `memory_recent {n?, session?, max_bytes?}`, the fact tools, `memory_search {query, order?, limit?, before?, max_bytes?}`, `file_ref {path, about}` and `file_get {path, versions?}`.
 Read tools carry `readOnlyHint: true`, so VS Code runs them without asking. `initialize` returns short `instructions`: use the memory block, and where to save rules and notes. Copilot CLI adds a server's instructions to the system prompt only for allowlisted servers, or with `--allow-all-mcp-server-instructions`.
 Integers beyond ±(2^53 - 1), such as `commit_time_ns`, come back as strings in tool results, because JavaScript clients can't hold them (I-JSON, RFC 7493). The shell verbs print them as numbers.
 `--agent` defaults to `mcp`, as in the shell verbs. The session-start hook reads that agent's notes too. A tool may pass `session`. An empty `session` counts as none, so the call uses the default session. The tenant still comes from the token.
@@ -546,7 +549,7 @@ Sessions live in memory only. At most 64 per tenant and 4,096 in all. A session 
 
 ## Shell verbs
 
-The same 9 tools run from a shell, with `atticdb mcp`'s connection flags. Each prints 1 JSON line. `fact set --delete` deletes.
+The same 9 tools run from a shell, with `atticdb mcp`'s connection flags. Each prints 1 JSON line. `fact set --delete` deletes. `search` ranks by relevance. `--order newest` needs every word and pages with `--before`.
 
 ```sh
 export ATTICDB_TOKEN=$TOKEN
