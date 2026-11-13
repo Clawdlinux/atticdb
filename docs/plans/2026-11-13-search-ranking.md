@@ -136,7 +136,7 @@ Expected: all pass. A research test that assumed newest-first MCP search gets `o
 
 - [ ] **Step 5: Docs and commit**
 
-D113: MCP and CLI search rank by summed IDF over any query word, with stopwords and a skip for words in over half the records. The HTTP default stays newest. Ranked results are top-only. Alternatives rejected:
+D113: MCP and CLI search rank by summed IDF over any query word, with a fixed English stopword list. Every query word is scored. The HTTP default stays newest. Ranked results are top-only. Alternatives rejected:
 - full BM25: term frequency and length made LoCoMo worse, and need an index format change.
 - an offset cursor: results shift between calls.
 
