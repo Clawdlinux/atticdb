@@ -15,7 +15,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Every entry name in `dir` with its bytes, or `None` when it cannot be read as a file.
@@ -313,21 +313,22 @@ pub const TOKEN_B: &str = "token-b-0123456789abcdefghijklmnopqrstuv";
 /// `sun_path` (104 bytes on macOS). By default it lives under `/tmp/atticdb-test-<uid>` on
 /// macOS and `/var/tmp/atticdb-test-<uid>` on Linux, whatever the checkout path.
 /// `ATTICDB_TEST_DIR` is optional and may be any short directory. It is resolved to its real
-/// path.
+/// path. Point it at a folder used only for tests, since [`sweep`] removes what dead test runs
+/// left there. Each [`Dir`] holds an empty [`MARKER`] file.
 #[derive(Debug)]
 pub struct Dir(pub PathBuf);
+
+/// The empty file [`Dir::new`] puts in each folder it makes, so [`sweep`] can tell them apart.
+pub const MARKER: &str = ".atticdb-test";
 
 impl Dir {
     pub fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        // Its real path, since servers build absolute paths from `getcwd` and tests compare them.
-        let root = std::env::var_os("ATTICDB_TEST_DIR").map_or_else(tmp_root, |root| {
-            std::fs::create_dir_all(&root).unwrap();
-            std::fs::canonicalize(root).unwrap()
-        });
+        let root = test_root();
         let name = format!("{:x}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
         let path = root.join(name);
         std::fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
+        File::options().write(true).create_new(true).mode(0o600).open(path.join(MARKER)).unwrap();
         let staging = path.join("d/.zs.01234567/s");
         assert!(
             staging.as_os_str().len() < atticdb::listen::SUN_PATH_BYTES,
@@ -341,6 +342,97 @@ impl Dir {
 impl Drop for Dir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The root that holds each [`Dir`]: `ATTICDB_TEST_DIR` if set, else [`tmp_root`]. The first
+/// call in a test process also runs [`sweep`] on it. Under `ATTICDB_TEST_DIR` the sweep also
+/// needs the [`MARKER`].
+fn test_root() -> PathBuf {
+    static SWEPT: OnceLock<()> = OnceLock::new();
+    let from_env = std::env::var_os("ATTICDB_TEST_DIR");
+    let need_marker = from_env.is_some();
+    // Its real path, since servers build absolute paths from `getcwd` and tests compare them.
+    let root = from_env.map_or_else(tmp_root, |root| {
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::canonicalize(root).unwrap()
+    });
+    SWEPT.get_or_init(|| sweep(&root, need_marker));
+    root
+}
+
+/// How many levels below a leftover [`Dir`] the sweep looks for `LOCK` files. A home's data
+/// directory, such as `h/Library/Application Support/atticdb/data/LOCK`, fits.
+const SWEEP_DEPTH: usize = 6;
+
+/// Stops servers left under `root` by killed test runs, then removes the runs' folders.
+/// A killed run never drops its [`Dir`] or [`Holders`], so its servers would run forever
+/// (#227). It takes only folders that [`leftover`] proves, and stops their servers together.
+/// It signals only what [`stop_servers`] confirms serves that folder. Then it checks each
+/// folder again right before removing it. Errors are ignored, since the sweep must never fail
+/// a test run.
+pub fn sweep(root: &Path, need_marker: bool) {
+    let Ok(entries) = std::fs::read_dir(root) else { return };
+    let leftovers: Vec<(PathBuf, (u64, u64))> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| leftover(&entry.path(), need_marker).map(|id| (entry.path(), id)))
+        .collect();
+    let mut data = Vec::new();
+    for (path, _) in &leftovers {
+        lock_dirs(path, 1, &mut data);
+    }
+    if !data.is_empty() {
+        stop_servers(&data);
+    }
+    for (path, id) in &leftovers {
+        // In case the pid or the folder changed while servers stopped.
+        if leftover(path, need_marker) == Some(*id) {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+}
+
+/// The `(dev, ino)` of `path` if [`Dir::new`] made it in a test process that is gone.
+/// - Its name is exactly what [`Dir::new`] writes: `<hex pid>-<n>`, with no leading zeros.
+/// - Its pid isn't this process and isn't running. A pid we may not signal still runs.
+///   Only `ESRCH` means it is gone.
+/// - It is a real folder, not a symlink, owned by this user with mode 0700 or stricter.
+/// - With `need_marker`, it holds a [`MARKER`] file.
+fn leftover(path: &Path, need_marker: bool) -> Option<(u64, u64)> {
+    let (pid, n) = path.file_name()?.to_str()?.split_once('-')?;
+    let raw = u32::from_str_radix(pid, 16).ok()?;
+    let digits = !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit());
+    let counter = n == "0" || (digits && !n.starts_with('0'));
+    if format!("{raw:x}") != pid || !counter || raw == std::process::id() {
+        return None;
+    }
+    let pid = rustix::process::Pid::from_raw(i32::try_from(raw).ok()?)?;
+    if rustix::process::test_kill_process(pid) != Err(rustix::io::Errno::SRCH) {
+        return None;
+    }
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    let uid = rustix::process::geteuid().as_raw();
+    if !meta.is_dir() || meta.uid() != uid || meta.mode() & 0o077 != 0 {
+        return None;
+    }
+    if need_marker && !std::fs::symlink_metadata(path.join(MARKER)).is_ok_and(|m| m.is_file()) {
+        return None;
+    }
+    Some((meta.dev(), meta.ino()))
+}
+
+/// Adds to `found` each directory under `dir` that holds a `LOCK` file. The entries of `dir`
+/// are `depth` levels below the leftover folder, and the walk stops at [`SWEEP_DEPTH`].
+/// Symlinks aren't followed.
+fn lock_dirs(dir: &Path, depth: usize, found: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.filter_map(Result::ok) {
+        let Ok(kind) = entry.file_type() else { continue };
+        if kind.is_dir() && depth < SWEEP_DEPTH {
+            lock_dirs(&entry.path(), depth + 1, found);
+        } else if kind.is_file() && entry.file_name() == "LOCK" {
+            found.push(dir.to_owned());
+        }
     }
 }
 
@@ -477,6 +569,16 @@ pub struct Running {
 }
 
 pub fn serve(engine: Arc<Engine>, dir: &Dir, max_connections: usize) -> Running {
+    serve_watching(engine, dir, max_connections, None)
+}
+
+/// [`serve`], with the server watching `lock_path` as its `LOCK`.
+pub fn serve_watching(
+    engine: Arc<Engine>,
+    dir: &Dir,
+    max_connections: usize,
+    lock_path: Option<PathBuf>,
+) -> Running {
     let socket = dir.0.join("a");
     wait_unheard(&socket);
     let instance = atticdb::random_hex(16).unwrap();
@@ -494,6 +596,7 @@ pub fn serve(engine: Arc<Engine>, dir: &Dir, max_connections: usize) -> Running 
         exit_on_poison: false,
         max_connections,
         log_requests: false,
+        lock_path,
     };
     let server = serve::run(engine, listeners, config).unwrap();
     let vias = [Via::Tcp(server.tcp_addr().unwrap()), Via::Unix(socket)];

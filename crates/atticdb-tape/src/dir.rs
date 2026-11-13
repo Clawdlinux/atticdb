@@ -224,7 +224,7 @@ pub struct DataDir {
     segment_size: u64,
     superblock: u64,
     manifest_version: u32,
-    _lock: LockGuard,
+    lock: LockGuard,
 }
 
 /// MANIFEST versions this build reads. Version 3 has version 2's layout. It marks a store whose
@@ -321,7 +321,7 @@ impl DataDir {
             segment_size,
             superblock: 0,
             manifest_version: manifest_new,
-            _lock: guard,
+            lock: guard,
         };
         if dir.io.exists(&dir.path.join("MANIFEST"))? {
             let manifest = read_manifest(dir.io.clone(), &dir.path)?;
@@ -394,6 +394,12 @@ impl DataDir {
     /// Returns the MANIFEST version on disk.
     pub fn manifest_version(&self) -> u32 {
         self.manifest_version
+    }
+
+    /// The device and inode of the held `LOCK`, from its handle. `None` when the I/O backend
+    /// has none, as on Windows and on `SimDisk`.
+    pub fn lock_identity(&self) -> Option<(u64, u64)> {
+        self.lock.identity()
     }
 
     /// Raises the MANIFEST version to at least `version`, through an atomic install. Never

@@ -950,3 +950,109 @@ fn serve_waits_out_a_copy_of_the_old_listener() {
     running.server.shutdown();
     assert!(child.wait().unwrap().success());
 }
+
+/// Once a lost `LOCK` stops the server, an open keep-alive connection is closed at once. A
+/// write sent on it after the stop is not committed (#227).
+#[test]
+fn lost_lock_closes_keep_alive_connections() {
+    use atticdb::http::Stream;
+    use atticdb::serve::Exit;
+    use std::io::ErrorKind::{TimedOut, WouldBlock};
+    use std::io::Read;
+    use std::time::{Duration, Instant};
+    let dir = Dir::new();
+    let (engine, lock) = real_engine(&dir);
+    let running =
+        support::serve_watching(engine.clone(), &dir, MAX_CONNECTIONS, Some(lock.clone()));
+    let durable = || atticdb::api::stats_fields(&engine).unwrap()["durable_lsn"].clone();
+    let before = durable();
+    let mut streams: Vec<(&str, Box<dyn Stream>)> = running
+        .vias
+        .iter()
+        .map(|via| match via {
+            Via::Tcp(addr) => ("tcp", Box::new(std::net::TcpStream::connect(addr).unwrap()) as _),
+            Via::Unix(path) => {
+                ("unix", Box::new(std::os::unix::net::UnixStream::connect(path).unwrap()) as _)
+            }
+        })
+        .collect();
+    let auth = format!("Bearer {TOKEN_A}");
+    let headers = [("Host", "127.0.0.1"), ("Authorization", &auth), ("Connection", "keep-alive")];
+    let send = |stream: &mut dyn Stream, method: &str, target: &str, body: &[u8]| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        atticdb::http::exchange(stream, method, target, &headers, body, deadline, 1 << 20)
+    };
+    for (name, stream) in &mut streams {
+        let reply = send(&mut **stream, "GET", "/healthz", b"").unwrap();
+        assert_eq!(reply.status, 200, "{name}: kept alive");
+        // Set while open: macOS fails `setsockopt` once the peer has closed.
+        stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    }
+    std::fs::remove_file(&lock).unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let server = running.server;
+    let waiter = std::thread::spawn(move || {
+        let _ = tx.send(server.wait());
+        server
+    });
+    let why = rx.recv_timeout(Duration::from_secs(10));
+    assert_eq!(why, Ok(Exit::LockLost), "stops within 10 s");
+    for (name, stream) in &mut streams {
+        // The server shut its read side, so its connection thread ends and closes.
+        let read = stream.read(&mut [0; 64]);
+        let timed_out = |e: &std::io::Error| matches!(e.kind(), WouldBlock | TimedOut);
+        assert!(matches!(&read, Ok(0)) || read.as_ref().is_err_and(|e| !timed_out(e)), "{name}");
+        let body = append_body("s", name, "after the stop").to_string();
+        let reply = send(&mut **stream, "POST", "/v1/append", body.as_bytes());
+        assert!(reply.as_ref().map_or(true, |reply| reply.status != 200), "{name}: {reply:?}");
+    }
+    assert_eq!(durable(), before, "nothing was committed");
+    let target = "/v1/window?agent=a&session=s&last=10";
+    let window = atticdb::api::window(&engine, "a", target);
+    let window: Value = serde_json::from_slice(&window.body).unwrap();
+    assert_eq!(window["turns"], json!([]), "{window}");
+    waiter.join().unwrap().shutdown();
+}
+
+/// An engine on real storage in `dir/d`, so it holds a real `LOCK` with an identity. Returns
+/// it with the `LOCK` path. Segments are 1 MiB and checkpoints never run on a timer.
+fn real_engine(dir: &Dir) -> (Arc<atticdb_core::Engine>, std::path::PathBuf) {
+    use std::time::Duration;
+    let data = dir.0.join("d");
+    let mut opts = EngineOptions {
+        checkpoint_interval: Duration::from_secs(3600),
+        checkpoint_bytes: u64::MAX,
+        ..EngineOptions::default()
+    };
+    opts.tape.segment_size = 1 << 20;
+    let engine = atticdb_core::Engine::open(&data, opts).unwrap();
+    assert!(engine.lock_identity().is_some(), "a real engine knows its LOCK");
+    (Arc::new(engine), data.join("LOCK"))
+}
+
+/// A `LOCK` replaced after the engine locked it, and before `run`, is caught by the held
+/// lock's identity, not by a path snapshot. `run` stops at once and never serves (#227).
+#[test]
+fn lock_replaced_before_run_never_serves() {
+    use atticdb::serve::Exit;
+    use std::time::{Duration, Instant};
+    let dir = Dir::new();
+    let (engine, lock) = real_engine(&dir);
+    std::fs::remove_file(&lock).unwrap();
+    std::fs::write(&lock, "").unwrap();
+    let started = Instant::now();
+    let running = support::serve_watching(engine, &dir, MAX_CONNECTIONS, Some(lock));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let server = running.server;
+    let waiter = std::thread::spawn(move || {
+        let _ = tx.send(server.wait());
+        server
+    });
+    // Well under the 2 s between watch checks, so only the check in `run` can stop it.
+    assert_eq!(rx.recv_timeout(Duration::from_millis(1500)), Ok(Exit::LockLost));
+    assert!(started.elapsed() < Duration::from_millis(1500), "{:?}", started.elapsed());
+    // No TCP check: another test may take the freed port at once.
+    let [_, Via::Unix(socket)] = &running.vias else { unreachable!() };
+    assert!(!socket.exists(), "the socket path was removed");
+    waiter.join().unwrap().shutdown();
+}

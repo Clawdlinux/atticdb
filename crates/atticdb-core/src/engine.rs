@@ -558,6 +558,12 @@ impl Engine {
         }
     }
 
+    /// The device and inode of the held `LOCK`, from its handle. `None` when the I/O backend
+    /// has none, as on Windows and on `SimDisk`.
+    pub fn lock_identity(&self) -> Option<(u64, u64)> {
+        self.tape.lock_identity()
+    }
+
     /// Creates the directory, recovers its tape, and starts background workers using real filesystem I/O.
     pub fn open(path: impl AsRef<Path>, opts: EngineOptions) -> Result<Self> {
         std::fs::create_dir_all(path.as_ref()).map_err(atticdb_tape::Error::from)?;

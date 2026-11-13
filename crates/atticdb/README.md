@@ -329,6 +329,7 @@ AtticDB 0.4.0 is out (you have 0.3.0). Run: atticdb upgrade
 - `LOCK` and `GET /healthz` carry a per-start instance id.
 - At most 256 connections. Past that, a new connection gets 503 `busy`. A request body grows only as its bytes arrive, up to 8 MiB, and is dropped once parsed. At most 8 JSON trees exist at once. 2 are for request parses and window builds. Up to 2 `/mcp` calls run at once. Each holds at most its request tree, 1 handler-reply tree and its reply value. A tree can be about 16x its body. A reply carries at most 8 MiB of budgeted bytes, so each tree is about 16 x 8 MiB at most. Window bodies being written total at most 256 MiB. A window that waits 5 s for that budget gets 503 `busy`. In the worst case, memory stays under the sum of 3 parts. Raw bodies or turns take about 256 x 8 MiB = 2 GiB. JSON trees take 8 x about 16 x 8 MiB = 1 GiB. Window bodies take 256 MiB + 2 x 49 MiB.
 - `--exit-on-poison`: when the engine is poisoned, stop accepting, finish responses in flight, remove the socket path if it is still the one this server installed, and exit 70. A fresh start recovers. Without it, a poisoned server serves reads and 503 `poisoned` until you restart it.
+- On Unix, the server checks that `<data_dir>/LOCK` is still the file it locked. It checks once before it serves, then every 2 s. If `LOCK` or the data folder was removed or replaced, a new server could start beside it. Both would then use the same data. So it stops the same way as `--exit-on-poison` and exits 75 (D114). Its stderr line is `atticdb: <data_dir>/LOCK was removed or replaced, exiting so 2 servers can't share the data folder`.
 - Logs: startup, shutdown and 5xx answers on stderr, one line each with method, path, status, tenant and latency. `--log-requests` adds a line for every request. Never headers, bodies or query strings.
 - Stop it with a signal. Every acknowledged write is already synced, so `kill` is safe.
 
@@ -337,7 +338,7 @@ AtticDB 0.4.0 is out (you have 0.3.0). Run: atticdb upgrade
 | 1 | Startup failed: config, listener or socket checks |
 | 2 | Usage error |
 | 70 | Poisoned, with `--exit-on-poison` |
-| 75 | Another process holds the data directory lock |
+| 75 | Another process holds the data directory lock, or `LOCK` or the data folder was removed or replaced while serving |
 
 On Windows the server listens on loopback TCP only. See [Windows](#windows).
 
@@ -481,7 +482,7 @@ How it finds a server:
 1. `--url unix:///path` or `--url http://127.0.0.1:<port>`. An operator chose it, so there is no instance check. `http` takes only `127.0.0.1`, `localhost` or `[::1]`, because the token travels in cleartext.
 2. Else it reads `<data_dir>/LOCK` and uses the Unix socket named there. Never the TCP address. The socket must be yours, its parent owned by you and not writable by group or others. Every directory above it must be owned by root or you and not writable by group or others unless sticky, as OpenSSH's StrictModes checks. Then `GET /healthz` must return the instance id in `LOCK`. Only then does the token go out, on that same connection.
 3. Else, with `--config` or the home, it starts `atticdb serve --config <path> --data-dir <dir> --listen none --exit-on-poison`. Output goes to `<data_dir>/serve.log`. The token is never on its command line. It runs in `/`, so it holds no repo folder. A relative `unix_socket` in the config is made absolute against the adapter's folder, then passed as `--unix-socket`.
-4. It repeats step 2 until a server is trusted or 2 s before the call's deadline. A started server that exits 75 lost the lock race. If no trusted server shows up, it starts another, backing off from 100 ms to 2 s. A start that can't work fails the call at once with its reason: a data directory it can't use, or a started server that exits with any code but 75 or 70 (poisoned). The last line of `serve.log` is in the error. The next call tries again.
+4. It repeats step 2 until a server is trusted or 2 s before the call's deadline. A started server that exits 75 lost the lock race, or its `LOCK` or data folder was removed (D114). If no trusted server shows up, it starts another, backing off from 100 ms to 2 s. A start that can't work fails the call at once with its reason: a data directory it can't use, or a started server that exits with any code but 75 or 70 (poisoned). The last line of `serve.log` is in the error. The next call tries again.
 
 An auto-started server runs in its own process group and outlives the adapters. Stop it with `kill <pid>`. The pid is in `<data_dir>/LOCK`.
 
@@ -1141,4 +1142,4 @@ Not yet: arm64, an `install.ps1`, and Codex's hooks ([#142](https://github.com/C
 
 ## Tests
 
-Socket paths, staging included, must fit `sun_path` (104 bytes on macOS). Tests put them under `/tmp/atticdb-test-<uid>` on macOS and `/var/tmp/atticdb-test-<uid>` on Linux. The checkout path does not matter. Tests create that directory with mode 0700 and fail if it is not private to you. `ATTICDB_TEST_DIR` is optional. It may be any short directory, and tests resolve it to its real path.
+Socket paths, staging included, must fit `sun_path` (104 bytes on macOS). Tests put them under `/tmp/atticdb-test-<uid>` on macOS and `/var/tmp/atticdb-test-<uid>` on Linux. The checkout path does not matter. Tests create that directory with mode 0700 and fail if it is not private to you. `ATTICDB_TEST_DIR` is optional. It may be any short directory, and tests resolve it to its real path. Point it at a folder used only for tests, since tests remove what dead test runs left there.

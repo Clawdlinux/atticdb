@@ -1,5 +1,5 @@
-//! `atticdb serve`: startup order, accept loops, one thread per connection, and
-//! `--exit-on-poison`.
+//! `atticdb serve`: startup order, accept loops, one thread per connection,
+//! `--exit-on-poison`, and the `LOCK` watch.
 //!
 //! Memory: at most [`MAX_CONNECTIONS`] connections. A request body grows only as its
 //! bytes arrive, up to the 8 MiB cap, and the raw body is dropped once parsed into
@@ -38,7 +38,7 @@ use std::os::fd::AsFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 #[cfg(windows)]
 use std::os::windows::io::AsSocket as AsFd;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
@@ -46,10 +46,23 @@ use std::time::{Duration, Instant};
 
 /// Default cap on open connections. Past it a new connection gets 503 `busy`.
 pub const MAX_CONNECTIONS: usize = 256;
-/// Exit code when the data directory lock is held by another process.
+/// Exit code when the data directory lock is held by another process. Also when a running
+/// server finds its `LOCK` or data folder removed or replaced, on Unix.
 pub const EXIT_LOCKED: u8 = 75;
 /// Exit code after `--exit-on-poison` stops a poisoned server.
 pub const EXIT_POISONED: u8 = 70;
+/// How often a server checks that `<data_dir>/LOCK` is still the file it locked.
+#[cfg(unix)]
+const LOCK_CHECK: Duration = Duration::from_secs(2);
+
+/// Why a server stopped on its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Exit {
+    /// `--exit-on-poison` stopped a poisoned server.
+    Poisoned,
+    /// `LOCK` was removed or replaced, or its data folder was.
+    LockLost,
+}
 
 /// Bound listeners. Either may be absent.
 #[derive(Debug, Default)]
@@ -76,6 +89,10 @@ pub struct ServeConfig {
     /// One stderr line per request. Off by default: every connection thread shares the
     /// lock. 5xx answers are always logged.
     pub log_requests: bool,
+    /// The data folder's `LOCK`. On Unix the server stops once this path is gone or names
+    /// another file than the engine's held lock. `None` means no watch. So does an engine
+    /// with no lock identity, such as one on `SimDisk`.
+    pub lock_path: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -83,7 +100,7 @@ struct Conns {
     next: u64,
     open: HashMap<u64, Box<dyn Stream + Send>>,
     in_flight: usize,
-    exited: bool,
+    exited: Option<Exit>,
 }
 
 #[derive(Default)]
@@ -130,18 +147,33 @@ impl Shared {
         !self.stopping.swap(true, Ordering::AcqRel)
     }
 
-    /// With `--exit-on-poison`, once the engine is poisoned: stop accepting, wait for
-    /// responses in flight, remove the socket path while the lock is still held.
+    /// With `--exit-on-poison`, once the engine is poisoned: [`Shared::exit`].
     fn exit_on_poison(&self) {
-        if !self.config.exit_on_poison || self.engine.health() != Health::Poisoned || !self.stop() {
+        if self.config.exit_on_poison && self.engine.health() == Health::Poisoned {
+            self.exit(Exit::Poisoned);
+        }
+    }
+
+    /// Stops accepting, waits for responses in flight, and removes the socket path if it is
+    /// still ours. Then [`Server::wait`] returns `why`. Does nothing once already stopping.
+    /// It sets `stopping` before it takes the tracker lock. So every request admitted under
+    /// that lock is waited for, and every later one is refused.
+    fn exit(&self, why: Exit) {
+        if !self.stop() {
             return;
         }
+        // Idle keep-alive connections read EOF at once. A response being written still goes out.
+        self.tracker.update(|conns| {
+            for stream in conns.open.values() {
+                let _ = stream.shutdown(Shutdown::Read);
+            }
+        });
         self.tracker.wait_until(|conns| conns.in_flight == 0);
         #[cfg(unix)]
         if let Some(unix) = &self.unix {
             let _ = unix.remove();
         }
-        self.tracker.update(|conns| conns.exited = true);
+        self.tracker.update(|conns| conns.exited = Some(why));
     }
 
     fn connection<S: Stream>(&self, stream: S, tcp: bool) {
@@ -157,11 +189,23 @@ impl Shared {
                 })
         };
         while let Some((request, (route, tenant, started))) = conn.next_request(check) {
-            // Counted once the body is in. A body still arriving at a poison exit gets a
-            // reset: the client sees a transport error and retries with the same key.
-            self.tracker.update(|conns| conns.in_flight += 1);
+            // Admitted once the body is in, under the tracker lock and only before a stop.
+            // After a stop a body still arriving reads EOF, and a read one gets 503 `busy`.
+            // Either way nothing was written, and the client retries with the same key.
+            let admitted = {
+                let mut conns = self.tracker.lock();
+                let open = !self.stopping.load(Ordering::Acquire);
+                conns.in_flight += usize::from(open);
+                open
+            };
             let (method, path) = (request.head.method.clone(), request.head.path().to_owned());
             let tenant = tenant.unwrap_or_default();
+            if !admitted {
+                let response = api::busy();
+                let _ = conn.respond_and_close(&response);
+                self.log(&method, &path, &response, &tenant, started);
+                break;
+            }
             let response = match route {
                 #[cfg(unix)]
                 Route::Health => api::health(&self.engine, &self.config.instance),
@@ -230,11 +274,18 @@ impl Server {
         self.shared.tcp
     }
 
-    /// Blocks until `--exit-on-poison` has stopped the server: accepting stopped,
-    /// responses in flight were written, and the socket path is gone. Without the flag
-    /// it never returns.
-    pub fn wait(&self) {
-        self.shared.tracker.wait_until(|conns| conns.exited);
+    /// Blocks until the server stops on its own, and returns why. By then accepting stopped,
+    /// responses in flight were written, and the socket path is gone. Without
+    /// `--exit-on-poison` and without a `LOCK` watch it never returns.
+    pub fn wait(&self) -> Exit {
+        let tracker = &self.shared.tracker;
+        let mut conns = tracker.lock();
+        loop {
+            if let Some(why) = conns.exited {
+                return why;
+            }
+            conns = tracker.changed.wait(conns).unwrap_or_else(PoisonError::into_inner);
+        }
     }
 
     /// Stops accepting, closes every connection and joins every thread. Afterwards
@@ -255,6 +306,9 @@ impl Server {
 
 /// Serves an opened engine on bound listeners. Tests pass an engine on `SimDisk`.
 pub fn run(engine: Arc<Engine>, listeners: Listeners, config: ServeConfig) -> io::Result<Server> {
+    // The held lock's identity comes from its handle, so a path swapped before now is caught.
+    #[cfg(unix)]
+    let watch = config.lock_path.clone().zip(engine.lock_identity());
     let tcp = listeners.tcp.as_ref().map(TcpListener::local_addr).transpose()?;
     #[cfg(unix)]
     let (unix, unix_path) = listeners.unix.unzip();
@@ -272,6 +326,12 @@ pub fn run(engine: Arc<Engine>, listeners: Listeners, config: ServeConfig) -> io
         ),
         config,
     });
+    // Checked before any accept loop starts. A server whose `LOCK` is already lost never serves.
+    #[cfg(unix)]
+    if watch.as_ref().is_some_and(|(path, held)| lock_lost(path, *held)) {
+        shared.exit(Exit::LockLost);
+        return Ok(Server { shared, threads: Vec::new() });
+    }
     let mut threads = Vec::new();
     // Accepted streams can inherit nonblocking mode from the listener, as on macOS.
     if let Some(listener) = listeners.tcp {
@@ -303,7 +363,48 @@ pub fn run(engine: Arc<Engine>, listeners: Listeners, config: ServeConfig) -> io
         };
         threads.push(thread::Builder::new().name("atticdb-poison".into()).spawn(tick)?);
     }
+    #[cfg(unix)]
+    if let Some((path, held)) = watch {
+        threads.push(spawn_lock_watch(&shared, path, held)?);
+    }
     Ok(Server { shared, threads })
+}
+
+/// Whether `path` is gone or names another file than the held lock's device and inode `held`.
+/// If so, a new server could lock the data folder beside this one. The path is not followed
+/// as a symlink. Other errors count as not lost.
+#[cfg(unix)]
+fn lock_lost(path: &Path, held: (u64, u64)) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => (meta.dev(), meta.ino()) != held,
+        Err(error) => error.kind() == io::ErrorKind::NotFound,
+    }
+}
+
+/// Every [`LOCK_CHECK`], stops the server once [`lock_lost`]. Checks `stopping` every 50 ms,
+/// so `shutdown` joins it soon.
+#[cfg(unix)]
+fn spawn_lock_watch(
+    shared: &Arc<Shared>,
+    path: PathBuf,
+    held: (u64, u64),
+) -> io::Result<JoinHandle<()>> {
+    let shared = shared.clone();
+    let watch = move || {
+        let mut next = Instant::now() + LOCK_CHECK;
+        while !shared.stopping.load(Ordering::Acquire) {
+            thread::sleep(Duration::from_millis(50));
+            if Instant::now() < next {
+                continue;
+            }
+            next = Instant::now() + LOCK_CHECK;
+            if lock_lost(&path, held) {
+                shared.exit(Exit::LockLost);
+            }
+        }
+    };
+    thread::Builder::new().name("atticdb-lockwatch".into()).spawn(watch)
 }
 
 /// Waits up to 50 ms for a connection. So the accept loop sees `stopping` without a
@@ -448,13 +549,22 @@ fn try_start(config: Config, exit_on_poison: bool, log_requests: bool) -> Result
     #[cfg(unix)]
     let unix = listen::install_unix(&socket, group, &instance).map_err(fail)?;
     #[cfg(unix)]
+    let installed = unix.1.clone();
+    #[cfg(unix)]
     let listeners = Listeners { tcp, unix: Some(unix) };
     #[cfg(not(unix))]
     let listeners = Listeners { tcp };
     let auth = Auth::new(&config.tenants);
     let max_connections = MAX_CONNECTIONS;
-    let config = ServeConfig { auth, instance, exit_on_poison, max_connections, log_requests };
-    let server = run(Arc::new(engine), listeners, config).map_err(|e| fail(e.to_string()))?;
+    let lock_path = Some(data_dir.join("LOCK"));
+    let config =
+        ServeConfig { auth, instance, exit_on_poison, max_connections, log_requests, lock_path };
+    let server = run(Arc::new(engine), listeners, config).map_err(|error| {
+        // It never served, so it leaves no socket behind.
+        #[cfg(unix)]
+        let _ = installed.remove();
+        fail(error.to_string())
+    })?;
     // One write, so a reader never sees half of the line.
     #[cfg(unix)]
     let (instance, socket) = (&server.shared.config.instance, socket.display());
@@ -463,11 +573,27 @@ fn try_start(config: Config, exit_on_poison: bool, log_requests: bool) -> Result
     #[cfg(not(unix))]
     let line =
         format!("atticdb: serving instance={} tcp={tcp_text}\n", server.shared.config.instance);
-    let _ = io::stderr().write_all(line.as_bytes());
-    server.wait();
-    let _ =
-        writeln!(io::stderr(), "atticdb: engine poisoned, exiting so a fresh start can recover");
-    Ok(EXIT_POISONED)
+    // `run` stops at once when `LOCK` was already lost. Then it never served.
+    if server.shared.tracker.lock().exited.is_none() {
+        let _ = io::stderr().write_all(line.as_bytes());
+    }
+    match server.wait() {
+        Exit::Poisoned => {
+            let line = "atticdb: engine poisoned, exiting so a fresh start can recover";
+            let _ = writeln!(io::stderr(), "{line}");
+            Ok(EXIT_POISONED)
+        }
+        Exit::LockLost => {
+            let lock = data_dir.join("LOCK");
+            let line = format!(
+                "atticdb: {} was removed or replaced, exiting so 2 servers can't share the data \
+                 folder",
+                lock.display()
+            );
+            let _ = writeln!(io::stderr(), "{line}");
+            Ok(EXIT_LOCKED)
+        }
+    }
 }
 
 /// The `LOCK` contents when another process holds the data directory lock.
@@ -517,5 +643,69 @@ pub fn recover(dir: &Path, lsn: u64) -> u8 {
                 1
             }
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use crate::config::{Tenant, Token};
+    use atticdb_tape::{SimDisk, SystemClock};
+
+    const TOKEN: &str = "token-a-0123456789abcdefghijklmnopqrstuv";
+
+    /// Writes 1 full keep-alive append into a socket pair, serves the other end, and returns
+    /// everything the server wrote before it closed.
+    fn append(shared: &Shared, key: &str) -> String {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let body = serde_json::json!({"agent": "a", "session": "s", "idem_key": key,
+            "turns": [{"role": "user", "content": key}]})
+        .to_string();
+        let head = format!(
+            "POST /v1/append HTTP/1.1\r\nAuthorization: Bearer {TOKEN}\r\n\
+             Connection: keep-alive\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        client.write_all(format!("{head}{body}").as_bytes()).unwrap();
+        // The server reads EOF after the request, so a kept-alive connection ends too.
+        client.shutdown(Shutdown::Write).unwrap();
+        shared.connection(server, false);
+        let mut reply = String::new();
+        client.read_to_string(&mut reply).unwrap();
+        reply
+    }
+
+    /// A full request read after the stop decision gets 503 `busy` and `Connection: close`,
+    /// and never reaches the engine. Only the admission check covers this: no stream was
+    /// shut, since `stop` alone shuts none.
+    #[test]
+    fn a_full_request_after_stop_is_refused() {
+        let disk = Arc::new(SimDisk::new(9));
+        let opened = Engine::open_with(disk, Arc::new(SystemClock), "db", Default::default());
+        let engine = Arc::new(opened.unwrap());
+        let tenant = Tenant { name: "a".into(), token: Token::new(TOKEN.into()).unwrap() };
+        let config = ServeConfig {
+            auth: Auth::new(&[tenant]),
+            instance: "0123456789abcdef".into(),
+            exit_on_poison: false,
+            max_connections: MAX_CONNECTIONS,
+            log_requests: false,
+            lock_path: None,
+        };
+        let server = run(engine.clone(), Listeners::default(), config).unwrap();
+        let durable = || engine.metrics().unwrap().durable_lsn;
+        let served = append(&server.shared, "before");
+        assert!(served.starts_with("HTTP/1.1 200 "), "the request is valid: {served}");
+        let before = durable();
+        assert!(server.shared.stop());
+        let refused = append(&server.shared, "after");
+        assert!(refused.starts_with("HTTP/1.1 503 "), "{refused}");
+        assert!(refused.contains("\r\nConnection: close\r\n"), "{refused}");
+        let body = refused.split_once("\r\n\r\n").unwrap().1;
+        let body: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(body, serde_json::json!({"outcome": "not_committed", "error": "busy"}));
+        assert_eq!(durable(), before, "nothing was committed");
+        server.shutdown();
     }
 }
