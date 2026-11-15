@@ -65,3 +65,12 @@ Every row is read by hand before any number is reported.
 - No product change until the numbers are in and the owner approves.
 - No claim beyond these 4 synthetic projects.
 - No reuse of the paper's projects. Their data repo has no license.
+
+## Added after the 1st pilot
+
+- The 1st pilot put the rule in `CLAUDE.md`. Git can date that rule, so the history sentence alone fixed both cases. That left the AtticDB question open: memory lives outside git.
+- So a 2nd channel: the rule arrives through a SessionStart hook, and the repo never holds it. Arms there: `atticdb-today`, the shipped header with dated lines, and `annotated`, which adds a commit anchor and the sentence.
+- `--neutral` renames the stale refactor commit to name only its files. Then only dates can tell the cases apart.
+- Ablations split `annotated` into its parts: `dated-history` and `anchored`.
+- `atticdb-next` tests the sentence inside AtticDB's own header, as it would ship.
+- Results: [research/stale_rule/results/2026-11-15-results.md](../../research/stale_rule/results/2026-11-15-results.md).

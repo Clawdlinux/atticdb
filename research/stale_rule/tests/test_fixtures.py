@@ -101,3 +101,25 @@ def test_neutral_refactor_message(tmp_path):
     log = git(repo, "log", "--format=%s")
     assert "Update app/notes.py and tests/test_notes.py" in log
     assert "refactor" not in log and "counter" not in log
+
+
+def test_ablation_arms(tmp_path):
+    conv = CONVENTIONS["ids"]
+    repo = str(tmp_path / "r")
+    build(conv, "stale", repo, "memory", neutral=True)
+    assert fixtures.memory_block("dated-history", conv, "stale", repo) == fixtures.memory_block(
+        "atticdb-today", conv, "stale", repo)
+    assert fixtures.memory_block("anchored", conv, "stale", repo) == fixtures.memory_block(
+        "annotated", conv, "stale", repo)
+    assert fixtures.memory_user_file("dated-history") == fixtures.MEMORY_HISTORY
+    assert fixtures.memory_user_file("anchored") == ""
+
+
+def test_candidate_header(tmp_path):
+    conv = CONVENTIONS["ids"]
+    repo = str(tmp_path / "r")
+    build(conv, "migration", repo, "memory", neutral=True)
+    block = fixtures.memory_block("atticdb-next", conv, "migration", repo)
+    assert fixtures.NEXT_SENTENCES in block and "(2026-11-10)" in block and "Since then" not in block
+    assert fixtures.NEXT_HEADER != fixtures.ATTICDB_HEADER
+    assert fixtures.memory_user_file("atticdb-next") == ""

@@ -26,6 +26,9 @@ CHANNELS = ("file", "memory")
 # SessionStart hook, as AtticDB's block does. `atticdb-today` is the block as it ships: the real
 # header and dated lines, nothing else.
 MEMORY_ARMS = ("plain", "code-wins", "history", "atticdb-today", "annotated")
+# Ablations of `annotated`: the dated line with the sentence and no anchor, or the anchor and no sentence.
+ABLATION_ARMS = ("dated-history", "anchored")
+CANDIDATE_ARMS = ("atticdb-next",)
 MEMORY_HISTORY = ("When a remembered rule and the existing code disagree, find out which changed last. A rule "
                   "saved after the code it describes is the new direction: follow it. Code changed after the "
                   "rule was saved means the rule is stale: follow the code.\n")
@@ -36,6 +39,12 @@ ATTICDB_HEADER = ("AtticDB memory for repo project, a snapshot from chat start: 
                   "wrong, set its key again. A line ending in (cut) was shortened. Call fact_get or "
                   "memory_search for the rest.")
 PLAIN_HEADER = "AtticDB memory for repo project."
+# The candidate header: the shipped one plus 2 sentences on reading a dated line against git.
+NEXT_SENTENCES = ("If a dated line disagrees with the code, check git log for that code. Code changed after the "
+                  "line's date means the line is stale: follow the code. Code older than the line means the "
+                  "line is the new direction: follow the line. ")
+NEXT_HEADER = ATTICDB_HEADER.replace("If it is wrong, set its key again. ",
+                                     NEXT_SENTENCES + "If it is wrong, set its key again. ")
 # When the memory was saved: with the stale history's 1st commit, or after the migration's last.
 SAVED = {"stale": "2026-03-02", "migration": "2026-11-10"}
 README = "# project\n\nA small example app.\n"
@@ -252,16 +261,19 @@ def memory_block(arm: str, conv: Convention, history: str, repo: str) -> str:
         return f"{PLAIN_HEADER}\nThis repo (project):\n- {key}: {rule}"
     saved = SAVED[history]
     line = f"- {key} ({saved}): {rule}"
-    if arm == "annotated":
+    if arm in ("annotated", "anchored"):
         # The commit that was HEAD when the memory was saved, and the code commits since.
         anchor = git(repo, "rev-list", "-1", f"--before={saved}T23:59:59", "HEAD")
         since = int(git(repo, "rev-list", "--count", f"{anchor}..HEAD", "--", "app", "tests"))
         line += f" [saved at commit {anchor[:7]}. Since then, {since} commits changed app/ or tests/.]"
-    if arm in ("atticdb-today", "annotated"):
+    if arm == "atticdb-next":
+        return f"{NEXT_HEADER}\nThis repo (project):\n{line}"
+    if arm in ("atticdb-today", "annotated", "dated-history", "anchored"):
         return f"{ATTICDB_HEADER}\nThis repo (project):\n{line}"
     raise ValueError(arm)
 
 
 def memory_user_file(arm: str) -> str:
     """The user-level CLAUDE.md for pilot 2's `arm`."""
-    return {"code-wins": CODE_WINS, "history": MEMORY_HISTORY, "annotated": MEMORY_HISTORY}.get(arm, "")
+    return {"code-wins": CODE_WINS, "history": MEMORY_HISTORY, "annotated": MEMORY_HISTORY,
+            "dated-history": MEMORY_HISTORY}.get(arm, "")
