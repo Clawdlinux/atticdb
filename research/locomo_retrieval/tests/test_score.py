@@ -104,3 +104,13 @@ def test_percentile_is_nearest_rank():
     assert score.percentile([7.0], 95) == 7.0
     with pytest.raises(ValueError):
         score.percentile([], 95)
+def test_byte_budget_stops_at_first_overflow_in_rank_order():
+    texts = {"first": "é", "second": "ab", "third": "x"}
+    assert score.budget_metrics(["first", "first", "second", "third"],
+                                ["first", "third"], texts, 3) == (0.5, False, 2)
+
+
+def test_byte_budget_counts_full_evidence_on_exact_fit():
+    texts = {"first": "é", "second": "ab"}
+    assert score.budget_metrics(["first", "second"], ["first", "second"], texts, 4) == (1.0, True, 4)
+    assert score.budget_metrics([], ["first"], texts, 4) == (0.0, False, 0)

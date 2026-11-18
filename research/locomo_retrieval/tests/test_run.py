@@ -28,7 +28,9 @@ needs_atticdb = pytest.mark.skipif(not (ATTICDB and os.access(ATTICDB, os.X_OK))
 ARMS = ["atticdb-question", "atticdb-1word", "atticdb-2words", "fts5-bm25", "random", "atticdb-ranked"]
 COLUMNS = ["sample_id", "q_index", "category", "arm", "query", "retrieved", "n_evidence",
            "recall@5", "recall@10", "recall@20", "hit@5", "hit@10", "hit@20",
-           "tokens@5", "tokens@10", "tokens@20", "ms"]
+           "tokens@5", "tokens@10", "tokens@20", "ms",
+           "recall@1024B", "complete@1024B", "bytes@1024B",
+           "recall@2048B", "complete@2048B", "bytes@2048B"]
 # Kept questions: fx-a keeps qa 0, 1, 2, 5, 6, 7 and 8. fx-b keeps qa 0 and 3.
 KEPT = {"fx-a": [0, 1, 2, 5, 6, 7, 8], "fx-b": [0, 3]}
 
@@ -105,6 +107,8 @@ def test_end_to_end_fixture(short_tmp, dataset, tmp_path, capsys):
     w1 = _row(rows, "fx-a", 0, "atticdb-1word")
     assert (w1["query"], w1["retrieved"], w1["recall@5"], w1["hit@5"]) == ("pottery", "D1:1", "1.0", "1")
     assert float(w1["tokens@5"]) == len("Orla: I signed up for a pottery workshop downtown.") / 4
+    assert (w1["recall@1024B"], w1["complete@1024B"], w1["bytes@1024B"]) == ("1.0", "1", "50")
+    assert (q0["recall@2048B"], q0["complete@2048B"], q0["bytes@2048B"]) == ("0.0", "0", "0")
     w2 = _row(rows, "fx-a", 0, "atticdb-2words")
     assert (w2["query"], w2["retrieved"], w2["recall@20"]) == ("pottery workshop", "D1:1", "1.0")
     fts = _row(rows, "fx-a", 0, "fts5-bm25")
@@ -477,10 +481,13 @@ def test_cli_rejects_bad_counts(capsys):
 
 def test_summary_is_numbers_only():
     rows = [
-        {"sample_id": "s", "q_index": 0, "category": 4, "arm": arm, "query": "secret words",
+        {"sample_id": "s", "q_index": 0, "category": 2, "arm": arm, "query": "secret words",
          "retrieved": ["D1:1"], "n_evidence": 1, "ms": None if arm == "random" else 1.5,
          **{f"recall@{k}": 1.0 for k in (5, 10, 20)}, **{f"hit@{k}": True for k in (5, 10, 20)},
-         **{f"tokens@{k}": 3.0 for k in (5, 10, 20)}}
+         **{f"tokens@{k}": 3.0 for k in (5, 10, 20)},
+         **{f"recall@{b}B": 1.0 for b in (1024, 2048)},
+         **{f"complete@{b}B": True for b in (1024, 2048)},
+         **{f"bytes@{b}B": 12 for b in (1024, 2048)}}
         for arm in ARMS
     ]
     meta = {"sha256": "ab" * 32, "pinned": False, "atticdb_version": "atticdb 9", "platform": "plat",
@@ -489,6 +496,7 @@ def test_summary_is_numbers_only():
     text = run.summary_markdown(rows, meta)
     assert "secret" not in text
     assert "| atticdb-1word | 5 | 1 | 100.0% | 100.0% | 3 |" in text
+    assert "| atticdb-1word | temporal | 1024 | 1 | 100.0% | 100.0% | 12 |" in text
     assert "| random | 0 | n/a | n/a |" in text
     assert "| atticdb-1word | 1 | 1.50 | 1.50 |" in text
     assert "not the pinned file" in text
