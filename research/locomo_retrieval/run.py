@@ -56,9 +56,10 @@ class RunError(Exception):
 
 
 def child_env(home: str) -> dict:
-    """The parent env without any ATTICDB_* var, then this store's own ATTICDB_HOME."""
+    """Drop inherited AtticDB settings, select this store, and keep it offline."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("ATTICDB_")}
     env["ATTICDB_HOME"] = home
+    env["ATTICDB_NO_UPDATE_CHECK"] = "1"
     return env
 
 

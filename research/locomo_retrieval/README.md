@@ -72,6 +72,41 @@ ATTICDB_BIN=$PWD/target/debug/atticdb PYTHONDONTWRITEBYTECODE=1 PYTEST_DISABLE_P
 
 Tests that start a server skip when `ATTICDB_BIN` is unset.
 
+## Correction handoff
+
+This separate test runs AtticDB and the MCP reference memory server over stdio.
+It uses 3 synthetic decisions: build runner, API encoding, and test fixture size.
+There is no model, external dataset, or network service.
+
+For each decision:
+
+1. Writer A saves and then corrects a known value. Reader B looks up the current value by key.
+2. B checks for native ordered history. AtticDB uses `fact_history`. The reference server has no revision tool.
+3. Both clients read the correction before A writes again. B then attempts a different edit from the stale read.
+4. B reads the result again. We record whether the stale edit was refused and which values are visible.
+
+AtticDB uses `fact_set` and `fact_get`. The graph uses `add_observations`, `delete_observations`, and `open_nodes`.
+A graph caller could keep its own archive or handle conflicts. This test does neither.
+We do not time the tools or rank recall quality here.
+
+Run on Unix with Node and an installed `@modelcontextprotocol/server-memory@2.0.0`:
+
+```sh
+cargo build --release --locked -p atticdb
+TMPDIR=/tmp python3 -m research.correction_eval \
+  --atticdb ./target/release/atticdb \
+  --reference /path/to/node_modules/@modelcontextprotocol/server-memory/dist/index.js
+```
+
+For the integration test, set `ATTICDB_BIN` and `MCP_MEMORY_ENTRY` to those paths:
+
+```sh
+TMPDIR=/tmp python3 -m pytest -q research/test_correction_eval.py
+```
+
+The test skips without either setting. On 2026-11-19, all 3 fresh-store runs matched.
+The run used Node 22.23.4 and AtticDB built at `7dfa70c`.
+
 ## The stores
 
 - Each conversation gets a fresh temp dir with its own `ATTICDB_HOME`.

@@ -371,7 +371,20 @@ AtticDB runs locally and keeps explicit fact revisions. Its ranked search uses w
 | [Mem0](https://docs.mem0.ai/open-source/overview) | Embeddings with configurable retrieval components | Library or self-hosted server |
 | [Walrus Memory](https://docs.wal.app/walrus-memory/sdk/overview) | Embedding-based recall | Relayer-backed, even with client-side embeddings |
 
-These are documented differences, not measured rankings. We have not run Mem0 or Walrus Memory on the workload below.
+These are documented differences, not measured rankings. We have not benchmarked Mem0 or Walrus Memory.
+
+**Measured correction handoff:** We tried 3 explicit decision changes with fresh stores, repeated 3 times.
+
+| Check | AtticDB | [MCP reference memory server 2.0.0](https://www.npmjs.com/package/@modelcontextprotocol/server-memory/v/2.0.0) |
+|---|---:|---:|
+| Reader got only the corrected value | 9/9 | 9/9 |
+| Reader could retrieve ordered revisions natively | 9/9 | No native revision tool |
+| Stale writer was refused after another writer saved | 9/9 | 0/9 |
+
+Both clients read the same value before either edit. AtticDB refused the stale edit.
+The reference server kept both edits as observations.
+This tests native tools, not a workflow with a separate graph archive or client-managed locking.
+See the [correction eval](research/locomo_retrieval/README.md#correction-handoff).
 
 **Measured retrieval:** On LoCoMo, each retriever got the same 1 KiB text limit.
 
