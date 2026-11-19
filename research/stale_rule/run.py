@@ -111,10 +111,13 @@ def run_one(conv_name: str, history: str, arm: str, rep: int, model: str, batch:
             stream = timed_out.stdout.decode() if isinstance(timed_out.stdout, bytes) else (timed_out.stdout or "")
             row["error"] = "timeout"
         row["seconds"] = round(time.monotonic() - start)
-        os.makedirs(os.path.join(CACHE, batch), exist_ok=True)
-        name = f"{channel}-{conv_name}-{history}-{arm}-{rep}.jsonl"
-        with open(os.path.join(CACHE, batch, name), "w") as f:
+        cache = os.path.join(CACHE, batch)
+        os.makedirs(cache, exist_ok=True)
+        prefix = f"{channel}-{conv_name}-{history}-{arm}-{rep}-"
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=cache, prefix=prefix,
+                                         suffix=".jsonl", delete=False) as f:
             f.write(stream)
+            row["transcript"] = os.path.basename(f.name)
         parsed = parse(stream)
         lines = grade.added_lines(repo, base)
         found = grade.verdict(conv_name, lines)
@@ -122,8 +125,7 @@ def run_one(conv_name: str, history: str, arm: str, rep: int, model: str, batch:
                     "tests": int(grade.tests_pass(repo)),
                     "ran_git": int(any(GIT_LOOK.search(c) for c in parsed["bash"])),
                     "mentioned_conflict": int(bool(CONFLICT.search(parsed["text"]))),
-                    "model": parsed["model"], "turns": parsed["turns"], "cost_usd": parsed["cost_usd"],
-                    "transcript": name})
+                    "model": parsed["model"], "turns": parsed["turns"], "cost_usd": parsed["cost_usd"]})
     except Exception as error:  # a broken run is a row, not a crash of the batch
         row["error"] = row["error"] or f"{type(error).__name__}: {error}"
     finally:
@@ -149,7 +151,8 @@ def batch(a: argparse.Namespace) -> int:
             for row in csv.DictReader(f):
                 if row["error"]:
                     continue
-                if (row.get("channel"), row.get("neutral"), row.get("model")) != expected:
+                # The initial file pilot predates both fields. The next batches predate neutral.
+                if (row.get("channel", "file"), row.get("neutral", "0"), row.get("model")) != expected:
                     print("--resume requires the same channel, history mode, and exact model ID",
                           file=sys.stderr)
                     return 2

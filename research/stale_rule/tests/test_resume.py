@@ -1,3 +1,5 @@
+import sys
+
 import pytest
 
 from research.stale_rule import run
@@ -14,22 +16,43 @@ def test_child_env_keeps_provider_and_account_overrides_out(monkeypatch, tmp_pat
     assert env["GIT_CONFIG_NOSYSTEM"] == "1"
 
 
-def test_resume_writes_to_current_directory(tmp_path, monkeypatch):
+@pytest.mark.parametrize(("channel", "header", "prefix"), [
+    ("memory", "channel,neutral,", "memory,0,"),
+    ("memory", "channel,", "memory,"),
+    ("file", "", ""),
+])
+def test_resume_writes_to_current_directory(tmp_path, monkeypatch, channel, header, prefix):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(run, "LOGIN_DIR", str(tmp_path))
     source = tmp_path / "source.csv"
-    source.write_text("channel,neutral,model,convention,history,arm,rep,error\n"
-                      "memory,0,claude-sonnet-5-5,errors,stale,plain,1,\n"
-                      "memory,0,claude-sonnet-5-5,errors,migration,plain,1,\n")
+    source.write_text(f"{header}model,convention,history,arm,rep,error\n"
+                      f"{prefix}claude-sonnet-5-5,errors,stale,plain,1,\n"
+                      f"{prefix}claude-sonnet-5-5,errors,migration,plain,1,\n")
 
     def unexpected_run(*args):
         pytest.fail("completed cells must not be rerun")
 
     monkeypatch.setattr(run, "run_one", unexpected_run)
-    assert run.main(["run", "--batch", "test", "--channel", "memory",
+    assert run.main(["run", "--batch", "test", "--channel", channel,
                      "--model", "claude-sonnet-5-5", "--conventions", "errors",
                      "--arms", "plain", "--resume", "source.csv", "--out", "retry.csv"]) == 0
     assert len((tmp_path / "retry.csv").read_text().splitlines()) == 1
+
+
+def test_retry_preserves_previous_transcript(tmp_path, monkeypatch):
+    monkeypatch.setattr(run, "CACHE", str(tmp_path))
+
+    def attempt(text):
+        monkeypatch.setattr(run, "argv", lambda *args: [sys.executable, "-c", f"print({text!r})"])
+        row = run.run_one("errors", "stale", "plain", 1, "stub", "batch", "file")
+        assert not row["error"], row["error"]
+        return tmp_path / "batch" / row["transcript"]
+
+    first = attempt("first")
+    retry = attempt("retry")
+    assert first != retry
+    assert first.read_text() == "first\n"
+    assert retry.read_text() == "retry\n"
 
 
 @pytest.mark.parametrize("flag", [
