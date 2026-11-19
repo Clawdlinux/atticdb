@@ -5,6 +5,7 @@ use crate::fact::Fact;
 use crate::facts::{visible, Rev};
 use crate::forget::Selector;
 use crate::machine::{Machine, REPLY_DEDUPLICATED};
+use crate::rank::Candidate;
 use crate::session::{address, Key};
 use crate::state::State;
 use crate::turn::{decode, decode_ref, encode, ParsedTurn};
@@ -1606,8 +1607,8 @@ impl Engine {
             header.tenant_id == id && matches!(header.kind, Kind::Turn | Kind::Fact)
         };
         let (mut visited, mut reader) = (0usize, self.tape.reader());
-        let mut ranked: Vec<(f64, u64)> =
-            scores.into_iter().map(|(lsn, score)| (score, lsn)).collect();
+        let mut ranked: Vec<Candidate> =
+            scores.into_iter().map(|(lsn, score)| Candidate { score, lsn }).collect();
         let from_index = ranked.len();
         // Above `indexed`, records are walked newest first and scored from their text. The walk
         // counts toward `query.visits`, as in newest order, so a store without an index stays
@@ -1624,24 +1625,23 @@ impl Engine {
                 got.get().is_some()
             };
             if self.search_pick(&frame, found)?.is_some() {
-                ranked.extend(got.get().map(|score| (score, lsn)));
+                ranked.extend(got.get().map(|score| Candidate { score, lsn }));
             }
         }
-        // Best first: higher score, then higher LSN.
-        let best = |a: &(f64, u64), b: &(f64, u64)| b.0.total_cmp(&a.0).then(b.1.cmp(&a.1));
         // Below, each index candidate costs 1 visit and a walked one costs none. So phase 2
         // reads at most `k` = the visits left plus the walked count. Every walked candidate
         // stays. Of the index candidates, only the best ones the visits left can pay for stay.
         let remaining = query.visits - visited;
         let walked = ranked.split_off(from_index);
         if remaining < ranked.len() {
-            ranked.select_nth_unstable_by(remaining, best);
+            ranked.select_nth_unstable_by(remaining, |a, b| b.cmp(a));
             ranked.truncate(remaining);
         }
         ranked.extend(walked);
-        ranked.sort_unstable_by(best);
+        // Heapify once. Only order the candidates we need to read.
+        let mut ranked = BinaryHeap::from(ranked);
         let (mut hits, mut bytes) = (Vec::new(), 0usize);
-        for (_, lsn) in ranked {
+        while let Some(Candidate { lsn, .. }) = ranked.pop() {
             // A walked record was counted when the walk read it. An index candidate needs a
             // visit. Without one it is skipped, and walked hits below it still count.
             if lsn <= indexed {
