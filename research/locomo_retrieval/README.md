@@ -18,6 +18,10 @@ It is stdlib only, and no answering model is involved.
   - p50 and p95 cover only questions where the arm ran a search. An arm with no content words runs none.
   - Arms 1 to 3 and 6 go over the Unix socket. FTS5 runs in process, so it skips the IPC cost.
 - Full context is the average bytes/4 of a whole conversation's turn contents.
+- At 1,024 and 2,048 UTF-8 bytes, each arm keeps the longest ranked prefix of up to 20 whole turns.
+  Turns aren't skipped or split to fit. Repeated ids count once. Prompt framing is not counted.
+- The equal-budget report shows mean recall, mean bytes used, and the share that retrieves all labelled evidence.
+  It reports all questions and the temporal slice separately.
 
 ## What it doesn't measure
 
@@ -25,6 +29,7 @@ It is stdlib only, and no answering model is involved.
 - No answering model, embeddings or reranking.
 - The harness never reads a question's `answer`.
 - Finding evidence is necessary for a good answer, but it is not enough.
+- The temporal slice does not test whether an agent prefers a current fact over a superseded one.
 
 ## License
 
@@ -53,7 +58,8 @@ Each store's socket must fit in 104 bytes. If the temp dir is too long, set `TMP
 
 Outputs, both in `--out` and written only when the whole run succeeds:
 - `results.csv`: 1 row per question and arm. Columns are `sample_id`, `q_index`, `category`, `arm`, `query`, `retrieved` (the top 20 `dia_id`s), `n_evidence`, `recall@5/10/20`, `hit@5/10/20`, `tokens@5/10/20` and `ms`.
-- `summary.md`: tables per arm and k, and per arm and category at k = 10.
+- `results.csv` also includes `recall@1024B`, `complete@1024B`, `bytes@1024B`, and the same fields for 2,048 bytes.
+- `summary.md`: tables per arm and k, per arm and category at k = 10, and equal-budget scores.
   It also has latency, the counts and the run's provenance.
 
 Tests:
@@ -65,6 +71,41 @@ ATTICDB_BIN=$PWD/target/debug/atticdb PYTHONDONTWRITEBYTECODE=1 PYTEST_DISABLE_P
 ```
 
 Tests that start a server skip when `ATTICDB_BIN` is unset.
+
+## Correction handoff
+
+This separate test runs AtticDB and the MCP reference memory server over stdio.
+It uses 3 synthetic decisions: build runner, API encoding, and test fixture size.
+There is no model, external dataset, or network service.
+
+For each decision:
+
+1. Writer A saves and then corrects a known value. Reader B looks up the current value by key.
+2. B checks for native ordered history. AtticDB uses `fact_history`. The reference server has no revision tool.
+3. Both clients read the correction before A writes again. B then attempts a different edit from the stale read.
+4. B reads the result again. We record whether the stale edit was refused and which values are visible.
+
+AtticDB uses `fact_set` and `fact_get`. The graph uses `add_observations`, `delete_observations`, and `open_nodes`.
+A graph caller could keep its own archive or handle conflicts. This test does neither.
+We do not time the tools or rank recall quality here.
+
+Run on Unix with Node and an installed `@modelcontextprotocol/server-memory@2.0.0`:
+
+```sh
+cargo build --release --locked -p atticdb
+TMPDIR=/tmp python3 -m research.correction_eval \
+  --atticdb ./target/release/atticdb \
+  --reference /path/to/node_modules/@modelcontextprotocol/server-memory/dist/index.js
+```
+
+For the integration test, set `ATTICDB_BIN` and `MCP_MEMORY_ENTRY` to those paths:
+
+```sh
+TMPDIR=/tmp python3 -m pytest -q research/test_correction_eval.py
+```
+
+The test skips without either setting. On 2026-11-19, all 3 fresh-store runs matched.
+The run used Node 22.23.4 and AtticDB built at `7dfa70c`.
 
 ## The stores
 

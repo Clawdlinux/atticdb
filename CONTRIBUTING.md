@@ -35,6 +35,7 @@ cargo test -p atticdb --release --features fault-inject --test it -- --include-i
 cargo build -p atticdb --release --features fault-inject
 ATTICDB_BIN=target/release/atticdb python3 -m pytest clients/python/tests
 python3 -m pytest research/ctxcache/tests
+ATTICDB_BIN="$PWD/target/release/atticdb" python3 -m pytest research/locomo_retrieval/tests
 ATTICDB_BIN=target/release/atticdb python3 -m pytest research/setup_eval/tests
 python3 -m pytest scripts/tests
 shellcheck install.sh

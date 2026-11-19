@@ -34,6 +34,9 @@ ARMS = ("atticdb-question", "atticdb-1word", "atticdb-2words", "fts5-bm25", "ran
 KS = (5, 10, 20)
 TOP = 20  # Ids kept per row. Scoring at any k uses this list.
 SUMMARY_K = 10
+BYTE_BUDGETS = (1024, 2048)
+BUDGET_KEYS = tuple(f"{metric}@{budget}B" for budget in BYTE_BUDGETS
+                    for metric in ("recall", "complete", "bytes"))
 TENANT = "locomo"
 ROLE = "user"
 BATCH_TURNS = 1000  # The server takes at most 1,024 turns per append.
@@ -44,7 +47,8 @@ STOP_TIMEOUT = 5.0
 SERVING = "atticdb: serving "
 
 CSV_COLUMNS = (["sample_id", "q_index", "category", "arm", "query", "retrieved", "n_evidence"]
-               + [f"{m}@{k}" for m in ("recall", "hit", "tokens") for k in KS] + ["ms"])
+               + [f"{m}@{k}" for m in ("recall", "hit", "tokens") for k in KS]
+               + ["ms", *BUDGET_KEYS])
 
 
 class RunError(Exception):
@@ -52,9 +56,10 @@ class RunError(Exception):
 
 
 def child_env(home: str) -> dict:
-    """The parent env without any ATTICDB_* var, then this store's own ATTICDB_HOME."""
+    """Drop inherited AtticDB settings, select this store, and keep it offline."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("ATTICDB_")}
     env["ATTICDB_HOME"] = home
+    env["ATTICDB_NO_UPDATE_CHECK"] = "1"
     return env
 
 
@@ -230,6 +235,10 @@ def score_row(sample_id: str, q: data.Question, arm: str, ids: list[str], query:
         row[f"hit@{k}"] = score.hit(kept, q.evidence, k)
     for k in KS:
         row[f"tokens@{k}"] = score.approx_tokens(contents[i] for i in kept[:k])
+    for budget in BYTE_BUDGETS:
+        recall, complete, used = score.budget_metrics(kept, q.evidence, contents, budget)
+        row.update({f"recall@{budget}B": recall, f"complete@{budget}B": complete,
+                    f"bytes@{budget}B": used})
     return row
 
 
@@ -277,7 +286,7 @@ def csv_text(rows: Iterable[Mapping]) -> str:
                 v = " ".join(v)
             elif col == "ms":
                 v = "" if v is None else f"{v:.3f}"
-            elif col.startswith("hit@"):
+            elif col.startswith(("hit@", "complete@")):
                 v = int(bool(v))
             elif col.startswith(("recall@", "tokens@")):
                 v = _num(v)
@@ -292,7 +301,7 @@ def _pct(x: float) -> str:
 
 def _metric_rows(rows: Iterable[Mapping]) -> list[dict]:
     """What score.summarize takes: category and the metrics, no ids, no text, no latency."""
-    keys = [f"{m}@{k}" for m in ("recall", "hit", "tokens") for k in KS]
+    keys = [f"{m}@{k}" for m in ("recall", "hit", "tokens") for k in KS] + list(BUDGET_KEYS)
     return [{"category": r["category"], **{k: r[k] for k in keys}} for r in rows]
 
 
@@ -344,6 +353,22 @@ def summary_markdown(rows: list[Mapping], meta: Mapping) -> str:
         for name, c in sums[arm]["by_category"].items():
             lines.append(f"| {arm} | {name} | {c['n']} | {_pct(c[f'recall@{k}'])} | "
                          f"{_pct(c[f'hit@{k}'])} | {c[f'tokens@{k}']:,.0f} |")
+    lines += ["", "## Equal text budget", "",
+              "Use the longest ranked prefix of up to 20 whole turns that fits.",
+              "Budgets count UTF-8 bytes of turn text, not prompt framing.",
+              "Complete is the share of questions for which all labelled evidence fits.",
+              "", "| arm | slice | budget (bytes) | n | recall | complete | mean bytes |",
+              "|---|---|---|---|---|---|---|"]
+    for arm in ARMS:
+        for label, metrics in (("all", sums[arm]),
+                               ("temporal", sums[arm]["by_category"].get("temporal", {}))):
+            if not metrics.get("n"):
+                continue
+            for budget in BYTE_BUDGETS:
+                suffix = f"@{budget}B"
+                lines.append(f"| {arm} | {label} | {budget} | {metrics['n']} | "
+                             f"{_pct(metrics['recall' + suffix])} | {_pct(metrics['complete' + suffix])} | "
+                             f"{metrics['bytes' + suffix]:,.0f} |")
     lines += ["", "## Latency", "",
               "Wall time of the search call only, in ms. Ingestion and server start are excluded.",
               "p50 and p95 cover only questions where the arm ran a search.",

@@ -41,6 +41,26 @@ def approx_tokens(texts: Iterable[str]) -> float:
     return sum(len(t.encode("utf-8")) for t in texts) / 4
 
 
+def budget_metrics(retrieved: Sequence[str], evidence: Iterable[str],
+                   contents: Mapping[str, str], budget: int) -> tuple[float, bool, int]:
+    """Recall, all-evidence hit and bytes used by the ranked prefix that fits."""
+    gold = set(evidence)
+    if not gold:
+        raise ValueError("empty evidence can't be scored")
+    kept: set[str] = set()
+    used = 0
+    for item in retrieved:
+        if item in kept:
+            continue
+        size = len(contents[item].encode("utf-8"))
+        if used + size > budget:
+            break
+        used += size
+        kept.add(item)
+    found = len(kept & gold)
+    return found / len(gold), found == len(gold), used
+
+
 def percentile(values: Sequence[float], pct: float) -> float:
     """The nearest-rank percentile: the smallest value with pct% of values at or below it."""
     if not values:

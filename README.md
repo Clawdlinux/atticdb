@@ -361,6 +361,42 @@ AtticDB does a few things on purpose. We add features when people ask for them.
 - Something broke? [Open a bug](https://github.com/Clawdlinux/atticdb/issues/new?template=bug.yml) with the `atticdb doctor` output.
 - Someone asked already? Add a thumbs-up to that issue. We count those. Issues labeled `waiting-for-users` are ideas we parked until enough people want them.
 
+## Memory comparison
+
+AtticDB runs locally and keeps explicit fact revisions. Its ranked search uses words, not embeddings.
+
+| Tool | How it retrieves memory | Where it runs |
+|---|---|---|
+| AtticDB | Ranked word search and keyed fact lookup | Local binary or self-hosted MCP |
+| [Mem0](https://docs.mem0.ai/open-source/overview) | Embeddings with configurable retrieval components | Library or self-hosted server |
+| [Walrus Memory](https://docs.wal.app/walrus-memory/sdk/overview) | Embedding-based recall | Relayer-backed, even with client-side embeddings |
+
+These are documented differences, not measured rankings. We have not benchmarked Mem0 or Walrus Memory.
+
+**Measured correction handoff:** We tried 3 explicit decision changes with fresh stores, repeated 3 times.
+
+| Check | AtticDB | [MCP reference memory server 2.0.0](https://www.npmjs.com/package/@modelcontextprotocol/server-memory/v/2.0.0) |
+|---|---:|---:|
+| Reader got only the corrected value | 9/9 | 9/9 |
+| Reader could retrieve ordered revisions natively | 9/9 | No native revision tool |
+| Stale writer was refused after another writer saved | 9/9 | 0/9 |
+
+Both clients read the same value before either edit. AtticDB refused the stale edit.
+The reference server kept both edits as observations.
+This tests native tools, not a workflow with a separate graph archive or client-managed locking.
+See the [correction eval](research/locomo_retrieval/README.md#correction-handoff).
+
+**Measured retrieval:** On LoCoMo, each retriever got the same 1 KiB text limit.
+
+| Evidence recall | AtticDB ranked search | SQLite FTS5 BM25 |
+|---|---:|---:|
+| All 1,536 questions | 54.1% | 51.9% |
+| 321 temporal questions | 63.2% | 62.0% |
+
+SQLite was faster in this setup. It ran in process, while AtticDB used a Unix socket.
+This tests evidence retrieval, not answer accuracy or whether an agent rejects an outdated fact.
+See the [full results](research/locomo_retrieval/results/2026-11-19-equal-budget.md) and [run command](research/locomo_retrieval/README.md#how-to-run-it).
+
 ## Docs
 
 - [atticdb](crates/atticdb/README.md): server, HTTP API, MCP, studio, `tree`, `forget`, `export`, `upgrade`, `stats`, `load`, `verify`, `dump` and `recover`. It also has these:
