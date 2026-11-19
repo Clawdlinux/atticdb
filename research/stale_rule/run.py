@@ -15,11 +15,12 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import sys
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
+
+from research.setup_eval.proc import Runner
 
 from . import fixtures, grade
 
@@ -101,15 +102,17 @@ def run_one(conv_name: str, history: str, arm: str, rep: int, model: str, batch:
             with open(os.path.join(claude_dir, "CLAUDE.md"), "w") as f:
                 f.write(user)
         start = time.monotonic()
-        try:
-            proc = subprocess.run(argv(conv.task, model), cwd=repo, env=child_env(claude_dir),
-                                  stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=TIMEOUT)
-            stream, code = proc.stdout, proc.returncode
-            if code != 0:
-                row["error"] = f"exit {code}: {proc.stderr[-200:].strip()}"
-        except subprocess.TimeoutExpired as timed_out:
-            stream = timed_out.stdout.decode() if isinstance(timed_out.stdout, bytes) else (timed_out.stdout or "")
+        env = child_env(claude_dir)
+        env.update({"ATTICDB_HOME": os.path.join(root, "store"), "ATTICDB_NO_UPDATE_CHECK": "1"})
+        proc = Runner().run(argv(conv.task, model), cwd=repo, env=env, root=root, timeout=TIMEOUT)
+        stream = proc.stdout.decode("utf-8", errors="replace")
+        if proc.timed_out:
             row["error"] = "timeout"
+        elif proc.missing:
+            row["error"] = "Claude CLI not found"
+        elif proc.code != 0:
+            detail = proc.stderr.decode("utf-8", errors="replace")[-200:].strip()
+            row["error"] = f"exit {proc.code}: {detail}"
         row["seconds"] = round(time.monotonic() - start)
         cache = os.path.join(CACHE, batch)
         os.makedirs(cache, exist_ok=True)
@@ -118,6 +121,8 @@ def run_one(conv_name: str, history: str, arm: str, rep: int, model: str, batch:
                                          suffix=".jsonl", delete=False) as f:
             f.write(stream)
             row["transcript"] = os.path.basename(f.name)
+        if proc.timed_out:
+            return row
         parsed = parse(stream)
         lines = grade.added_lines(repo, base)
         found = grade.verdict(conv_name, lines)

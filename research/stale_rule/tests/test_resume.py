@@ -1,4 +1,5 @@
 import sys
+import time
 
 import pytest
 
@@ -53,6 +54,25 @@ def test_retry_preserves_previous_transcript(tmp_path, monkeypatch):
     assert first != retry
     assert first.read_text() == "first\n"
     assert retry.read_text() == "retry\n"
+
+
+def test_timeout_stops_agent_child(tmp_path, monkeypatch):
+    ready = tmp_path / "ready"
+    late = tmp_path / "late"
+    child = (
+        "import pathlib,time; "
+        f"pathlib.Path({str(ready)!r}).touch(); time.sleep(2); pathlib.Path({str(late)!r}).touch()"
+    )
+    parent = f"import subprocess,sys,time; subprocess.Popen([sys.executable,'-c',{child!r}]); time.sleep(5)"
+    monkeypatch.setattr(run, "CACHE", str(tmp_path))
+    monkeypatch.setattr(run, "TIMEOUT", 1)
+    monkeypatch.setattr(run, "argv", lambda *args: [sys.executable, "-c", parent])
+    assert run.run_one("errors", "stale", "plain", 1, "stub", "batch", "file")["error"] == "timeout"
+    assert ready.exists(), "the child must start before the deadline"
+    deadline = time.monotonic() + 2.5
+    while time.monotonic() < deadline and not late.exists():
+        time.sleep(0.05)
+    assert not late.exists()
 
 
 @pytest.mark.parametrize("flag", [

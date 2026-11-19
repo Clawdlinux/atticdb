@@ -28,7 +28,7 @@ def _signals(convention: str, lines: list[str]) -> tuple[bool, bool]:
     """(follows the rule, follows the code)."""
     text = "\n".join(line for line in lines if not line.lstrip().startswith("#"))
     if convention == "errors":
-        rule = bool(re.search(r"\braise\b", text))
+        rule = bool(re.search(r"\braise\s+(?:LookupError|KeyError|IndexError)\b", text))
         return rule, not rule and bool(re.search(r"\.get\(|return None", text))
     if convention == "timestamps":
         return "isoformat" in text, bool(re.search(r"time\.time\(|\.timestamp\(", text))

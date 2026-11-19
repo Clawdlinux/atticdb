@@ -64,6 +64,12 @@ def test_added_lines_include_new_files(tmp_path):
     assert not grade.correct("stale", "rule")
 
 
+def test_invalid_input_exception_is_not_missing_item_handling():
+    lines = ["if not isinstance(member_id, int):", "    raise TypeError('expected int')",
+             "return MEMBERS.get(member_id)"]
+    assert grade.verdict("errors", lines) == "code"
+
+
 @pytest.mark.parametrize("name", sorted(CONVENTIONS))
 def test_memory_histories_end_at_one_tree_without_the_rule(tmp_path, name):
     conv = CONVENTIONS[name]
