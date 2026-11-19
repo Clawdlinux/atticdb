@@ -38,4 +38,5 @@ python3 -m research.stale_rule run --batch my-batch --channel memory --reps 2 --
 python3 -m research.stale_rule summary research/stale_rule/results/my-batch.csv
 ```
 
-A batch that hits the login's usage limit records errored rows. Rerun only those with `--resume <csv> --out <new csv>`.
+To rerun failed or missing cells, use `--resume <csv> --out <new csv>`.
+Match the original channel and `--neutral` setting. Pass the exact model ID from a completed row using `--model`.

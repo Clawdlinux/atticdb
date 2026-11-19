@@ -138,13 +138,23 @@ def batch(a: argparse.Namespace) -> int:
         return 2
     arms = a.arms or list(fixtures.MEMORY_ARMS if a.channel == "memory" else fixtures.ARMS)
     cells = list(itertools.product(a.conventions, fixtures.HISTORIES, arms, range(1, a.reps + 1)))
-    if a.resume:
-        # Reruns only the cells that errored or are missing in an earlier CSV of the same batch.
-        with open(a.resume) as f:
-            done = {(r["convention"], r["history"], r["arm"], int(r["rep"])) for r in csv.DictReader(f)
-                    if not r["error"]}
-        cells = [c for c in cells if c not in done]
     out = a.out or os.path.join(os.path.dirname(__file__), "results", f"{a.batch}.csv")
+    if a.resume:
+        if os.path.realpath(a.resume) == os.path.realpath(out):
+            print("--resume requires a separate --out file", file=sys.stderr)
+            return 2
+        expected = (a.channel, str(int(a.neutral)), a.model)
+        done = set()
+        with open(a.resume) as f:
+            for row in csv.DictReader(f):
+                if row["error"]:
+                    continue
+                if (row.get("channel"), row.get("neutral"), row.get("model")) != expected:
+                    print("--resume requires the same channel, history mode, and exact model ID",
+                          file=sys.stderr)
+                    return 2
+                done.add((row["convention"], row["history"], row["arm"], int(row["rep"])))
+        cells = [c for c in cells if c not in done]
     os.makedirs(os.path.dirname(out), exist_ok=True)
     print(f"{len(cells)} runs, {a.jobs} at a time, model {a.model}, to {out}", flush=True)
     rows = []
