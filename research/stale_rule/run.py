@@ -20,6 +20,7 @@ import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+from research.setup_eval.parse import parse_claude
 from research.setup_eval.proc import Runner
 
 from . import fixtures, grade
@@ -121,7 +122,11 @@ def run_one(conv_name: str, history: str, arm: str, rep: int, model: str, batch:
                                          suffix=".jsonl", delete=False) as f:
             f.write(stream)
             row["transcript"] = os.path.basename(f.name)
-        if proc.timed_out:
+        if row["error"]:
+            return row
+        outcome = parse_claude(stream)
+        if outcome.is_error or not outcome.final:
+            row["error"] = "Claude reported an error" if outcome.is_error else "missing final result"
             return row
         parsed = parse(stream)
         lines = grade.added_lines(repo, base)

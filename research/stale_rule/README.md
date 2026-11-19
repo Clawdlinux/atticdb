@@ -39,4 +39,5 @@ python3 -m research.stale_rule summary research/stale_rule/results/my-batch.csv
 ```
 
 To rerun failed or missing cells, use `--resume <csv> --out <new csv>`.
+An attempt without a successful final result is not graded, even if the CLI exits 0.
 Match the original channel and `--neutral` setting. Pass the exact model ID from a completed row using `--model`.

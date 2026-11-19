@@ -1,3 +1,4 @@
+import json
 import sys
 import time
 
@@ -44,7 +45,8 @@ def test_retry_preserves_previous_transcript(tmp_path, monkeypatch):
     monkeypatch.setattr(run, "CACHE", str(tmp_path))
 
     def attempt(text):
-        monkeypatch.setattr(run, "argv", lambda *args: [sys.executable, "-c", f"print({text!r})"])
+        stream = json.dumps({"type": "result", "subtype": "success", "result": text})
+        monkeypatch.setattr(run, "argv", lambda *args: [sys.executable, "-c", f"print({stream!r})"])
         row = run.run_one("errors", "stale", "plain", 1, "stub", "batch", "file")
         assert not row["error"], row["error"]
         return tmp_path / "batch" / row["transcript"]
@@ -52,8 +54,22 @@ def test_retry_preserves_previous_transcript(tmp_path, monkeypatch):
     first = attempt("first")
     retry = attempt("retry")
     assert first != retry
-    assert first.read_text() == "first\n"
-    assert retry.read_text() == "retry\n"
+    assert json.loads(first.read_text())["result"] == "first"
+    assert json.loads(retry.read_text())["result"] == "retry"
+
+
+@pytest.mark.parametrize(("events", "error"), [
+    ([], "missing final result"),
+    ([{"type": "result", "subtype": "error_max_turns", "is_error": True}], "Claude reported an error"),
+])
+def test_exit_zero_does_not_count_an_incomplete_run(tmp_path, monkeypatch, events, error):
+    monkeypatch.setattr(run, "CACHE", str(tmp_path))
+    stream = "\n".join(map(json.dumps, events))
+    monkeypatch.setattr(run, "argv", lambda *args: [sys.executable, "-c", f"print({stream!r})"])
+    row = run.run_one("errors", "stale", "plain", 1, "stub", "batch", "file")
+    assert row["error"] == error
+    assert "correct" not in row
+    assert (tmp_path / "batch" / row["transcript"]).is_file()
 
 
 def test_timeout_stops_agent_child(tmp_path, monkeypatch):
