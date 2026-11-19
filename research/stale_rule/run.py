@@ -38,7 +38,7 @@ FIELDS = ["channel", "neutral", "convention", "history", "arm", "rep", "verdict"
 
 def child_env(claude_dir: str) -> dict:
     env = {k: v for k, v in os.environ.items() if not k.startswith(DROP)}
-    env.update(fixtures.git_env())
+    env.update((key, value) for key, value in fixtures.git_env().items() if key.startswith("GIT_"))
     env.update({"CLAUDE_CONFIG_DIR": claude_dir, "CLAUDE_SECURESTORAGE_CONFIG_DIR": LOGIN_DIR,
                 "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"})
     return env
@@ -155,7 +155,7 @@ def batch(a: argparse.Namespace) -> int:
                     return 2
                 done.add((row["convention"], row["history"], row["arm"], int(row["rep"])))
         cells = [c for c in cells if c not in done]
-    os.makedirs(os.path.dirname(out), exist_ok=True)
+    os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     print(f"{len(cells)} runs, {a.jobs} at a time, model {a.model}, to {out}", flush=True)
     rows = []
     with ThreadPoolExecutor(a.jobs) as pool, open(out, "w", newline="") as f:
