@@ -3,7 +3,33 @@
 //! The rules match the LoCoMo research harness, so its numbers carry over. Only keeping ids
 //! such as `fin-88` whole is extra.
 
+use std::cmp::Ordering;
 use std::collections::HashSet;
+
+pub(crate) struct Candidate {
+    pub score: f64,
+    pub lsn: u64,
+}
+
+impl Ord for Candidate {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.score.total_cmp(&other.score).then(self.lsn.cmp(&other.lsn))
+    }
+}
+
+impl PartialOrd for Candidate {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for Candidate {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for Candidate {}
 
 /// Common English function words, question words and light verbs. Words under 3 chars are
 /// dropped anyway. Copied from `STOPWORDS` in `research/locomo_retrieval/words.py`. It is

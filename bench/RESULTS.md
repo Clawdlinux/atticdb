@@ -22,6 +22,27 @@ All earlier sections in this file used asymmetric load: only Engine ran readers.
 Their ratios include reader contention on the engine side only.
 Set `G1_SYMMETRIC=0` to reproduce those traces. No symmetric numbers are recorded yet.
 
+# Ranked search on 100K turns
+
+Measured on Apple M4, macOS 27.2.1, with local release builds. The baseline is `b322cf5`.
+The change replaces the final candidate sort with a heap. It reads candidates in the same score and LSN order.
+
+Run `TMPDIR=/tmp python3 -m bench.ranked_search <baseline-binary> <candidate-binary>`.
+Each run builds 2 identical stores and waits for both indexes to catch up.
+It alternates which binary runs first. Timings cover 50 paired requests per query after 5 warmups.
+Results were identical after excluding timestamps from the fresh writes.
+
+| Query | Baseline p95 range, ms | Heap p95 range, ms |
+|---|---:|---:|
+| Common term, 10 hits | 3.996-4.080 | 3.042-3.066 |
+| Mixed scores, 10 hits | 4.472-4.554 | 3.502-3.533 |
+| Selective term, 10 hits | 0.120-0.138 | 0.114-0.127 |
+| Mixed scores, 100 hits | 4.812-4.884 | 3.773-3.778 |
+
+Ranges span 3 fresh pairs of 100K-turn stores. The common query's median p95 fell from 4.031 to 3.060 ms.
+There was no clear speed change on 1K turns. On LoCoMo, all 1,536 ranked hit lists matched at the same index state.
+These are before-and-after AtticDB timings, not a new comparison with SQLite.
+
 # M1 append baseline
 
 Measured on 2026-10-18. These are local development numbers, not G1 results.
