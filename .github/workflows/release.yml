@@ -402,6 +402,8 @@ jobs:
         env:
           ATTICDB_INSTALL_DIR: ${{ runner.temp }}\atticdb-bin
         run: |
+          # A user PATH with 1 entry, the case where PowerShell returns a string, not an array.
+          [Environment]::SetEnvironmentVariable('Path', 'C:\only-entry', 'User')
           Get-Content -Raw .\install.ps1 | Invoke-Expression
           $exe = Join-Path $env:ATTICDB_INSTALL_DIR 'atticdb.exe'
           $got = & $exe --version
@@ -410,8 +412,8 @@ jobs:
             exit 1
           }
           $user = [Environment]::GetEnvironmentVariable('Path', 'User')
-          if (-not (($user -split ';') -contains $env:ATTICDB_INSTALL_DIR)) {
-            Write-Output "::error::install.ps1 did not add $env:ATTICDB_INSTALL_DIR to the user PATH"
+          if ($user -ne "C:\only-entry;$env:ATTICDB_INSTALL_DIR") {
+            Write-Output "::error::user PATH is '$user', want 'C:\only-entry;$env:ATTICDB_INSTALL_DIR'"
             exit 1
           }
           # A second run replaces the binary in place.
@@ -517,6 +519,14 @@ jobs:
           scripts/brew-formula.sh "$VERSION" SHA256SUMS > atticdb.rb
           path=Formula/atticdb.rb
           current=$(gh api "repos/Clawdlinux/homebrew-tap/contents/$path" --jq .sha)
+          # A rerun of an older release must not replace a newer formula.
+          tap=$(gh api "repos/Clawdlinux/homebrew-tap/contents/$path" -H 'Accept: application/vnd.github.raw' \
+            | sed -n 's#.*/releases/download/v\([0-9.]*\)/.*#\1#p' | head -n 1)
+          if [ -n "$tap" ] && [ "$tap" != "$VERSION" ] &&
+            [ "$(printf '%s\n%s\n' "$tap" "$VERSION" | sort -V | tail -n 1)" = "$tap" ]; then
+            echo "the tap has atticdb $tap, newer than $VERSION. Leaving it."
+            exit 0
+          fi
           if gh api "repos/Clawdlinux/homebrew-tap/contents/$path" -H 'Accept: application/vnd.github.raw' \
             | cmp -s - atticdb.rb; then
             echo "the tap already has atticdb $VERSION"

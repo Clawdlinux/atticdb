@@ -87,7 +87,7 @@ function Install-AtticDB {
         try {
             Move-Item -Force $part $dest
         } catch {
-            throw "atticdb install: cannot replace $dest. It may be running: stop it with 'atticdb stop', then run the installer again. Nothing was installed."
+            throw "atticdb install: cannot replace $dest. It may be running. Close your apps, end atticdb.exe in Task Manager, then run the installer again. Nothing was installed."
         }
         $part = $null
 
@@ -95,8 +95,9 @@ function Install-AtticDB {
         Say "installed $installed at $dest"
 
         $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+        # @() keeps a 1-entry PATH an array, so + appends an entry instead of joining strings.
         $entries = @()
-        if ($userPath) { $entries = $userPath -split ';' | Where-Object { $_ } }
+        if ($userPath) { $entries = @($userPath -split ';' | Where-Object { $_ }) }
         if (-not ($entries | Where-Object { $_.TrimEnd('\') -ieq $dir })) {
             [Environment]::SetEnvironmentVariable('Path', (($entries + $dir) -join ';'), 'User')
             Say "added $dir to your user PATH. New terminals pick it up."
