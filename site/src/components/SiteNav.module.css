@@ -40,10 +40,25 @@
     gap: 0.75rem 1rem;
   }
 
+  /* Row 2 on purpose: its own ruled strip, 1 line of links, spread edge to edge. */
   .links {
     order: 3;
+    flex-wrap: nowrap;
     width: 100%;
     justify-content: space-between;
     gap: 0.5rem;
+    border-top: 1px solid color-mix(in srgb, var(--ink) 18%, var(--bg));
+    font-size: 1rem;
+  }
+
+  .links a {
+    white-space: nowrap;
+  }
+}
+
+/* Under 360px: a step smaller, so the 5 links keep 1 line with room between them. */
+@media (max-width: 22.49rem) {
+  .links {
+    font-size: 0.9375rem;
   }
 }
