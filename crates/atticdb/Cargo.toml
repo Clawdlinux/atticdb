@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "Local, durable memory for coding agents. An MCP server and CLI that wires into Copilot, Claude Code and Codex."
+homepage.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+keywords = ["mcp", "agent-memory", "coding-agents", "local-first", "database"]
+categories = ["command-line-utilities", "database-implementations", "development-tools"]
 
 [features]
 # Test-only sync failure trigger. Release builds never enable it.

@@ -4,7 +4,9 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-publish = false
+description = "Safe wrappers over the Win32 calls AtticDB needs. Empty on other targets."
+homepage.workspace = true
+repository.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "=0.61.2", features = [

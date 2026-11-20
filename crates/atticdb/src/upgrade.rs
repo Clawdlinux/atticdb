@@ -122,8 +122,7 @@ mod unix {
     const NO_LATEST: &str =
         "cannot find the latest release. Check the network, or pass --version <v>.";
     /// The line for a binary under `.cargo/bin`.
-    const CARGO: &str = "Installed by cargo. Run: cargo install --git \
-                         https://github.com/Clawdlinux/atticdb atticdb --locked";
+    const CARGO: &str = "Installed by cargo. Run: cargo install atticdb --locked";
     /// The line for a binary that Homebrew installed.
     const BREW: &str = "Installed by Homebrew. Run: brew upgrade atticdb";
     /// How long the old server may take to free the lock after SIGTERM.

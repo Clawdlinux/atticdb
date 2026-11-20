@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "The append-only log under AtticDB: fsync-acked segments with CRC-checked records."
+homepage.workspace = true
+repository.workspace = true
 
 [features]
 sim = []

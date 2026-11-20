@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "The AtticDB engine: sessions, keyed facts with revision history, and word search over a durable log."
+homepage.workspace = true
+repository.workspace = true
 
 [features]
 sim = ["atticdb-tape/sim"]
