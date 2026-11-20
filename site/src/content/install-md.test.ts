@@ -7,7 +7,7 @@ import { APPS } from "@/content/install";
 // public/install.md is what an agent runs when a user pastes the one-line prompt.
 // It must stay in step with the installer's app names and the CLI it drives.
 const INSTALL_MD = readFileSync(resolve(process.cwd(), "public/install.md"), "utf8");
-const MAIN_RS = "/Users/sunny/clawdlinux/atticdb/crates/atticdb/src/main.rs";
+const MAIN_RS = resolve(process.cwd(), "../crates/atticdb/src/main.rs");
 const SUBCOMMANDS = ["--version", "setup", "doctor", "fact set", "disconnect"];
 
 describe("public/install.md", () => {
