@@ -493,26 +493,10 @@
   }
 }
 
+/* Tablet: the phone stack (tabs, box, link), centred as a group and about as wide as the lead. */
 @media (min-width: 48rem) and (max-width: 63.99rem) {
   .actions {
-    grid-template-columns: auto auto;
-    justify-content: center;
-    align-items: start;
-    column-gap: 1.75rem;
-  }
-
-  .method {
-    grid-column: 1;
-  }
-
-  .panels {
-    grid-column: 1;
-  }
-
-  .actions .waitlist {
-    grid-column: 2;
-    grid-row: 2;
-    justify-self: start;
+    width: min(100%, 32rem);
   }
 }
 
