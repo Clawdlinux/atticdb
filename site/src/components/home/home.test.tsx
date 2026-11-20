@@ -212,7 +212,9 @@ describe("home first screen", () => {
     for (const a of HERO_AGENTS) {
       expect(within(agents).getByRole("radio", { name: a.name })).toBeInTheDocument();
     }
-    expect(within(stage).getByText("New chat in Claude Code")).toBeInTheDocument();
+    expect(within(stage).getByText("Chat in Claude Code, connected")).toBeInTheDocument();
+    expect(within(stage).getByText("Shared with tools you connect")).toBeInTheDocument();
+    expect(stage.textContent).not.toMatch(/every\s+new\s+chat/i);
   });
 
   it("has no benchmark jargon before the demo: the chip and the plug band come after it", () => {
@@ -223,11 +225,24 @@ describe("home first screen", () => {
     range.setStartBefore(hero.firstChild!);
     range.setEndBefore(demo);
     const before = range.cloneContents().textContent!;
-    expect(before).toContain("Your coding agent forgets everything between chats.");
+    expect(before).toContain("Shared local memory for your coding tools.");
     expect(before).toMatch(/Early\. Word search, not semantic\./);
     for (const word of [/\backed\b/i, /\backs\b/i, /µs/, /p50/i, /fdatasync/i, /Pull the plug/i, /Writers/, /Disk/]) {
       expect(before).not.toMatch(word);
     }
+  });
+});
+
+describe("home memory claims (#238)", () => {
+  it("scopes memory to the tools you connect, with no every-chat or forgets-everything promise", () => {
+    const { container } = render(<Home />);
+    const text = container.textContent!;
+    expect(text).not.toMatch(/every\s+new\s+chat|forgets\s+everything/i);
+    const demo = container.querySelector('[aria-labelledby="demo-heading"]') as HTMLElement;
+    expect(
+      within(demo).getByText("Save a rule from your terminal. New chats in that repo can start with it, in tools you connect."),
+    ).toBeInTheDocument();
+    expect(HOME_FAQ[0].a).toMatch(/^In each tool you connect, a new chat in a repo can start with a short memory block\./);
   });
 });
 

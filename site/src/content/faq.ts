@@ -4,7 +4,7 @@ export type Qa = { q: string; a: string };
 export const HOME_FAQ: Qa[] = [
   {
     q: "What changes in my agent?",
-    a: "Each new chat in a repo starts with a short memory block. It holds your rules and that repo's 5 newest notes. This works in Claude Code, Codex, Copilot and VS Code. Your agent can also save and search memory during a chat. To see the exact block, run atticdb studio and open Chat start.",
+    a: "In each tool you connect, a new chat in a repo can start with a short memory block. It holds your rules and that repo's 5 newest notes. You can connect Claude Code, Codex, Copilot and VS Code. Your agent can also save and search memory during a chat. To see the exact block, run atticdb studio and open Chat start.",
   },
   {
     q: "Where is my data?",

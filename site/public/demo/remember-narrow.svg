@@ -15,7 +15,6 @@
     .c3 { transform: translateX(371px); animation-name: type3; }
     .out { animation-name: out; }
     .saved { animation-name: saved; }
-    .chat { animation-name: chat; }
     .block { animation-name: block; }
     .user { animation-name: user; }
     .agent { animation-name: agent; }
@@ -36,11 +35,6 @@
     }
     @keyframes out { 0%, 25% { opacity: 0; } 26%, 96% { opacity: 1; } 97%, 100% { opacity: 0; } }
     @keyframes saved { 0%, 27.5% { opacity: 0; } 28.5%, 96% { opacity: 1; } 97%, 100% { opacity: 0; } }
-    @keyframes chat {
-      0%, 35% { opacity: 0; transform: translateY(10px); }
-      37%, 96% { opacity: 1; transform: none; }
-      97%, 100% { opacity: 0; transform: none; }
-    }
     @keyframes block { 0%, 40% { opacity: 0; } 41.5%, 96% { opacity: 1; } 97%, 100% { opacity: 0; } }
     @keyframes user { 0%, 50% { opacity: 0; } 51%, 96% { opacity: 1; } 97%, 100% { opacity: 0; } }
     @keyframes agent { 0%, 60% { opacity: 0; } 61%, 96% { opacity: 1; } 97%, 100% { opacity: 0; } }
@@ -82,44 +76,43 @@
   <!-- A caption outside the terminal, not CLI output -->
   <text class="a saved sans accent" x="200" y="256" text-anchor="middle" font-size="19">Saved. The rule is on disk.</text>
 
-  <!-- A new chat, later -->
-  <g class="a chat">
-    <text x="200" y="290" text-anchor="middle" font-size="19" class="sans muted">Later, a new chat in the same repo</text>
-    <rect x="0.5" y="306.5" width="399" height="569" rx="6" fill="#221B17" stroke="#3A302A"/>
-    <text x="14" y="336" font-size="19" class="sans muted">New chat · Claude Code · ~/shop</text>
-    <line x1="1" y1="352" x2="399" y2="352" stroke="#3A302A"/>
+  <!-- A new chat, later. Its frame shows from the first frame, so the figure never sits empty. -->
+  <text x="200" y="290" text-anchor="middle" font-size="19" class="sans muted">Later, a new chat in the same repo</text>
+  <rect x="0.5" y="306.5" width="399" height="569" rx="6" fill="#221B17" stroke="#3A302A"/>
+  <text x="14" y="336" font-size="19" class="sans muted">New chat · Claude Code · ~/shop</text>
+  <line x1="1" y1="352" x2="399" y2="352" stroke="#3A302A"/>
 
-    <g class="a block">
-      <rect x="10.5" y="366.5" width="379" height="307" fill="#16110E" stroke="#C8F03C" stroke-dasharray="4 3"/>
-      <text x="22" y="392" font-size="19" class="sans accent">What the agent sees at chat start</text>
-      <g font-size="19" class="mono muted">
-        <text x="22" y="420">AtticDB memory for repo shop,</text>
-        <text x="22" y="443">a snapshot from chat start:</text>
-        <text x="22" y="466">rules, facts under repo/shop/</text>
-        <text x="22" y="489">and only the 5 newest notes.</text>
-        <text x="22" y="512">Older notes and decisions are</text>
-        <text x="22" y="535">not shown. Before saying why</text>
-        <text x="22" y="558">or when something was decided,</text>
-        <text x="22" y="581">call memory_search.</text>
-      </g>
-      <g font-size="19" class="mono ink">
-        <text x="22" y="612">This repo (shop):</text>
-        <text x="22" y="635">- repo/shop/rule:</text>
-        <text x="45" y="658" class="accent">Use pnpm, not npm.</text>
-      </g>
+  <!-- Only the contents animate in -->
+  <g class="a block">
+    <rect x="10.5" y="366.5" width="379" height="307" fill="#16110E" stroke="#C8F03C" stroke-dasharray="4 3"/>
+    <text x="22" y="392" font-size="19" class="sans accent">What the agent sees at chat start</text>
+    <g font-size="19" class="mono muted">
+      <text x="22" y="420">AtticDB memory for repo shop,</text>
+      <text x="22" y="443">a snapshot from chat start:</text>
+      <text x="22" y="466">rules, facts under repo/shop/</text>
+      <text x="22" y="489">and only the 5 newest notes.</text>
+      <text x="22" y="512">Older notes and decisions are</text>
+      <text x="22" y="535">not shown. Before saying why</text>
+      <text x="22" y="558">or when something was decided,</text>
+      <text x="22" y="581">call memory_search.</text>
     </g>
+    <g font-size="19" class="mono ink">
+      <text x="22" y="612">This repo (shop):</text>
+      <text x="22" y="635">- repo/shop/rule:</text>
+      <text x="45" y="658" class="accent">Use pnpm, not npm.</text>
+    </g>
+  </g>
 
-    <g class="a user">
-      <rect x="140" y="690" width="250" height="40" rx="4" fill="#3A302A"/>
-      <text x="378" y="716" text-anchor="end" font-size="19" class="sans ink">Add lodash to this repo.</text>
-    </g>
+  <g class="a user">
+    <rect x="140" y="690" width="250" height="40" rx="4" fill="#3A302A"/>
+    <text x="378" y="716" text-anchor="end" font-size="19" class="sans ink">Add lodash to this repo.</text>
+  </g>
 
-    <g class="a agent">
-      <text x="14" y="760" font-size="19" class="sans muted">Agent</text>
-      <text x="14" y="788" font-size="19" class="sans ink">This repo uses pnpm, not npm.</text>
-      <text x="14" y="812" font-size="19" class="sans ink">So I'll run:</text>
-      <rect x="14" y="826" width="204" height="36" fill="#16110E"/>
-      <text x="26" y="850" font-size="19" class="mono accent">pnpm add lodash</text>
-    </g>
+  <g class="a agent">
+    <text x="14" y="760" font-size="19" class="sans muted">Agent</text>
+    <text x="14" y="788" font-size="19" class="sans ink">This repo uses pnpm, not npm.</text>
+    <text x="14" y="812" font-size="19" class="sans ink">So I'll run:</text>
+    <rect x="14" y="826" width="204" height="36" fill="#16110E"/>
+    <text x="26" y="850" font-size="19" class="mono accent">pnpm add lodash</text>
   </g>
 </svg>

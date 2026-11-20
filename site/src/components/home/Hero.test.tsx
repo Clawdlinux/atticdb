@@ -31,16 +31,16 @@ describe("Hero", () => {
     return container.querySelector("canvas")!;
   }
 
-  it("names the h1 by the ICP one-liner alone", () => {
+  it("names the h1 by the #238 headline alone", () => {
     render(<Hero />);
     expect(
       screen.getByRole("heading", {
         level: 1,
-        name: "Your coding agent forgets everything between chats. AtticDB remembers, on your own disk.",
+        name: "Shared local memory for your coding tools. Rules and session notes on your own disk.",
       }),
     ).toBeInTheDocument();
     expect(HEADLINE.join(" ")).toBe(
-      "Your coding agent forgets everything between chats. AtticDB remembers, on your own disk.",
+      "Shared local memory for your coding tools. Rules and session notes on your own disk.",
     );
   });
 
@@ -56,7 +56,7 @@ describe("Hero", () => {
     const { container } = render(<Hero />);
     const sub = screen.getByText(SUB);
     expect(SUB).toBe(
-      "It saves your rules and decisions on your machine. Every new chat in Claude Code, Codex, Copilot and VS Code starts with them. Free, open source, 1 small binary, no account.",
+      "Connect Claude Code, Codex, Copilot or VS Code to the same AtticDB store. Save project rules and session notes for use across those configured tools. Free and open source.",
     );
     const install = screen.getByText(INSTALL_CMD);
     const honest = screen.getByText(HONEST);

@@ -47,6 +47,8 @@
 @media (min-width: 64rem) {
   .stage {
     grid-template-columns: minmax(0, 5.5fr) minmax(0, 6.5fr);
+    /* Top-aligned: the hub is taller, and centring left a gap above the copy. */
+    align-items: start;
     column-gap: 2.5rem;
     row-gap: 1.75rem;
     text-align: left;
@@ -415,14 +417,21 @@
   font-size: var(--step-small);
 }
 
+/* On the page grid: its left edge is the band's, under the Disk label. It stacks below 64rem. */
 .proof {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: center;
+  flex-direction: column;
+  align-items: flex-start;
   gap: 0.75rem 1.25rem;
   /* Tight: the demo above already ends in its own padding. */
   margin-top: clamp(0.75rem, 1.5svh, 1.25rem);
+}
+
+@media (min-width: 64rem) {
+  .proof {
+    flex-direction: row;
+    align-items: center;
+  }
 }
 
 .trust {
@@ -484,26 +493,10 @@
   }
 }
 
+/* Tablet: the phone stack (tabs, box, link), centred as a group and about as wide as the lead. */
 @media (min-width: 48rem) and (max-width: 63.99rem) {
   .actions {
-    grid-template-columns: auto auto;
-    justify-content: center;
-    align-items: start;
-    column-gap: 1.75rem;
-  }
-
-  .method {
-    grid-column: 1;
-  }
-
-  .panels {
-    grid-column: 1;
-  }
-
-  .actions .waitlist {
-    grid-column: 2;
-    grid-row: 2;
-    justify-self: start;
+    width: min(100%, 32rem);
   }
 }
 
@@ -579,12 +572,8 @@
   }
 }
 
-/* Phone: the proof centres, and the band stacks. */
+/* Phone: the band stacks. */
 @media (max-width: 47.99rem) {
-  .trust {
-    text-align: center;
-  }
-
   .strip {
     gap: 0.375rem 1.25rem;
     padding-top: 0.625rem;

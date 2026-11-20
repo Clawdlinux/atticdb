@@ -55,13 +55,28 @@ describe("page metadata", () => {
     expect(pageMetadata("/pricing").alternates?.canonical).toBe("https://atticdb.com/pricing");
   });
 
+  it("gives the home link preview the approved #238 headline, subline and image alt", () => {
+    const metadata = pageMetadata("/");
+    const alt = "AtticDB: shared local memory for configured coding tools, stored on your own disk.";
+    expect(metadata.openGraph).toMatchObject({
+      title: "Shared local memory for your coding tools.",
+      description: "Rules and session notes on your own disk.",
+      images: [{ url: "/og.png", width: 1200, height: 630, alt }],
+    });
+    expect(metadata.twitter).toMatchObject({
+      title: "Shared local memory for your coding tools.",
+      description: "Rules and session notes on your own disk.",
+    });
+  });
+
   it("gives every page its own canonical and social metadata", () => {
-    for (const { path, title, description } of PAGES) {
+    for (const { path, title: pageTitle, description: pageDescription, social } of PAGES) {
+      const { title, description } = social ?? { title: pageTitle, description: pageDescription };
       const metadata = pageMetadata(path);
-      expect(metadata.description).toBe(description);
+      expect(metadata.description).toBe(pageDescription);
       expect(metadata.alternates?.canonical).toBe(absoluteUrl(path));
       expect(metadata.alternates?.types).toEqual(RSS_FEED);
-      if (path !== "/") expect(metadata.title).toBe(title);
+      if (path !== "/") expect(metadata.title).toBe(pageTitle);
       expect(metadata.openGraph).toEqual({
         title,
         description,
