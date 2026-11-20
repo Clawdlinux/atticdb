@@ -47,6 +47,8 @@
 @media (min-width: 64rem) {
   .stage {
     grid-template-columns: minmax(0, 5.5fr) minmax(0, 6.5fr);
+    /* Top-aligned: the hub is taller, and centring left a gap above the copy. */
+    align-items: start;
     column-gap: 2.5rem;
     row-gap: 1.75rem;
     text-align: left;
