@@ -19,7 +19,7 @@ export const HERO_AGENTS = [
     name: "Codex",
     session: "codex · ~/api",
     prompt: "Add the precondition check to /invoices.",
-    reply: "Loaded repo/api/etag at chat start:",
+    reply: "Rule repo/api/etag from AtticDB:",
     cmd: "if !etag.matches(req) { return Err(Status::PreconditionFailed); }",
   },
   {
@@ -125,7 +125,7 @@ export default function HeroStage() {
             transition={{ duration: 0.36, ease: EASE_OUT }}
           />
         </span>
-        <span className={styles.handoffText}>Loaded into every new chat</span>
+        <span className={styles.handoffText}>Shared with tools you connect</span>
       </div>
 
       {/* Interactive agent switcher + spring-animated chat card */}
@@ -186,7 +186,7 @@ export default function HeroStage() {
               transition={CARD_SPRING}
             >
               <div className={styles.chatHead}>
-                <span>{`New chat in ${agent.name}`}</span>
+                <span>{`Chat in ${agent.name}, connected`}</span>
                 <code className={styles.sessionCode}>{agent.session}</code>
               </div>
 

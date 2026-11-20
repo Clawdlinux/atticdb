@@ -5,13 +5,25 @@ import type { Qa } from "@/content/faq";
 import { absoluteUrl, GITHUB_URL, SITE_URL } from "@/lib/site";
 
 type PagePath = "/" | "/pricing" | "/compare" | "/benchmarks" | "/blog";
+type PageSeo = {
+  path: PagePath;
+  title: string;
+  description: string;
+  // Link previews can carry their own words. They fall back to the title and description.
+  social?: { title: string; description: string };
+};
 
-export const PAGES: { path: PagePath; title: string; description: string }[] = [
+export const PAGES: PageSeo[] = [
   {
     path: "/",
     title: "AtticDB: durable memory for coding agents",
     description:
       "AtticDB is an open-source memory database for coding agents. One Rust binary. Every write is acked after fdatasync. No model calls.",
+    // The approved link-preview copy from #238.
+    social: {
+      title: "Shared local memory for your coding tools.",
+      description: "Rules and session notes on your own disk.",
+    },
   },
   {
     path: "/pricing",
@@ -42,7 +54,7 @@ const OG_IMAGE = {
   url: "/og.png",
   width: 1200,
   height: 630,
-  alt: "Your coding agent forgets everything between chats. AtticDB remembers, on your own disk.",
+  alt: "AtticDB: shared local memory for configured coding tools, stored on your own disk.",
 };
 
 // Next replaces a layout's alternates with a page's, so every page repeats the feed link.
@@ -54,14 +66,15 @@ export function pageMetadata(path: PagePath): Metadata {
   const page = PAGES.find((page) => page.path === path);
   if (!page) throw new Error(`No metadata for ${path}`);
   const { title, description } = page;
+  const social = page.social ?? { title, description };
 
   return {
     title: path === "/" ? { absolute: title } : title,
     description,
     alternates: { canonical: absoluteUrl(path), types: RSS_FEED },
     openGraph: {
-      title,
-      description,
+      title: social.title,
+      description: social.description,
       url: absoluteUrl(path),
       siteName: "AtticDB",
       images: [OG_IMAGE],
@@ -70,8 +83,8 @@ export function pageMetadata(path: PagePath): Metadata {
     twitter: {
       card: "summary_large_image",
       creator: "@shrey_sancheti",
-      title,
-      description,
+      title: social.title,
+      description: social.description,
       images: ["/og.png"],
     },
   };
