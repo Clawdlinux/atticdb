@@ -287,7 +287,7 @@ To roll back, put `atticdb.prev` back and stop the server. With the default inst
 mv ~/.local/bin/atticdb.prev ~/.local/bin/atticdb
 ```
 
-A `+dev` binary under `.cargo/bin` gets `Installed by cargo. Run: cargo install --git https://github.com/Clawdlinux/atticdb atticdb --locked`.
+A `+dev` binary under `.cargo/bin` gets `Installed by cargo. Run: cargo install atticdb --locked`.
 cargo builds from source, so a release version there came from `install.sh`, and upgrades as usual.
 One under `/opt/homebrew/` or in a Homebrew `Cellar/` gets `Installed by Homebrew. Run: brew upgrade atticdb`.
 Neither runs anything, and both exit 1.

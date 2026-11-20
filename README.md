@@ -11,6 +11,8 @@ It wires into Copilot CLI, VS Code, Claude Code, Codex, Gemini CLI, Antigravity 
 
 Status: early. Fine for your laptop. Not for production yet.
 
+- MCP Registry name: `mcp-name: io.github.Clawdlinux/atticdb`
+
 ## Install
 
 On macOS and Linux:

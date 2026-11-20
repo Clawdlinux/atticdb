@@ -8,6 +8,11 @@ on:
     paths:
       - .github/workflows/release.yml
       - install.sh
+      - install.ps1
+      - scripts/crates-publish.sh
+      - scripts/brew-formula.sh
+      - server.json
+      - "**/Cargo.toml"
   # 06:00 UTC on the 1st of each month. Publishes the next minor version when main has new
   # commits since the latest tag.
   schedule:
@@ -319,8 +324,8 @@ jobs:
             echo "::error::want 5 archives, 4 tarballs and 1 zip, found ${tars[*]} ${zips[*]}"
             exit 1
           fi
-          cp ../install.sh .
-          sha256sum "${tars[@]}" "${zips[@]}" install.sh > SHA256SUMS
+          cp ../install.sh ../install.ps1 .
+          sha256sum "${tars[@]}" "${zips[@]}" install.sh install.ps1 > SHA256SUMS
           cat SHA256SUMS
       # A scheduled or manual release tags the commit it built. The API creates the tag, so the
       # job needs no git credentials. A tag made with GITHUB_TOKEN starts no other run. A re-run
@@ -356,7 +361,12 @@ jobs:
           atticdb setup
           ```
 
-          Install on Windows x86_64: download `atticdb-x86_64-pc-windows-msvc.zip`. Put `atticdb.exe` in a folder on your PATH. Then run `atticdb setup`.
+          Install on Windows, in PowerShell:
+
+          ```powershell
+          irm https://github.com/Clawdlinux/atticdb/releases/latest/download/install.ps1 | iex
+          atticdb setup
+          ```
 
           Check the files against SHA256SUMS.
           EOF
@@ -376,3 +386,153 @@ jobs:
             gh release delete "$TAG" --yes
           fi
           gh release create "$TAG" --verify-tag --title "AtticDB $TAG" --notes-file notes.md dist/*
+
+  # Runs the checked-out install.ps1 against the latest release, as a new user would.
+  # install.ps1 ships with the next release, so its first test can't use a live copy.
+  install-ps1:
+    if: github.event_name == 'pull_request'
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install with install.ps1
+        shell: pwsh
+        env:
+          ATTICDB_INSTALL_DIR: ${{ runner.temp }}\atticdb-bin
+        run: |
+          # A user PATH with 1 entry, the case where PowerShell returns a string, not an array.
+          [Environment]::SetEnvironmentVariable('Path', 'C:\only-entry', 'User')
+          Get-Content -Raw .\install.ps1 | Invoke-Expression
+          $exe = Join-Path $env:ATTICDB_INSTALL_DIR 'atticdb.exe'
+          $got = & $exe --version
+          if ($LASTEXITCODE -ne 0 -or $got -notmatch '^atticdb \d+\.\d+\.\d+$') {
+            Write-Output "::error::$exe --version printed '$got'"
+            exit 1
+          }
+          $user = [Environment]::GetEnvironmentVariable('Path', 'User')
+          if ($user -ne "C:\only-entry;$env:ATTICDB_INSTALL_DIR") {
+            Write-Output "::error::user PATH is '$user', want 'C:\only-entry;$env:ATTICDB_INSTALL_DIR'"
+            exit 1
+          }
+          # A second run replaces the binary in place.
+          Get-Content -Raw .\install.ps1 | Invoke-Expression
+          Write-Output "installed $got"
+
+  # Publishes the crates at the release version. A run that only builds checks that every crate
+  # still packages and builds from its package. A rerun skips crates already on crates.io.
+  crates:
+    needs: [version, publish]
+    if: >-
+      !cancelled() && needs.version.result == 'success' &&
+      (needs.version.outputs.publish != 'true' || needs.publish.result == 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PUBLISH: ${{ needs.version.outputs.publish }}
+      VERSION: ${{ needs.version.outputs.version }}
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Publish to crates.io
+        run: |
+          if [ "$PUBLISH" = true ]; then
+            scripts/crates-publish.sh "$VERSION"
+          else
+            # A build-only run has a +ci version. Package at a placeholder instead.
+            scripts/crates-publish.sh 0.0.0 --dry-run
+          fi
+
+  # Lists this version in the official MCP registry. It checks the crate on crates.io, so it
+  # runs after the crates job. GitHub OIDC proves the io.github.Clawdlinux namespace.
+  mcp-registry:
+    needs: [version, crates]
+    if: needs.version.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      MCP_PUBLISHER_VERSION: v1.8.9
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: listed
+        run: |
+          url="https://registry.modelcontextprotocol.io/v0.1/servers/io.github.Clawdlinux%2Fatticdb/versions/$VERSION"
+          status=$(curl -s -o /dev/null -w '%{http_code}' "$url")
+          case "$status" in
+            200) echo "$VERSION is already in the MCP registry"; echo "listed=true" >> "$GITHUB_OUTPUT" ;;
+            404) echo "listed=false" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::the MCP registry answered $status for $url"; exit 1 ;;
+          esac
+      - if: steps.listed.outputs.listed == 'false'
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+      - name: Download and verify mcp-publisher
+        if: steps.listed.outputs.listed == 'false'
+        run: |
+          archive=mcp-publisher_linux_amd64.tar.gz
+          base="https://github.com/modelcontextprotocol/registry/releases/download/$MCP_PUBLISHER_VERSION"
+          curl -fsSL --retry 3 -o "$archive" "$base/$archive"
+          curl -fsSL --retry 3 -o "$archive.sigstore.json" "$base/$archive.sigstore.json"
+          cosign verify-blob --bundle "$archive.sigstore.json" \
+            --certificate-identity "https://github.com/modelcontextprotocol/registry/.github/workflows/release.yml@refs/tags/$MCP_PUBLISHER_VERSION" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com "$archive"
+          tar xzf "$archive" mcp-publisher
+      - name: Publish to the MCP registry
+        if: steps.listed.outputs.listed == 'false'
+        run: |
+          jq --arg v "$VERSION" '.version = $v | .packages[0].version = $v' server.json > server.tmp
+          mv server.tmp server.json
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish
+
+  # Writes the formula for this version to Clawdlinux/homebrew-tap. HOMEBREW_TAP_TOKEN may
+  # write that repo's contents and nothing else.
+  homebrew:
+    needs: [version, publish]
+    if: needs.version.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      TAG: ${{ needs.version.outputs.tag }}
+      GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Update the formula
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::HOMEBREW_TAP_TOKEN is not set"
+            exit 1
+          fi
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" -p SHA256SUMS -O SHA256SUMS
+          scripts/brew-formula.sh "$VERSION" SHA256SUMS > atticdb.rb
+          path=Formula/atticdb.rb
+          current=$(gh api "repos/Clawdlinux/homebrew-tap/contents/$path" --jq .sha)
+          # A rerun of an older release must not replace a newer formula.
+          tap=$(gh api "repos/Clawdlinux/homebrew-tap/contents/$path" -H 'Accept: application/vnd.github.raw' \
+            | sed -n 's#.*/releases/download/v\([0-9.]*\)/.*#\1#p' | head -n 1)
+          if [ -n "$tap" ] && [ "$tap" != "$VERSION" ] &&
+            [ "$(printf '%s\n%s\n' "$tap" "$VERSION" | sort -V | tail -n 1)" = "$tap" ]; then
+            echo "the tap has atticdb $tap, newer than $VERSION. Leaving it."
+            exit 0
+          fi
+          if gh api "repos/Clawdlinux/homebrew-tap/contents/$path" -H 'Accept: application/vnd.github.raw' \
+            | cmp -s - atticdb.rb; then
+            echo "the tap already has atticdb $VERSION"
+            exit 0
+          fi
+          gh api -X PUT "repos/Clawdlinux/homebrew-tap/contents/$path" \
+            -f message="atticdb $VERSION" -f sha="$current" \
+            -f content="$(base64 -w0 atticdb.rb)" --silent
+          echo "the tap now has atticdb $VERSION"

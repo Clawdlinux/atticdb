@@ -1,6 +1,6 @@
 # Counts release downloads by users for the README badge, and writes it to the badges branch.
 # Users = release archive downloads (tarballs and the zip) minus our own test installs.
-# install.sh and SHA256SUMS are left out, as each install fetches them too.
+# install.sh, install.ps1 and SHA256SUMS are left out, as each install fetches them too.
 name: badges
 on:
   schedule:

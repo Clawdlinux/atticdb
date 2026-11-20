@@ -960,9 +960,7 @@ fn upgrade_reports_a_failed_check() {
 #[test]
 fn upgrade_points_cargo_and_brew_to_their_tool() {
     let setup = Setup::new();
-    let cargo =
-        "Installed by cargo. Run: cargo install --git https://github.com/Clawdlinux/atticdb \
-                 atticdb --locked\n";
+    let cargo = "Installed by cargo. Run: cargo install atticdb --locked\n";
     let brew = "Installed by Homebrew. Run: brew upgrade atticdb\n";
     let cellar = setup.copy_binary("usr/local/Cellar/atticdb/0.1.0/bin");
     let link = setup.dir.0.join("usr/local/bin");
