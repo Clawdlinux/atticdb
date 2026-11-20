@@ -24,7 +24,7 @@ export default function Demo() {
           Save it once
         </h2>
         <p className={styles.lead}>
-          Save a rule from your terminal. New chats in that repo start with it, in tools you connect.
+          Save a rule from your terminal. New chats in that repo can start with it, in tools you connect.
         </p>
         <a className={styles.link} href={TRY_IT_URL}>
           Try it in 1 minute

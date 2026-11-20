@@ -240,9 +240,9 @@ describe("home memory claims (#238)", () => {
     expect(text).not.toMatch(/every\s+new\s+chat|forgets\s+everything/i);
     const demo = container.querySelector('[aria-labelledby="demo-heading"]') as HTMLElement;
     expect(
-      within(demo).getByText("Save a rule from your terminal. New chats in that repo start with it, in tools you connect."),
+      within(demo).getByText("Save a rule from your terminal. New chats in that repo can start with it, in tools you connect."),
     ).toBeInTheDocument();
-    expect(HOME_FAQ[0].a).toMatch(/^In each tool you connect, a new chat in a repo starts with a short memory block\./);
+    expect(HOME_FAQ[0].a).toMatch(/^In each tool you connect, a new chat in a repo can start with a short memory block\./);
   });
 });
 
