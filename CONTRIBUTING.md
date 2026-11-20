@@ -9,6 +9,31 @@ Thanks for helping. This file says how to propose a change and get it merged.
 - Issues labeled [`waiting-for-users`](https://github.com/Clawdlinux/atticdb/labels/waiting-for-users) are ideas we parked until enough people want them. Thumbs-ups count.
 - A bug report needs the `atticdb doctor` output. It holds no tokens.
 
+## Your first change
+
+1. Pick an issue labeled [`good first issue`](https://github.com/Clawdlinux/atticdb/labels/good%20first%20issue). Each one says where to start and when it's done. Comment that you're taking it.
+2. Questions go to [Discussions](https://github.com/Clawdlinux/atticdb/discussions), or to the issue itself.
+3. Build, then test only the crate you touch. A change to 1 crate usually needs 1 command:
+
+```sh
+rustup toolchain install                   # the pinned toolchain, with rustfmt and clippy
+cargo test --locked -p atticdb-tape        # or atticdb-core, or atticdb
+cargo fmt --all && cargo clippy --locked -p atticdb-tape --all-targets -- -D warnings
+```
+
+Run the full list under [Build and test](#build-and-test) once, before you open the pull request.
+
+Where the code lives, bottom up:
+
+| Crate | What it is | Start reading |
+|---|---|---|
+| `atticdb-sys` | The few Win32 calls AtticDB needs. Empty on other targets. | `src/win.rs` |
+| `atticdb-tape` | The append-only log: group commit, CRC32C frames, recovery. | [README](crates/atticdb-tape/README.md), `src/dir.rs` |
+| `atticdb-core` | Sessions, turns and keyed facts on top of the tape. | [README](crates/atticdb-core/README.md), `src/engine.rs` |
+| `atticdb` | The server, the CLI and the MCP adapter. | [README](crates/atticdb/README.md), `src/client.rs`, `src/mcp.rs` |
+
+The why behind the design is in [docs/design](docs/design). Start with [0001](docs/design/0001-architecture.md) and the [decision log](docs/design/0002-decision-log.md).
+
 ## Setup
 
 - Rust: [rust-toolchain.toml](rust-toolchain.toml) pins the version and adds rustfmt and clippy. Run `rustup toolchain install` in the repo, as CI does.
