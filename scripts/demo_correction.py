@@ -220,19 +220,28 @@ def alive(pid):
 
 
 def stop_server(data_dir):
-    """Stops the server named in LOCK with SIGTERM, then SIGKILL after 5 s. Exact pid only."""
+    """Stops the server named in LOCK with SIGTERM, then SIGKILL after 5 s. Exact pid only.
+    A server that already exited counts as stopped."""
     pid = server_pid(data_dir)
     if pid is None or not alive(pid):
         return
-    os.kill(pid, signal.SIGTERM)
-    deadline = time.monotonic() + 5
-    while alive(pid) and time.monotonic() < deadline:
-        time.sleep(0.05)
-    if alive(pid):
-        os.kill(pid, signal.SIGKILL)
+    try:
+        os.kill(pid, signal.SIGTERM)
+        deadline = time.monotonic() + 5
+        while alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if alive(pid):
+            os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
 
 
 def main():
+    # The temp home under /tmp and the pid in LOCK are Unix-only.
+    if os.name == "nt":
+        print("This demo runs on macOS and Linux.", file=sys.stderr)
+        return 2
+
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--fast", action="store_true", help="skip the pauses")
     args = parser.parse_args()
@@ -246,24 +255,24 @@ def main():
     # SIGTERM runs the cleanup below, like Ctrl-C does.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
 
-    # macOS caps socket paths at 104 bytes, so the temp home stays short.
-    tmp = tempfile.mkdtemp(prefix="ad", dir="/tmp")
-    home = os.path.join(tmp, "h")
-    data_dir = os.path.join(home, "data")
-    env = {k: v for k, v in os.environ.items()
-           if not k.startswith("ATTICDB_") and not k.startswith("XDG_")}
-    env.update({
-        "HOME": tmp,
-        "ATTICDB_HOME": home,
-        "ATTICDB_NO_UPDATE_CHECK": "1",
-        "XDG_DATA_HOME": os.path.join(tmp, ".local", "share"),
-        "XDG_CONFIG_HOME": os.path.join(tmp, ".config"),
-        "XDG_CACHE_HOME": os.path.join(tmp, ".cache"),
-        "XDG_STATE_HOME": os.path.join(tmp, ".local", "state"),
-    })
-
+    tmp = None
     agents = []
     try:
+        # macOS caps socket paths at 104 bytes, so the temp home stays short.
+        tmp = tempfile.mkdtemp(prefix="ad", dir="/tmp")
+        home = os.path.join(tmp, "h")
+        data_dir = os.path.join(home, "data")
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith("ATTICDB_") and not k.startswith("XDG_")}
+        env.update({
+            "HOME": tmp,
+            "ATTICDB_HOME": home,
+            "ATTICDB_NO_UPDATE_CHECK": "1",
+            "XDG_DATA_HOME": os.path.join(tmp, ".local", "share"),
+            "XDG_CONFIG_HOME": os.path.join(tmp, ".config"),
+            "XDG_CACHE_HOME": os.path.join(tmp, ".cache"),
+            "XDG_STATE_HOME": os.path.join(tmp, ".local", "state"),
+        })
         a = Agent(binary, "agent-a", env, tmp)
         agents.append(a)
         b = Agent(binary, "agent-b", env, tmp)
@@ -281,10 +290,20 @@ def main():
     except KeyboardInterrupt:
         return 130
     finally:
-        for agent in agents:
-            agent.close()
-        stop_server(data_dir)
-        shutil.rmtree(tmp, ignore_errors=True)
+        # A signal now would skip the rest of the cleanup, so ignore them from here on.
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        try:
+            for agent in agents:
+                try:
+                    agent.close()
+                except OSError:
+                    pass
+            if tmp is not None:
+                stop_server(os.path.join(tmp, "h", "data"))
+        finally:
+            if tmp is not None:
+                shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":

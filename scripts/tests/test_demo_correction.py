@@ -13,6 +13,9 @@ import pytest
 DEMO = Path(__file__).resolve().parents[1] / "demo_correction.py"
 BIN = os.environ.get("ATTICDB_BIN", "")
 
+# The demo runs on macOS and Linux only. On Windows it exits 2.
+pytestmark = pytest.mark.skipif(os.name == "nt", reason="the demo runs on macOS and Linux")
+
 needs_bin = pytest.mark.skipif(not BIN or not os.path.isfile(BIN),
                                reason="ATTICDB_BIN is unset or not a file")
 

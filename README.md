@@ -119,7 +119,7 @@ The config key `segment_mib`, 16 to 1024, sets the segment size of a new store o
 
 ### See it
 
-In under 60 s, 1 agent corrects a fact, and another agent's stale write is refused.
+In under 60 s on macOS and Linux, 1 agent corrects a fact, and another agent's stale write is refused.
 
 ```sh
 python3 scripts/demo_correction.py
