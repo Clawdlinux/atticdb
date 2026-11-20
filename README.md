@@ -119,6 +119,14 @@ A home made before keeps its 64 MiB segments, about 130 MiB. Nothing migrates it
 The config key `segment_mib`, 16 to 1024, sets the segment size of a new store only. Without it, a store gets 64 MiB.
 `atticdb doctor` shows the size as `store: <X> MB on disk, <S> MiB segments`. The [crate README](crates/atticdb/README.md) gives the details.
 
+### See it
+
+In under 60 s on macOS and Linux, 1 agent corrects a fact, and another agent's stale write is refused.
+
+```sh
+python3 scripts/demo_correction.py
+```
+
 ## Memory tree
 
 AtticDB saves facts under keys that work like folder paths. Use these top-level folders:

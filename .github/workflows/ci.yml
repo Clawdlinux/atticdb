@@ -64,8 +64,9 @@ jobs:
       - run: ATTICDB_BIN="$PWD/target/release/atticdb" python3 -m pytest research/locomo_retrieval/tests
       # Stub agents only, never a real model. The end-to-end test runs the binary built above.
       - run: ATTICDB_BIN=target/release/atticdb python3 -m pytest research/setup_eval/tests research/handoff_eval/tests
-      # install.sh against fake releases on 127.0.0.1. It never touches the real HOME.
-      - run: python3 -m pytest scripts/tests
+      # install.sh against fake releases on 127.0.0.1, and the correction demo against the binary built above.
+      # Neither touches the real HOME.
+      - run: ATTICDB_BIN=target/release/atticdb python3 -m pytest scripts/tests
   # Branch protection requires these 2 names. Add jobs to `needs`, never rename this.
   test:
     name: test (${{ matrix.os }})
