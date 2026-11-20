@@ -1,0 +1,81 @@
+channel,neutral,convention,history,arm,rep,verdict,correct,tests,ran_git,mentioned_conflict,model,turns,cost_usd,seconds,error,transcript
+memory,0,errors,stale,plain,1,code,1,1,1,1,claude-sonnet-5-5,5,0.054510800000000005,10,,memory-errors-stale-plain-1.jsonl
+memory,0,errors,stale,plain,2,code,1,1,1,1,claude-sonnet-5-5,4,0.0345796,9,,memory-errors-stale-plain-2.jsonl
+memory,0,errors,stale,code-wins,1,code,1,1,1,1,claude-sonnet-5-5,8,0.041595099999999996,11,,memory-errors-stale-code-wins-1.jsonl
+memory,0,errors,stale,code-wins,2,code,1,1,1,1,claude-sonnet-5-5,10,0.0723664,16,,memory-errors-stale-code-wins-2.jsonl
+memory,0,errors,stale,history,1,code,1,1,1,1,claude-sonnet-5-5,4,0.0336786,9,,memory-errors-stale-history-1.jsonl
+memory,0,errors,stale,history,2,code,1,1,1,0,claude-sonnet-5-5,4,0.0355382,10,,memory-errors-stale-history-2.jsonl
+memory,0,errors,stale,atticdb-today,1,code,1,1,1,0,claude-sonnet-5-5,5,0.056499999999999995,10,,memory-errors-stale-atticdb-today-1.jsonl
+memory,0,errors,stale,atticdb-today,2,code,1,1,1,0,claude-sonnet-5-5,8,0.0667345,14,,memory-errors-stale-atticdb-today-2.jsonl
+memory,0,errors,stale,annotated,1,code,1,1,1,0,claude-sonnet-5-5,3,0.0303649,8,,memory-errors-stale-annotated-1.jsonl
+memory,0,errors,stale,annotated,2,code,1,1,0,1,claude-sonnet-5-5,3,0.047914899999999996,8,,memory-errors-stale-annotated-2.jsonl
+memory,0,errors,migration,plain,1,rule,1,1,0,1,claude-sonnet-5-5,4,0.0307673,8,,memory-errors-migration-plain-1.jsonl
+memory,0,errors,migration,plain,2,rule,1,1,0,1,claude-sonnet-5-5,4,0.0496206,9,,memory-errors-migration-plain-2.jsonl
+memory,0,errors,migration,code-wins,1,code,0,1,0,1,claude-sonnet-5-5,5,0.0365221,10,,memory-errors-migration-code-wins-1.jsonl
+memory,0,errors,migration,code-wins,2,code,0,1,0,0,claude-sonnet-5-5,5,0.055301300000000005,11,,memory-errors-migration-code-wins-2.jsonl
+memory,0,errors,migration,history,1,rule,1,1,1,1,claude-sonnet-5-5,7,0.0669698,15,,memory-errors-migration-history-1.jsonl
+memory,0,errors,migration,history,2,rule,1,1,1,1,claude-sonnet-5-5,7,0.0475822,14,,memory-errors-migration-history-2.jsonl
+memory,0,errors,migration,atticdb-today,1,rule,1,1,0,1,claude-sonnet-5-5,4,0.0510481,9,,memory-errors-migration-atticdb-today-1.jsonl
+memory,0,errors,migration,atticdb-today,2,rule,1,1,0,1,claude-sonnet-5-5,4,0.0513795,9,,memory-errors-migration-atticdb-today-2.jsonl
+memory,0,errors,migration,annotated,1,rule,1,1,1,1,claude-sonnet-5-5,5,0.059514,11,,memory-errors-migration-annotated-1.jsonl
+memory,0,errors,migration,annotated,2,rule,1,1,1,0,claude-sonnet-5-5,3,0.030998100000000004,9,,memory-errors-migration-annotated-2.jsonl
+memory,0,ids,stale,plain,1,code,1,1,1,0,claude-sonnet-5-5,8,0.0490442,15,,memory-ids-stale-plain-1.jsonl
+memory,0,ids,stale,plain,2,code,1,1,1,1,claude-sonnet-5-5,8,0.0693917,15,,memory-ids-stale-plain-2.jsonl
+memory,0,ids,stale,code-wins,1,code,1,1,0,0,claude-sonnet-5-5,8,0.0680087,14,,memory-ids-stale-code-wins-1.jsonl
+memory,0,ids,stale,code-wins,2,code,1,1,0,1,claude-sonnet-5-5,7,0.0402658,11,,memory-ids-stale-code-wins-2.jsonl
+memory,0,ids,stale,history,1,code,1,1,1,1,claude-sonnet-5-5,7,0.046409399999999996,14,,memory-ids-stale-history-1.jsonl
+memory,0,ids,stale,history,2,code,1,1,1,1,claude-sonnet-5-5,8,0.0510801,15,,memory-ids-stale-history-2.jsonl
+memory,0,ids,stale,atticdb-today,1,code,1,1,1,1,claude-sonnet-5-5,8,0.0702198,15,,memory-ids-stale-atticdb-today-1.jsonl
+memory,0,ids,stale,atticdb-today,2,code,1,1,1,1,claude-sonnet-5-5,9,0.06632,15,,memory-ids-stale-atticdb-today-2.jsonl
+memory,0,ids,stale,annotated,1,code,1,1,1,1,claude-sonnet-5-5,7,0.0651134,13,,memory-ids-stale-annotated-1.jsonl
+memory,0,ids,stale,annotated,2,code,1,1,1,1,claude-sonnet-5-5,8,0.0711135,15,,memory-ids-stale-annotated-2.jsonl
+memory,0,ids,migration,plain,1,rule,1,1,0,1,claude-sonnet-5-5,7,0.0627605,13,,memory-ids-migration-plain-1.jsonl
+memory,0,ids,migration,plain,2,rule,1,1,0,0,claude-sonnet-5-5,7,0.062075,13,,memory-ids-migration-plain-2.jsonl
+memory,0,ids,migration,code-wins,1,code,0,1,1,1,claude-sonnet-5-5,8,0.0488778,14,,memory-ids-migration-code-wins-1.jsonl
+memory,0,ids,migration,code-wins,2,code,0,1,1,0,claude-sonnet-5-5,8,0.06917430000000001,15,,memory-ids-migration-code-wins-2.jsonl
+memory,0,ids,migration,history,1,rule,1,1,1,1,claude-sonnet-5-5,10,0.0808222,19,,memory-ids-migration-history-1.jsonl
+memory,0,ids,migration,history,2,rule,1,1,1,1,claude-sonnet-5-5,10,0.06033199999999999,20,,memory-ids-migration-history-2.jsonl
+memory,0,ids,migration,atticdb-today,1,rule,1,1,0,0,claude-sonnet-5-5,6,0.0565226,11,,memory-ids-migration-atticdb-today-1.jsonl
+memory,0,ids,migration,atticdb-today,2,rule,1,1,0,0,claude-sonnet-5-5,7,0.039184199999999995,12,exit 1: ,memory-ids-migration-atticdb-today-2.jsonl
+memory,0,ids,migration,annotated,1,rule,1,1,0,0,claude-sonnet-5-5,6,0.0330665,10,exit 1: ,memory-ids-migration-annotated-1.jsonl
+memory,0,ids,migration,annotated,2,rule,1,1,0,0,claude-sonnet-5-5,6,0.0509075,10,exit 1: ,memory-ids-migration-annotated-2.jsonl
+memory,0,keys,stale,plain,1,code,1,1,1,0,claude-sonnet-5-5,7,0.039538000000000004,12,exit 1: ,memory-keys-stale-plain-1.jsonl
+memory,0,keys,stale,plain,2,none,0,1,0,0,claude-sonnet-5-5,1,0,2,exit 1: ,memory-keys-stale-plain-2.jsonl
+memory,0,keys,stale,code-wins,1,none,0,1,0,0,claude-sonnet-5-5,1,0,2,exit 1: ,memory-keys-stale-code-wins-1.jsonl
+memory,0,keys,stale,code-wins,2,none,0,1,0,0,claude-sonnet-5-5,1,0,2,exit 1: ,memory-keys-stale-code-wins-2.jsonl
+memory,0,keys,stale,history,1,none,0,1,1,0,claude-sonnet-5-5,3,0.020864200000000003,5,exit 1: ,memory-keys-stale-history-1.jsonl
+memory,0,keys,stale,history,2,none,0,1,0,0,claude-sonnet-5-5,1,0,2,exit 1: ,memory-keys-stale-history-2.jsonl
+memory,0,keys,stale,atticdb-today,1,none,0,1,0,0,claude-sonnet-5-5,1,0,3,exit 1: ,memory-keys-stale-atticdb-today-1.jsonl
+memory,0,keys,stale,atticdb-today,2,none,0,1,0,0,claude-sonnet-5-5,1,0,2,exit 1: ,memory-keys-stale-atticdb-today-2.jsonl
+memory,0,keys,stale,annotated,1,none,0,1,0,0,claude-sonnet-5-5,1,0,2,exit 1: ,memory-keys-stale-annotated-1.jsonl
+memory,0,keys,stale,annotated,2,none,0,1,0,0,claude-sonnet-5-5,1,0,2,exit 1: ,memory-keys-stale-annotated-2.jsonl
+memory,0,keys,migration,plain,1,none,0,1,0,0,claude-sonnet-5-5,1,0,2,exit 1: ,memory-keys-migration-plain-1.jsonl
+memory,0,keys,migration,plain,2,none,0,1,0,0,claude-sonnet-5-5,1,0,2,exit 1: ,memory-keys-migration-plain-2.jsonl
+memory,0,keys,migration,code-wins,1,none,0,1,0,0,claude-sonnet-5-5,1,0,2,exit 1: ,memory-keys-migration-code-wins-1.jsonl
+memory,0,keys,migration,code-wins,2,none,0,1,0,0,claude-sonnet-5-5,1,0,2,exit 1: ,memory-keys-migration-code-wins-2.jsonl
+memory,0,keys,migration,history,1,none,0,1,0,0,claude-sonnet-5-5,1,0,2,exit 1: ,memory-keys-migration-history-1.jsonl
+memory,0,keys,migration,history,2,none,0,1,0,0,claude-sonnet-5-5,1,0,2,exit 1: ,memory-keys-migration-history-2.jsonl
+memory,0,keys,migration,atticdb-today,1,none,0,1,0,0,claude-sonnet-5-5,1,0,2,exit 1: ,memory-keys-migration-atticdb-today-1.jsonl
+memory,0,keys,migration,atticdb-today,2,none,0,1,0,0,claude-sonnet-5-5,1,0,3,exit 1: ,memory-keys-migration-atticdb-today-2.jsonl
+memory,0,keys,migration,annotated,1,none,0,1,0,0,claude-sonnet-5-5,1,0,2,exit 1: ,memory-keys-migration-annotated-1.jsonl
+memory,0,keys,migration,annotated,2,none,0,1,0,0,claude-sonnet-5-5,1,0,2,exit 1: ,memory-keys-migration-annotated-2.jsonl
+memory,0,timestamps,stale,plain,1,none,0,1,0,0,claude-sonnet-5-5,1,0,2,exit 1: ,memory-timestamps-stale-plain-1.jsonl
+memory,0,timestamps,stale,plain,2,none,0,1,0,0,claude-sonnet-5-5,1,0,2,exit 1: ,memory-timestamps-stale-plain-2.jsonl
+memory,0,timestamps,stale,code-wins,1,none,0,1,0,0,claude-sonnet-5-5,1,0,2,exit 1: ,memory-timestamps-stale-code-wins-1.jsonl
+memory,0,timestamps,stale,code-wins,2,none,0,1,0,0,claude-sonnet-5-5,1,0,2,exit 1: ,memory-timestamps-stale-code-wins-2.jsonl
+memory,0,timestamps,stale,history,1,none,0,1,0,0,claude-sonnet-5-5,1,0,2,exit 1: ,memory-timestamps-stale-history-1.jsonl
+memory,0,timestamps,stale,history,2,none,0,1,0,0,claude-sonnet-5-5,1,0,2,exit 1: ,memory-timestamps-stale-history-2.jsonl
+memory,0,timestamps,stale,atticdb-today,1,none,0,1,0,0,claude-sonnet-5-5,1,0,2,exit 1: ,memory-timestamps-stale-atticdb-today-1.jsonl
+memory,0,timestamps,stale,atticdb-today,2,none,0,1,0,0,claude-sonnet-5-5,1,0,3,exit 1: ,memory-timestamps-stale-atticdb-today-2.jsonl
+memory,0,timestamps,stale,annotated,1,none,0,1,0,0,claude-sonnet-5-5,1,0,2,exit 1: ,memory-timestamps-stale-annotated-1.jsonl
+memory,0,timestamps,stale,annotated,2,none,0,1,0,0,claude-sonnet-5-5,1,0,2,exit 1: ,memory-timestamps-stale-annotated-2.jsonl
+memory,0,timestamps,migration,plain,1,none,0,1,0,0,claude-sonnet-5-5,1,0,2,exit 1: ,memory-timestamps-migration-plain-1.jsonl
+memory,0,timestamps,migration,plain,2,none,0,1,0,0,claude-sonnet-5-5,1,0,2,exit 1: ,memory-timestamps-migration-plain-2.jsonl
+memory,0,timestamps,migration,code-wins,1,none,0,1,0,0,claude-sonnet-5-5,1,0,2,exit 1: ,memory-timestamps-migration-code-wins-1.jsonl
+memory,0,timestamps,migration,code-wins,2,none,0,1,0,0,claude-sonnet-5-5,1,0,2,exit 1: ,memory-timestamps-migration-code-wins-2.jsonl
+memory,0,timestamps,migration,history,1,none,0,1,0,0,claude-sonnet-5-5,1,0,2,exit 1: ,memory-timestamps-migration-history-1.jsonl
+memory,0,timestamps,migration,history,2,none,0,1,0,0,claude-sonnet-5-5,1,0,2,exit 1: ,memory-timestamps-migration-history-2.jsonl
+memory,0,timestamps,migration,atticdb-today,1,none,0,1,0,0,claude-sonnet-5-5,1,0,2,exit 1: ,memory-timestamps-migration-atticdb-today-1.jsonl
+memory,0,timestamps,migration,atticdb-today,2,none,0,1,0,0,claude-sonnet-5-5,1,0,2,exit 1: ,memory-timestamps-migration-atticdb-today-2.jsonl
+memory,0,timestamps,migration,annotated,1,none,0,1,0,0,claude-sonnet-5-5,1,0,2,exit 1: ,memory-timestamps-migration-annotated-1.jsonl
+memory,0,timestamps,migration,annotated,2,none,0,1,0,0,claude-sonnet-5-5,1,0,2,exit 1: ,memory-timestamps-migration-annotated-2.jsonl
