@@ -14,9 +14,17 @@ Status: early. Fine for your laptop. Not for production yet.
 
 - MCP Registry name: `mcp-name: io.github.Clawdlinux/atticdb`
 
+![2 MCP agents sharing 1 AtticDB store: agent A saves a correction, and agent B's stale write is refused](docs/launch/demo-correction.gif)
+
 ## Install
 
-On macOS and Linux:
+With Homebrew on macOS and Linux:
+
+```sh
+brew install clawdlinux/tap/atticdb
+```
+
+Or with the release installer on macOS and Linux:
 
 ```sh
 curl -fsSL https://github.com/Clawdlinux/atticdb/releases/latest/download/install.sh | sh
@@ -122,7 +130,8 @@ The config key `segment_mib`, 16 to 1024, sets the segment size of a new store o
 
 ### See it
 
-In under 60 s on macOS and Linux, 1 agent corrects a fact, and another agent's stale write is refused.
+In about 10 s on macOS and Linux, 1 agent corrects a fact, and another agent's stale write is refused.
+The recording at the top of this README is [demo-correction.cast](docs/launch/demo-correction.cast).
 
 ```sh
 python3 scripts/demo_correction.py
@@ -419,7 +428,7 @@ See the [full results](research/locomo_retrieval/results/2026-11-19-equal-budget
 - [Sandboxed agents](docs/deploy/sandboxes.md): who holds memory, and how sandboxed code can reach it.
 - [Hosting](docs/hosting.md): 1 VM, Caddy and `atticdb serve`, so remote agents reach 1 store at `POST /mcp`.
 - [Python client](clients/python/README.md), [TESTING.md](TESTING.md) and the [decision log](docs/design/0002-decision-log.md).
-- Benchmarks: [head-to-head tables](bench/H2H.md) and [macOS engine runs](bench/RESULTS.md). History: [0001 (historical)](docs/design/0001-architecture.md).
+- Benchmarks: [head-to-head tables](bench/H2H.md), [macOS engine runs](bench/RESULTS.md) and [launch facts](docs/launch/facts.md). History: [0001 (historical)](docs/design/0001-architecture.md).
 
 ## Contributing
 
