@@ -34,8 +34,19 @@ CONFLICT = re.compile(r"conflict|disagree|stale|inconsisten|contradict|mismatch|
 GIT_LOOK = re.compile(r"\bgit\s+(log|blame|show|diff)\b")
 # Never passed on: another account, provider or config would change the run.
 DROP = ("ANTHROPIC_", "CLAUDE_", "GIT_", "ATTICDB_", "OPENAI_", "AWS_")
+ALIASES = ("sonnet", "opus", "haiku")
 FIELDS = ["channel", "neutral", "convention", "history", "arm", "rep", "verdict", "correct", "tests", "ran_git", "mentioned_conflict",
           "model", "turns", "cost_usd", "seconds", "error", "transcript"]
+
+
+def model_matches(recorded: str, expected: str, errored: bool, resolved: set[str]) -> bool:
+    """Completed rows record the resolved ID. Pre-init failures may hold only the CLI alias."""
+    if not recorded or not expected:
+        return False
+    if recorded == expected:
+        return True
+    return (errored and recorded in ALIASES and expected in resolved
+            and expected.startswith(f"claude-{recorded}-"))
 
 
 def child_env(claude_dir: str) -> dict:
@@ -81,7 +92,8 @@ def hook_settings(block_path: str) -> dict:
 def run_one(conv_name: str, history: str, arm: str, rep: int, model: str, batch: str, channel: str,
             neutral: bool = False) -> dict:
     conv = fixtures.CONVENTIONS[conv_name]
-    row = {"channel": channel, "neutral": int(neutral), "convention": conv_name, "history": history, "arm": arm, "rep": rep, "error": ""}
+    row = {"channel": channel, "neutral": int(neutral), "convention": conv_name, "history": history,
+           "arm": arm, "rep": rep, "model": model, "error": ""}
     root = tempfile.mkdtemp(prefix="sr-")
     claude_root = tempfile.mkdtemp(prefix="sr-cfg-")
     try:
@@ -107,6 +119,9 @@ def run_one(conv_name: str, history: str, arm: str, rep: int, model: str, batch:
         env.update({"ATTICDB_HOME": os.path.join(root, "store"), "ATTICDB_NO_UPDATE_CHECK": "1"})
         proc = Runner().run(argv(conv.task, model), cwd=repo, env=env, root=root, timeout=TIMEOUT)
         stream = proc.stdout.decode("utf-8", errors="replace")
+        parsed = parse(stream)
+        if parsed["model"]:
+            row["model"] = parsed["model"]
         if proc.timed_out:
             row["error"] = "timeout"
         elif proc.missing:
@@ -128,14 +143,13 @@ def run_one(conv_name: str, history: str, arm: str, rep: int, model: str, batch:
         if outcome.is_error or not outcome.final:
             row["error"] = "Claude reported an error" if outcome.is_error else "missing final result"
             return row
-        parsed = parse(stream)
         lines = grade.added_lines(repo, base)
         found = grade.verdict(conv_name, lines)
         row.update({"verdict": found, "correct": int(grade.correct(history, found)),
                     "tests": int(grade.tests_pass(repo)),
                     "ran_git": int(any(GIT_LOOK.search(c) for c in parsed["bash"])),
                     "mentioned_conflict": int(bool(CONFLICT.search(parsed["text"]))),
-                    "model": parsed["model"], "turns": parsed["turns"], "cost_usd": parsed["cost_usd"]})
+                    "turns": parsed["turns"], "cost_usd": parsed["cost_usd"]})
     except Exception as error:  # a broken run is a row, not a crash of the batch
         row["error"] = row["error"] or f"{type(error).__name__}: {error}"
     finally:
@@ -155,17 +169,30 @@ def batch(a: argparse.Namespace) -> int:
         if os.path.realpath(a.resume) == os.path.realpath(out):
             print("--resume requires a separate --out file", file=sys.stderr)
             return 2
-        expected = (a.channel, str(int(a.neutral)), a.model)
+        expected = (a.channel, str(int(a.neutral)))
         done = set()
         with open(a.resume) as f:
-            for row in csv.DictReader(f):
-                if row["error"]:
-                    continue
-                # The initial file pilot predates both fields. The next batches predate neutral.
-                if (row.get("channel", "file"), row.get("neutral", "0"), row.get("model")) != expected:
-                    print("--resume requires the same channel, history mode, and exact model ID",
-                          file=sys.stderr)
-                    return 2
+            source_rows = list(csv.DictReader(f))
+        if not source_rows:
+            print("--resume source CSV has no rows", file=sys.stderr)
+            return 2
+        resolved = {r["model"] for r in source_rows if r.get("model") and r["model"] not in ALIASES}
+        for row in source_rows:
+            errored = bool(row["error"])
+            # The initial file pilot predates both fields. The next batches predate neutral.
+            if (row.get("channel", "file"), row.get("neutral", "0")) != expected:
+                print("--resume requires the same channel, history mode, and exact model ID",
+                      file=sys.stderr)
+                return 2
+            if not row.get("model"):
+                print("--resume cannot verify model: source CSV has a row without model metadata",
+                      file=sys.stderr)
+                return 2
+            if not model_matches(row["model"], a.model, errored, resolved):
+                print("--resume requires the same channel, history mode, and exact model ID",
+                      file=sys.stderr)
+                return 2
+            if not errored:
                 done.add((row["convention"], row["history"], row["arm"], int(row["rep"])))
         cells = [c for c in cells if c not in done]
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)

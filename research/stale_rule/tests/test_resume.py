@@ -68,6 +68,7 @@ def test_exit_zero_does_not_count_an_incomplete_run(tmp_path, monkeypatch, event
     monkeypatch.setattr(run, "argv", lambda *args: [sys.executable, "-c", f"print({stream!r})"])
     row = run.run_one("errors", "stale", "plain", 1, "stub", "batch", "file")
     assert row["error"] == error
+    assert row["model"] == "stub"
     assert "correct" not in row
     assert (tmp_path / "batch" / row["transcript"]).is_file()
 
@@ -114,3 +115,63 @@ def test_resume_rejects_a_different_experiment(tmp_path, monkeypatch, capsys, fl
     assert run.main(argv + flag) == 2
     assert "resume" in capsys.readouterr().err
     assert not out.exists()
+
+
+@pytest.mark.parametrize("flag", [
+    ["--channel", "file"],
+    ["--channel", "memory"],
+    ["--channel", "memory", "--neutral", "--model", "different-model"],
+])
+def test_resume_checks_all_errored_batches(tmp_path, monkeypatch, capsys, flag):
+    source = tmp_path / "source.csv"
+    source.write_text("channel,neutral,model,convention,history,arm,rep,error\n"
+                      "memory,1,claude-sonnet-5-5,errors,stale,plain,1,timeout\n")
+    out = tmp_path / "out.csv"
+    monkeypatch.setattr(run, "LOGIN_DIR", str(tmp_path))
+    monkeypatch.setattr(run, "run_one", lambda *a: pytest.fail("resume started a mismatched run"))
+    argv = ["run", "--batch", "test", "--conventions", "errors", "--arms", "plain",
+            "--resume", str(source), "--out", str(out)]
+    if "--model" not in flag:
+        argv += ["--model", "claude-sonnet-5-5"]
+    assert run.main(argv + flag) == 2
+    assert "resume" in capsys.readouterr().err
+    assert not out.exists()
+
+
+@pytest.mark.parametrize("csv_body", [
+    "channel,neutral,model,convention,history,arm,rep,error\n"
+    "memory,0,,errors,stale,plain,1,timeout\n",
+    "channel,neutral,model,convention,history,arm,rep,error\n",
+])
+def test_resume_rejects_unverifiable_source_csv(tmp_path, monkeypatch, capsys, csv_body):
+    source = tmp_path / "source.csv"
+    source.write_text(csv_body)
+    out = tmp_path / "out.csv"
+    monkeypatch.setattr(run, "LOGIN_DIR", str(tmp_path))
+    monkeypatch.setattr(run, "run_one", lambda *a: pytest.fail("resume accepted unverifiable CSV"))
+    assert run.main(["run", "--batch", "test", "--channel", "memory", "--model", "claude-sonnet-5-5",
+                     "--conventions", "errors", "--arms", "plain", "--resume", str(source),
+                     "--out", str(out)]) == 2
+    assert "resume" in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_resume_reruns_errored_cell_with_pre_init_alias(tmp_path, monkeypatch):
+    source = tmp_path / "source.csv"
+    source.write_text("channel,neutral,model,convention,history,arm,rep,error\n"
+                      "memory,0,claude-sonnet-5-5,errors,stale,plain,1,\n"
+                      "memory,0,sonnet,errors,migration,plain,1,Claude CLI not found\n")
+    out = tmp_path / "out.csv"
+    monkeypatch.setattr(run, "LOGIN_DIR", str(tmp_path))
+    calls = []
+
+    def stub_run(conv_name, history, arm, rep, model, batch, channel, neutral=False):
+        calls.append((conv_name, history, arm, rep, model, channel, neutral))
+        return {"channel": channel, "neutral": int(neutral), "convention": conv_name,
+                "history": history, "arm": arm, "rep": rep, "model": model, "correct": 1, "error": ""}
+
+    monkeypatch.setattr(run, "run_one", stub_run)
+    assert run.main(["run", "--batch", "test", "--channel", "memory", "--model", "claude-sonnet-5-5",
+                     "--conventions", "errors", "--arms", "plain", "--resume", str(source),
+                     "--out", str(out)]) == 0
+    assert calls == [("errors", "migration", "plain", 1, "claude-sonnet-5-5", "memory", False)]
