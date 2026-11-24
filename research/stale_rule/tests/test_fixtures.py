@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 import sys
 
@@ -129,3 +130,23 @@ def test_candidate_header(tmp_path):
     assert fixtures.NEXT_SENTENCES in block and "(2026-11-10)" in block and "Since then" not in block
     assert fixtures.NEXT_HEADER != fixtures.ATTICDB_HEADER
     assert fixtures.memory_user_file("atticdb-next") == ""
+
+
+def test_guide_arm_ships_the_rule_twice(tmp_path):
+    conv = CONVENTIONS["errors"]
+    repo = str(tmp_path / "r")
+    build(conv, "stale", repo, "memory", neutral=True)
+    block = fixtures.memory_block("atticdb-next-guide", conv, "stale", repo)
+    assert block == fixtures.memory_block("atticdb-next", conv, "stale", repo)
+    assert block.startswith(fixtures.NEXT_HEADER) and "(2026-03-02)" in block
+    assert fixtures.memory_user_file("atticdb-next-guide") == fixtures.NEXT_SENTENCES.strip() + "\n"
+    assert "atticdb-next-guide" in fixtures.CANDIDATE_ARMS
+
+
+def test_candidate_matches_the_shipped_rule():
+    """The candidate arms test the rule AtticDB ships in hook.rs, word for word (#233)."""
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    with open(os.path.join(root, "crates", "atticdb", "src", "hook.rs")) as f:
+        source = f.read()
+    literal = re.search(r'pub const DATED_RULE: &str = "(.*?)";', source, re.S).group(1)
+    assert re.sub(r"\\\n\s*", "", literal) == fixtures.NEXT_SENTENCES.strip()
