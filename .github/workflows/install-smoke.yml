@@ -93,6 +93,7 @@ jobs:
             echo "SMOKE_PROJ=$home/proj"
             echo "SMOKE_DATA=$data"
             echo "SMOKE_CODE=$code"
+            echo "SMOKE_START=$(date +%s)"
           } >> "$GITHUB_ENV"
           echo "home: $home"
 
@@ -245,6 +246,12 @@ jobs:
           cat "$SMOKE_DIR/hook.out"
           jq -e '.additionalContext | contains("AtticDB memory") and contains("smoke note")
             and test("user/smoke \\([0-9]{4}-[0-9]{2}-[0-9]{2}\\): ok")' "$SMOKE_DIR/hook.out"
+          elapsed=$(( $(date +%s) - SMOKE_START ))
+          echo "quickstart elapsed: ${elapsed}s (budget: 300s)"
+          if [ "$elapsed" -ge 300 ]; then
+            echo "::error::quickstart took ${elapsed}s, must stay under 300s"
+            exit 1
+          fi
 
       - name: Server log
         if: failure()
@@ -296,6 +303,7 @@ jobs:
       - name: Find the release
         id: release
         run: |
+          Add-Content -Path $env:GITHUB_ENV -Value "SMOKE_START=$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
           switch ($env:EVENT) {
             'release' { $want = $env:RELEASE_TAG }
             # A tag push names its tag. A scheduled or manual run ran on main, so test latest.
@@ -544,6 +552,9 @@ jobs:
           Write-Output $out
           $context = ($out | ConvertFrom-Json).additionalContext
           check ($context -like '*AtticDB memory*' -and $context -like '*smoke note*' -and $context -match 'user/smoke \(\d{4}-\d{2}-\d{2}\): ok') 'the hook did not print the memory block'
+          $elapsed = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [long]$env:SMOKE_START
+          Write-Output "quickstart elapsed: ${elapsed}s (budget: 300s)"
+          check ($elapsed -lt 300) "quickstart took ${elapsed}s, must stay under 300s"
 
       - name: Server log
         if: failure() && steps.release.outputs.skip == 'false'
