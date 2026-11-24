@@ -25,6 +25,7 @@ macOS and Linux with `curl`:
 
 ```sh
 curl -fsSL https://github.com/Clawdlinux/atticdb/releases/latest/download/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"   # needed only if the installer said it isn't on PATH
 atticdb setup
 ```
 
@@ -82,7 +83,7 @@ Azure `Standard_L8s_v3`, Linux ext4, 256-byte appends, `fsync` before every ack,
 
 Losses to state plainly:
 - SQLite runs in process and wins closed-loop `p50` at every writer count (`32 µs` on NVMe, `704 µs` on SSD v2).
-- On Premium SSD v2 at 4 and 16 writers, SQLite has lower `p99` (`1.7 ms` vs `2.7 ms`). Its max latency spikes to `46.8 s` on WAL checkpoints.
+- On Premium SSD v2, SQLite has lower `p99` at 4 writers (`2.0 ms` vs `2.4 ms`) and 16 writers (`1.7 ms` vs `2.7 ms`). Its max latency spikes to `9.9 s` and `46.8 s` on WAL checkpoints.
 - Past 16 writers on local NVMe, a single writer thread caps AtticDB near `68K` acks/s (`#52`).
 
 ### 3. Equal-budget retrieval vs SQLite FTS5
@@ -116,7 +117,7 @@ Source: [research/stale_rule/results/2026-11-15-results.md](../../research/stale
 - `"Existing code wins"` (from arXiv `2610.30571`) got `12/12` stale rules right, and `0/12` migrations right.
 - Every wrong migration run still passed the project's test suite.
 - A 1-sentence instruction about whether the rule or the code changed last got `24/24` when the rule lived in git.
-- For hook-injected memory outside git with neutral commit messages, undated memory scored `0/8` on stale rules. A save date plus that history sentence scored `16/16`.
+- For hook-injected memory outside git with neutral commit messages, undated memory scored `0/8` on stale rules. A save date plus that sentence in user `CLAUDE.md` scored `16/16`. In the hook header alone it scored `14/16` (`6/8` stale, `8/8` migration).
 
 Boundaries: simulated SessionStart hook (no live MCP calls), 4 small 3-commit repos, 1 harness and 1 model. The guide update itself is tracked in `#233`.
 
