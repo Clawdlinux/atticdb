@@ -4,6 +4,7 @@
 [![Downloads](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FClawdlinux%2Fatticdb%2Fbadges%2Fdownloads.json)](https://github.com/Clawdlinux/atticdb/releases)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 [![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)](#where-to-run-it)
+[![Clawdlinux/atticdb MCP server](https://glama.ai/mcp/servers/Clawdlinux/atticdb/badges/score.svg)](https://glama.ai/mcp/servers/Clawdlinux/atticdb)
 
 AtticDB is local, durable memory for coding agents, written in Rust.
 It stores turn history per session and keyed facts. A write is acked only after it is synced to disk.
