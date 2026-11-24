@@ -1,0 +1,9 @@
+channel,neutral,convention,history,arm,rep,verdict,correct,tests,ran_git,mentioned_conflict,model,turns,cost_usd,seconds,error,transcript
+memory,0,errors,stale,atticdb-next,1,code,1,1,1,1,claude-sonnet-5-5,4,0.0528514,10,,memory-errors-stale-atticdb-next-1.jsonl
+memory,0,errors,migration,atticdb-next,1,rule,1,1,1,0,claude-sonnet-5-5,5,0.0571375,11,,memory-errors-migration-atticdb-next-1.jsonl
+memory,0,ids,stale,atticdb-next,1,code,1,1,1,0,claude-sonnet-5-5,8,0.04981460000000001,15,,memory-ids-stale-atticdb-next-1.jsonl
+memory,0,ids,migration,atticdb-next,1,rule,1,1,1,1,claude-sonnet-5-5,7,0.0415084,12,,memory-ids-migration-atticdb-next-1.jsonl
+memory,0,keys,stale,atticdb-next,1,code,1,1,1,0,claude-sonnet-5-5,8,0.06990249999999999,15,,memory-keys-stale-atticdb-next-1.jsonl
+memory,0,keys,migration,atticdb-next,1,rule,1,1,1,1,claude-sonnet-5-5,8,0.0513925,16,,memory-keys-migration-atticdb-next-1.jsonl
+memory,0,timestamps,stale,atticdb-next,1,code,1,1,1,1,claude-sonnet-5-5,7,0.0657998,14,,memory-timestamps-stale-atticdb-next-1.jsonl
+memory,0,timestamps,migration,atticdb-next,1,rule,1,1,1,0,claude-sonnet-5-5,8,0.0620024,12,,memory-timestamps-migration-atticdb-next-1.jsonl
