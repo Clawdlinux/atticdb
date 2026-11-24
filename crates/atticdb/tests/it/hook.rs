@@ -59,7 +59,10 @@ fn header(repo: &str) -> String {
          repo/{repo}/ and only the 5 newest notes. Older notes and decisions are not shown. \
          Before saying why or when something was decided, call memory_search. Dates show when \
          each line was saved. Before acting on a fact about code, a version or a status, check \
-         it against the repo. If it is wrong, set its key again. A line ending in (cut) was \
+         it against the repo. If a dated line disagrees with the code, check git log for that \
+         code. Code changed after the line's date means the line is stale: follow the code. \
+         Code older than the line means the line is the new direction: follow the line. If it \
+         is wrong, set its key again. A line ending in (cut) was \
          shortened. Call fact_get or memory_search for the rest."
     )
 }

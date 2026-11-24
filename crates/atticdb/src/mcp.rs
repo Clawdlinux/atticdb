@@ -325,7 +325,9 @@ pub const INSTRUCTIONS: &str = "AtticDB is this user's long-term memory. A chat 
     \"AtticDB memory\" block: rules, this repo's facts and recent notes. Use it. If no block \
     for <repo> arrived, call fact_list with prefix user/ and repo/<repo>/. <repo> is the main \
     folder name of the repo you work in, not always the chat's. The block holds only the newest \
-    notes. When \
+    notes. If a dated line disagrees with the code, check git log for that code. Code changed \
+    after the line's date means the line is stale: follow the code. Code older than the line \
+    means the line is the new direction: follow the line. When \
     asked why, when or how something was decided, call memory_search first, before you read \
     files or git history, even when a block arrived. Save a rule with fact_set only when the user \
     states it in this chat. Keys form a tree: user/<topic> for preferences and style, \

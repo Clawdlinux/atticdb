@@ -36,6 +36,11 @@ const MAX_CONTENT: usize = 300;
 /// Longest block, in characters.
 pub(crate) const MAX_BLOCK: usize = 6_000;
 const MORE: &str = "(more in atticdb)";
+/// How to read a dated line that disagrees with the code. In the header and in
+/// [`crate::mcp::INSTRUCTIONS`]. Without it agents followed stale memory in 0/8 cases (#233).
+pub const DATED_RULE: &str = "If a dated line disagrees with the code, check git log for that \
+    code. Code changed after the line's date means the line is stale: follow the code. Code \
+    older than the line means the line is the new direction: follow the line.";
 /// Most characters of a compaction summary kept in its note.
 const MAX_SUMMARY: usize = 16_000;
 
@@ -278,8 +283,8 @@ fn block_in(repo: &str, deadline: Instant, lookup: &Lookup) -> Result<Option<Str
          repo/{repo}/ and only the {TURNS} newest notes. Older notes and decisions are not \
          shown. Before saying why or when something was decided, call memory_search. Dates \
          show when each line was saved. Before acting on a fact about code, a version or a \
-         status, check it against the repo. If it is wrong, set its key again. A line ending \
-         in (cut) was shortened. Call fact_get or memory_search for the rest."
+         status, check it against the repo. {DATED_RULE} If it is wrong, set its key again. A \
+         line ending in (cut) was shortened. Call fact_get or memory_search for the rest."
     );
     // Right after the header, so the cap never drops them. [`others`] keeps the list near
     // [`OTHERS_CHARS`], so the header, the update line and the list fit in [`MAX_BLOCK`].
