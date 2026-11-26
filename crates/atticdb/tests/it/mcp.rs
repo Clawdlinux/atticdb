@@ -1588,13 +1588,23 @@ fn unknown_outcome_never_downgrades() {
 }
 
 /// The guide goes into every chat-start guide, so its size is budgeted. It had 240 words before
-/// it asked for reasons with their evidence. It may grow by at most 35.
+/// it asked for reasons with their evidence. It may grow by at most 35. #233 added 43 more: the
+/// rule for a dated line that disagrees with the code.
 #[test]
 fn instructions_stay_within_word_budget() {
     let words = atticdb::mcp::INSTRUCTIONS.split_whitespace().count();
-    assert!(words <= 240 + 35, "INSTRUCTIONS has {words} words, over the budget of 275");
+    assert!(words <= 240 + 35 + 43, "INSTRUCTIONS has {words} words, over the budget of 318");
     let words = atticdb::mcp::hosted_instructions().split_whitespace().count();
-    assert!(words <= 240 + 35, "the hosted instructions have {words} words, over 275");
+    assert!(words <= 240 + 35 + 43, "the hosted instructions have {words} words, over 318");
+}
+
+/// A dated memory line can be stale or the new direction. Only history tells them apart (#233).
+#[test]
+fn instructions_say_how_to_read_a_dated_line() {
+    for instructions in [atticdb::mcp::INSTRUCTIONS.to_owned(), atticdb::mcp::hosted_instructions()]
+    {
+        assert!(instructions.contains(atticdb::hook::DATED_RULE), "{instructions}");
+    }
 }
 
 /// Hosts may start `atticdb mcp` outside the repo with no roots, so agents name the session.

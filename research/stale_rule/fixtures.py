@@ -28,7 +28,9 @@ CHANNELS = ("file", "memory")
 MEMORY_ARMS = ("plain", "code-wins", "history", "atticdb-today", "annotated")
 # Ablations of `annotated`: the dated line with the sentence and no anchor, or the anchor and no sentence.
 ABLATION_ARMS = ("dated-history", "anchored")
-CANDIDATE_ARMS = ("atticdb-next",)
+# `atticdb-next-guide` adds the same sentences in the user file, as `connect` writes them into
+# the Copilot, Codex and Gemini guides (#233).
+CANDIDATE_ARMS = ("atticdb-next", "atticdb-next-guide")
 MEMORY_HISTORY = ("When a remembered rule and the existing code disagree, find out which changed last. A rule "
                   "saved after the code it describes is the new direction: follow it. Code changed after the "
                   "rule was saved means the rule is stale: follow the code.\n")
@@ -266,7 +268,7 @@ def memory_block(arm: str, conv: Convention, history: str, repo: str) -> str:
         anchor = git(repo, "rev-list", "-1", f"--before={saved}T23:59:59", "HEAD")
         since = int(git(repo, "rev-list", "--count", f"{anchor}..HEAD", "--", "app", "tests"))
         line += f" [saved at commit {anchor[:7]}. Since then, {since} commits changed app/ or tests/.]"
-    if arm == "atticdb-next":
+    if arm in ("atticdb-next", "atticdb-next-guide"):
         return f"{NEXT_HEADER}\nThis repo (project):\n{line}"
     if arm in ("atticdb-today", "annotated", "dated-history", "anchored"):
         return f"{ATTICDB_HEADER}\nThis repo (project):\n{line}"
@@ -276,4 +278,4 @@ def memory_block(arm: str, conv: Convention, history: str, repo: str) -> str:
 def memory_user_file(arm: str) -> str:
     """The user-level CLAUDE.md for pilot 2's `arm`."""
     return {"code-wins": CODE_WINS, "history": MEMORY_HISTORY, "annotated": MEMORY_HISTORY,
-            "dated-history": MEMORY_HISTORY}.get(arm, "")
+            "dated-history": MEMORY_HISTORY, "atticdb-next-guide": NEXT_SENTENCES.strip() + "\n"}.get(arm, "")
