@@ -19,9 +19,10 @@ pub const USAGE: &str = "usage:
   atticdb upgrade [--yes] [--version <v>]
   atticdb upgrade --auto on|off
   atticdb connect <vscode|copilot> [--force] [--dry-run]
-  atticdb connect <antigravity|claude-desktop> [--force] [--dry-run]
+  atticdb connect <antigravity|claude-desktop|cursor|windsurf> [--force] [--dry-run]
   atticdb connect <claude-code|codex|gemini> [--force] [--no-hook] [--notes ask|auto] [--dry-run]
-  atticdb disconnect <vscode|copilot|claude-code|codex|gemini|antigravity|claude-desktop>
+  atticdb disconnect <vscode|copilot|claude-code|codex|gemini|antigravity|claude-desktop|cursor|
+                     windsurf>
   atticdb hook <session-start|post-compact> [--harness <name>] [--home <dir>]
   atticdb studio [--url unix:///path|http://127.0.0.1:<port>] [--data-dir <dir>] [--config <path>]
                 [--tenant <name>] [--token-file <path>] [--no-open] [--allow-forget]
@@ -65,8 +66,8 @@ pub const USAGE: &str = "usage:
   Forgotten facts are left out.
   studio serves a read-only page on 127.0.0.1 and opens it. With --allow-forget it can also forget
   sessions and fact keys. It runs until Ctrl-C.
-  setup finds VS Code, Copilot CLI, Claude Code, Codex, Gemini CLI, Antigravity and Claude
-  Desktop. It asks which to connect and shows the plan. Then it connects them and checks each.
+  setup finds VS Code, Copilot CLI, Claude Code, Codex, Gemini CLI, Antigravity, Claude Desktop,
+  Cursor and Windsurf. It asks which to connect and shows the plan. Then it connects them and checks each.
   See atticdb setup --help.
   doctor checks the install. It writes nothing but the daily update check's cache. See
   atticdb doctor --help.
@@ -88,8 +89,17 @@ pub enum Style {
 }
 
 /// The app names `connect` and `disconnect` take, in `Harness::ALL` order.
-pub const APPS: [&str; 7] =
-    ["vscode", "copilot", "claude-code", "codex", "gemini", "antigravity", "claude-desktop"];
+pub const APPS: [&str; 9] = [
+    "vscode",
+    "copilot",
+    "claude-code",
+    "codex",
+    "gemini",
+    "antigravity",
+    "claude-desktop",
+    "cursor",
+    "windsurf",
+];
 
 const BOLD: &str = "\x1b[1m";
 const RED: &str = "\x1b[31m";
@@ -448,7 +458,7 @@ mod tests {
             let text = error(Style::Plain, &args(&[command, "claude-desktp"]));
             assert_eq!(text.lines().next(), Some(r#"error: unknown app "claude-desktp""#));
             let apps =
-                "  apps:  vscode  copilot  claude-code  codex  gemini  antigravity  claude-desktop";
+                "  apps:  vscode  copilot  claude-code  codex  gemini  antigravity  claude-desktop  cursor  windsurf";
             assert!(text.lines().any(|line| line == apps), "{text}");
             assert!(
                 text.lines().any(|line| line.starts_with("  usage:")
@@ -548,7 +558,7 @@ mod tests {
         assert!(connect.starts_with("usage: atticdb connect <vscode|copilot>"), "{connect}");
         assert_eq!(connect.lines().filter(|line| line.contains("atticdb connect")).count(), 3);
         let apps =
-            "apps:  vscode  copilot  claude-code  codex  gemini  antigravity  claude-desktop";
+            "apps:  vscode  copilot  claude-code  codex  gemini  antigravity  claude-desktop  cursor  windsurf";
         assert!(connect.ends_with(&format!("{apps}\n")), "{connect}");
         assert_eq!(command_usage("-V").as_deref(), Some("usage: atticdb --version | -V\n"));
         assert_eq!(command_usage("bogus"), None);

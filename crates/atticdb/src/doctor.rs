@@ -169,7 +169,13 @@ fn check(harnesses: Option<Vec<Harness>>) -> u8 {
 }
 
 /// The apps doctor checks only when their config holds an atticdb entry, or they are named.
-const NEWER: [Harness; 3] = [Harness::Gemini, Harness::Antigravity, Harness::ClaudeDesktop];
+const NEWER: [Harness; 5] = [
+    Harness::Gemini,
+    Harness::Antigravity,
+    Harness::ClaudeDesktop,
+    Harness::Cursor,
+    Harness::Windsurf,
+];
 
 /// Prints the server's version against this binary's, by [`version_line`].
 fn server_version(checks: &mut Checks, found: &Found) {

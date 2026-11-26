@@ -110,7 +110,7 @@ def test_setup_writes_nothing_when_declined(home):
 
 
 def test_setup_asks_again_after_a_bad_answer(home):
-    code, out, missed = setup(home, [(APPS, "cursor"), (APPS, "codex"), (HOOK_CODEX, "maybe"),
+    code, out, missed = setup(home, [(APPS, "aider"), (APPS, "codex"), (HOOK_CODEX, "maybe"),
                                      ("Answer y or n.", ""), (NOTES, ""), (APPLY, "n")])
     assert missed == [], out
     assert code == 0, out

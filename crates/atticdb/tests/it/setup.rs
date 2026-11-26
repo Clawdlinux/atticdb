@@ -1019,10 +1019,13 @@ fn doctor_checks_an_install_and_writes_nothing() {
 }
 
 /// The entry-only apps on this OS: name, name in sentences, config. Claude Desktop has no
-/// Linux app.
+/// Linux app. Cursor and Windsurf keep theirs under the home on every OS.
 fn plain_apps(home: &Path) -> Vec<(&'static str, &'static str, PathBuf)> {
-    let mut apps =
-        vec![("antigravity", "Antigravity", home.join(".gemini/config/mcp_config.json"))];
+    let mut apps = vec![
+        ("antigravity", "Antigravity", home.join(".gemini/config/mcp_config.json")),
+        ("cursor", "Cursor", home.join(".cursor/mcp.json")),
+        ("windsurf", "Windsurf", home.join(".codeium/windsurf/mcp_config.json")),
+    ];
     if cfg!(target_os = "macos") {
         let config = "Library/Application Support/Claude/claude_desktop_config.json";
         apps.push(("claude-desktop", "Claude Desktop", home.join(config)));
@@ -1035,7 +1038,7 @@ fn plain_list(home: &Path) -> String {
     plain_apps(home).iter().map(|(name, ..)| *name).collect::<Vec<_>>().join(",")
 }
 
-/// A `HOME` under `dir` with the dirs of Antigravity and Claude Desktop, and an empty `PATH`.
+/// A `HOME` under `dir` with the dirs of the entry-only apps, and an empty `PATH`.
 /// Antigravity's are `~/.gemini/antigravity` and `~/.gemini/config`, with no config file.
 fn plain_home(dir: &Path) -> (PathBuf, OsString) {
     let home = dir.join("h");
@@ -1048,7 +1051,7 @@ fn plain_home(dir: &Path) -> (PathBuf, OsString) {
 }
 
 /// Setup's plan lists each new app whose dir exists, and none that's missing. `~/.gemini`
-/// alone doesn't find Gemini CLI. Applying connects Antigravity and Claude Desktop, checks
+/// alone doesn't find Gemini CLI. Applying connects each entry-only app, checks
 /// each, and says to restart them. A rerun has nothing to restart.
 #[test]
 fn setup_detects_new_apps() {

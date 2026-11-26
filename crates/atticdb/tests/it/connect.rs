@@ -2191,7 +2191,8 @@ fn connect_codex_adds_its_parts() {
     assert!(calls().iter().all(|call| *call == get), "only codex mcp get atticdb --json runs");
 }
 
-/// A home for the entry-only apps, Antigravity and Claude Desktop: an empty `HOME`, and a
+/// A home for the entry-only apps, Antigravity, Claude Desktop, Cursor and Windsurf: an empty
+/// `HOME`, and a
 /// `PATH` with no programs.
 struct Plain {
     dir: Dir,
@@ -2220,6 +2221,8 @@ impl Plain {
         let home = self.dir.0.join("h");
         match app {
             "antigravity" => home.join(".gemini/config/mcp_config.json"),
+            "cursor" => home.join(".cursor/mcp.json"),
+            "windsurf" => home.join(".codeium/windsurf/mcp_config.json"),
             _ => home.join("Library/Application Support/Claude/claude_desktop_config.json"),
         }
     }
@@ -2245,7 +2248,8 @@ impl Plain {
 /// The entry-only apps on this OS, with their names in sentences. Claude Desktop has no Linux
 /// app.
 fn plain_apps() -> Vec<(&'static str, &'static str)> {
-    let mut apps = vec![("antigravity", "Antigravity")];
+    let mut apps =
+        vec![("antigravity", "Antigravity"), ("cursor", "Cursor"), ("windsurf", "Windsurf")];
     if cfg!(target_os = "macos") {
         apps.push(("claude-desktop", "Claude Desktop"));
     }
