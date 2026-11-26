@@ -3,11 +3,12 @@ import { DOCS_URL } from "@/lib/site";
 import styles from "./Demo.module.css";
 
 export const DEMO_SRC = "/demo/remember.svg";
-// The SVG's #still fragment turns its animation off, so it shows the last frame.
-export const DEMO_STILL = `${DEMO_SRC}#still`;
+// The same SVG with its animation off, so it shows the last frame. A #still fragment can't do
+// this: Chromium ignores it, and the SVG's own media queries, inside <img> (#244).
+export const DEMO_STILL = "/demo/remember-still.svg";
 // Phones get a taller, narrower layout of the same story, so its text stays 16px or more at 375px.
 export const DEMO_NARROW_SRC = "/demo/remember-narrow.svg";
-export const DEMO_NARROW_STILL = `${DEMO_NARROW_SRC}#still`;
+export const DEMO_NARROW_STILL = "/demo/remember-narrow-still.svg";
 export const DEMO_NARROW_MEDIA = "(max-width: 40rem)";
 export const DEMO_ALT =
   'A terminal in the shop repo runs atticdb fact set --key repo/shop/rule --content "Use pnpm, not npm." The rule is saved. ' +

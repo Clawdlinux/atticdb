@@ -131,10 +131,12 @@ describe("home demo", () => {
       s.getAttribute("srcset"),
     ]);
     // The first match wins, so the phone sources come first and each keeps a still frame.
+    // Chromium ignores an SVG's #still fragment and media queries inside <img>, so reduced
+    // motion gets its own still files (#244).
     expect(sources).toEqual([
-      ["(max-width: 40rem) and (prefers-reduced-motion: reduce)", "/demo/remember-narrow.svg#still"],
+      ["(max-width: 40rem) and (prefers-reduced-motion: reduce)", "/demo/remember-narrow-still.svg"],
       ["(max-width: 40rem)", "/demo/remember-narrow.svg"],
-      ["(prefers-reduced-motion: reduce)", "/demo/remember.svg#still"],
+      ["(prefers-reduced-motion: reduce)", "/demo/remember-still.svg"],
     ]);
     expect(within(demo).getByRole("link", { name: "Try it in 1 minute" })).toHaveAttribute(
       "href",
@@ -160,6 +162,18 @@ describe("home demo", () => {
       expect(svg).toContain("pnpm add lodash");
     },
   );
+
+  it.each([
+    ["remember.svg", "remember-still.svg"],
+    ["remember-narrow.svg", "remember-narrow-still.svg"],
+  ])("ships %s's last frame as %s, the same SVG with its animation off", (file, still) => {
+    const svg = readFileSync(`public/demo/${file}`, "utf8");
+    const rule = ".a { animation-duration: 16s; animation-iteration-count: infinite; animation-fill-mode: both; }";
+    expect(svg).toContain(rule);
+    const frame = readFileSync(`public/demo/${still}`, "utf8");
+    expect(frame).toBe(svg.replace(rule, ".a { animation: none; }"));
+    expect(frame).not.toContain("infinite");
+  });
 
   it("keeps the real command and output on the phone, wrapped to fit, with text 16px or more at 375px", () => {
     const svg = readFileSync("public/demo/remember-narrow.svg", "utf8");
