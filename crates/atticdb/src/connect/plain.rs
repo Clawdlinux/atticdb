@@ -1,4 +1,5 @@
-//! The apps that get only AtticDB's MCP entry: Antigravity and Claude Desktop. Each keeps its
+//! The apps that get only AtticDB's MCP entry: Antigravity, Claude Desktop, Cursor and
+//! Windsurf. Each keeps its
 //! servers under `mcpServers` in 1 JSON file, and reads it only at start. Gemini CLI's entry
 //! goes in by the same code, from [`super::gemini`].
 //!

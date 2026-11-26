@@ -102,7 +102,10 @@ fn command_help() {
         assert!(err.is_empty(), "{args:?}: {err}");
     }
     let (_, out, _) = run_bare(&["connect", "--help"]);
-    assert!(out.ends_with("  claude-desktop\n") && out.contains("apps:  vscode"), "{out}");
+    assert!(
+        out.ends_with("  claude-desktop  cursor  windsurf\n") && out.contains("apps:  vscode"),
+        "{out}"
+    );
     for (args, start) in [
         (&["setup", "-h"][..], "usage: atticdb setup"),
         (&["doctor", "-h"], "usage: atticdb doctor"),

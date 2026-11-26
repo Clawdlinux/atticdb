@@ -33,13 +33,14 @@ pub struct Flags {
 pub const USAGE: &str =
     "usage: atticdb setup [--yes] [--harness <list>] [--no-hook] [--notes ask|auto] [--dry-run]
 
-Finds VS Code, Copilot CLI, Claude Code, Codex, Gemini CLI, Antigravity and Claude Desktop.
+Finds VS Code, Copilot CLI, Claude Code, Codex, Gemini CLI, Antigravity, Claude Desktop, Cursor
+and Windsurf.
 It asks which to connect, and shows the plan.
 Then it connects them, checks each one, and says what to do next.
 
   --yes             take every default, and don't ask Apply?
   --harness <list>  connect these apps, a comma list of copilot, vscode, claude-code, codex,
-                    gemini, antigravity and claude-desktop
+                    gemini, antigravity, claude-desktop, cursor and windsurf
   --no-hook         no chat-start memory in Claude Code, Codex and Gemini CLI, and no saved
                     compaction summaries
   --notes ask|auto  ask before saving notes in Claude Code, Codex and Gemini CLI, or don't
@@ -113,7 +114,7 @@ const STORE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The order apps are listed and connected in: the Copilot ones, Claude Code and Codex, then
 /// the newer apps.
-pub(crate) const ORDER: [Harness; 7] = [
+pub(crate) const ORDER: [Harness; 9] = [
     Harness::Copilot,
     Harness::Vscode,
     Harness::ClaudeCode,
@@ -121,6 +122,8 @@ pub(crate) const ORDER: [Harness; 7] = [
     Harness::Gemini,
     Harness::Antigravity,
     Harness::ClaudeDesktop,
+    Harness::Cursor,
+    Harness::Windsurf,
 ];
 
 /// The apps in a comma list of their names, such as `vscode` and `claude-code`, in [`ORDER`].
@@ -253,9 +256,9 @@ fn choose(
             if found.is_empty() {
                 println!(
                     "atticdb found no apps: none of VS Code, Copilot CLI, Claude Code, Codex, \
-                     Gemini CLI, Antigravity or Claude Desktop has a config. None of code, \
-                     copilot, claude, codex, gemini or agy is on PATH. Install one, or name it \
-                     with --harness.\n{}",
+                     Gemini CLI, Antigravity, Claude Desktop, Cursor or Windsurf has a config. \
+                     None of code, copilot, claude, codex, gemini, agy, cursor or windsurf is on \
+                     PATH. Install one, or name it with --harness.\n{}",
                     try_shell(&typed())
                 );
                 return Ok(None);
@@ -263,7 +266,7 @@ fn choose(
             let names: Vec<&str> = found.iter().map(|harness| harness.name()).collect();
             let prompt = format!("Which apps? [{}] ", names.join(","));
             let hint = "Answer with a comma list of copilot, vscode, claude-code, codex, gemini, \
-                        antigravity and claude-desktop.";
+                        antigravity, claude-desktop, cursor and windsurf.";
             if ask {
                 asker.ask(&prompt, found, apps, hint)?
             } else {
@@ -417,7 +420,7 @@ fn apply(chosen: &[(Harness, Options)]) -> u8 {
         if harness == Harness::Gemini && plan.hooks_off {
             next.push(GEMINI_HOOKS_OFF.into());
         }
-        // Codex on Windows has no hook to check. Antigravity and Claude Desktop have none.
+        // Codex on Windows has no hook to check. The entry-only apps have none.
         let codex_hook = !(cfg!(windows) && harness == Harness::Codex);
         let own_hook = matches!(harness, Harness::ClaudeCode | Harness::Codex | Harness::Gemini);
         if (options.hook && codex_hook && own_hook)
@@ -427,7 +430,10 @@ fn apply(chosen: &[(Harness, Options)]) -> u8 {
             failed.extend(hook.err().map(|why| format!("hook: {why}")));
         }
         // They read their config only at start.
-        if matches!(harness, Harness::Antigravity | Harness::ClaudeDesktop) {
+        if matches!(
+            harness,
+            Harness::Antigravity | Harness::ClaudeDesktop | Harness::Cursor | Harness::Windsurf
+        ) {
             next.extend(report.next.iter().cloned());
         }
         let checked = || cwd.clone().and_then(|cwd| check_store(&cwd));
@@ -504,8 +510,13 @@ pub(crate) fn check_hook(harness: Harness, cwd: &Path) -> Result<(), String> {
         Harness::ClaudeCode | Harness::Codex | Harness::Gemini => {
             json!({"cwd": cwd, "hook_event_name": "SessionStart"})
         }
-        // Antigravity and Claude Desktop have no hook, so they get the plain shape.
-        Harness::Vscode | Harness::Copilot | Harness::Antigravity | Harness::ClaudeDesktop => {
+        // The entry-only apps have no hook, so they get the plain shape.
+        Harness::Vscode
+        | Harness::Copilot
+        | Harness::Antigravity
+        | Harness::ClaudeDesktop
+        | Harness::Cursor
+        | Harness::Windsurf => {
             json!({"cwd": cwd})
         }
     };

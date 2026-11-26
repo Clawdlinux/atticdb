@@ -1,8 +1,8 @@
 //! `atticdb connect` and `atticdb disconnect`: add or remove AtticDB's entry in a harness's
 //! user MCP config, and 2 Copilot files VS Code and Copilot CLI share: the `sessionStart`
 //! hook and the instructions file. Claude Code, Codex and Gemini CLI have their own parts, in
-//! [`claude`], [`codex`] and [`gemini`]. Antigravity and Claude Desktop get only their entry,
-//! by [`plain`]. The entry and the hook run the binary on the home, so they hold no token. The
+//! [`claude`], [`codex`] and [`gemini`]. Antigravity, Claude Desktop, Cursor and Windsurf get
+//! only their entry, by [`plain`]. The entry and the hook run the binary on the home, so they hold no token. The
 //! only paths they hold are the binary's and, under `ATTICDB_HOME`, the home's.
 
 mod claude;
@@ -191,6 +191,10 @@ pub enum Harness {
     Antigravity,
     /// Claude Desktop's `claude_desktop_config.json`, its MCP entry only. macOS and Windows.
     ClaudeDesktop,
+    /// Cursor's global `~/.cursor/mcp.json`, its MCP entry only.
+    Cursor,
+    /// Windsurf's `~/.codeium/windsurf/mcp_config.json`, its MCP entry only.
+    Windsurf,
 }
 
 /// The harnesses that share the Copilot hook and instructions files, which read 1 home.
@@ -198,7 +202,7 @@ const COPILOT_SHARED: [Harness; 2] = [Harness::Vscode, Harness::Copilot];
 
 impl Harness {
     /// Every harness, the first 4 in the order they were added.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 9] = [
         Self::Vscode,
         Self::Copilot,
         Self::ClaudeCode,
@@ -206,6 +210,8 @@ impl Harness {
         Self::Gemini,
         Self::Antigravity,
         Self::ClaudeDesktop,
+        Self::Cursor,
+        Self::Windsurf,
     ];
 
     /// The harness called `name` on the command line.
@@ -218,6 +224,8 @@ impl Harness {
             "gemini" => Some(Self::Gemini),
             "antigravity" => Some(Self::Antigravity),
             "claude-desktop" => Some(Self::ClaudeDesktop),
+            "cursor" => Some(Self::Cursor),
+            "windsurf" => Some(Self::Windsurf),
             _ => None,
         }
     }
@@ -232,6 +240,8 @@ impl Harness {
             Self::Gemini => "gemini",
             Self::Antigravity => "antigravity",
             Self::ClaudeDesktop => "claude-desktop",
+            Self::Cursor => "cursor",
+            Self::Windsurf => "windsurf",
         }
     }
 
@@ -245,6 +255,8 @@ impl Harness {
             Self::Gemini => "Gemini CLI",
             Self::Antigravity => "Antigravity",
             Self::ClaudeDesktop => "Claude Desktop",
+            Self::Cursor => "Cursor",
+            Self::Windsurf => "Windsurf",
         }
     }
 
@@ -258,6 +270,8 @@ impl Harness {
             Self::Gemini => "gemini",
             Self::Antigravity => "antigravity",
             Self::ClaudeDesktop => "claude-desktop",
+            Self::Cursor => "cursor",
+            Self::Windsurf => "windsurf",
         }
     }
 
@@ -266,7 +280,9 @@ impl Harness {
     /// `config.toml`, which isn't JSON, so only [`codex`] reads it. Gemini CLI's is in
     /// `$GEMINI_CLI_HOME/.gemini`, else `~/.gemini`. Antigravity's is under `~/.gemini`, by
     /// [`plain::antigravity_file`].
-    /// Claude Desktop's is in its app data dir, which only macOS and Windows have.
+    /// Claude Desktop's is in its app data dir, which only macOS and Windows have. Cursor's and
+    /// Windsurf's are their global files under the user's home, on every OS. Windsurf kept
+    /// Codeium's dir.
     pub(crate) fn file(self) -> Result<PathBuf, String> {
         Ok(match self {
             Self::Vscode if cfg!(target_os = "macos") => {
@@ -287,6 +303,10 @@ impl Harness {
             Self::Gemini => gemini::settings_file()?,
             Self::Antigravity => plain::antigravity_file()?,
             Self::ClaudeDesktop => plain::desktop_dir()?.join("claude_desktop_config.json"),
+            Self::Cursor => user_home()?.join(".cursor").join("mcp.json"),
+            Self::Windsurf => {
+                user_home()?.join(".codeium").join("windsurf").join("mcp_config.json")
+            }
         })
     }
 
@@ -298,7 +318,9 @@ impl Harness {
             | Self::ClaudeCode
             | Self::Gemini
             | Self::Antigravity
-            | Self::ClaudeDesktop => "mcpServers",
+            | Self::ClaudeDesktop
+            | Self::Cursor
+            | Self::Windsurf => "mcpServers",
             Self::Codex => "mcp_servers",
         }
     }
@@ -318,8 +340,10 @@ impl Harness {
             // `trust` skips Gemini CLI's confirmation before each tool call.
             Self::Gemini => json!({"command": command,
                 "args": ["mcp", "--agent", self.agent()], "trust": true}),
-            Self::Antigravity | Self::ClaudeDesktop => json!({"command": command,
-                "args": ["mcp", "--agent", self.agent()]}),
+            Self::Antigravity | Self::ClaudeDesktop | Self::Cursor | Self::Windsurf => {
+                json!({"command": command,
+                "args": ["mcp", "--agent", self.agent()]})
+            }
         };
         with_home(entry, home)
     }
@@ -388,6 +412,13 @@ pub fn detect(harness: Harness) -> bool {
         Harness::Antigravity => return plain::antigravity_found() || on_path("agy"),
         Harness::Gemini => (vec![gemini::settings_file().ok()], Some("gemini")),
         Harness::ClaudeDesktop => (vec![plain::desktop_dir().ok()], None),
+        Harness::Cursor => {
+            (vec![user_home().ok().map(|home| home.join(".cursor"))], Some("cursor"))
+        }
+        Harness::Windsurf => (
+            vec![user_home().ok().map(|home| home.join(".codeium").join("windsurf"))],
+            Some("windsurf"),
+        ),
     };
     paths.into_iter().flatten().any(|path: PathBuf| path.exists())
         || program.and_then(claude::find_program).is_some()
@@ -425,7 +456,8 @@ pub fn detect(harness: Harness) -> bool {
 /// For Claude Code, Codex and Gemini CLI, a part that can't be applied is skipped, with what to
 /// do by hand, and the others still apply.
 ///
-/// Antigravity and Claude Desktop: adds their MCP entry only, by [`plain::connect`]. They read
+/// Antigravity, Claude Desktop, Cursor and Windsurf: adds their MCP entry only, by
+/// [`plain::connect`]. They read
 /// it only at start, so the report says to restart them.
 pub fn connect(harness: Harness, options: Options, mode: Mode) -> Report {
     let Options { force, hook, notes } = options;
@@ -434,7 +466,9 @@ pub fn connect(harness: Harness, options: Options, mode: Mode) -> Report {
         Harness::Codex => codex::connect(hook, notes, mode),
         Harness::Vscode | Harness::Copilot => connect_shared(harness, force, mode, false),
         Harness::Gemini => gemini::connect(force, hook, notes, mode),
-        Harness::Antigravity | Harness::ClaudeDesktop => plain::connect(harness, force, mode),
+        Harness::Antigravity | Harness::ClaudeDesktop | Harness::Cursor | Harness::Windsurf => {
+            plain::connect(harness, force, mode)
+        }
     }
 }
 
@@ -629,14 +663,15 @@ fn moved_home(harness: Harness) -> Result<Option<String>, String> {
 /// once neither VS Code nor Copilot CLI has one. Both removals are tried, and every error is
 /// reported. VS Code also reads Copilot CLI's entry, so while that is left, disconnecting VS
 /// Code says so and keeps both shared files. Claude Code's, Codex's and Gemini CLI's parts go
-/// by [`claude`]'s, [`codex`]'s and [`gemini`]'s rules, and Antigravity's and Claude Desktop's
-/// by [`plain`]'s. Returns the exit code.
+/// by [`claude`]'s, [`codex`]'s and [`gemini`]'s rules, and the entry-only apps' by [`plain`]'s. Returns the exit code.
 pub fn disconnect(harness: Harness) -> u8 {
     match harness {
         Harness::ClaudeCode => return claude::disconnect(),
         Harness::Codex => return codex::disconnect(),
         Harness::Gemini => return gemini::disconnect(),
-        Harness::Antigravity | Harness::ClaudeDesktop => return plain::disconnect(harness),
+        Harness::Antigravity | Harness::ClaudeDesktop | Harness::Cursor | Harness::Windsurf => {
+            return plain::disconnect(harness)
+        }
         Harness::Vscode | Harness::Copilot => {}
     }
     finish(edit(harness, None, None, Mode::Apply).and_then(|line| {
@@ -956,7 +991,7 @@ pub fn binaries(harness: Harness) -> Vec<(PathBuf, String)> {
             found
         }
         Harness::Gemini => gemini::binaries(),
-        Harness::Antigravity | Harness::ClaudeDesktop => {
+        Harness::Antigravity | Harness::ClaudeDesktop | Harness::Cursor | Harness::Windsurf => {
             entry_binary(harness).into_iter().collect()
         }
     }
@@ -1397,13 +1432,15 @@ mod tests {
             "gemini",
             "antigravity",
             "claude-desktop",
+            "cursor",
+            "windsurf",
         ];
         assert_eq!(Harness::ALL.map(Harness::name), names);
         for harness in Harness::ALL {
             assert_eq!(Harness::parse(harness.name()), Some(harness));
         }
         let agents: Vec<&str> = Harness::ALL[4..].iter().map(|h| h.agent()).collect();
-        assert_eq!(agents, ["gemini", "antigravity", "claude-desktop"]);
+        assert_eq!(agents, ["gemini", "antigravity", "claude-desktop", "cursor", "windsurf"]);
         assert_eq!(Harness::parse("claude"), None);
     }
 
