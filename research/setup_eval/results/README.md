@@ -108,3 +108,7 @@ No regression. S2 now takes 1 `memory_search` and 3 turns, against 2 calls and 7
 - Claude Code with `atticdb setup`: memory works as designed for recall, search, save and summary.
 - Codex needs the guide in `AGENTS.md`, which #121 adds. It now saves rules. With the #122 wording it searches for history beyond the block, 3 of 3. It saves a summary note in 2 of 3 runs.
 - n is small: 1 or 2 runs per cell. These are behavior checks, not rates.
+
+## 2026-11-26: cut facts (#234)
+
+Claude Code read a fact the block cut before editing in 8 of 9 runs, and followed its hidden exception. With no fact, 0 of 9 did. See [2026-11-26-cutfact.md](2026-11-26-cutfact.md).

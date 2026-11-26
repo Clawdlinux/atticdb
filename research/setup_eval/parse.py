@@ -33,6 +33,7 @@ class Call:
 class Outcome:
     reply: str = ""
     calls: list[Call] = field(default_factory=list)
+    tools: list[str] = field(default_factory=list)  # every tool, in order. Claude Code only. AtticDB tools by bare name
     input_tokens: int | None = None
     output_tokens: int | None = None
     cache_read_tokens: int | None = None
@@ -127,6 +128,7 @@ def parse_claude(stream: bytes | str) -> Outcome:
                         seen_ids.add(bid)
                     if name.startswith(CLAUDE_PREFIX):
                         out.calls.append(Call(name[len(CLAUDE_PREFIX):], _args(block.get("input"))))
+                    out.tools.append(name.removeprefix(CLAUDE_PREFIX))
             if texts:
                 last_text = "\n".join(texts)
         elif kind == "result":

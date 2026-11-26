@@ -10,6 +10,8 @@
 
 **Spec:** [#234](https://github.com/Clawdlinux/atticdb/issues/234).
 
+**As built (2026-11-26):** the cases went into `research/setup_eval` as opt-in scenarios, not a new `research/cut_fact` package. `setup_eval` already runs 1 harness per run with a real hook and MCP server. It needed 1 new field, the ordered tool list. Results: `research/setup_eval/results/2026-11-26-cutfact.md`.
+
 ## Global Constraints
 
 - The hook cuts a fact's content at `MAX_CONTENT` = 300 chars and appends ` (cut)` (`crates/atticdb/src/hook.rs:35`, `:438`).

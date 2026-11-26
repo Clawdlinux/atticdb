@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from . import agents, guard
 from .parse import PARSERS, Outcome
 from .proc import Result, Runner
-from .scenarios import CALC_PY, NEEDS_BLOCK, README_MD, REPO, Scenario, judge, seed_commands
+from .scenarios import CALC_PY, NEEDS_BLOCK, NEEDS_DIFF, README_MD, REPO, Scenario, judge, seed_commands
 
 SUN_PATH_BYTES = 104  # macOS; Linux allows 108
 BASE_REF = "refs/eval/base"
@@ -85,7 +85,7 @@ def plan(cfg: Config, harness: str, scenario: Scenario, root: str) -> dict[str, 
     if scenario.rule in NEEDS_BLOCK:
         steps["check"].append(Step("check", agents.hook_argv(z, harness), repo, agents.HOOK_TIMEOUT,
                                    stdin=hook_input(repo)))
-    if scenario.rule == "summary":
+    if scenario.rule in NEEDS_DIFF:
         steps["check"].append(Step("check", ["git", "diff", BASE_REF, "--", "calc.py"], repo,
                                    agents.GIT_TIMEOUT, git))
     return steps

@@ -103,6 +103,7 @@ Exit codes: 0 when the batch ran, 1 when a run hit a harness error, 2 for a refu
 | S4 | none | Add `add(a, b)` to `calc.py`. | `calc.py` gained `def add(a, b)`, a `memory_append` without `session`, and the next block shows the note |
 | B1 | none | the S1 prompt | the S1 rule |
 | B2 | none | the S2 prompt | the S2 rule |
+| C1-CUT to C3-NONE | a fact per case, cut, exception first, or none | Add `add`, `divide` or `power` to `calc.py`. | the added lines follow the fact's exception (#234) |
 
 The S2 note is: "We dropped Redis because its 2 extra round trips per append broke the 1 ms p99 budget."
 The hook shows only the 5 newest notes, so the 10 fillers push it out of the block.
@@ -113,6 +114,8 @@ Every text match ignores case and is a plain substring match:
 - S2: an integration check that the agent searched, plus a coarse reason check. It is not proof of factual accuracy; the `handoff_eval` graders cover accuracy. S2 uses regexes, not substrings. The reply needs both parts of the reason. The round trips: `round trip`, `round-trip`, `roundtrip`, `hop`, `hops` or `extra trip`. The budget: `p99`, or a whole `1 ms`, `1ms` or `1 millisecond` (`11 ms`, `0.1 ms` and `21ms` don't count). `tail latency` counts only next to a 1 ms match. A reply that names a competing cause fails: `licens`, `cost`, `price`, `pricing`, `memory usage`, `ram`, `crash`, `deprecat` or `vendor lock`, as whole words or word starts.
 - S3: a block line `- <key>: ...` holds `22`, for a key the agent set under `repo/evalrepo/`.
 - S4: an added line of `git diff <first commit> -- calc.py` holds `def add(a, b)`. The `memory_append` has no `session`, or an empty or null one, as AtticDB reads those as none. The first 60 characters of the note, with whitespace collapsed, appear in the block.
+
+The C cells are opt-in, so the default batch stays S1 to B2. Each case's fact is in `cutfact.py`. The `cut` version puts the exception past the hook's 300-character cut, and `full` puts it first. The notes always hold `verdict=`, `read=` and `read_before_edit=`, so the CSV can be recounted.
 
 For S3 and S4, the next block is what `atticdb hook session-start --harness <h>` prints after the agent.
 It gets `{"cwd": "<fixture>", "hook_event_name": "SessionStart"}` on stdin and the run's `ATTICDB_HOME`.
@@ -161,7 +164,7 @@ An event of an unknown type counts as unknown. Neither stops the parse.
 - Claude Code: `tool_use` blocks in `assistant` messages, and the final `result` event with `result`, `usage` and `num_turns`.
 - Codex: `mcp_tool_call` items with `server` and `tool`, the last `agent_message` item, and `usage` from each `turn.completed`. Older `{"msg": ...}` events are read too.
 
-Tool calls keep the bare AtticDB tool name, such as `fact_set`.
+Tool calls keep the bare AtticDB tool name, such as `fact_set`. For Claude Code, `tools` also lists every tool in order, so a read can be placed before or after the first edit.
 `input_tokens` counts every prompt token, cache reads and writes included. `cache_read_tokens` is the part read from the cache.
 Turns are Claude's `num_turns`, and Codex's count of `turn.completed`. They do not compare across harnesses.
 
