@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from . import cutfact
 from .parse import Outcome
 
 REPO = "evalrepo"
@@ -49,8 +50,9 @@ NOTE_PREFIX_CHARS = 60  # how much of a saved note the block must show
 class Scenario:
     id: str
     prompt: str
-    seed: str  # "recall", "search" or "none"
-    rule: str  # "recall", "search", "save" or "summary"
+    seed: str  # "recall", "search", "cut", "full" or "none"
+    rule: str  # "recall", "search", "save", "summary" or "cutfact"
+    case: str = ""  # a cutfact.CASES id, for rule "cutfact"
 
 
 SCENARIOS = {
@@ -62,6 +64,13 @@ SCENARIOS = {
     "B1": Scenario("B1", "How do I run this repo's tests? 1 line.", "none", "recall"),
     "B2": Scenario("B2", "Why did we drop Redis here? 1 line.", "none", "search"),
 }
+
+# #234, opt-in: each cutfact case in each arm, such as C1-CUT. Not in the default batch.
+CUT_SCENARIOS = {f"{c.id}-{arm.upper()}": Scenario(f"{c.id}-{arm.upper()}", c.prompt, arm, "cutfact", c.id)
+                 for c in cutfact.CASES.values() for arm in cutfact.ARMS}
+ALL_SCENARIOS = {**SCENARIOS, **CUT_SCENARIOS}
+# Rules whose check diffs calc.py against the base commit.
+NEEDS_DIFF = {"summary", "cutfact"}
 
 # The block checks re-run the hook after the agent, for these rules only.
 NEEDS_BLOCK = {"save", "summary"}
@@ -77,6 +86,9 @@ def seed_commands(scenario: Scenario) -> list[list[str]]:
     if scenario.seed == "search":
         notes = [REDIS_NOTE] + FILLER_NOTES
         return [["append", "--content", note] for note in notes]
+    if scenario.rule == "cutfact" and scenario.seed in ("cut", "full"):
+        case = cutfact.CASES[scenario.case]
+        return [["fact", "set", "--key", case.key, "--content", cutfact.fact_text(case, scenario.seed)]]
     return []
 
 
@@ -148,7 +160,16 @@ def check_summary(out: Outcome, block: str, diff: str) -> Verdict:
     return Verdict(changed and bool(notes) and shown, reasons)
 
 
+def check_cutfact(scenario: Scenario, out: Outcome, diff: str) -> Verdict:
+    """Passes when the edit follows the exception. The reasons always carry the verdict and
+    the read flags, so the CSV can be recounted."""
+    g = cutfact.grade(cutfact.CASES[scenario.case], out, diff)
+    return Verdict(g.correct, [f"verdict={g.verdict}", f"read={int(g.read)}", f"read_before_edit={int(g.read_before_edit)}"])
+
+
 def judge(scenario: Scenario, out: Outcome, block: str = "", diff: str = "") -> Verdict:
+    if scenario.rule == "cutfact":
+        return check_cutfact(scenario, out, diff)
     if scenario.rule == "recall":
         return check_recall(out)
     if scenario.rule == "search":

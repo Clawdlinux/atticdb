@@ -20,7 +20,7 @@ import tempfile
 from . import agents, guard, results
 from .harness import Config, describe, run_one
 from .proc import Runner
-from .scenarios import SCENARIOS
+from .scenarios import ALL_SCENARIOS, SCENARIOS
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_MAX_RUNS = 12
@@ -41,8 +41,8 @@ def scenario_list(text: str) -> list[str]:
     out = []
     for part in text.split(","):
         part = part.strip().upper()
-        if part not in SCENARIOS:
-            raise argparse.ArgumentTypeError(f"unknown scenario {part!r}; use {','.join(SCENARIOS)}")
+        if part not in ALL_SCENARIOS:
+            raise argparse.ArgumentTypeError(f"unknown scenario {part!r}; use {','.join(ALL_SCENARIOS)}")
         if part not in out:
             out.append(part)
     return out
@@ -55,7 +55,7 @@ def parse(argv) -> argparse.Namespace:
     r = sub.add_parser("run", help="run a batch")
     r.add_argument("--harness", choices=["claude-code", "codex", "both"], default="both")
     r.add_argument("--scenarios", type=scenario_list, default=list(SCENARIOS),
-                   help="comma list of S1,S2,S3,S4,B1,B2")
+                   help="comma list of S1,S2,S3,S4,B1,B2. Opt-in: the #234 cut-fact cells C1-CUT to C3-NONE")
     r.add_argument("--runs", type=positive, default=1, help="runs per harness and scenario")
     r.add_argument("--atticdb", required=True, help="the atticdb binary to set up and seed with")
     today = datetime.date.today().isoformat()
@@ -140,7 +140,7 @@ def dry_run(a: argparse.Namespace, cfg: Config, out=print) -> int:
         for harness in a.harnesses:
             for sid in a.scenarios:
                 out(f"run {n} {harness} {sid}")
-                for line in describe(cfg, harness, SCENARIOS[sid]):
+                for line in describe(cfg, harness, ALL_SCENARIOS[sid]):
                     out(line)
     for harness in a.harnesses:
         out(f"Overrides for {harness}: " + "; ".join(agents.OVERRIDES[harness]))
@@ -175,7 +175,7 @@ def batch(a: argparse.Namespace, cfg: Config, out=print, environ=None) -> int:
         for n in range(1, a.runs + 1):
             for harness in a.harnesses:
                 for sid in a.scenarios:
-                    res = run_one(cfg, runner, harness, SCENARIOS[sid], n)
+                    res = run_one(cfg, runner, harness, ALL_SCENARIOS[sid], n)
                     done.append(res)
                     results.append(a.out, [results.row(today, res)])
                     verdict = "error" if res.errored else ("pass" if res.passed else "fail")
