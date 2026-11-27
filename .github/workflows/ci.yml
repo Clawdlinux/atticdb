@@ -62,6 +62,8 @@ jobs:
       # Research code: synthetic fixtures only, no network.
       - run: python3 -m pytest research/ctxcache/tests
       - run: ATTICDB_BIN="$PWD/target/release/atticdb" python3 -m pytest research/locomo_retrieval/tests
+      # LongMemEval runner and retrieval study: pure helpers only, no models or dataset.
+      - run: python3 -m pytest research/longmemeval/test_run.py
       # Stub agents only, never a real model. The end-to-end test runs the binary built above.
       - run: ATTICDB_BIN=target/release/atticdb python3 -m pytest research/setup_eval/tests research/handoff_eval/tests
       # install.sh against fake releases on 127.0.0.1. The correction demo and interactive setup on a pty run
