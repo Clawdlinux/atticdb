@@ -379,10 +379,9 @@ impl DataDir {
             dir.install_superblock(0)?;
             dir.install_manifest(&[])?;
         }
-        let file = Handle::open(dir.io.clone(), &dir.path.join("LOCK"))?;
+        // Through the held handle, so a `LOCK` swapped since the lock never gets it (#229).
         let holder = format!("pid={} {}\n", std::process::id(), address.unwrap_or(""));
-        dir.io.set_len(file.id, 0)?;
-        dir.io.write_at(file.id, 0, holder.as_bytes())?;
+        dir.lock.write_holder(holder.as_bytes())?;
         Ok(dir)
     }
 
