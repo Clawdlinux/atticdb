@@ -326,3 +326,42 @@ fn a_whole_file_lock_reports_locked_with_no_holder() {
     whole.unlock().unwrap();
     assert!(StdIo::new().try_lock_exclusive(&path).is_ok());
 }
+
+/// The holder line goes through the locked handle (#229). If `LOCK` is swapped right after the
+/// lock, the held file gets the holder, and the file now at the path keeps its own text.
+#[cfg(unix)]
+#[test]
+fn holder_is_written_to_the_locked_file() {
+    use atticdb_tape::Op;
+    let dir = TestDir::new();
+    let path = dir.0.join("LOCK");
+    let moved = dir.0.join("LOCK.held");
+    let (from, to) = (path.clone(), moved.clone());
+    let io = Arc::new(HookIo::new(StdIo::new()).with(move |op, next| {
+        let locking = matches!(op, Op::Lock(_));
+        next()?;
+        if locking {
+            std::fs::rename(&from, &to).unwrap();
+            std::fs::write(&from, "pid=1 other\n").unwrap();
+        }
+        Ok(())
+    }));
+    let held = DataDir::open(io, &dir.0, Some("localhost:77"), 1024).unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "pid=1 other\n");
+    let holder = std::fs::read_to_string(&moved).unwrap();
+    assert_eq!(holder, format!("pid={} localhost:77\n", std::process::id()));
+    drop(held);
+}
+
+/// A guard from `SimDisk` writes its holder too, so simulated opens keep the holder line.
+#[test]
+fn sim_guard_writes_the_holder() {
+    let sim = SimDisk::new(1);
+    let guard = sim.try_lock_exclusive(Path::new("LOCK")).unwrap();
+    guard.write_holder(b"pid=7 long holder line\n").unwrap();
+    guard.write_holder(b"pid=7 short\n").unwrap();
+    let file = sim.open(Path::new("LOCK")).unwrap();
+    let mut bytes = vec![0; 64];
+    let n = sim.read_at(file, 0, &mut bytes).unwrap();
+    assert_eq!(&bytes[..n], b"pid=7 short\n");
+}

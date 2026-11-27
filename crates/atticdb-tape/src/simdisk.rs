@@ -256,11 +256,43 @@ impl State {
     }
 
     fn file(&mut self, id: FileId) -> Result<&mut SimFile> {
-        let inode = self
-            .handles
-            .get(&id)
-            .ok_or_else(|| io_error(ErrorKind::NotFound, "unknown file handle"))?;
-        self.files.get_mut(inode).ok_or_else(|| io_error(ErrorKind::NotFound, "file not found"))
+        let inode = self.inode(id)?;
+        self.inode_file(inode)
+    }
+
+    fn inode(&self, handle: FileId) -> Result<FileId> {
+        self.handles
+            .get(&handle)
+            .copied()
+            .ok_or_else(|| io_error(ErrorKind::NotFound, "unknown file handle"))
+    }
+
+    fn inode_file(&mut self, inode: FileId) -> Result<&mut SimFile> {
+        self.files.get_mut(&inode).ok_or_else(|| io_error(ErrorKind::NotFound, "file not found"))
+    }
+
+    /// Writes `data` at `off` in `inode`, as [`SimDisk::write_at`] does for a handle: it
+    /// counts against the space left, and a short write is a storage-full error.
+    fn write_inode(&mut self, inode: FileId, off: u64, data: &[u8]) -> Result<()> {
+        let offset = position(off)?;
+        offset
+            .checked_add(data.len())
+            .ok_or_else(|| io_error(ErrorKind::InvalidInput, "write offset overflow"))?;
+        let free = self.available();
+        let capacity_count =
+            self.inode_file(inode)?.visible_blocks.writable(offset, data.len(), free);
+        let count = self.space.map_or(capacity_count, |left| left.min(capacity_count));
+        if let Some(left) = &mut self.space {
+            *left -= count;
+        }
+        if count > 0 {
+            self.inode_file(inode)?.write(Write::Bytes(offset, data[..count].to_vec()));
+        }
+        if count != data.len() {
+            self.storage_full_returns += 1;
+            return Err(io_error(ErrorKind::StorageFull, "injected partial write"));
+        }
+        Ok(())
     }
 
     fn handle(&mut self, inode: FileId) -> FileId {
@@ -522,25 +554,13 @@ impl Io for SimDisk {
     }
 
     fn write_at(&self, file: FileId, off: u64, data: &[u8]) -> Result<()> {
-        let offset = position(off)?;
-        offset
+        // Checked before the handle, as before the split into `write_inode`.
+        position(off)?
             .checked_add(data.len())
             .ok_or_else(|| io_error(ErrorKind::InvalidInput, "write offset overflow"))?;
         let mut state = lock(&self.state)?;
-        let free = state.available();
-        let capacity_count = state.file(file)?.visible_blocks.writable(offset, data.len(), free);
-        let count = state.space.map_or(capacity_count, |left| left.min(capacity_count));
-        if let Some(left) = &mut state.space {
-            *left -= count;
-        }
-        if count > 0 {
-            state.file(file)?.write(Write::Bytes(offset, data[..count].to_vec()));
-        }
-        if count != data.len() {
-            state.storage_full_returns += 1;
-            return Err(io_error(ErrorKind::StorageFull, "injected partial write"));
-        }
-        Ok(())
+        let inode = state.inode(file)?;
+        state.write_inode(inode, off, data)
     }
 
     fn read_at(&self, file: FileId, off: u64, data: &mut [u8]) -> Result<usize> {
@@ -714,12 +734,17 @@ impl Io for SimDisk {
             let holder = String::from_utf8_lossy(&file.visible).into_owned();
             return Err(Error::DataDirLocked { holder });
         }
-        let state = self.state.clone();
+        let (state, writer) = (self.state.clone(), self.state.clone());
         Ok(LockGuard::new(move || {
             if let Ok(mut state) = state.lock() {
                 state.locked.remove(&id);
                 state.collect();
             }
+        })
+        .with_holder(move |text| {
+            let mut state = lock(&writer)?;
+            state.inode_file(id)?.write(Write::Resize(0));
+            state.write_inode(id, 0, text)
         }))
     }
 }

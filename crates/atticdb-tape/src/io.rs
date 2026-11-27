@@ -24,7 +24,11 @@ pub struct FileId(
 pub struct LockGuard {
     release: Option<Box<dyn FnOnce() + Send + Sync>>,
     identity: Option<(u64, u64)>,
+    holder: Option<HolderWriter>,
 }
+
+/// Replaces the locked file's contents through the handle the lock holds.
+type HolderWriter = Box<dyn Fn(&[u8]) -> Result<()> + Send + Sync>;
 
 impl std::fmt::Debug for LockGuard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -35,7 +39,26 @@ impl std::fmt::Debug for LockGuard {
 impl LockGuard {
     /// Owns a backend lock and releases it exactly once when dropped.
     pub fn new(release: impl FnOnce() + Send + Sync + 'static) -> Self {
-        Self { release: Some(Box::new(release)), identity: None }
+        Self { release: Some(Box::new(release)), identity: None, holder: None }
+    }
+
+    /// Records how to write the holder line through the locked handle.
+    pub fn with_holder(
+        mut self,
+        write: impl Fn(&[u8]) -> Result<()> + Send + Sync + 'static,
+    ) -> Self {
+        self.holder = Some(Box::new(write));
+        self
+    }
+
+    /// Replaces the locked file's contents with `text`, through the held handle, never by
+    /// path. So a `LOCK` swapped after locking never gets this process's holder (#229). A
+    /// guard with no writer, such as a test's, writes nothing.
+    pub fn write_holder(&self, text: &[u8]) -> Result<()> {
+        match &self.holder {
+            Some(write) => write(text),
+            None => Ok(()),
+        }
     }
 
     /// Records the device and inode of the locked file, read from the held handle.
@@ -317,11 +340,14 @@ impl Io for StdIo {
         #[cfg(windows)]
         {
             if atticdb_sys::try_lock_past_eof(&file)? {
+                let file = Arc::new(file);
+                let writer = Arc::clone(&file);
                 return Ok(LockGuard::new(move || {
                     // Closing releases the lock anyway, so an unlock error changes nothing.
                     let _ = atticdb_sys::unlock_past_eof(&file);
                     drop(file);
-                }));
+                })
+                .with_holder(move |text| write_holder(&writer, text)));
             }
             // Another process may lock the whole file, as `File::try_lock` does. Then the read
             // fails, but the directory is locked all the same.
@@ -343,10 +369,19 @@ impl Io for StdIo {
                 // From the handle, so it names the file locked, whatever the path names later.
                 let meta = file.metadata()?;
                 let identity = (meta.dev(), meta.ino());
-                Ok(LockGuard::new(move || drop(file)).with_identity(identity))
+                let file = Arc::new(file);
+                let writer = Arc::clone(&file);
+                Ok(LockGuard::new(move || drop(file))
+                    .with_identity(identity)
+                    .with_holder(move |text| write_holder(&writer, text)))
             }
             #[cfg(not(unix))]
-            Ok(()) => Ok(LockGuard::new(move || drop(file))),
+            Ok(()) => {
+                let file = Arc::new(file);
+                let writer = Arc::clone(&file);
+                Ok(LockGuard::new(move || drop(file))
+                    .with_holder(move |text| write_holder(&writer, text)))
+            }
             Err(TryLockError::WouldBlock) => {
                 let mut holder = String::new();
                 file.read_to_string(&mut holder)?;
@@ -355,6 +390,21 @@ impl Io for StdIo {
             Err(TryLockError::Error(error)) => Err(error.into()),
         }
     }
+}
+
+/// Truncates the locked `file` and writes `text` at its start, through the handle. The file
+/// closes, and the lock goes, only when the guard drops both its release and this writer.
+fn write_holder(file: &File, text: &[u8]) -> Result<()> {
+    file.set_len(0)?;
+    #[cfg(unix)]
+    std::os::unix::fs::FileExt::write_all_at(file, text, 0)?;
+    #[cfg(not(unix))]
+    {
+        let mut file = file;
+        file.seek(SeekFrom::Start(0))?;
+        file.write_all(text)?;
+    }
+    Ok(())
 }
 
 /// A source of nanoseconds since the Unix epoch.
