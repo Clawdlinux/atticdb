@@ -606,6 +606,17 @@ mod tests {
         std::fs::write(dir.join("LOCK"), text).unwrap();
     }
 
+    /// A socket file at `path` that never listened, as a crashed server leaves. Not a dropped
+    /// `UnixListener`: on macOS std sets close-on-exec only after `socket()` returns, so a
+    /// child another test thread spawns in between, such as update's `curl`, keeps that
+    /// listener open after the drop. A connect then succeeds and reads EOF (#201). A socket
+    /// that never called `listen` refuses a connect, whoever holds it.
+    fn stale_socket(path: &Path) {
+        use rustix::net::{AddressFamily, SocketAddrUnix, SocketType};
+        let socket = rustix::net::socket(AddressFamily::UNIX, SocketType::STREAM, None).unwrap();
+        rustix::net::bind(&socket, &SocketAddrUnix::new(path).unwrap()).unwrap();
+    }
+
     fn discover(dir: &Path) -> Refusal {
         let deadline = Instant::now() + Duration::from_secs(5);
         super::discover(dir, deadline).unwrap_err()
@@ -634,8 +645,9 @@ mod tests {
         );
 
         // A stale socket: the file is there but nobody listens, so a connect is refused.
-        drop(UnixListener::bind(&socket).unwrap());
-        assert!(matches!(discover(dir), Refusal::NotRunning(_)), "{:?}", discover(dir));
+        stale_socket(&socket);
+        let refusal = discover(dir);
+        assert!(matches!(&refusal, Refusal::NotRunning(_)), "{refusal:?}");
         std::fs::remove_file(&socket).unwrap();
 
         // Something that is not a socket.
